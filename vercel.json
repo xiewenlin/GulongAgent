@@ -4,7 +4,7 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist/client",
   "functions": {
-    "api/[...route].js": {
+    "api/**/*.js": {
       "maxDuration": 30
     }
   },
