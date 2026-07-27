@@ -1,0 +1,30 @@
+{
+  "name": "gulongagent",
+  "version": "1.0.0",
+  "description": "古龙 Gulong Agent Engine 官方网站与开放平台",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:api": "node server/local.js",
+    "build": "vite build && node scripts/prepare-sites-build.mjs",
+    "preview": "vite preview",
+    "test": "node --test tests/unit/*.test.mjs tests/sites-worker.test.mjs",
+    "test:sites": "node --test tests/sites-worker.test.mjs"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.12",
+    "@hono/zod-openapi": "^1.5.1",
+    "@phosphor-icons/react": "^2.1.10",
+    "@scalar/hono-api-reference": "^0.11.11",
+    "@vercel/blob": "^2.6.1",
+    "@vitejs/plugin-react": "5.0.4",
+    "hono": "^4.12.32",
+    "jose": "^6.2.4",
+    "mongodb": "^7.5.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "vite": "6.4.2",
+    "zod": "^4.4.3"
+  }
+}
