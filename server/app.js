@@ -268,7 +268,7 @@ app.notFound((c) =>
 app.openapi(healthRoute, async (c) => {
   const database = await pingDatabase();
   return c.json({
-    status: database.configured && !database.ok ? "degraded" : "ok",
+    status: database.ok ? "ok" : "degraded",
     service: "gulong-platform",
     database,
   });

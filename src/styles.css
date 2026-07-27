@@ -2473,6 +2473,7 @@ textarea:focus {
   .hero-copy {
     max-width: 760px;
     padding-top: 10px;
+    transform: none;
   }
 
   .hero-copy > p {
