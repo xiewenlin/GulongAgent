@@ -2,7 +2,7 @@ import { Eye, EyeSlash, LockKey, SignIn, UserCircle, X } from "@phosphor-icons/r
 import { useEffect, useState } from "react";
 import { apiFetch } from "../api.js";
 
-export function AccountModal({ open, initialMode = "login", onClose, onUser }) {
+export function AccountModal({ open, initialMode = "login", onClose, onUser, themeIcon }) {
   const [mode, setMode] = useState(initialMode);
   const [registerWith, setRegisterWith] = useState("email");
   const [showPassword, setShowPassword] = useState(false);
@@ -44,7 +44,7 @@ export function AccountModal({ open, initialMode = "login", onClose, onUser }) {
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <section className="account-modal" role="dialog" aria-modal="true" aria-labelledby="account-title">
         <button className="modal-close" type="button" aria-label="关闭" onClick={onClose}><X size={20} /></button>
-        <div className="account-brand"><img src="/assets/gulong-dragon.png" alt="" /><span>古龙统一账号</span></div>
+        <div className="account-brand"><img src={themeIcon} alt="" /><span>古龙统一账号</span></div>
         <h2 id="account-title">{mode === "login" ? "欢迎回来" : "创建你的古龙账号"}</h2>
         <p>{mode === "login" ? "使用用户名或邮箱继续进入开放平台。" : "注册后即可上传第二大脑、提交反馈并创建 API Key。"}</p>
 

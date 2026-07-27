@@ -2,11 +2,11 @@
 
 古龙桌面端智能体引擎的官网、用户中心与开放平台。项目同时提供浅色高端营销首页、可切换主题、账号与 API Key、软件下载、第二大脑 ZIP 上传、图文反馈、充值/订阅，以及可在线浏览的 OpenAPI 文档。
 
-![古龙首页](docs/design/implementation-homepage-round-2.png)
+![古龙 Gulong Agent Engine 首页](docs/design/readme-homepage.png)
 
 ## 已实现
 
-- 玉瓷、晨曦、竹影、云岫 4 套可持久化浅色主题
+- 玉瓷、日出、青竹、鸢尾 4 套可持久化浅色主题，并配有独立 3D 圆形徽章
 - 用户名 + 密码、邮箱 + 密码两种注册/登录方式
 - 每位开发者最多 10 个可撤销 API Key，按 scope 授权
 - 智能体任务、任务状态、第二大脑记忆、工作流开放接口
@@ -76,4 +76,3 @@ npm run build
 ```
 
 视觉验收记录见 [design-qa.md](design-qa.md)，最终结果为 `passed`。
-

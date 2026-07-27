@@ -38,7 +38,7 @@ function EmptyConfig({ children }) {
   return <div className="empty-config"><ShieldCheck size={22} /><span>{children}</span></div>;
 }
 
-export function DownloadPage() {
+export function DownloadPage({ themeIcon }) {
   const [links, setLinks] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -60,7 +60,7 @@ export function DownloadPage() {
       <PageIntro eyebrow="WINDOWS DESKTOP" title="下载古龙桌面版" description="完整离线安装，优先使用内置 Node、Git 与能力包；联网时仅在需要时修复组件。" />
       <section className="download-layout section-shell">
         <article className="download-primary">
-          <div className="download-mark"><img src="/assets/gulong-dragon.png" alt="古龙" /></div>
+          <div className="download-mark"><img src={themeIcon} alt="古龙主题图标" /></div>
           <div><span>Windows 10 / 11 · x64</span><h2>古龙 Gulong Agent Engine</h2><p>本地优先运行，内置插件、技能、工作流与恢复机制。下载后即可安装，无需额外配置开发环境。</p></div>
           <div className="release-meta"><span>最新稳定版</span><strong>v0.17.2</strong><small>完整离线安装包</small></div>
         </article>

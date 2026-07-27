@@ -22,12 +22,12 @@ const iconMap = {
   devices: Devices,
 };
 
-export function HomePage({ navigate, openTheme }) {
+export function HomePage({ navigate, openTheme, themeIcon }) {
   return (
     <>
       <main id="main-content">
         <section className="hero section-shell">
-          <div className="hero-ghost" aria-hidden="true"><img src="/assets/gulong-dragon.png" alt="" /></div>
+          <div className="hero-ghost" aria-hidden="true"><img src={themeIcon} alt="" /></div>
           <div className="hero-copy">
             <div className="eyebrow"><Sparkle size={14} weight="fill" /> 本地优先的智能体操作系统</div>
             <h1><span>古龙</span> Gulong Agent Engine</h1>
@@ -50,7 +50,7 @@ export function HomePage({ navigate, openTheme }) {
               <span>古龙 · 工作台</span>
               <button type="button" onClick={openTheme}><Palette size={15} /> 自定义主题</button>
             </div>
-            <ProductDemo />
+            <ProductDemo themeIcon={themeIcon} />
           </div>
         </section>
 
@@ -100,7 +100,7 @@ export function HomePage({ navigate, openTheme }) {
         </section>
 
         <section className="closing-cta section-shell">
-          <img src="/assets/gulong-dragon.png" alt="古龙" />
+          <img src={themeIcon} alt="古龙主题图标" />
           <div><span>你的 AI 团队，今天开始成长</span><h2>把下一个想法交给古龙</h2></div>
           <button className="button primary" type="button" onClick={() => navigate("/download")}>免费下载 <ArrowRight size={18} /></button>
         </section>

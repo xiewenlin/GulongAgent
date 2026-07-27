@@ -30,11 +30,11 @@ const taskSteps = [
   ["排版与导出", "waiting"],
 ];
 
-export function ProductDemo() {
+export function ProductDemo({ themeIcon }) {
   return (
     <div className="product-demo" aria-label="古龙软件浅色主题演示">
       <aside className="demo-sidebar">
-        <img src="/assets/gulong-dragon.png" alt="古龙" />
+        <img src={themeIcon} alt="古龙" />
         <div className="demo-health"><span /> 服务健康</div>
         <nav>
           {navItems.map(([Icon, label, active]) => (
@@ -71,7 +71,7 @@ export function ProductDemo() {
           <div className="demo-head-actions"><button><ListBullets size={14} /> 会话记录</button><button><ArrowCounterClockwise size={14} /> 恢复数据</button></div>
         </div>
         <div className="demo-message">
-          <img src="/assets/gulong-dragon.png" alt="" />
+          <img src={themeIcon} alt="" />
           <div><time>助手 · 10:30</time><p>你好，我是古龙。告诉我你想完成的任务，我会规划、执行，并持续汇报进度。</p></div>
         </div>
         <div className="demo-composer">

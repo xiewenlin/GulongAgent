@@ -1,8 +1,8 @@
 export const themes = [
-  { id: "porcelain", name: "玉瓷", colors: ["#fbfaf6", "#0c6159", "#d1a54f"] },
-  { id: "morning", name: "日出", colors: ["#fff9f1", "#9f4c2f", "#e29b59"] },
-  { id: "bamboo", name: "青竹", colors: ["#f5faf4", "#315f46", "#8ba66b"] },
-  { id: "iris", name: "鸢尾", colors: ["#f8f7fc", "#4c4d8a", "#9f86d9"] },
+  { id: "porcelain", name: "玉瓷", icon: "/assets/themes/gulong-theme-yuci-3d-v2.png", colors: ["#fbfaf6", "#0c6159", "#d1a54f"] },
+  { id: "morning", name: "日出", icon: "/assets/themes/gulong-theme-sunrise-3d-v2.png", colors: ["#fff9f1", "#9f4c2f", "#e29b59"] },
+  { id: "bamboo", name: "青竹", icon: "/assets/themes/gulong-theme-bamboo-3d-v2.png", colors: ["#f5faf4", "#315f46", "#8ba66b"] },
+  { id: "iris", name: "鸢尾", icon: "/assets/themes/gulong-theme-iris-3d-v2.png", colors: ["#f8f7fc", "#4c4d8a", "#9f86d9"] },
 ];
 
 export const capabilities = [

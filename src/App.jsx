@@ -48,6 +48,8 @@ export function App() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [theme, setTheme] = useState(() => window.localStorage.getItem("gulong-web-theme") || "porcelain");
+  const activeTheme = themes.find((item) => item.id === theme) || themes[0];
+  const themeIcon = activeTheme.icon;
 
   useEffect(() => {
     const onPopState = () => setRoute(currentRoute());
@@ -94,13 +96,13 @@ export function App() {
 
   const pathname = window.location.pathname;
   let page;
-  if (pathname === "/download") page = <DownloadPage />;
+  if (pathname === "/download") page = <DownloadPage themeIcon={themeIcon} />;
   else if (pathname === "/developer") page = <DeveloperPage user={user} openAuth={openAuth} />;
   else if (pathname === "/pricing") page = <PricingPage user={user} openAuth={openAuth} navigate={navigate} />;
   else if (pathname === "/upload") page = <BrainUploadPage user={user} openAuth={openAuth} />;
   else if (pathname === "/feedback") page = <FeedbackPage user={user} />;
   else if (pathname === "/payment/mock") page = <MockPaymentPage user={user} navigate={navigate} />;
-  else page = <HomePage navigate={navigate} openTheme={() => setThemeOpen(true)} />;
+  else page = <HomePage navigate={navigate} openTheme={() => setThemeOpen(true)} themeIcon={themeIcon} />;
 
   return (
     <div className="site-app">
@@ -108,7 +110,7 @@ export function App() {
       <header className="site-header">
         <div className="header-inner section-shell">
           <button className="brand" type="button" onClick={() => navigate("/")} aria-label="古龙首页">
-            <img src="/assets/gulong-dragon.png" alt="" />
+            <img src={themeIcon} alt="" />
             <span><strong>古龙</strong><small>Gulong Agent Engine</small></span>
           </button>
           <nav className={mobileOpen ? "primary-nav open" : "primary-nav"} aria-label="主要导航">
@@ -133,7 +135,7 @@ export function App() {
 
       <footer className="site-footer">
         <div className="footer-main section-shell">
-          <div className="footer-brand"><img src="/assets/gulong-dragon.png" alt="" /><div><strong>古龙</strong><span>Gulong Agent Engine</span></div><p>不是又一个聊天机器人，而是一套会持续成长的 AI 操作系统。</p></div>
+          <div className="footer-brand"><img src={themeIcon} alt="" /><div><strong>古龙</strong><span>Gulong Agent Engine</span></div><p>不是又一个聊天机器人，而是一套会持续成长的 AI 操作系统。</p></div>
           <div><h3>产品</h3><button onClick={() => navigate("/#capabilities")}>核心能力</button><button onClick={() => navigate("/upload")}>第二大脑</button><button onClick={() => navigate("/pricing")}>订阅与定价</button></div>
           <div><h3>开发者</h3><button onClick={() => navigate("/developer")}>开放平台</button><a href="/api/docs" target="_blank" rel="noreferrer">API 文档</a><a href="/api/openapi.json" target="_blank" rel="noreferrer">OpenAPI JSON</a></div>
           <div><h3>支持</h3><button onClick={() => navigate("/download")}>软件下载</button><button onClick={() => navigate("/feedback")}>问题反馈</button><button onClick={() => setThemeOpen(true)}>自定义主题</button></div>
@@ -143,7 +145,7 @@ export function App() {
 
       <button className="floating-feedback" type="button" onClick={() => navigate("/feedback")}><ChatCircleText size={20} /><span>反馈</span></button>
 
-      <AccountModal open={authOpen} initialMode={authMode} onClose={() => setAuthOpen(false)} onUser={setUser} />
+      <AccountModal open={authOpen} initialMode={authMode} onClose={() => setAuthOpen(false)} onUser={setUser} themeIcon={themeIcon} />
       {themeOpen && (
         <div className="theme-drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setThemeOpen(false)}>
           <aside className="theme-drawer"><button className="modal-close" onClick={() => setThemeOpen(false)}><X size={19} /></button><span>PERSONALIZE</span><h2>选择你的古龙主题</h2><p>主题保存在当前浏览器，不会影响账户数据与功能。</p><div className="theme-options">{themes.map((item) => <button type="button" key={item.id} className={theme === item.id ? "active" : ""} onClick={() => setTheme(item.id)}><span className="theme-swatches">{item.colors.map((color) => <i key={color} style={{ backgroundColor: color }} />)}</span><strong>{item.name}</strong>{theme === item.id && <CheckCircle size={18} weight="fill" />}</button>)}</div><button className="button secondary full" onClick={() => setThemeOpen(false)}>完成设置 <ArrowRight size={16} /></button></aside>
