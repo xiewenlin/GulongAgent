@@ -361,6 +361,25 @@ app.post("/api/auth/logout", async (c) => {
   return c.json({ ok: true });
 });
 
+app.delete("/api/auth/account", async (c) => {
+  if (!isTrustedBrowserRequest(c)) return c.json({ code: "ORIGIN_REJECTED", message: "请求来源不受信任" }, 403);
+  const auth = await authenticate(c);
+  if (auth.error) return auth.error;
+  const body = await c.req.json();
+  const ownerId = new ObjectId(auth.user.id);
+  const user = await (await getCollection("users")).findOne({ _id: ownerId });
+  if (!user || !(await verifyPassword(String(body.password || ""), user.passwordHash))) {
+    return c.json({ code: "INVALID_CREDENTIALS", message: "密码不正确，账户未删除" }, 401);
+  }
+  await revokeSession(c);
+  await Promise.all(
+    ["sessions", "apiKeys", "tasks", "memories", "feedback", "payments", "subscriptions", "wallets", "uploads"]
+      .map((name) => getCollection(name).then((collection) => collection.deleteMany({ ownerId }))),
+  );
+  await (await getCollection("users")).deleteOne({ _id: ownerId });
+  return c.json({ ok: true });
+});
+
 app.get("/api/developer/keys", async (c) => {
   const auth = await authenticate(c);
   if (auth.error) return auth.error;
