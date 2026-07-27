@@ -460,13 +460,19 @@ app.put("/api/admin/downloads", async (c) => {
 });
 
 app.post("/api/uploads/token", async (c) => {
-  const auth = await authenticate(c);
-  if (auth.error) return auth.error;
   if (!process.env.BLOB_READ_WRITE_TOKEN) {
     return c.json({ code: "CONFIG_REQUIRED", message: "文件存储尚未配置 BLOB_READ_WRITE_TOKEN" }, 503);
   }
+  const body = await c.req.json();
+  let ownerId = null;
+  if (body.type === "blob.generate-client-token") {
+    if (!isTrustedBrowserRequest(c)) return c.json({ code: "ORIGIN_REJECTED", message: "请求来源不受信任" }, 403);
+    const auth = await authenticate(c);
+    if (auth.error) return auth.error;
+    ownerId = auth.user.id;
+  }
   const result = await handleUpload({
-    body: await c.req.json(),
+    body,
     request: c.req.raw,
     onBeforeGenerateToken: async (pathname, clientPayload) => {
       const payload = JSON.parse(clientPayload || "{}");
@@ -479,11 +485,14 @@ app.post("/api/uploads/token", async (c) => {
           : ["image/png", "image/jpeg", "image/webp", "image/gif"],
         maximumSizeInBytes: kind === "brain" ? 500 * 1024 * 1024 : 15 * 1024 * 1024,
         addRandomSuffix: true,
-        tokenPayload: JSON.stringify({ ownerId: auth.user.id, kind }),
+        tokenPayload: JSON.stringify({ ownerId, kind }),
       };
     },
     onUploadCompleted: async ({ blob, tokenPayload }) => {
       const payload = JSON.parse(tokenPayload || "{}");
+      if (!ObjectId.isValid(payload.ownerId) || !["brain", "feedback"].includes(payload.kind)) {
+        throw new Error("上传回调负载无效");
+      }
       await (await getCollection("uploads")).insertOne({
         ownerId: new ObjectId(payload.ownerId),
         kind: payload.kind,
