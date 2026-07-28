@@ -256,7 +256,7 @@ function RechargeDialog({ provider, onClose, navigate }) {
   return <div className="modal-backdrop"><section className="payment-modal"><button className="modal-close" onClick={onClose}><X size={19} /></button><div className="payment-logo"><Wallet size={28} /></div><h2>充值余额</h2><form onSubmit={submit}><label><span>充值金额（元）</span><input type="number" min="1" max="50000" value={amount} onChange={(event) => setAmount(Number(event.target.value))} /></label>{error && <div className="form-error">{error}</div>}<button className="button primary full" disabled={busy}>{busy ? "正在创建订单" : `充值 ${formatMoney(amount * 100)}`}</button></form></section></div>;
 }
 
-export function BrainUploadPage({ user, openAuth }) {
+export function BrainUploadPanel({ user, openAuth, embedded = false }) {
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -284,9 +284,7 @@ export function BrainUploadPage({ user, openAuth }) {
   }
 
   return (
-    <main id="main-content">
-      <PageIntro eyebrow="SECOND BRAIN" title="把你的知识带回古龙" description="上传 ZIP 格式的“第二大脑”存储目录。文件进入隔离存储后，系统会排队分析问题、需求与可复用经验。" />
-      <section className="upload-grid section-shell">
+      <section className={`upload-grid ${embedded ? "embedded" : "section-shell"}`}>
         <form className="upload-card" onSubmit={uploadFile}>
           <div className="upload-drop"><FileZip size={42} /><h2>上传第二大脑 ZIP</h2><p>支持分片直传，单个文件最大 500 MB；仅账号本人可查看处理记录。</p><label className="button secondary"><UploadSimple size={18} /> 选择 ZIP<input type="file" accept=".zip,application/zip,application/x-zip-compressed" onChange={(event) => setFile(event.target.files?.[0] || null)} hidden /></label>{file && <div className="file-chip"><FileZip size={17} /><span>{file.name}</span><small>{(file.size / 1024 / 1024).toFixed(1)} MB</small></div>}</div>
           {busy && <div className="upload-progress"><span style={{ width: `${progress}%` }} /><em>{progress}%</em></div>}
@@ -298,6 +296,14 @@ export function BrainUploadPage({ user, openAuth }) {
           {[["01", "安全接收", "浏览器直传文件存储，MongoDB 仅记录索引、状态与所有权。"], ["02", "结构扫描", "识别会话、笔记、素材和索引，不执行压缩包中的程序。"], ["03", "问题与需求挖掘", "聚类错误、重复操作与未满足需求，形成可审阅报告。"], ["04", "升级建议", "生成产品优化与工作流迭代建议，未经确认不会自动发布。"]].map(([n, title, text]) => <article key={n}><span>{n}</span><div><strong>{title}</strong><p>{text}</p></div></article>)}
         </aside>
       </section>
+  );
+}
+
+export function BrainUploadPage({ user, openAuth }) {
+  return (
+    <main id="main-content">
+      <PageIntro eyebrow="SECOND BRAIN" title="把你的知识带回古龙" description="上传 ZIP 格式的“第二大脑”存储目录。文件进入隔离存储后，系统会排队分析问题、需求与可复用经验。" />
+      <BrainUploadPanel user={user} openAuth={openAuth} />
     </main>
   );
 }

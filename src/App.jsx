@@ -17,6 +17,8 @@ import { useEffect, useState } from "react";
 import { apiFetch } from "./api.js";
 import { AccountModal } from "./components/AccountModal.jsx";
 import { HomePage } from "./components/HomePage.jsx";
+import { ProductManualPage } from "./components/ProductManualPage.jsx";
+import { SecondBrainPage } from "./components/SecondBrainPage.jsx";
 import {
   BrainUploadPage,
   DeveloperPage,
@@ -28,8 +30,8 @@ import {
 import { themes } from "./data/site.js";
 
 const primaryNav = [
-  ["产品能力", "/#capabilities"],
-  ["第二大脑", "/upload"],
+  ["产品能力", "/manual"],
+  ["第二大脑", "/brain"],
   ["开发者", "/developer"],
   ["定价", "/pricing"],
   ["下载", "/download"],
@@ -171,7 +173,9 @@ export function App() {
 
   const pathname = window.location.pathname;
   let page;
-  if (pathname === "/download") page = <DownloadPage themeIcon={themeIcon} />;
+  if (pathname === "/manual") page = <ProductManualPage navigate={navigate} />;
+  else if (pathname === "/brain") page = <SecondBrainPage user={user} openAuth={openAuth} navigate={navigate} />;
+  else if (pathname === "/download") page = <DownloadPage themeIcon={themeIcon} />;
   else if (pathname === "/developer") page = <DeveloperPage user={user} openAuth={openAuth} />;
   else if (pathname === "/pricing") page = <PricingPage user={user} openAuth={openAuth} navigate={navigate} />;
   else if (pathname === "/upload") page = <BrainUploadPage user={user} openAuth={openAuth} />;
@@ -211,7 +215,7 @@ export function App() {
       <footer className="site-footer">
         <div className="footer-main section-shell">
           <div className="footer-brand"><img src={themeIcon} alt="" /><div><strong>古龙</strong><span>Gulong Agent Engine</span></div><p>不是又一个聊天机器人，而是一套会持续成长的 AI 操作系统。</p></div>
-          <div><h3>产品</h3><button onClick={() => navigate("/#capabilities")}>核心能力</button><button onClick={() => navigate("/upload")}>第二大脑</button><button onClick={() => navigate("/pricing")}>订阅与定价</button></div>
+          <div><h3>产品</h3><button onClick={() => navigate("/manual")}>产品手册</button><button onClick={() => navigate("/brain")}>第二大脑</button><button onClick={() => navigate("/pricing")}>订阅与定价</button></div>
           <div><h3>开发者</h3><button onClick={() => navigate("/developer")}>开放平台</button><a href="/api/docs" target="_blank" rel="noreferrer">API 文档</a><a href="/api/openapi.json" target="_blank" rel="noreferrer">OpenAPI JSON</a></div>
           <div><h3>支持</h3><button onClick={() => navigate("/download")}>软件下载</button><button onClick={() => navigate("/feedback")}>问题反馈</button><button onClick={() => setThemeOpen(true)}>自定义主题</button></div>
         </div>
