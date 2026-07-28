@@ -35,6 +35,12 @@ const primaryNav = [
   ["下载", "/download"],
 ];
 
+const THEME_ICON_VERSION = "20260728-3d-favicon-1";
+
+function themeIconUrl(theme) {
+  return `${theme.icon}?theme=${theme.id}&v=${THEME_ICON_VERSION}`;
+}
+
 function currentRoute() {
   return window.location.pathname + window.location.search + window.location.hash;
 }
@@ -49,7 +55,7 @@ export function App() {
   const [accountOpen, setAccountOpen] = useState(false);
   const [theme, setTheme] = useState(() => window.localStorage.getItem("gulong-web-theme") || "porcelain");
   const activeTheme = themes.find((item) => item.id === theme) || themes[0];
-  const themeIcon = activeTheme.icon;
+  const themeIcon = themeIconUrl(activeTheme);
 
   useEffect(() => {
     const onPopState = () => setRoute(currentRoute());
@@ -60,7 +66,76 @@ export function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     window.localStorage.setItem("gulong-web-theme", theme);
-  }, [theme]);
+
+    let themeColor = document.querySelector('meta[name="theme-color"]');
+    if (!themeColor) {
+      themeColor = document.createElement("meta");
+      themeColor.name = "theme-color";
+      document.head.appendChild(themeColor);
+    }
+    themeColor.content = activeTheme.colors[0];
+  }, [activeTheme, theme]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const source = new Image();
+
+    function installFavicon(href) {
+      if (cancelled) return;
+      document.querySelectorAll('link[rel~="icon"]').forEach((link) => link.remove());
+      const favicon = document.createElement("link");
+      favicon.rel = "icon";
+      favicon.type = "image/png";
+      favicon.sizes = "64x64";
+      favicon.href = href;
+      favicon.dataset.theme = activeTheme.id;
+      document.head.appendChild(favicon);
+    }
+
+    source.onload = () => {
+      if (cancelled) return;
+      const canvas = document.createElement("canvas");
+      canvas.width = 64;
+      canvas.height = 64;
+      const context = canvas.getContext("2d");
+      context.clearRect(0, 0, 64, 64);
+      context.drawImage(source, 0, 0, 64, 64);
+      installFavicon(canvas.toDataURL("image/png"));
+    };
+    source.onerror = () => installFavicon(themeIcon);
+    source.src = themeIcon;
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTheme.id, themeIcon]);
+
+  useEffect(() => {
+    const preloadLinks = [];
+    const preloadThemes = () => {
+      themes.forEach((item) => {
+        if (item.id === activeTheme.id) return;
+        const preload = document.createElement("link");
+        preload.rel = "preload";
+        preload.as = "image";
+        preload.href = themeIconUrl(item);
+        preload.fetchPriority = "low";
+        preload.dataset.themePreload = item.id;
+        document.head.appendChild(preload);
+        preloadLinks.push(preload);
+      });
+    };
+
+    const idleId = "requestIdleCallback" in window
+      ? window.requestIdleCallback(preloadThemes, { timeout: 1500 })
+      : window.setTimeout(preloadThemes, 250);
+
+    return () => {
+      if ("cancelIdleCallback" in window) window.cancelIdleCallback(idleId);
+      else window.clearTimeout(idleId);
+      preloadLinks.forEach((link) => link.remove());
+    };
+  }, []);
 
   useEffect(() => {
     apiFetch("/api/auth/me").then((result) => setUser(result.user)).catch(() => setUser(null));
@@ -110,7 +185,7 @@ export function App() {
       <header className="site-header">
         <div className="header-inner section-shell">
           <button className="brand" type="button" onClick={() => navigate("/")} aria-label="古龙首页">
-            <img src={themeIcon} alt="" />
+            <img key={`brand-${activeTheme.id}`} src={themeIcon} alt="" />
             <span><strong>古龙</strong><small>Gulong Agent Engine</small></span>
           </button>
           <nav className={mobileOpen ? "primary-nav open" : "primary-nav"} aria-label="主要导航">
