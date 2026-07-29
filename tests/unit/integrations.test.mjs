@@ -83,6 +83,7 @@ test("OpenAPI document includes Chandler admin, offline credentials, dated attac
   assert.ok(document.paths["/api/v1/brain/attachments/latest"]);
   assert.ok(document.paths["/api/releases/latest"]);
   assert.ok(document.paths["/api/v1/configuration/minimax"]);
+  assert.ok(document.paths["/api/v1/account/profile"]);
   assert.ok(document.paths["/api/admin/chandler/users"]);
   assert.ok(document.paths["/api/admin/chandler/users/{id}/status"]);
   assert.ok(document.paths["/api/admin/chandler/users/{id}/subscriptions"]);
@@ -108,6 +109,9 @@ test("Vercel consolidates nested account and configuration routes", async () => 
   const sources = configuration.rewrites.map((rewrite) => rewrite.source);
   assert.ok(sources.includes("/api/account/:path*"));
   assert.ok(sources.includes("/api/v1/configuration/:path*"));
+  assert.ok(sources.includes("/api/v1/account/:path*"));
+  assert.ok(sources.includes("/api/billing/:path*"));
+  assert.ok(sources.includes("/api/users/:id/avatar"));
   assert.ok(sources.includes("/api/admin/analytics/:path*"));
   assert.ok(sources.includes("/api/analytics/:path*"));
   assert.ok(sources.includes("/api/admin/release-channels/:id/manual-upload"));
@@ -119,7 +123,33 @@ test("download page explains both desktop editions", async () => {
   const source = await readFile(new URL("../../src/components/PlatformPages.jsx", import.meta.url), "utf8");
   assert.match(source, /古龙基础版/);
   assert.match(source, /永生花定制版/);
+  assert.match(source, /gulong-edition-icon\.png/);
+  assert.match(source, /yongshenghua-edition-icon\.png/);
   assert.match(source, /\/api\/downloads\/\$\{editionKey\}\/download/);
+});
+
+test("admin subscriptions localize review state and keep the three-column detail layout readable", async () => {
+  const [adminSource, css] = await Promise.all([
+    readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/styles.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(adminSource, /label:\s*"订阅用户"/);
+  assert.match(adminSource, /pending_review:\s*"待人工审核"/);
+  assert.match(adminSource, /<h2>订阅用户<\/h2>/);
+  assert.match(css, /\.admin-detail-panel\s*>\s*article\s*\{[^}]*grid-template-columns:\s*minmax\(132px,[^;]+minmax\(180px,[^;]+minmax\(230px,\s*auto\)/s);
+  assert.match(css, /\.subscription-state\s*\{[^}]*white-space:\s*nowrap/s);
+});
+
+test("price publishing uses an in-product confirmation and a Chandler permission fallback", async () => {
+  const [adminSource, serverSource] = await Promise.all([
+    readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(adminSource, /price-publish-modal/);
+  assert.doesNotMatch(adminSource, /window\.confirm\(`发布目标价格/);
+  assert.match(serverSource, /CHANDLER_PRICE_PERMISSION_DENIED/);
+  assert.match(serverSource, /permissionFallback:\s*true/);
+  assert.match(serverSource, /price_source:\s*"website-local"/);
 });
 
 test("trusted release protocol enforces direct-COS integrity metadata", async () => {

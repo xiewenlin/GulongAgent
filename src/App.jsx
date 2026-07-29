@@ -193,7 +193,7 @@ export function App() {
   else if (pathname === "/account") page = <AccountDashboard user={user} openAuth={openAuth} navigate={navigate} onUser={setUser} />;
   else if (pathname === "/manual") page = <ProductManualPage navigate={navigate} />;
   else if (pathname === "/brain") page = <SecondBrainPage user={user} openAuth={openAuth} navigate={navigate} />;
-  else if (pathname === "/download") page = <DownloadPage themeIcon={themeIcon} />;
+  else if (pathname === "/download") page = <DownloadPage />;
   else if (pathname === "/developer") page = <DeveloperPage user={user} openAuth={openAuth} />;
   else if (pathname === "/pricing") page = <PricingPage user={user} openAuth={openAuth} navigate={navigate} />;
   else if (pathname === "/upload") page = <BrainUploadPage user={user} openAuth={openAuth} />;

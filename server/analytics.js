@@ -393,6 +393,8 @@ export async function buildAdminAnalyticsDashboard(requestedDays = 30) {
   if (brainBacklog || scale.openFeedback) insights.push({ tone: brainBacklog > 10 || scale.openFeedback > 10 ? "attention" : "neutral", title: "服务队列需要持续关注", detail: `第二大脑待处理 ${brainBacklog} 份，未解决用户反馈 ${scale.openFeedback} 条。` });
 
   return {
+    dataMode: "live",
+    dataSources: ["MongoDB 用户与会话", "MongoDB 支付与订阅", "MongoDB 行为事件", "MongoDB 任务、附件与发版记录"],
     generatedAt: now,
     timezone: "Asia/Shanghai",
     days,

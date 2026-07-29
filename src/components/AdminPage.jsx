@@ -1,5 +1,6 @@
 import {
   ArrowClockwise,
+  ArrowRight,
   ArrowSquareOut,
   CalendarBlank,
   ChartLineUp,
@@ -7,8 +8,10 @@ import {
   CloudArrowDown,
   CloudArrowUp,
   Cube,
+  CurrencyCny,
   DownloadSimple,
   FileZip,
+  FloppyDisk,
   GearSix,
   Handshake,
   ImageSquare,
@@ -28,13 +31,24 @@ import { AdminDashboard } from "./AdminDashboard.jsx";
 
 const menu = [
   { id: "dashboard", label: "数据看板", icon: ChartLineUp },
-  { id: "users", label: "用户与订阅", icon: UsersThree },
+  { id: "users", label: "订阅用户", icon: UsersThree },
   { id: "prices", label: "订阅价格", icon: Cube },
   { id: "partners", label: "合作伙伴", icon: Handshake },
   { id: "brain", label: "第二大脑", icon: FileZip },
   { id: "versions", label: "版本管理", icon: Package },
   { id: "payments", label: "线下支付", icon: ShieldCheck },
 ];
+
+const subscriptionStatusLabels = {
+  active: "生效中",
+  pending: "待处理",
+  pending_review: "待人工审核",
+  approved: "已通过",
+  canceled: "已取消",
+  cancelled: "已取消",
+  expired: "已到期",
+  rejected: "已拒绝",
+};
 
 function AdminNotice({ children, tone = "info" }) {
   return <div className={`admin-notice ${tone}`}><ShieldCheck size={18} /> <span>{children}</span></div>;
@@ -104,12 +118,12 @@ function ChandlerUserManager() {
   }
 
   return <section className="admin-module">
-    <header className="admin-module-head"><div><span>CHANDLER IDENTITY CONTROL</span><h2>用户与订阅</h2><p>搜索 Chandler 真实用户、冻结或恢复账号、查看订阅，并发起权益双人审批。</p></div><div className="storage-badge"><ShieldCheck size={18} /><span>数据来源</span><strong>{meta.permissionLimited ? "官网同步用户" : "Chandler OpenAPI"}</strong></div></header>
+    <header className="admin-module-head"><div><span>CHANDLER IDENTITY CONTROL</span><h2>订阅用户</h2><p>搜索 Chandler 真实用户、冻结或恢复账号、查看订阅，并发起权益双人审批。</p></div><div className="storage-badge"><ShieldCheck size={18} /><span>数据来源</span><strong>{meta.permissionLimited ? "官网同步用户" : "Chandler OpenAPI"}</strong></div></header>
     <form className="admin-filterbar" onSubmit={load}><label><MagnifyingGlass size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索邮箱、昵称、手机号" /></label><button className="button secondary" disabled={busy === "search"}><MagnifyingGlass size={16} /> {busy === "search" ? "搜索中" : "搜索"}</button><span>共 {meta.total ?? users.length} 个结果</span></form>
     {message && <AdminNotice tone={message.includes("已") ? "success" : "error"}>{message}</AdminNotice>}
     {meta.permissionLimited && <AdminNotice>Chandler 管理接口未向当前账号开放，已自动切换为官网同步用户与本地订阅视图；查看、搜索和线下审核可继续使用，全局冻结与权益审批需 Chandler 授权。</AdminNotice>}
     {users.length ? <div className="chandler-user-list">{users.map((user) => <article key={user.id}><div className="chandler-user-avatar">{(user.display_name || user.email || "U").slice(0, 1).toUpperCase()}</div><div><strong>{user.display_name || "未设置昵称"}</strong><span>{user.email || user.phone || user.id}</span><small>{user.edition_name ? `${user.edition_name} · ` : ""}{user.id}</small></div><span className={`status-pill ${user.status || "active"}`}>{user.status === "disabled" ? "已冻结" : user.status === "deleted" ? "已删除" : "正常"}</span><div className="admin-row-actions"><button className="button small ghost" onClick={() => inspect(user)}>订阅详情</button>{!meta.permissionLimited && user.status !== "deleted" && <button className="button small secondary" disabled={busy === user.id} onClick={() => changeStatus(user)}>{user.status === "disabled" ? "恢复" : "冻结"}</button>}{!meta.permissionLimited && <button className="button small primary" onClick={() => setGrant({ user, entitlementCode: "gulong.member", validUntil: new Date(Date.now() + 365 * 86400_000).toISOString().slice(0, 16), reason: "管理员根据线下合同申请开通古龙会员权益" })}>申请权益</button>}</div></article>)}</div> : <EmptyState icon={UsersThree} title="没有匹配用户" text="尝试使用邮箱、昵称或手机号的一部分重新搜索。" />}
-    {selected && <div className="admin-detail-panel"><header><div><span>SUBSCRIPTIONS</span><h3>{selected.display_name || selected.email || selected.id} 的订阅</h3></div><button className="icon-danger" onClick={() => setSelected(null)}><X size={17} /></button></header>{subscriptionMeta.permissionLimited && <AdminNotice>当前显示官网订阅与线下支付审核记录。</AdminNotice>}{subscriptions.length ? subscriptions.map((subscription, index) => <article key={subscription.id || index}><strong>{subscription.status || "unknown"}</strong><span>{subscription.sku_name || subscription.sku_id || subscription.product_name || "订阅套餐"}</span><time>有效至 {subscription.current_period_end ? new Date(subscription.current_period_end).toLocaleString("zh-CN") : subscription.valid_until ? new Date(subscription.valid_until).toLocaleString("zh-CN") : subscription.status === "pending_review" ? "等待审核" : "未返回"}</time></article>) : <p>该用户当前没有订阅记录。</p>}</div>}
+    {selected && <div className="admin-detail-panel"><header><div><span>SUBSCRIPTIONS</span><h3>{selected.display_name || selected.email || selected.id} 的订阅</h3></div><button className="icon-danger" onClick={() => setSelected(null)}><X size={17} /></button></header>{subscriptionMeta.permissionLimited && <AdminNotice>当前显示官网订阅与线下支付审核记录。</AdminNotice>}{subscriptions.length ? subscriptions.map((subscription, index) => <article key={subscription.id || index}><strong className={`subscription-state ${subscription.status || "unknown"}`}>{subscriptionStatusLabels[subscription.status] || subscription.status || "未知状态"}</strong><span>{subscription.sku_name || subscription.sku_id || subscription.product_name || "订阅套餐"}</span><time>有效至 {subscription.current_period_end ? new Date(subscription.current_period_end).toLocaleString("zh-CN") : subscription.valid_until ? new Date(subscription.valid_until).toLocaleString("zh-CN") : subscription.status === "pending_review" ? "等待审核" : "未返回"}</time></article>) : <p>该用户当前没有订阅记录。</p>}</div>}
     {grant && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setGrant(null)}><form className="admin-form-modal" onSubmit={requestGrant}><button className="modal-close" type="button" onClick={() => setGrant(null)}><X size={18} /></button><span>DUAL APPROVAL</span><h2>申请订阅权益</h2><p>目标用户：{grant.user.email || grant.user.id}</p><div className="admin-form-grid"><label><span>权益代码</span><input required value={grant.entitlementCode} onChange={(event) => setGrant({ ...grant, entitlementCode: event.target.value })} /></label><label><span>有效期至</span><input required type="datetime-local" value={grant.validUntil} onChange={(event) => setGrant({ ...grant, validUntil: event.target.value })} /></label><label className="span-2"><span>申请原因</span><textarea required minLength={2} maxLength={1024} value={grant.reason} onChange={(event) => setGrant({ ...grant, reason: event.target.value })} /></label></div><AdminNotice>申请将进入 Chandler 双人审批，申请人不能审批自己的请求。</AdminNotice><button className="button primary full" disabled={busy === "grant"}>{busy === "grant" ? "提交中" : "提交审批"}</button></form></div>}
   </section>;
 }
@@ -119,24 +133,30 @@ function ChandlerPriceManager() {
   const [targets, setTargets] = useState({ month: 0, year: 0 });
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState("");
+  const [publishing, setPublishing] = useState(null);
   async function load() {
     setMessage("");
     try { const result = await apiFetch("/api/admin/chandler/catalog"); setPlans(result.plans || []); setTargets(result.targetPrices || {}); }
     catch (error) { setMessage(error.message); }
   }
   useEffect(() => { load(); }, []);
-  async function publish(plan) {
+  function openPublish(plan) {
     const yearly = `${plan.skuType} ${plan.billingInterval}`.toLowerCase().includes("year");
-    const target = yearly ? targets.year : targets.month;
-    if (!window.confirm(`为 ${plan.skuName || plan.skuId} 发布新价格 ${formatMoney(target)}？旧版本会由 Chandler 自动替代。`)) return;
+    setPublishing({ plan, yearly, target: yearly ? targets.year : targets.month, effectiveAt: new Date(Date.now() + 5 * 60_000).toISOString().slice(0, 16) });
+  }
+  async function publish(event) {
+    event.preventDefault();
+    const { plan, effectiveAt } = publishing;
     setBusy(plan.skuId); setMessage("");
     try {
-      await apiFetch("/api/admin/chandler/prices", { method: "POST", body: JSON.stringify({ skuId: plan.skuId, effectiveAt: new Date(Date.now() + 60_000).toISOString() }) });
-      setMessage("新价格版本已发布，将在约一分钟后生效。"); await load();
+      const result = await apiFetch("/api/admin/chandler/prices", { method: "POST", body: JSON.stringify({ skuId: plan.skuId, effectiveAt: new Date(effectiveAt).toISOString() }) });
+      setPublishing(null);
+      await load();
+      setMessage(result.permissionFallback ? "Chandler 未开放价格权限，已自动由古龙官网价格覆盖层发布；结算接口将读取新价格。" : "新价格版本已发布到 Chandler，将按设定时间生效。");
     } catch (error) { setMessage(error.message); }
     finally { setBusy(""); }
   }
-  return <section className="admin-module"><header className="admin-module-head"><div><span>IMMUTABLE PRICE VERSIONS</span><h2>订阅价格</h2><p>读取 Chandler 实时目录；发布时由官网固定目标价格推导金额，避免前端篡改。</p></div><button className="button secondary" onClick={load}><ArrowClockwise size={17} /> 刷新实时价格</button></header>{message && <AdminNotice tone={message.includes("已发布") ? "success" : "error"}>{message}</AdminNotice>}<div className="price-admin-grid">{plans.map((plan) => { const yearly = `${plan.skuType} ${plan.billingInterval}`.toLowerCase().includes("year"); const target = yearly ? targets.year : targets.month; const matches = plan.amountFen === target; return <article key={plan.skuId}><span>{yearly ? "YEARLY" : "MONTHLY"}</span><h3>{plan.productName}</h3><p>{plan.skuName}</p><div><strong>{formatMoney(plan.amountFen)}</strong><small>当前实时价格</small></div><div><strong>{formatMoney(target)}</strong><small>官网目标价格</small></div><span className={`price-sync-state ${matches ? "ready" : "pending"}`}>{matches ? "已同步" : "需要发布新版本"}</span><button className="button primary full" disabled={matches || busy === plan.skuId} onClick={() => publish(plan)}>{busy === plan.skuId ? "发布中" : matches ? "无需更新" : "发布目标价格"}</button></article>; })}</div>{!plans.length && <EmptyState title="没有可用订阅套餐" text="请先在 Chandler 建立并上架月度、年度订阅 SKU。" />}</section>;
+  return <section className="admin-module"><header className="admin-module-head"><div><span>IMMUTABLE PRICE VERSIONS</span><h2>订阅价格</h2><p>读取 Chandler 实时目录；若 Chandler 未开放价格权限，古龙官网会自动接管价格覆盖与结算。</p></div><button className="button secondary" onClick={load}><ArrowClockwise size={17} /> 刷新实时价格</button></header>{message && <AdminNotice tone={message.includes("已") || message.includes("接管") ? "success" : "error"}>{message}</AdminNotice>}<div className="price-admin-grid">{plans.map((plan) => { const yearly = `${plan.skuType} ${plan.billingInterval}`.toLowerCase().includes("year"); const target = yearly ? targets.year : targets.month; const scheduled = plan.scheduledPriceFen === target; const matches = plan.amountFen === target; return <article key={plan.skuId}><span>{yearly ? "YEARLY" : "MONTHLY"}</span><h3>{plan.productName}</h3><p>{plan.skuName}</p><div><strong>{formatMoney(plan.amountFen)}</strong><small>{plan.priceSource === "website-local" ? "官网覆盖价格" : "Chandler 实时价格"}</small></div><div><strong>{formatMoney(target)}</strong><small>官网目标价格</small></div><span className={`price-sync-state ${matches ? "ready" : scheduled ? "scheduled" : "pending"}`}>{matches ? "已同步" : scheduled ? `已排期 · ${new Date(plan.scheduledEffectiveAt).toLocaleString("zh-CN")}` : "需要发布新版本"}</span><button className="button primary full" disabled={matches || scheduled || busy === plan.skuId} onClick={() => openPublish(plan)}>{busy === plan.skuId ? "发布中" : matches ? "无需更新" : scheduled ? "等待生效" : "发布目标价格"}</button></article>; })}</div>{!plans.length && <EmptyState title="没有可用订阅套餐" text="请先在 Chandler 建立并上架月度、年度订阅 SKU。" />}{publishing && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && setPublishing(null)}><form className="admin-form-modal price-publish-modal" onSubmit={publish}><button className="modal-close" type="button" disabled={Boolean(busy)} onClick={() => setPublishing(null)}><X size={18} /></button><header className="price-publish-head"><div className="price-publish-icon"><CurrencyCny size={30} weight="duotone" /></div><div><span>IMMUTABLE PRICE VERSION</span><h2>发布目标价格</h2><p>{publishing.plan.productName} · {publishing.plan.skuName}</p></div></header><div className="price-compare"><article><span>当前价格</span><strong>{formatMoney(publishing.plan.amountFen)}</strong><small>{publishing.plan.priceSource === "website-local" ? "古龙官网覆盖层" : "Chandler 当前版本"}</small></article><ArrowRight size={25} /><article className="target"><span>发布后价格</span><strong>{formatMoney(publishing.target)}</strong><small>{publishing.yearly ? "按年订阅" : "按月订阅"}</small></article></div><label className="price-effective-field"><span><CalendarBlank size={19} /> 生效时间</span><input required type="datetime-local" min={new Date(Date.now() + 60_000).toISOString().slice(0, 16)} value={publishing.effectiveAt} onChange={(event) => setPublishing({ ...publishing, effectiveAt: event.target.value })} /><small>建议至少预留 5 分钟，避免用户在价格切换瞬间创建旧订单。</small></label><div className="price-publish-impact"><ShieldCheck size={23} weight="duotone" /><div><strong>安全发布说明</strong><p>价格版本不可直接覆盖历史金额。Chandler 有权限时同步发布；无权限时自动写入官网不可变价格版本，官网下单与结算会使用同一生效价格。</p></div></div><div className="price-publish-actions"><button className="button secondary" type="button" disabled={Boolean(busy)} onClick={() => setPublishing(null)}>取消</button><button className="button primary" disabled={Boolean(busy)}><RocketLaunch size={18} /> {busy ? "正在发布" : `确认发布 ${formatMoney(publishing.target)}`}</button></div></form></div>}</section>;
 }
 
 function PartnerManager() {
@@ -307,14 +327,27 @@ function VersionManager() {
 function OfflinePaymentManager() {
   const [orders, setOrders] = useState([]);
   const [message, setMessage] = useState("");
+  const [rejecting, setRejecting] = useState(null);
+  const [busy, setBusy] = useState("");
   async function load() { try { setOrders((await apiFetch("/api/admin/offline-payments")).orders || []); } catch (error) { setMessage(error.message); } }
   useEffect(() => { load(); }, []);
   async function approve(order) {
     if (!window.confirm(`确认 ${order.userEmail || order.orderNo} 已到账并开通会员吗？`)) return;
+    setBusy(order.id);
     try { await apiFetch(`/api/admin/offline-payments/${order.id}/approve`, { method: "POST", body: "{}" }); setMessage("已确认到账，权益已写入官网并尝试同步 Chandler。"); await load(); }
     catch (error) { setMessage(error.message); }
+    finally { setBusy(""); }
   }
-  return <section className="admin-module"><header className="admin-module-head"><div><span>CHANDLER OFFLINE REVIEW</span><h2>线下支付审核</h2><p>订单先持久化到 MongoDB，再镜像到 Chandler；确认到账后同步订阅有效期与用户扩展属性。</p></div><button className="button secondary" onClick={load}><ArrowClockwise size={17} /> 刷新</button></header>{message && <AdminNotice tone={message.startsWith("已确认") ? "success" : "error"}>{message}</AdminNotice>}{orders.length ? <div className="offline-order-grid">{orders.map((order) => <article key={order.id}><header><div><span>{order.cycle === "year" ? "年度会员" : "月度会员"}</span><strong>{formatMoney(order.amountFen)}</strong></div><span className={`status-pill ${order.status}`}>{order.status === "pending" ? "待审核" : order.status === "approved" ? "已通过" : "已拒绝"}</span></header><dl><div><dt>订单号</dt><dd>{order.orderNo}</dd></div><div><dt>用户</dt><dd>{order.userEmail || order.ownerId}</dd></div><div><dt>提交时间</dt><dd>{new Date(order.createdAt).toLocaleString("zh-CN")}</dd></div><div><dt>Chandler</dt><dd>{order.chandlerOrderNo || "等待镜像"}</dd></div></dl>{order.status === "pending" && <button className="button primary full" onClick={() => approve(order)}><CheckCircle size={17} /> 确认到账并通过</button>}</article>)}</div> : <EmptyState icon={ShieldCheck} title="没有线下支付申请" text="用户在定价页选择“线下支付”后，申请会显示在这里。" />}</section>;
+  async function reject(event) {
+    event.preventDefault();
+    setBusy(rejecting.order.id); setMessage("");
+    try {
+      await apiFetch(`/api/admin/offline-payments/${rejecting.order.id}/reject`, { method: "POST", body: JSON.stringify({ reason: rejecting.reason }) });
+      setRejecting(null); setMessage("已拒绝该申请，用户后台已收到原因与重新申请入口。"); await load();
+    } catch (error) { setMessage(error.message); }
+    finally { setBusy(""); }
+  }
+  return <section className="admin-module"><header className="admin-module-head"><div><span>CHANDLER OFFLINE REVIEW</span><h2>线下支付审核</h2><p>订单先持久化到 MongoDB，再镜像到 Chandler；通过或拒绝都会给用户发送站内消息。</p></div><button className="button secondary" onClick={load}><ArrowClockwise size={17} /> 刷新</button></header>{message && <AdminNotice tone={message.startsWith("已") ? "success" : "error"}>{message}</AdminNotice>}{orders.length ? <div className="offline-order-grid">{orders.map((order) => <article key={order.id}><header><div><span>{order.cycle === "year" ? "年度会员" : "月度会员"}</span><strong>{formatMoney(order.amountFen)}</strong></div><span className={`status-pill ${order.status}`}>{order.status === "pending" ? "待审核" : order.status === "approved" ? "已通过" : "已拒绝"}</span></header><dl><div><dt>订单号</dt><dd>{order.orderNo}</dd></div><div><dt>用户</dt><dd>{order.userEmail || order.ownerId}</dd></div><div><dt>提交时间</dt><dd>{new Date(order.createdAt).toLocaleString("zh-CN")}</dd></div><div><dt>Chandler</dt><dd>{order.chandlerOrderNo || "等待镜像"}</dd></div></dl>{order.previousReviewReason && <div className="offline-review-history"><strong>上次拒绝：</strong>{order.previousReviewReason}<br /><strong>用户调整：</strong>{order.resubmissionNote || "未填写"}</div>}{order.reviewReason && <div className="offline-review-history rejected"><strong>拒绝原因：</strong>{order.reviewReason}</div>}{order.status === "pending" && <div className="offline-review-actions"><button className="button primary" disabled={busy === order.id} onClick={() => approve(order)}><CheckCircle size={17} /> 确认到账并通过</button><button className="button danger" disabled={busy === order.id} onClick={() => setRejecting({ order, reason: "" })}><X size={17} /> 拒绝通过</button></div>}</article>)}</div> : <EmptyState icon={ShieldCheck} title="没有线下支付申请" text="用户在定价页选择“线下支付”后，申请会显示在这里。" />}{rejecting && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && setRejecting(null)}><form className="admin-form-modal offline-reject-modal" onSubmit={reject}><button className="modal-close" type="button" disabled={Boolean(busy)} onClick={() => setRejecting(null)}><X size={18} /></button><span>REJECT OFFLINE PAYMENT</span><h2>拒绝通过</h2><p>订单：<strong>{rejecting.order.orderNo}</strong></p><label><span>拒绝原因</span><textarea required minLength={2} maxLength={500} autoFocus value={rejecting.reason} onChange={(event) => setRejecting({ ...rejecting, reason: event.target.value })} placeholder="请清楚说明金额、付款截图或订单信息中需要用户调整的内容。" /></label><div className="offline-reject-actions"><button type="button" className="button secondary" disabled={Boolean(busy)} onClick={() => setRejecting(null)}>取消</button><button className="button danger" disabled={Boolean(busy)}><FloppyDisk size={17} /> {busy ? "正在保存" : "保存拒绝原因"}</button></div></form></div>}</section>;
 }
 
 export function AdminPage({ user, openAuth }) {

@@ -145,6 +145,26 @@ export async function ensureIndexes() {
           { status: 1, reviewedAt: -1, updatedAt: -1 },
           { name: "offline_payments_analytics" },
         ),
+        db.collection("notifications").createIndex(
+          { ownerId: 1, createdAt: -1 },
+          { name: "notifications_by_owner" },
+        ),
+        db.collection("notifications").createIndex(
+          { ownerId: 1, readAt: 1, createdAt: -1 },
+          { name: "notifications_unread" },
+        ),
+        db.collection("avatarUploads").createIndex(
+          { expiresAt: 1 },
+          { expireAfterSeconds: 0, name: "ttl_avatar_uploads" },
+        ),
+        db.collection("pricingVersions").createIndex(
+          { skuId: 1, effectiveAt: -1, status: 1 },
+          { name: "pricing_versions_by_sku" },
+        ),
+        db.collection("pricingVersions").createIndex(
+          { billingInterval: 1, effectiveAt: -1, status: 1 },
+          { name: "pricing_versions_by_cycle" },
+        ),
         db.collection("subscriptions").createIndex(
           { status: 1, currentPeriodEnd: 1 },
           { name: "subscriptions_active" },

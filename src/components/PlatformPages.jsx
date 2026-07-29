@@ -10,7 +10,6 @@ import {
   CreditCard,
   DownloadSimple,
   FileZip,
-  FlowerLotus,
   Images,
   Key,
   LockKey,
@@ -39,7 +38,7 @@ function EmptyConfig({ children }) {
   return <div className="empty-config"><ShieldCheck size={22} /><span>{children}</span></div>;
 }
 
-export function DownloadPage({ themeIcon }) {
+export function DownloadPage() {
   const [links, setLinks] = useState([]);
   const [releases, setReleases] = useState({});
   const [loading, setLoading] = useState(true);
@@ -71,6 +70,7 @@ export function DownloadPage({ themeIcon }) {
       description: "面向个人用户、独立开发者与小型团队的标准版本。第一次接触古龙，直接选择这一版即可。",
       suitable: "适合希望快速拥有 AI 团队，并使用官方标准能力与持续更新的用户。",
       features: ["完整智能体引擎与任务工作流", "第二大脑、技能与插件能力", "本地优先的数据与模型配置"],
+      icon: "/assets/gulong-edition-icon.png",
     },
     {
       key: "yongshenghua",
@@ -80,6 +80,7 @@ export function DownloadPage({ themeIcon }) {
       description: "面向永生花既有用户、品牌合作方与需要专属外观、权限策略和发行节奏的组织。",
       suitable: "适合已通过永生花端注册，或需要品牌化部署与专属发行渠道的用户。",
       features: ["继承古龙基础版核心引擎", "永生花品牌界面与专属配置", "独立权限分组与版本发行通道"],
+      icon: "/assets/yongshenghua-edition-icon.png",
     },
   ];
 
@@ -109,7 +110,7 @@ export function DownloadPage({ themeIcon }) {
             const isCustom = edition.key === "yongshenghua";
             return <article key={edition.key} className={`download-edition-card ${isCustom ? "custom" : "essential"}`}>
               <header>
-                <div className={`download-edition-mark ${isCustom ? "flower" : ""}`}>{isCustom ? <FlowerLotus size={54} weight="duotone" /> : <img src={themeIcon} alt="古龙基础版图标" />}</div>
+                <div className={`download-edition-mark ${isCustom ? "flower" : ""}`}><img src={edition.icon} alt={`${edition.name}圆形图标`} /></div>
                 <div><span>{edition.eyebrow}</span><h2>{edition.name}</h2><strong>{edition.tagline}</strong></div>
               </header>
               <p className="edition-description">{edition.description}</p>
@@ -171,7 +172,7 @@ export function DeveloperPage({ user, openAuth }) {
     try {
       const result = await apiFetch("/api/developer/keys", {
         method: "POST",
-        body: JSON.stringify({ name, scopes: ["tasks:read", "tasks:write", "workflows:read", "configuration:read"] }),
+        body: JSON.stringify({ name, scopes: ["tasks:read", "tasks:write", "workflows:read", "configuration:read", "profile:read"] }),
       });
       setFreshKey(result.apiKey);
       setName("");
@@ -247,6 +248,22 @@ export function PricingPage({ user, openAuth, navigate }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [payment, setPayment] = useState(null);
+  const [membership, setMembership] = useState(null);
+
+  useEffect(() => {
+    if (!user) { setMembership(null); return; }
+    apiFetch("/api/billing/subscription")
+      .then((result) => setMembership(result.subscription || null))
+      .catch(() => setMembership(null));
+  }, [user?.id]);
+
+  const memberPlan = plans.find((item) => item.id === "member");
+  const monthlyUpgrade = cycle === "year"
+    && membership?.status === "active"
+    && membership?.cycle === "month"
+    && new Date(membership.currentPeriodEnd).getTime() > Date.now();
+  const upgradeCreditFen = monthlyUpgrade ? memberPlan.monthlyFen : 0;
+  const memberPayableFen = cycle === "year" ? memberPlan.yearlyFen - upgradeCreditFen : memberPlan.monthlyFen;
 
   async function startPayment(plan) {
     if (!user) return openAuth("login");
@@ -254,7 +271,7 @@ export function PricingPage({ user, openAuth, navigate }) {
     if (plan.id === "custom") return navigate("/feedback");
     trackAnalyticsEvent("CHECKOUT_START", { path: "/pricing" });
     if (paymentMode === "offline") {
-      setPayment({ mode: "offline-cashier", cycle, amountFen: cycle === "year" ? plan.yearlyFen : plan.monthlyFen, planName: plan.name });
+      setPayment({ mode: "offline-cashier", cycle, amountFen: plan.id === "member" ? memberPayableFen : cycle === "year" ? plan.yearlyFen : plan.monthlyFen, upgradeCreditFen, planName: plan.name });
       return;
     }
     setBusy(true);
@@ -278,18 +295,19 @@ export function PricingPage({ user, openAuth, navigate }) {
       <PageIntro eyebrow="SIMPLE PRICING" title="把成本花在真正困难的任务上" description="普通能力永久免费；会员解锁第二大脑、多端消息、本地模型与完整创作流水线。" />
       <section className="pricing-controls section-shell">
         <div className="cycle-switch"><button className={cycle === "month" ? "active" : ""} onClick={() => setCycle("month")}>按月订阅</button><button className={cycle === "year" ? "active" : ""} onClick={() => setCycle("year")}>按年订阅 <span>省 ¥596</span></button></div>
-        <div className="payment-method-control"><div className="provider-switch"><span>支付方式</span><button className={paymentMode === "online" ? "active" : ""} onClick={() => setPaymentMode("online")}>线上支付</button><button className={paymentMode === "offline" ? "active" : ""} onClick={() => { setPaymentMode("offline"); setAutoRenew(false); }}>线下支付</button></div>{paymentMode === "online" && <div className="online-channel-switch" aria-label="线上支付渠道"><span>选择渠道</span><button className={onlineProvider === "wechat" ? "active" : ""} onClick={() => setOnlineProvider("wechat")}>微信支付</button><button className={onlineProvider === "alipay" ? "active" : ""} onClick={() => setOnlineProvider("alipay")}>支付宝</button></div>}</div>
+        <div className="payment-method-control"><div className="provider-switch"><button className={paymentMode === "online" ? "active" : ""} onClick={() => setPaymentMode("online")}>线上支付</button><button className={paymentMode === "offline" ? "active" : ""} onClick={() => { setPaymentMode("offline"); setAutoRenew(false); }}>线下支付</button></div>{paymentMode === "online" && <div className="online-channel-switch" aria-label="线上支付渠道"><span>选择渠道</span><button className={onlineProvider === "wechat" ? "active" : ""} onClick={() => setOnlineProvider("wechat")}>微信支付</button><button className={onlineProvider === "alipay" ? "active" : ""} onClick={() => setOnlineProvider("alipay")}>支付宝</button></div>}</div>
       </section>
       <section className="pricing-grid section-shell">
         {plans.map((plan) => (
           <article key={plan.id} className={plan.featured ? "featured" : ""}>
             {plan.featured && <span className="plan-ribbon">推荐</span>}
             <small>{plan.eyebrow}</small><h2>{plan.name}</h2>
-            <div className="plan-price">{plan.pricing || formatMoney(cycle === "year" ? plan.yearlyFen : plan.monthlyFen)}{!plan.pricing && <em>/{cycle === "year" ? "年" : "月"}</em>}</div>
+            <div className="plan-price">{plan.pricing || formatMoney(plan.id === "member" ? memberPayableFen : cycle === "year" ? plan.yearlyFen : plan.monthlyFen)}{!plan.pricing && <em>/{cycle === "year" ? "年" : "月"}</em>}</div>
+            {plan.id === "member" && monthlyUpgrade && <div className="upgrade-credit"><CheckCircle size={19} weight="fill" /><div><strong>月度会员升级抵扣 {formatMoney(upgradeCreditFen)}</strong><span>年度原价 {formatMoney(plan.yearlyFen)}，本次只需补足剩余费用。</span></div></div>}
             {plan.subpricing && <p className="plan-subprice">{plan.subpricing}</p>}
             <ul>{plan.features.map((feature) => <li key={feature}><Check size={17} weight="bold" /> {feature}</li>)}</ul>
             {plan.id === "member" && <label className={`auto-renew ${paymentMode === "offline" ? "disabled" : ""}`}><input type="checkbox" disabled={paymentMode === "offline"} checked={autoRenew} onChange={(event) => setAutoRenew(event.target.checked)} /><span><strong>{paymentMode === "offline" ? "人工审核到账" : "到期自动续订"}</strong><small>{paymentMode === "offline" ? "线下订单确认后开通本期会员，续费时需重新提交。" : "可随时取消；实际扣款需完成支付渠道签约。"}</small></span></label>}
-            <button className={`button full ${plan.featured ? "primary" : "secondary"}`} disabled={busy} onClick={() => startPayment(plan)}>{plan.id === "free" ? "免费下载" : plan.id === "custom" ? "联系定制" : "立即开通"}</button>
+            <button className={`button full ${plan.featured ? "primary" : "secondary"}`} disabled={busy} onClick={() => startPayment(plan)}>{plan.id === "free" ? "免费下载" : plan.id === "custom" ? "联系定制" : monthlyUpgrade ? "补差价升级年度会员" : "立即开通"}</button>
           </article>
         ))}
       </section>
@@ -313,10 +331,10 @@ function PaymentDialog({ payment, provider, onPayment, onClose }) {
     finally { setBusy(false); }
   }
   if (payment.mode === "offline-cashier") {
-    return <div className="modal-backdrop"><section className="payment-modal offline-payment-modal" role="dialog" aria-modal="true"><button className="modal-close" disabled={busy} onClick={onClose}><X size={19} /></button><div className="payment-logo"><ShieldCheck size={28} /></div><span className="payment-eyebrow">OFFLINE PAYMENT</span><h2>扫码支付后提交人工审核</h2><p>请扫描企业收款码完成付款。付款后点击“我已支付”，系统会创建待审核订单。</p><img className="payment-qr enterprise-qr" src="/assets/enterprise-payment-qr.jpg" alt="古龙企业微信收款码" /><div className="offline-payment-summary"><span>{payment.cycle === "year" ? "年度会员" : "月度会员"}</span><strong>{formatMoney(payment.amountFen)}</strong></div>{error && <div className="form-error">{error}</div>}<div className="payment-dialog-actions"><button className="button secondary" disabled={busy} onClick={onClose}>返回套餐</button><button className="button primary" disabled={busy} onClick={confirmOffline}>{busy ? "正在提交" : "我已支付"}</button></div></section></div>;
+    return <div className="modal-backdrop"><section className="payment-modal offline-payment-modal" role="dialog" aria-modal="true"><button className="modal-close" disabled={busy} onClick={onClose}><X size={19} /></button><div className="payment-logo"><ShieldCheck size={28} /></div><span className="payment-eyebrow">OFFLINE PAYMENT</span><h2>扫码支付后提交人工审核</h2><p>请扫描企业收款码完成付款。付款后点击“我已支付”，系统会创建待审核订单。</p><img className="payment-qr enterprise-qr" src="/assets/enterprise-payment-qr.jpg" alt="古龙企业微信收款码" /><div className="offline-payment-summary"><span>{payment.cycle === "year" ? "年度会员" : "月度会员"}</span><strong>{formatMoney(payment.amountFen)}</strong></div>{payment.upgradeCreditFen > 0 && <p className="offline-upgrade-note">已按月度会员升级规则抵扣 {formatMoney(payment.upgradeCreditFen)}</p>}{error && <div className="form-error">{error}</div>}<div className="payment-dialog-actions"><button className="button secondary" disabled={busy} onClick={onClose}>返回套餐</button><button className="button primary" disabled={busy} onClick={confirmOffline}>{busy ? "正在提交" : "我已支付"}</button></div></section></div>;
   }
   if (payment.mode === "offline") {
-    return <div className="modal-backdrop"><section className="payment-modal offline-payment-modal" role="dialog" aria-modal="true"><button className="modal-close" onClick={onClose}><X size={19} /></button><div className="payment-logo"><ShieldCheck size={28} /></div><span className="payment-eyebrow">PAYMENT SUBMITTED</span><h2>已提交，等待管理员审核</h2><p>订单 <strong>{payment.orderNo}</strong> 已进入审核队列。到账确认后，会员权益会同步到古龙官网与桌面端。</p><div className="form-success">待审核 · {formatMoney(payment.amountFen)}</div><img className="payment-qr service-qr" src="/assets/customer-service-wechat.jpg" alt="古龙客服微信二维码" /><small>如需补充付款信息，可扫码联系古龙客服。</small><button className="button primary full" onClick={onClose}>我知道了</button></section></div>;
+    return <div className="modal-backdrop"><section className="payment-modal offline-payment-modal" role="dialog" aria-modal="true"><button className="modal-close" onClick={onClose}><X size={19} /></button><div className="payment-logo"><ShieldCheck size={28} /></div><span className="payment-eyebrow">PAYMENT SUBMITTED</span><h2>已提交，等待管理员审核</h2><p>订单 <strong>{payment.orderNo}</strong> 已进入审核队列。到账确认后，会员权益会同步到古龙官网与桌面端。</p><div className="form-success">待审核 · {formatMoney(payment.amountFen)}</div><p className="offline-payment-urgent">请尽快添加客服微信，发送支付截图，以加速审核进度。</p><img className="payment-qr service-qr" src="/assets/customer-service-wechat.jpg" alt="古龙客服微信二维码" /><small>扫码添加古龙客服，并发送本订单的支付截图。</small><button className="button primary full" onClick={onClose}>我知道了</button></section></div>;
   }
   return (
     <div className="modal-backdrop"><section className="payment-modal" role="dialog" aria-modal="true"><button className="modal-close" onClick={onClose}><X size={19} /></button><div className="payment-logo"><CreditCard size={28} /></div><h2>{provider === "wechat" ? "微信支付" : "支付宝"}</h2><p>订单 {payment.orderNo} 已由 Chandler 创建。{payment.qrCodeDataUrl ? "请扫码完成付款。" : "请在新的支付窗口完成付款。"}</p>{payment.qrCodeDataUrl && <img className="payment-qr" src={payment.qrCodeDataUrl} alt="微信支付二维码" />}{payment.paymentUrl && !payment.qrCodeDataUrl && <a className="button primary full" href={payment.paymentUrl} target="_blank" rel="noreferrer">打开支付页面 <ArrowRight size={17} /></a>}<small>支付结果、订阅与余额由 Chandler 公共 OpenAPI 统一记录。</small></section></div>

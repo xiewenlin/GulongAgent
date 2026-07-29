@@ -241,7 +241,7 @@ export async function upsertChandlerUser(chandlerUser, { username, identity, def
     const canonicalId = emailMatch._id;
     const duplicateId = chandlerMatch._id;
     await Promise.all([
-      ...["apiKeys", "tasks", "memories", "feedback", "payments", "subscriptions", "wallets", "uploads", "offlinePayments", "userConfigurations"]
+      ...["apiKeys", "tasks", "memories", "feedback", "payments", "subscriptions", "wallets", "uploads", "offlinePayments", "userConfigurations", "notifications", "avatarUploads"]
         .map(async (name) => (await getCollection(name)).updateMany({ ownerId: duplicateId }, { $set: { ownerId: canonicalId } })),
       (await getCollection("sessions")).updateMany({ userId: duplicateId }, { $set: { userId: canonicalId } }),
     ]);
@@ -272,7 +272,8 @@ export async function upsertChandlerUser(chandlerUser, { username, identity, def
     email,
     emailNormalized,
     displayName: canonical?.displayNameUserManaged ? canonical.displayName : chandlerUser.display_name || null,
-    avatar: chandlerUser.avatar || null,
+    avatar: canonical?.avatarUserManaged ? canonical.avatar : chandlerUser.avatar || null,
+    ...(canonical?.avatarUserManaged ? { avatarUserManaged: true, avatarObjectKey: canonical.avatarObjectKey, avatarUpdatedAt: canonical.avatarUpdatedAt } : {}),
     emailVerified: Boolean(chandlerUser.email_verified),
     role: identity?.role || (chandlerUser.is_admin || isChandlerBootstrapAdmin(chandlerUser) ? "admin" : "user"),
     editionKey: edition.key,

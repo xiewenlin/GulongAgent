@@ -70,6 +70,11 @@ import { buildAdminAnalyticsDashboard, recordAnalyticsEvent } from "./analytics.
 
 const app = new OpenAPIHono();
 
+const MINIMAX_API_HOST = "https://api.minimaxi.com/v1";
+const MINIMAX_DEFAULT_MODEL = "MiniMax-M3";
+const AVATAR_MAX_BYTES = 10 * 1024 * 1024;
+const AVATAR_CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+
 const ErrorSchema = z.object({
   code: z.string().openapi({ example: "VALIDATION_ERROR" }),
   message: z.string().openapi({ example: "请求参数不正确" }),
@@ -191,6 +196,16 @@ function objectSize(head) {
 function brainProgress(item) {
   if (Number.isFinite(item?.progress)) return Math.max(0, Math.min(100, Number(item.progress)));
   return ({ uploading: 20, queued_for_analysis: 40, analyzing: 72, completed: 100, failed: 100 })[item?.status] || 0;
+}
+
+async function effectiveLocalPrice({ skuId, cycle, at = new Date() } = {}) {
+  const filter = {
+    effectiveAt: { $lte: at },
+    status: { $ne: "superseded" },
+    ...(skuId ? { skuId } : {}),
+    ...(cycle ? { billingInterval: cycle } : {}),
+  };
+  return (await getCollection("pricingVersions")).findOne(filter, { sort: { effectiveAt: -1, createdAt: -1 } });
 }
 
 function workerAuthorized(c) {
@@ -511,6 +526,20 @@ const getMiniMaxConfigurationRoute = createRoute({
   },
 });
 
+const getAccountProfileRoute = createRoute({
+  method: "get",
+  path: "/api/v1/account/profile",
+  tags: ["User Configuration"],
+  summary: "桌面端同步当前用户资料与头像",
+  description: "只接受具有 profile:read 权限的古龙 API Key。头像地址会在用户更新头像后自动变化，响应禁止缓存。",
+  security: [{ bearerAuth: [] }],
+  responses: {
+    200: { description: "当前用户资料", content: { "application/json": { schema: z.object({ id: z.string(), username: z.string().nullable(), displayName: z.string().nullable(), avatar: z.string().nullable(), edition: z.object({ key: z.string(), name: z.string() }), updatedAt: z.coerce.date() }) } } },
+    401: { description: "未认证", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "必须使用带权限的 API Key", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 const ChandlerAdminUserSchema = z.object({
   id: z.string(),
   email: z.string().nullable().optional(),
@@ -616,7 +645,7 @@ const adminAnalyticsDashboardRoute = createRoute({
   description: "按 7、30 或 90 天汇总用户增长、活跃、访问、核心功能采用、会员订阅、已确认收入、待支付金额与运营健康度。仅 Chandler 管理员可访问。",
   request: { query: z.object({ days: z.enum(["7", "30", "90"]).optional() }) },
   responses: {
-    200: { description: "实时经营分析数据", content: { "application/json": { schema: z.object({ generatedAt: z.coerce.date(), timezone: z.literal("Asia/Shanghai"), days: z.number(), today: z.record(z.string(), z.unknown()), scale: z.record(z.string(), z.unknown()), period: z.record(z.string(), z.unknown()), comparisons: z.record(z.string(), z.unknown()), trend: z.array(z.record(z.string(), z.unknown())), insights: z.array(z.record(z.string(), z.unknown())) }).passthrough() } } },
+    200: { description: "实时经营分析数据", content: { "application/json": { schema: z.object({ dataMode: z.literal("live"), dataSources: z.array(z.string()), generatedAt: z.coerce.date(), timezone: z.literal("Asia/Shanghai"), days: z.number(), today: z.record(z.string(), z.unknown()), scale: z.record(z.string(), z.unknown()), period: z.record(z.string(), z.unknown()), comparisons: z.record(z.string(), z.unknown()), trend: z.array(z.record(z.string(), z.unknown())), insights: z.array(z.record(z.string(), z.unknown())) }).passthrough() } } },
     401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } },
     403: { description: "非管理员", content: { "application/json": { schema: ErrorSchema } } },
   },
@@ -866,7 +895,7 @@ app.get("/api/account/dashboard", async (c) => {
   const chandlerSubscriptionsPromise = chandlerAccessToken
     ? chandlerRequest("/v1/me/subscriptions", { accessToken: chandlerAccessToken, timeoutMs: 5_000 }).catch(() => null)
     : Promise.resolve(null);
-  const [user, subscription, wallet, uploads, feedback, payments, offlineOrders, minimax, chandlerSubscriptions] = await Promise.all([
+  const [user, subscription, wallet, uploads, feedback, payments, offlineOrders, minimax, notifications, chandlerSubscriptions] = await Promise.all([
     (await getCollection("users")).findOne({ _id: ownerId }),
     (await getCollection("subscriptions")).findOne({ ownerId }),
     (await getCollection("wallets")).findOne({ ownerId }),
@@ -875,6 +904,7 @@ app.get("/api/account/dashboard", async (c) => {
     (await getCollection("payments")).find({ ownerId }).sort({ createdAt: -1 }).limit(20).toArray(),
     (await getCollection("offlinePayments")).find({ ownerId }).sort({ createdAt: -1 }).limit(20).toArray(),
     (await getCollection("userConfigurations")).findOne({ ownerId, provider: "minimax" }),
+    (await getCollection("notifications")).find({ ownerId }).sort({ createdAt: -1 }).limit(20).toArray(),
     chandlerSubscriptionsPromise,
   ]);
   const remoteSubscription = (chandlerSubscriptions?.subscriptions || []).find((item) => item.status === "active") || null;
@@ -937,15 +967,39 @@ app.get("/api/account/dashboard", async (c) => {
     })),
     orders: [
       ...payments.map((item) => ({ id: item._id.toString(), orderNo: item.orderNo, kind: item.kind, cycle: item.cycle, provider: item.provider, amountFen: item.amountFen, status: item.status, createdAt: item.createdAt })),
-      ...offlineOrders.map((item) => ({ id: item._id.toString(), orderNo: item.orderNo, kind: "subscription", cycle: item.cycle, provider: "offline", amountFen: item.amountFen, status: item.status, createdAt: item.createdAt })),
+      ...offlineOrders.map((item) => ({
+        id: item._id.toString(),
+        orderNo: item.orderNo,
+        kind: "subscription",
+        cycle: item.cycle,
+        provider: "offline",
+        amountFen: item.amountFen,
+        status: item.status,
+        reviewReason: item.reviewReason || null,
+        previousReviewReason: item.previousReviewReason || null,
+        resubmissionNote: item.resubmissionNote || null,
+        resubmittedAt: item.resubmittedAt || null,
+        createdAt: item.createdAt,
+      })),
     ].sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt)).slice(0, 30),
+    notifications: notifications.map((item) => ({
+      id: item._id.toString(),
+      type: item.type,
+      title: item.title,
+      message: item.message,
+      reason: item.reason || null,
+      orderId: item.orderId?.toString() || null,
+      orderNo: item.orderNo || null,
+      readAt: item.readAt || null,
+      createdAt: item.createdAt,
+    })),
     minimax: minimax ? {
       configured: true,
       maskedKey: `••••••••${minimax.keyLast4 || ""}`,
-      apiHost: minimax.apiHost,
-      model: minimax.model,
+      apiHost: MINIMAX_API_HOST,
+      model: MINIMAX_DEFAULT_MODEL,
       updatedAt: minimax.updatedAt,
-    } : { configured: false, maskedKey: null, apiHost: "https://api.minimax.chat/v1", model: "MiniMax-M2.1" },
+    } : { configured: false, maskedKey: null, apiHost: MINIMAX_API_HOST, model: MINIMAX_DEFAULT_MODEL },
   });
 });
 
@@ -972,6 +1026,91 @@ app.put("/api/account/profile", async (c) => {
   return c.json({ user: { id: user._id.toString(), username: user.username || null, email: user.email || null, displayName: user.displayName || null, avatar: user.avatar || null, bio: user.bio || "", role: user.role || "user" } });
 });
 
+app.get("/api/users/:id/avatar", async (c) => {
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "AVATAR_NOT_FOUND", message: "头像不存在" }, 404);
+  const user = await (await getCollection("users")).findOne(
+    { _id: new ObjectId(c.req.param("id")), avatarObjectKey: { $exists: true, $ne: null } },
+    { projection: { avatarObjectKey: 1 } },
+  );
+  if (!user?.avatarObjectKey) return c.json({ code: "AVATAR_NOT_FOUND", message: "头像不存在" }, 404);
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  return c.redirect(createPresignedDownloadUrl(user.avatarObjectKey, { expires: 10 * 60 }), 302);
+});
+
+app.post("/api/account/avatar/presign", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  const body = await c.req.json().catch(() => ({}));
+  const filename = sanitizeFilename(body.filename, "avatar.webp");
+  const contentType = String(body.contentType || "").trim().toLowerCase();
+  const bytes = Number(body.bytes || 0);
+  if (!AVATAR_CONTENT_TYPES.has(contentType) || !Number.isInteger(bytes) || bytes < 1 || bytes > AVATAR_MAX_BYTES) {
+    return c.json({ code: "VALIDATION_ERROR", message: "头像仅支持 JPG、PNG、WebP 或 GIF，且不能超过 10MB" }, 400);
+  }
+  const uploadId = new ObjectId();
+  const extension = filename.includes(".") ? filename.slice(filename.lastIndexOf(".")).toLowerCase().slice(0, 8) : ".img";
+  const objectKey = `users/${auth.user.id}/avatar/${uploadId.toString()}${extension}`;
+  const now = new Date();
+  await (await getCollection("avatarUploads")).insertOne({
+    _id: uploadId,
+    ownerId: new ObjectId(auth.user.id),
+    objectKey,
+    filename,
+    contentType,
+    bytes,
+    status: "uploading",
+    createdAt: now,
+    expiresAt: new Date(now.getTime() + 60 * 60_000),
+  });
+  return c.json({
+    uploadId: uploadId.toString(),
+    uploadUrl: createPresignedPutUrl(objectKey, { expires: 60 * 60, headers: { "Content-Type": contentType } }),
+    objectKey,
+    expiresIn: 3600,
+    requiredHeaders: { "Content-Type": contentType },
+  }, 201);
+});
+
+app.post("/api/account/avatar/:uploadId/complete", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("uploadId"))) return c.json({ code: "UPLOAD_NOT_FOUND", message: "头像上传记录不存在" }, 404);
+  const ownerId = new ObjectId(auth.user.id);
+  const uploads = await getCollection("avatarUploads");
+  const upload = await uploads.findOne({ _id: new ObjectId(c.req.param("uploadId")), ownerId, status: "uploading", expiresAt: { $gt: new Date() } });
+  if (!upload) return c.json({ code: "UPLOAD_NOT_FOUND", message: "头像上传记录不存在或已失效" }, 404);
+  const head = await headObject(upload.objectKey);
+  const actualBytes = objectSize(head);
+  const actualType = String(head?.headers?.["content-type"] || head?.ContentType || "").split(";")[0].trim().toLowerCase();
+  if (actualBytes !== upload.bytes || (actualType && actualType !== upload.contentType)) {
+    await deleteObject(upload.objectKey).catch(() => {});
+    await uploads.updateOne({ _id: upload._id }, { $set: { status: "failed", error: "COS_OBJECT_MISMATCH", updatedAt: new Date() } });
+    return c.json({ code: "UPLOAD_MISMATCH", message: "头像文件校验失败，请重新上传" }, 409);
+  }
+  const users = await getCollection("users");
+  const previous = await users.findOne({ _id: ownerId }, { projection: { avatarObjectKey: 1 } });
+  const now = new Date();
+  const avatar = `/api/users/${auth.user.id}/avatar?v=${now.getTime()}`;
+  await Promise.all([
+    users.updateOne({ _id: ownerId }, { $set: { avatar, avatarObjectKey: upload.objectKey, avatarUserManaged: true, avatarUpdatedAt: now, updatedAt: now } }),
+    uploads.updateOne({ _id: upload._id, status: "uploading" }, { $set: { status: "completed", completedAt: now, updatedAt: now } }),
+  ]);
+  if (previous?.avatarObjectKey && previous.avatarObjectKey !== upload.objectKey) await deleteObject(previous.avatarObjectKey).catch(() => {});
+  return c.json({ ok: true, avatar, updatedAt: now });
+});
+
+app.post("/api/account/notifications/:id/read", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "NOTIFICATION_NOT_FOUND", message: "消息不存在" }, 404);
+  const result = await (await getCollection("notifications")).updateOne(
+    { _id: new ObjectId(c.req.param("id")), ownerId: new ObjectId(auth.user.id) },
+    { $set: { readAt: new Date() } },
+  );
+  if (!result.matchedCount) return c.json({ code: "NOTIFICATION_NOT_FOUND", message: "消息不存在" }, 404);
+  return c.json({ ok: true });
+});
+
 app.put("/api/account/integrations/minimax", async (c) => {
   const rejected = requireTrustedMutation(c); if (rejected) return rejected;
   const auth = await authenticate(c); if (auth.error) return auth.error;
@@ -980,17 +1119,13 @@ app.put("/api/account/integrations/minimax", async (c) => {
   const configurations = await getCollection("userConfigurations");
   const existing = await configurations.findOne({ ownerId, provider: "minimax" });
   const apiKey = String(body.apiKey || "").trim();
-  const apiHost = String(body.apiHost || existing?.apiHost || "https://api.minimax.chat/v1").trim().replace(/\/$/, "");
-  const model = String(body.model || existing?.model || "MiniMax-M2.1").trim();
-  let parsedHost;
-  try { parsedHost = new URL(apiHost); } catch { parsedHost = null; }
-  if ((!existing?.apiKeyEncrypted && apiKey.length < 8) || apiKey.length > 500 || !parsedHost || parsedHost.protocol !== "https:" || model.length < 2 || model.length > 100) {
-    return c.json({ code: "VALIDATION_ERROR", message: "MiniMax API Key、HTTPS 接口地址或模型名称不正确" }, 400);
+  if ((!existing?.apiKeyEncrypted && apiKey.length < 8) || apiKey.length > 500) {
+    return c.json({ code: "VALIDATION_ERROR", message: "MiniMax API Key 格式不正确" }, 400);
   }
   const now = new Date();
   const values = {
-    apiHost: parsedHost.toString().replace(/\/$/, ""),
-    model,
+    apiHost: MINIMAX_API_HOST,
+    model: MINIMAX_DEFAULT_MODEL,
     updatedAt: now,
     ...(apiKey ? { apiKeyEncrypted: sealUserSecret(apiKey, "minimax-api-key"), keyLast4: apiKey.slice(-4) } : {}),
   };
@@ -999,7 +1134,7 @@ app.put("/api/account/integrations/minimax", async (c) => {
     { $set: values, $setOnInsert: { ownerId, provider: "minimax", createdAt: now } },
     { upsert: true },
   );
-  return c.json({ configured: true, maskedKey: `••••••••${apiKey ? apiKey.slice(-4) : existing.keyLast4 || ""}`, apiHost: values.apiHost, model, updatedAt: now });
+  return c.json({ configured: true, maskedKey: `••••••••${apiKey ? apiKey.slice(-4) : existing.keyLast4 || ""}`, apiHost: values.apiHost, model: MINIMAX_DEFAULT_MODEL, updatedAt: now });
 });
 
 app.delete("/api/account/integrations/minimax", async (c) => {
@@ -1050,9 +1185,10 @@ app.delete("/api/auth/account", async (c) => {
     return c.json({ code: "INVALID_CREDENTIALS", message: "密码不正确，账户未删除" }, 401);
   }
   await revokeSession(c);
+  if (user.avatarObjectKey) await deleteObject(user.avatarObjectKey).catch(() => {});
   await Promise.all([
     (await getCollection("sessions")).deleteMany({ userId: ownerId }),
-    ...["apiKeys", "tasks", "memories", "feedback", "payments", "subscriptions", "wallets", "uploads", "offlinePayments", "userConfigurations"]
+    ...["apiKeys", "tasks", "memories", "feedback", "payments", "subscriptions", "wallets", "uploads", "offlinePayments", "userConfigurations", "notifications", "avatarUploads"]
       .map((name) => getCollection(name).then((collection) => collection.deleteMany({ ownerId }))),
   ]);
   await (await getCollection("users")).deleteOne({ _id: ownerId });
@@ -1079,7 +1215,7 @@ app.post("/api/developer/keys", async (c) => {
   const body = await c.req.json();
   const name = String(body.name || "").trim();
   const scopes = Array.isArray(body.scopes) ? body.scopes : ["tasks:read", "tasks:write"];
-  const allowedScopes = new Set(["tasks:read", "tasks:write", "brain:read", "brain:write", "brain:attachments:read", "workflows:read", "configuration:read"]);
+  const allowedScopes = new Set(["tasks:read", "tasks:write", "brain:read", "brain:write", "brain:attachments:read", "workflows:read", "configuration:read", "profile:read"]);
   if (name.length < 2 || name.length > 40 || scopes.some((scope) => !allowedScopes.has(scope)) || (scopes.includes("brain:attachments:read") && auth.user.role !== "admin")) {
     return c.json({ code: "VALIDATION_ERROR", message: "API Key 名称或权限不正确" }, 400);
   }
@@ -1197,7 +1333,26 @@ app.openapi(adminChandlerCatalogRoute, async (c) => {
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
   const plans = await listCatalogPlans();
   const config = chandlerConfig();
-  return c.json({ plans, targetPrices: { month: config.monthlyPriceFen, year: config.yearlyPriceFen } });
+  const now = new Date();
+  const skuIds = plans.map((plan) => plan.skuId).filter(Boolean);
+  const localVersions = skuIds.length
+    ? await (await getCollection("pricingVersions")).find({ skuId: { $in: skuIds }, status: { $ne: "superseded" } }).sort({ effectiveAt: -1, createdAt: -1 }).toArray()
+    : [];
+  const mergedPlans = plans.map((plan) => {
+    const versions = localVersions.filter((item) => item.skuId === plan.skuId);
+    const effective = versions.find((item) => new Date(item.effectiveAt) <= now);
+    const scheduled = versions.filter((item) => new Date(item.effectiveAt) > now).sort((left, right) => new Date(left.effectiveAt) - new Date(right.effectiveAt))[0];
+    return {
+      ...plan,
+      catalogAmountFen: plan.amountFen,
+      amountFen: effective?.amountFen ?? plan.amountFen,
+      priceSource: effective ? "website-local" : "chandler",
+      localVersionId: effective?._id?.toString() || null,
+      scheduledPriceFen: scheduled?.amountFen ?? null,
+      scheduledEffectiveAt: scheduled?.effectiveAt || null,
+    };
+  });
+  return c.json({ plans: mergedPlans, targetPrices: { month: config.monthlyPriceFen, year: config.yearlyPriceFen }, pricingAuthority: "website-with-chandler-sync" });
 });
 
 app.openapi(adminPublishChandlerPriceRoute, async (c) => {
@@ -1209,21 +1364,52 @@ app.openapi(adminPublishChandlerPriceRoute, async (c) => {
   if (!plan) return c.json({ code: "SKU_NOT_FOUND", message: "所选订阅套餐已下架，请刷新后重试" }, 404);
   const yearly = `${plan.skuType} ${plan.billingInterval}`.toLowerCase().includes("year");
   const config = chandlerConfig();
-  const accessToken = await getChandlerAccessToken(auth.session);
-  const price = await chandlerRequest("/v1/admin/prices", {
-    method: "POST",
-    accessToken,
-    body: {
-      sku_id: plan.skuId,
+  const amountFen = yearly ? config.yearlyPriceFen : config.monthlyPriceFen;
+  const billingInterval = yearly ? "year" : "month";
+  const effectiveAt = new Date(input.effectiveAt);
+  const now = new Date();
+  try {
+    const accessToken = await getChandlerAccessToken(auth.session);
+    const price = await chandlerRequest("/v1/admin/prices", {
+      method: "POST",
+      accessToken,
+      body: {
+        sku_id: plan.skuId,
+        currency: plan.currency || "CNY",
+        amount: amountFen,
+        billing_interval: billingInterval,
+        interval_count: 1,
+        effective_at: effectiveAt.toISOString(),
+        expires_at: null,
+      },
+    });
+    return c.json({ ...price, source: "chandler", permissionFallback: false }, 201);
+  } catch (error) {
+    if (!(error instanceof ChandlerError) || error.status !== 403) throw error;
+    const versions = await getCollection("pricingVersions");
+    await versions.updateMany(
+      { skuId: plan.skuId, status: { $in: ["active", "scheduled"] } },
+      { $set: { status: "superseded", supersededAt: now, updatedAt: now } },
+    );
+    const result = await versions.insertOne({
+      skuId: plan.skuId,
+      productId: plan.productId,
+      productName: plan.productName,
+      skuName: plan.skuName,
       currency: plan.currency || "CNY",
-      amount: yearly ? config.yearlyPriceFen : config.monthlyPriceFen,
-      billing_interval: yearly ? "year" : "month",
-      interval_count: 1,
-      effective_at: input.effectiveAt,
-      expires_at: null,
-    },
-  });
-  return c.json(price, 201);
+      amountFen,
+      billingInterval,
+      intervalCount: 1,
+      effectiveAt,
+      status: effectiveAt <= now ? "active" : "scheduled",
+      source: "website-local",
+      fallbackReason: "CHANDLER_PRICE_PERMISSION_DENIED",
+      createdBy: new ObjectId(auth.user.id),
+      createdAt: now,
+      updatedAt: now,
+    });
+    return c.json({ id: result.insertedId.toString(), source: "website-local", permissionFallback: true, amountFen, billingInterval, effectiveAt, status: effectiveAt <= now ? "active" : "scheduled", message: "Chandler 未授予价格管理权限，已由古龙官网价格覆盖层接管" }, 201);
+  }
 });
 
 app.openapi(adminRequestChandlerEntitlementRoute, async (c) => {
@@ -1319,7 +1505,7 @@ app.post("/api/admin/partners/assets/presign", async (c) => {
     return c.json({ code: "VALIDATION_ERROR", message: "仅支持 PNG、JPG、WebP 或 GIF 图片，单张不超过 30 MB" }, 400);
   }
   const objectKey = `partners/assets/${kind}/${Date.now()}-${randomBytes(10).toString("hex")}-${filename}`;
-  return c.json({ uploadUrl: createPresignedPutUrl(objectKey), objectKey, expiresIn: 1200, requiredHeaders: { "Content-Type": contentType } }, 201);
+  return c.json({ uploadUrl: createPresignedPutUrl(objectKey, { headers: { "Content-Type": contentType } }), objectKey, expiresIn: 1200, requiredHeaders: { "Content-Type": contentType } }, 201);
 });
 
 app.post("/api/admin/partners", async (c) => {
@@ -2093,7 +2279,7 @@ app.post("/api/brain/uploads/presign", async (c) => {
   });
   return c.json({
     uploadId: result.insertedId.toString(),
-    uploadUrl: createPresignedPutUrl(key),
+    uploadUrl: createPresignedPutUrl(key, { headers: { "Content-Type": contentType || "application/zip" } }),
     objectKey: key,
     expiresIn: 1200,
     requiredHeaders: { "Content-Type": contentType || "application/zip" },
@@ -2268,8 +2454,23 @@ app.post("/api/billing/orders", async (c) => {
   if (!cycle && kind === "subscription") return c.json({ code: "VALIDATION_ERROR", message: "订阅周期不正确" }, 400);
   if (provider === "offline" && kind !== "subscription") return c.json({ code: "VALIDATION_ERROR", message: "线下支付仅用于会员订阅审核" }, 400);
   const orderNo = `GL${Date.now()}${randomBytes(4).toString("hex").toUpperCase()}`;
-  const autoRenew = kind === "subscription" && Boolean(body.autoRenew);
+  const autoRenewRequested = kind === "subscription" && Boolean(body.autoRenew);
   const now = new Date();
+  const ownerId = new ObjectId(auth.user.id);
+  const activeSubscription = kind === "subscription" && cycle === "year"
+    ? await (await getCollection("subscriptions")).findOne({ ownerId, status: "active", cycle: "month", currentPeriodEnd: { $gt: now } })
+    : null;
+  const isMonthlyUpgrade = Boolean(activeSubscription);
+  const upgradeCreditFen = isMonthlyUpgrade ? chandlerConfig().monthlyPriceFen : 0;
+  const upgradeBaseStart = isMonthlyUpgrade
+    ? new Date(activeSubscription.currentPeriodStart || now)
+    : null;
+  if (isMonthlyUpgrade) amountFen = Math.max(100, chandlerConfig().yearlyPriceFen - upgradeCreditFen);
+  const localPriceVersion = kind === "subscription" && !isMonthlyUpgrade
+    ? await effectiveLocalPrice({ cycle, at: now })
+    : null;
+  if (localPriceVersion) amountFen = localPriceVersion.amountFen;
+  const autoRenew = autoRenewRequested && !localPriceVersion && !isMonthlyUpgrade;
 
   if (provider === "offline") {
     let plans = [];
@@ -2303,6 +2504,8 @@ app.post("/api/billing/orders", async (c) => {
       review_status: "pending",
       business_payment_status: "awaiting_manual_review",
       submitted_at: now.toISOString(),
+      ...(isMonthlyUpgrade ? { upgrade_from: "month", upgrade_credit_fen: upgradeCreditFen, upgrade_base_start: upgradeBaseStart.toISOString() } : {}),
+      ...(localPriceVersion ? { price_source: "website-local", price_version_id: localPriceVersion._id.toString() } : {}),
     };
     let chandlerOrderNo = null;
     try {
@@ -2321,7 +2524,7 @@ app.post("/api/billing/orders", async (c) => {
     const result = await (await getCollection("offlinePayments")).insertOne({
       orderNo,
       chandlerOrderNo,
-      ownerId: new ObjectId(auth.user.id),
+      ownerId,
       chandlerUserId: partnerData.chandler_user_id,
       userEmail: auth.user.email,
       cycle,
@@ -2329,16 +2532,29 @@ app.post("/api/billing/orders", async (c) => {
       plan,
       partnerData,
       status: "pending",
+      ...(isMonthlyUpgrade ? { upgradeFrom: "month", upgradeCreditFen, upgradeBaseStart } : {}),
+      ...(localPriceVersion ? { localPriceVersionId: localPriceVersion._id } : {}),
       createdAt: now,
       updatedAt: now,
     });
-    return c.json({ id: result.insertedId.toString(), orderNo, status: "pending_review", mode: "offline", amountFen }, 201);
+    return c.json({ id: result.insertedId.toString(), orderNo, status: "pending_review", mode: "offline", amountFen, upgradeCreditFen }, 201);
   }
 
   const accessToken = await getChandlerAccessToken(auth.session);
   let result;
-  if (kind === "subscription") {
+  if (kind === "subscription" && !isMonthlyUpgrade && !localPriceVersion) {
     result = await createSubscriptionCheckout(accessToken, { cycle, channel: provider });
+  } else if (kind === "subscription") {
+    result = await createDirectPaymentOrder(accessToken, {
+      merchantOrderNo: orderNo,
+      channel: provider,
+      amountFen,
+      subject: isMonthlyUpgrade ? "月度会员升级年度会员" : cycle === "year" ? "古龙年度会员" : "古龙月度会员",
+      source: isMonthlyUpgrade ? "gulong-web-subscription-upgrade" : "gulong-web-local-price",
+      partnerData: isMonthlyUpgrade
+        ? { schema_version: 2, kind: "subscription_upgrade", cycle: "year", upgrade_from: "month", upgrade_credit_fen: upgradeCreditFen, upgrade_base_start: upgradeBaseStart.toISOString(), amount_fen: amountFen }
+        : { schema_version: 2, kind: "subscription", cycle, price_source: "website-local", price_version_id: localPriceVersion._id.toString(), amount_fen: amountFen },
+    });
   } else {
     result = await createDirectPaymentOrder(accessToken, {
       merchantOrderNo: orderNo,
@@ -2356,7 +2572,7 @@ app.post("/api/billing/orders", async (c) => {
   await (await getCollection("payments")).insertOne({
     orderNo: actualOrderNo,
     merchantOrderNo: orderNo,
-    ownerId: new ObjectId(auth.user.id),
+    ownerId,
     provider,
     kind,
     cycle,
@@ -2364,6 +2580,8 @@ app.post("/api/billing/orders", async (c) => {
     autoRenew,
     chandler: true,
     status: "pending",
+    ...(isMonthlyUpgrade ? { upgradeFrom: "month", upgradeCreditFen, upgradeBaseStart } : {}),
+    ...(localPriceVersion ? { localPriceVersionId: localPriceVersion._id } : {}),
     createdAt: now,
     updatedAt: now,
   });
@@ -2374,8 +2592,11 @@ app.post("/api/billing/orders", async (c) => {
     qrCodeDataUrl,
     mode: "chandler",
     provider,
-    autoRenewRequested: autoRenew,
-    autoRenewAvailable: true,
+    amountFen,
+    upgradeCreditFen,
+    autoRenewRequested,
+    autoRenewAvailable: !localPriceVersion && !isMonthlyUpgrade,
+    priceSource: localPriceVersion ? "website-local" : "chandler",
   }, 201);
 });
 
@@ -2388,7 +2609,10 @@ async function activatePayment(orderNo, providerTransactionId) {
   );
   if (!payment) return;
   if (payment.kind === "subscription") {
-    const start = new Date();
+    const existingSubscription = await (await getCollection("subscriptions")).findOne({ ownerId: payment.ownerId });
+    const start = payment.upgradeFrom === "month"
+      ? new Date(payment.upgradeBaseStart || existingSubscription?.currentPeriodStart || new Date())
+      : new Date();
     const end = new Date(start);
     if (payment.cycle === "year") end.setFullYear(end.getFullYear() + 1);
     else end.setMonth(end.getMonth() + 1);
@@ -2491,7 +2715,7 @@ app.get("/api/billing/offline-orders", async (c) => {
     .sort({ createdAt: -1 })
     .limit(30)
     .toArray();
-  return c.json({ orders: orders.map((order) => ({ id: order._id.toString(), orderNo: order.orderNo, cycle: order.cycle, amountFen: order.amountFen, status: order.status, createdAt: order.createdAt, validUntil: order.validUntil })) });
+  return c.json({ orders: orders.map((order) => ({ id: order._id.toString(), orderNo: order.orderNo, cycle: order.cycle, amountFen: order.amountFen, status: order.status, reviewReason: order.reviewReason || null, previousReviewReason: order.previousReviewReason || null, resubmissionNote: order.resubmissionNote || null, createdAt: order.createdAt, validUntil: order.validUntil })) });
 });
 
 app.get("/api/admin/offline-payments", async (c) => {
@@ -2513,7 +2737,7 @@ app.post("/api/admin/offline-payments/:id/approve", async (c) => {
   const order = await orders.findOne({ _id: new ObjectId(c.req.param("id")), status: "pending" });
   if (!order) return c.json({ code: "ORDER_NOT_FOUND", message: "申请不存在或已经审核" }, 404);
   const body = await c.req.json().catch(() => ({}));
-  const start = safeDate(body.validFrom) || new Date();
+  const start = safeDate(body.validFrom) || (order.upgradeFrom === "month" && order.upgradeBaseStart ? new Date(order.upgradeBaseStart) : new Date());
   const end = safeDate(body.validUntil, true) || new Date(start);
   if (!body.validUntil) {
     if (order.cycle === "year") end.setFullYear(end.getFullYear() + 1);
@@ -2537,14 +2761,15 @@ app.post("/api/admin/offline-payments/:id/approve", async (c) => {
       { $set: { plan: "member", cycle: order.cycle, provider: "offline", status: "active", currentPeriodStart: start, currentPeriodEnd: end, autoRenew: false, updatedAt: now }, $setOnInsert: { createdAt: now } },
       { upsert: true },
     ),
+    (await getCollection("notifications")).insertOne({ ownerId: order.ownerId, type: "offline_payment_approved", title: "线下支付审核已通过", message: `订单 ${order.orderNo} 已确认到账，会员权益已经生效。`, orderId: order._id, orderNo: order.orderNo, readAt: null, createdAt: now }),
   ]);
-  const accessToken = await getChandlerAccessToken(auth.session);
-  if (order.chandlerOrderNo) {
+  const accessToken = await getChandlerAccessToken(auth.session).catch(() => null);
+  if (accessToken && order.chandlerOrderNo) {
     try {
       await chandlerRequest(`/v1/me/orders/${encodeURIComponent(order.chandlerOrderNo)}/partner-data?client_id=${encodeURIComponent(chandlerConfig().applicationId)}`, { method: "PUT", accessToken, body: { partner_data: partnerData } });
     } catch { /* Approval remains durable in MongoDB; sync can be retried. */ }
   }
-  if (order.chandlerUserId) {
+  if (accessToken && order.chandlerUserId) {
     try {
       const current = await chandlerRequest(`/v1/me/oauth/clients/${encodeURIComponent(chandlerConfig().applicationId)}/users/${encodeURIComponent(order.chandlerUserId)}/attributes`, { accessToken });
       const attributes = current.attributes && typeof current.attributes === "object" ? current.attributes : {};
@@ -2556,6 +2781,55 @@ app.post("/api/admin/offline-payments/:id/approve", async (c) => {
     } catch { /* The website remains authoritative for this approval until Chandler sync succeeds. */ }
   }
   return c.json({ ok: true, orderNo: order.orderNo, status: "approved", validFrom: start, validUntil: end });
+});
+
+app.post("/api/admin/offline-payments/:id/reject", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "ORDER_NOT_FOUND", message: "线下支付申请不存在" }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const reason = String(body.reason || "").trim();
+  if (reason.length < 2 || reason.length > 500) return c.json({ code: "VALIDATION_ERROR", message: "请填写 2–500 字的拒绝原因" }, 400);
+  const orders = await getCollection("offlinePayments");
+  const order = await orders.findOne({ _id: new ObjectId(c.req.param("id")), status: "pending" });
+  if (!order) return c.json({ code: "ORDER_NOT_FOUND", message: "申请不存在或已经审核" }, 404);
+  const now = new Date();
+  const partnerData = { ...order.partnerData, review_status: "rejected", business_payment_status: "rejected_offline", rejection_reason: reason, reviewed_by: readExternalAuth(auth.session)?.chandlerUserId, reviewed_at: now.toISOString() };
+  const update = await orders.updateOne(
+    { _id: order._id, status: "pending" },
+    { $set: { status: "rejected", reviewReason: reason, partnerData, reviewedBy: new ObjectId(auth.user.id), reviewedAt: now, rejectedAt: now, updatedAt: now } },
+  );
+  if (!update.modifiedCount) return c.json({ code: "ORDER_STATE_CHANGED", message: "订单状态已变化，请刷新后重试" }, 409);
+  await (await getCollection("notifications")).insertOne({ ownerId: order.ownerId, type: "offline_payment_rejected", title: "线下支付申请未通过", message: `订单 ${order.orderNo} 未通过审核，请查看原因并调整后重新申请。`, reason, orderId: order._id, orderNo: order.orderNo, readAt: null, createdAt: now });
+  const accessToken = await getChandlerAccessToken(auth.session).catch(() => null);
+  if (accessToken && order.chandlerOrderNo) {
+    try {
+      await chandlerRequest(`/v1/me/orders/${encodeURIComponent(order.chandlerOrderNo)}/partner-data?client_id=${encodeURIComponent(chandlerConfig().applicationId)}`, { method: "PUT", accessToken, body: { partner_data: partnerData } });
+    } catch { /* MongoDB remains the authoritative review queue. */ }
+  }
+  return c.json({ ok: true, orderNo: order.orderNo, status: "rejected", reason });
+});
+
+app.post("/api/billing/offline-payments/:id/resubmit", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "ORDER_NOT_FOUND", message: "线下支付申请不存在" }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const note = String(body.note || "").trim();
+  if (note.length < 2 || note.length > 500) return c.json({ code: "VALIDATION_ERROR", message: "请填写 2–500 字的调整说明" }, 400);
+  const orders = await getCollection("offlinePayments");
+  const ownerId = new ObjectId(auth.user.id);
+  const order = await orders.findOne({ _id: new ObjectId(c.req.param("id")), ownerId, status: "rejected" });
+  if (!order) return c.json({ code: "ORDER_NOT_FOUND", message: "申请不存在、已重新提交或不属于当前账号" }, 404);
+  const now = new Date();
+  const partnerData = { ...order.partnerData, review_status: "pending", business_payment_status: "awaiting_manual_review", previous_rejection_reason: order.reviewReason, resubmission_note: note, resubmitted_at: now.toISOString() };
+  const result = await orders.updateOne(
+    { _id: order._id, ownerId, status: "rejected" },
+    { $set: { status: "pending", previousReviewReason: order.reviewReason, resubmissionNote: note, resubmittedAt: now, partnerData, updatedAt: now }, $unset: { reviewReason: "", reviewedBy: "", reviewedAt: "", rejectedAt: "" }, $inc: { resubmissionCount: 1 } },
+  );
+  if (!result.modifiedCount) return c.json({ code: "ORDER_STATE_CHANGED", message: "订单状态已变化，请刷新后重试" }, 409);
+  await (await getCollection("notifications")).updateMany({ ownerId, orderId: order._id, type: "offline_payment_rejected", readAt: null }, { $set: { readAt: now } });
+  return c.json({ ok: true, orderNo: order.orderNo, status: "pending" });
 });
 
 app.openapi(createTaskRoute, async (c) => {
@@ -2638,6 +2912,24 @@ app.openapi(listWorkflowsRoute, async (c) => {
   });
 });
 
+app.openapi(getAccountProfileRoute, async (c) => {
+  const auth = await authenticate(c, { scopes: ["profile:read"] });
+  if (auth.error) return auth.error;
+  if (auth.kind !== "apiKey") return c.json({ code: "API_KEY_REQUIRED", message: "请使用具有 profile:read 权限的 API Key" }, 403);
+  const user = await (await getCollection("users")).findOne({ _id: new ObjectId(auth.user.id) });
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  c.header("Pragma", "no-cache");
+  const avatar = user?.avatar ? new URL(user.avatar, c.req.url).toString() : null;
+  return c.json({
+    id: auth.user.id,
+    username: user?.username || null,
+    displayName: user?.displayName || null,
+    avatar,
+    edition: { key: user?.editionKey || "gulong", name: user?.editionName || "古龙版" },
+    updatedAt: user?.updatedAt || user?.createdAt || new Date(0),
+  });
+});
+
 app.openapi(getMiniMaxConfigurationRoute, async (c) => {
   const auth = await authenticate(c, { scopes: ["configuration:read"] });
   if (auth.error) return auth.error;
@@ -2647,7 +2939,7 @@ app.openapi(getMiniMaxConfigurationRoute, async (c) => {
   if (!configuration || !apiKey) return c.json({ code: "CONFIGURATION_NOT_FOUND", message: "当前用户尚未配置 MiniMax API Key" }, 404);
   c.header("Cache-Control", "private, no-store, max-age=0");
   c.header("Pragma", "no-cache");
-  return c.json({ provider: "minimax", apiKey, apiHost: configuration.apiHost, model: configuration.model, updatedAt: configuration.updatedAt });
+  return c.json({ provider: "minimax", apiKey, apiHost: MINIMAX_API_HOST, model: MINIMAX_DEFAULT_MODEL, updatedAt: configuration.updatedAt });
 });
 
 app.openAPIRegistry.registerComponent("securitySchemes", "bearerAuth", {
