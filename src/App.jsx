@@ -15,7 +15,7 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
-import { apiFetch } from "./api.js";
+import { apiFetch, trackAnalyticsEvent } from "./api.js";
 import { AccountModal } from "./components/AccountModal.jsx";
 import { AccountDashboard } from "./components/AccountDashboard.jsx";
 import { AdminPage } from "./components/AdminPage.jsx";
@@ -150,6 +150,7 @@ export function App() {
     setMobileOpen(false);
     setAccountOpen(false);
     window.scrollTo({ top: 0, behavior: "instant" });
+    trackAnalyticsEvent("PAGE_VIEW", { path: `${window.location.pathname}${window.location.search}` });
     const hash = window.location.hash;
     if (hash) setTimeout(() => document.querySelector(hash)?.scrollIntoView({ behavior: "smooth" }), 20);
   }, [route]);
@@ -175,6 +176,7 @@ export function App() {
   }
 
   async function downloadLatest() {
+    trackAnalyticsEvent("DOWNLOAD_CLICK");
     try {
       const latest = await apiFetch("/api/releases/latest");
       if (!latest.release?.channelId) return navigate("/download");

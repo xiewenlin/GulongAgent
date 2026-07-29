@@ -69,6 +69,10 @@ export async function ensureIndexes() {
           { expiresAt: 1 },
           { expireAfterSeconds: 0, name: "ttl_sessions" },
         ),
+        db.collection("sessions").createIndex(
+          { lastSeenAt: -1, userId: 1 },
+          { name: "sessions_activity" },
+        ),
         db.collection("apiKeys").createIndex(
           { prefix: 1 },
           { unique: true, name: "uniq_api_key_prefix" },
@@ -81,9 +85,17 @@ export async function ensureIndexes() {
           { orderNo: 1 },
           { unique: true, name: "uniq_payment_order" },
         ),
+        db.collection("payments").createIndex(
+          { status: 1, paidAt: -1, updatedAt: -1 },
+          { name: "payments_analytics" },
+        ),
         db.collection("tasks").createIndex(
           { ownerId: 1, createdAt: -1 },
           { name: "tasks_by_owner" },
+        ),
+        db.collection("tasks").createIndex(
+          { createdAt: -1, workflowId: 1, status: 1 },
+          { name: "tasks_analytics" },
         ),
         db.collection("feedback").createIndex(
           { createdAt: -1 },
@@ -124,6 +136,22 @@ export async function ensureIndexes() {
         db.collection("offlinePayments").createIndex(
           { orderNo: 1 },
           { unique: true, name: "uniq_offline_payment_order" },
+        ),
+        db.collection("offlinePayments").createIndex(
+          { status: 1, reviewedAt: -1, updatedAt: -1 },
+          { name: "offline_payments_analytics" },
+        ),
+        db.collection("subscriptions").createIndex(
+          { status: 1, currentPeriodEnd: 1 },
+          { name: "subscriptions_active" },
+        ),
+        db.collection("analyticsEvents").createIndex(
+          { eventType: 1, createdAt: -1 },
+          { name: "analytics_events_by_type" },
+        ),
+        db.collection("analyticsEvents").createIndex(
+          { visitorId: 1, createdAt: -1 },
+          { name: "analytics_events_by_visitor" },
         ),
         db.collection("userConfigurations").createIndex(
           { ownerId: 1, provider: 1 },

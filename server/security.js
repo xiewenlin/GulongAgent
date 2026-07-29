@@ -227,7 +227,15 @@ export async function authenticate(c, { required = true, scopes = [] } = {}) {
         _id: session.userId,
         status: "active",
       });
-      if (user) return { kind: "session", user: publicUser(user), session };
+      if (user) {
+        if (!session.lastSeenAt || Date.now() - new Date(session.lastSeenAt).getTime() > 5 * 60_000) {
+          void (await getCollection("sessions")).updateOne(
+            { _id: session._id },
+            { $set: { lastSeenAt: new Date() } },
+          ).catch(() => {});
+        }
+        return { kind: "session", user: publicUser(user), session };
+      }
     }
   }
 

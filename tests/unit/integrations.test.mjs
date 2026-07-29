@@ -57,6 +57,7 @@ test("OpenAPI document includes Chandler admin, offline credentials, dated attac
   assert.ok(document.paths["/api/admin/chandler/catalog"]);
   assert.ok(document.paths["/api/admin/chandler/prices"]);
   assert.ok(document.paths["/api/admin/chandler/entitlement-requests"]);
+  assert.ok(document.paths["/api/admin/analytics/dashboard"]);
 });
 
 test("Vercel platform entry restores nested API paths", async () => {
@@ -70,4 +71,6 @@ test("Vercel consolidates nested account and configuration routes", async () => 
   const sources = configuration.rewrites.map((rewrite) => rewrite.source);
   assert.ok(sources.includes("/api/account/:path*"));
   assert.ok(sources.includes("/api/v1/configuration/:path*"));
+  assert.ok(sources.includes("/api/admin/analytics/:path*"));
+  assert.ok(sources.includes("/api/analytics/:path*"));
 });

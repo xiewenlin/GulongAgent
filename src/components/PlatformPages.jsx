@@ -22,7 +22,7 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
-import { apiFetch, formatMoney } from "../api.js";
+import { apiFetch, formatMoney, trackAnalyticsEvent } from "../api.js";
 import { plans } from "../data/site.js";
 
 function PageIntro({ eyebrow, title, description, actions }) {
@@ -59,6 +59,7 @@ export function DownloadPage({ themeIcon }) {
 
   async function downloadRelease() {
     if (!release?.channelId) return;
+    trackAnalyticsEvent("DOWNLOAD_CLICK");
     setDownloadError("");
     try {
       const result = await apiFetch(`/api/releases/${release.channelId}/download`);
@@ -204,6 +205,7 @@ export function PricingPage({ user, openAuth, navigate }) {
     if (!user) return openAuth("login");
     if (plan.id === "free") return navigate("/download");
     if (plan.id === "custom") return navigate("/feedback");
+    trackAnalyticsEvent("CHECKOUT_START", { path: "/pricing" });
     setBusy(true);
     setError("");
     try {

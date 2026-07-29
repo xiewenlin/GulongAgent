@@ -62,6 +62,7 @@ import {
   headObject,
   sanitizeFilename,
 } from "./cos.js";
+import { buildAdminAnalyticsDashboard, recordAnalyticsEvent } from "./analytics.js";
 
 const app = new OpenAPIHono();
 
@@ -441,6 +442,20 @@ const adminRequestChandlerEntitlementRoute = createRoute({
   },
 });
 
+const adminAnalyticsDashboardRoute = createRoute({
+  method: "get",
+  path: "/api/admin/analytics/dashboard",
+  tags: ["Admin · Analytics"],
+  summary: "古龙平台实时数据看板",
+  description: "按 7、30 或 90 天汇总用户增长、活跃、访问、核心功能采用、会员订阅、已确认收入、待支付金额与运营健康度。仅 Chandler 管理员可访问。",
+  request: { query: z.object({ days: z.enum(["7", "30", "90"]).optional() }) },
+  responses: {
+    200: { description: "实时经营分析数据", content: { "application/json": { schema: z.object({ generatedAt: z.coerce.date(), timezone: z.literal("Asia/Shanghai"), days: z.number(), today: z.record(z.string(), z.unknown()), scale: z.record(z.string(), z.unknown()), period: z.record(z.string(), z.unknown()), comparisons: z.record(z.string(), z.unknown()), trend: z.array(z.record(z.string(), z.unknown())), insights: z.array(z.record(z.string(), z.unknown())) }).passthrough() } } },
+    401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "非管理员", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 const healthRoute = createRoute({
   method: "get",
   path: "/api/health",
@@ -533,6 +548,47 @@ app.openapi(healthRoute, async (c) => {
     service: "gulong-platform",
     database,
   });
+});
+
+app.openapi(adminAnalyticsDashboardRoute, async (c) => {
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  return c.json(await buildAdminAnalyticsDashboard(Number(c.req.valid("query").days || 30)));
+});
+
+app.post("/api/analytics/events", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const body = await c.req.json().catch(() => ({}));
+  const eventType = ["PAGE_VIEW", "DOWNLOAD_CLICK", "CHECKOUT_START"].includes(body.eventType) ? body.eventType : null;
+  const visitorId = String(body.visitorId || "").trim();
+  const sessionId = String(body.sessionId || "").trim();
+  const path = String(body.path || "/").trim().slice(0, 256);
+  const source = ["DIRECT", "SEARCH", "SOCIAL", "REFERRAL", "CAMPAIGN"].includes(body.source) ? body.source : "DIRECT";
+  const deviceType = ["DESKTOP", "MOBILE", "TABLET"].includes(body.deviceType) ? body.deviceType : "DESKTOP";
+  if (!eventType || !/^[A-Za-z0-9_-]{8,80}$/.test(visitorId) || !/^[A-Za-z0-9_-]{8,80}$/.test(sessionId) || !path.startsWith("/")) {
+    return c.json({ code: "VALIDATION_ERROR", message: "分析事件格式不正确" }, 400);
+  }
+  const ipKey = fingerprintIp(c.req.header("x-forwarded-for") || "local");
+  const [visitorRate, ipRate] = await Promise.all([
+    enforceRateLimit(`analytics:${visitorId}`, { limit: 300, windowMs: 60 * 60_000 }),
+    enforceRateLimit(`analytics-ip:${ipKey}`, { limit: 1200, windowMs: 60 * 60_000 }),
+  ]);
+  if (!visitorRate.allowed || !ipRate.allowed) return c.json({ code: "RATE_LIMITED", message: "分析事件提交过于频繁" }, 429);
+  const auth = await authenticate(c, { required: false });
+  let referrer = null;
+  try { referrer = body.referrer ? new URL(String(body.referrer)).origin.slice(0, 180) : null; } catch { /* Ignore invalid referrers. */ }
+  await recordAnalyticsEvent({
+    eventType,
+    visitorId,
+    sessionId,
+    path,
+    source,
+    deviceType,
+    referrer,
+    utmSource: body.utmSource ? String(body.utmSource).trim().slice(0, 100) : null,
+    ownerId: auth?.user?.id ? new ObjectId(auth.user.id) : null,
+  });
+  return c.json({ accepted: true }, 202);
 });
 
 app.openapi(registerRoute, async (c) => {
@@ -1955,8 +2011,8 @@ app.doc("/api/openapi.json", {
   openapi: "3.1.0",
   info: {
     title: "古龙 Gulong Agent Engine API",
-    version: "1.2.0",
-    description: "面向开发者的任务执行、长期记忆、用户模型配置、第二大脑附件、发行版本、Chandler 统一账号与计费接口。API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
+    version: "1.3.0",
+    description: "面向开发者的任务执行、长期记忆、用户模型配置、第二大脑附件、发行版本、Chandler 统一账号、计费与管理员经营分析接口。API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
   },
   servers: [
     { url: "/", description: "当前环境" },

@@ -22,6 +22,8 @@
 - 文字反馈与最多 9 张问题截图
 - Chandler 微信/支付宝收银台、单次充值、月/年订阅、线下支付申请与管理员确认到账
 - 官网后台直连 Chandler 管理接口：用户搜索、账号冻结/恢复、订阅查看、权益双人审批与不可变价格版本发布
+- 管理员实时数据看板：7/30/90 天用户增长、访问来源、激活漏斗、功能采用、任务与第二大脑运营、收入结构和自动经营洞察
+- 官网访问、软件下载和发起支付采用匿名访客/会话 ID 做最小化埋点；登录用户活跃数据来自服务端会话，不采集页面输入内容
 - MongoDB Atlas 索引、会话 TTL、限流 TTL、连接池复用
 
 ## 技术架构
@@ -79,6 +81,7 @@ npm run dev
 - 按日期下载附件：`GET /api/v1/brain/attachments/latest?date=YYYY-MM-DD`
 - 桌面端用户配置：`GET /api/v1/configuration/minimax`（需要 `configuration:read`）
 - Chandler 管理接口：`/api/admin/chandler/users`、`/api/admin/chandler/catalog`、`/api/admin/chandler/prices`
+- 管理员经营分析：`GET /api/admin/analytics/dashboard?days=7|30|90`（管理员会话或管理员 API Key）
 
 完整集成边界与生产配置见 [docs/integration-deployment.md](docs/integration-deployment.md)，Windows 发行工作器说明见 [docs/release-worker.md](docs/release-worker.md)。
 

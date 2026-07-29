@@ -87,3 +87,26 @@ RELEASE_WORKER_KEY=<官网与工作器共享的随机密钥>
 ```
 
 所有敏感变量只进入 Vercel Environment Variables 或受保护的本机用户环境，不能写入 Git、前端 `VITE_*` 变量、日志或截图。
+
+## 8. 管理员数据看板与统计口径
+
+- 页面入口：`/admin` → `数据看板`
+- 聚合接口：`GET /api/admin/analytics/dashboard?days=7|30|90`
+- 自动刷新：前端每 60 秒拉取一次；响应使用 `Cache-Control: private, no-store`
+- 时区：所有日维度统一使用 `Asia/Shanghai`
+- 周期对比：当前 N 天与紧邻的前 N 天对比，增长率不混用自然月
+
+核心口径：
+
+| 指标 | 统计来源与定义 |
+| --- | --- |
+| 新增用户 | `users.createdAt` 落在统计周期内的账号 |
+| 活跃用户 | 统计周期内 `sessions.lastSeenAt` 去重后的用户；有效会话每 5 分钟最多更新一次活跃时间 |
+| 访客 / 浏览量 | 官网 `PAGE_VIEW` 匿名访客 ID 去重 / 事件总数 |
+| 下载 / 发起支付 | `DOWNLOAD_CLICK` / `CHECKOUT_START` 事件；不记录表单文字或密钥 |
+| 已确认收入 | 在线订单状态为 `paid` 或 `completed`，加上线下订单状态为 `approved` 的金额 |
+| 待处理金额 | 在线与线下 `pending` 订单，仅用于回款跟进，绝不计入已确认收入 |
+| 活跃付费转化 | 周期内去重付费用户数 / 活跃用户数，线上线下同一用户只计一次 |
+| 新用户激活 | 周期新增用户中，至少创建任务、提交第二大脑、配置 MiniMax 或创建有效 API Key 的人数 |
+
+匿名分析只保存随机访客 ID、随机会话 ID、页面路径、来源类型、设备类型和 UTM 来源，不保存 IP 原文、表单内容、密码、MiniMax Key 或第二大脑文件内容。`analyticsEvents` 按事件/访客与时间建立 MongoDB 索引；管理员接口每次实时聚合，不向公共缓存写入经营数据。

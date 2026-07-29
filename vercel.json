@@ -41,6 +41,14 @@
       "destination": "/api/platform?_platform_path=admin/chandler/:path*"
     },
     {
+      "source": "/api/admin/analytics/:path*",
+      "destination": "/api/platform?_platform_path=admin/analytics/:path*"
+    },
+    {
+      "source": "/api/analytics/:path*",
+      "destination": "/api/platform?_platform_path=analytics/:path*"
+    },
+    {
       "source": "/api/admin/partners/:id",
       "destination": "/api/platform?_platform_path=admin/partners/:id"
     },
