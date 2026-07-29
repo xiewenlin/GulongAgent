@@ -8,7 +8,10 @@
 
 - 玉瓷、日出、青竹、鸢尾 4 套可持久化浅色主题，并配有独立 3D 圆形徽章
 - Chandler 公共 OpenAPI 统一账号：邮箱注册，用户名/邮箱 + 密码登录，服务端自动刷新令牌，官网不保存密码
+- Chandler 全局账号可在古龙桌面端、永生花桌面端与官网交叉登录；官网注册默认标记为“古龙版”
+- 用户后台明确区分“管理员/会员用户/普通用户”和“古龙版/永生花版”，管理员身份不会再被会员状态覆盖
 - 普通用户后台：第二大脑处理进度与反馈、会员与余额、订单、个人资料和 MiniMax 配置
+- 全站正文以 18px 为最低字号，账户侧栏、表格、表单和说明文字统一按可读性基线校正
 - 旧官网账号首次 Chandler 登录时按已验证邮箱安全归并，保留历史上传、订单、API Key 与反馈
 - Chandler 离线权益凭据：RS256 JWT、JWKS 离线验签与可选设备绑定
 - 每位开发者最多 10 个可撤销 API Key，按 scope 授权
@@ -62,7 +65,7 @@ npm run dev
 
 - `MONGODB_URI` / `MONGODB_DB`：MongoDB Atlas
 - `SESSION_SECRET` / `API_KEY_PEPPER`：会话与 API Key 摘要密钥
-- `CHANDLER_*`：Chandler API 地址、古龙应用 ID 与当前价格版本
+- `CHANDLER_*`：Chandler API 地址、古龙/永生花应用 ID 与当前价格版本
 - `TENCENT_SECRET_ID` / `TENCENT_SECRET_KEY`：仅授予目标 Bucket 所需操作的 CAM 子账号密钥
 - `COS_BUCKET` / `COS_REGION` / `COS_DOMAIN`：`gulong-1259744534`、`ap-chengdu` 与请求域名
 - `RELEASE_WORKER_KEY`：官网与受信任 Windows 发行工作器共享的长随机密钥

@@ -48,10 +48,14 @@ import {
   externalAuthFromResponse,
   getChandlerAccessToken,
   issueOfflineCredential,
+  isChandlerBootstrapAdmin,
   listCatalogPlans,
   loginWithChandler,
   logoutFromChandler,
+  markChandlerProductEdition,
+  productEditionFromChannel,
   registerWithChandler,
+  resolveChandlerIdentity,
   upsertChandlerUser,
 } from "./chandler.js";
 import {
@@ -80,6 +84,7 @@ const PublicUserSchema = z.object({
   avatar: z.string().nullable().optional(),
   authProvider: z.enum(["local", "chandler"]).optional(),
   role: z.enum(["user", "developer", "admin"]),
+  edition: z.object({ key: z.enum(["gulong", "yongshenghua"]), name: z.enum(["古龙版", "永生花版"]), source: z.string() }).optional(),
   createdAt: z.coerce.date(),
 });
 
@@ -103,14 +108,10 @@ async function requireAdmin(c) {
   if (auth.user.authProvider === "chandler") {
     const accessToken = await getChandlerAccessToken(auth.session);
     const profile = await chandlerRequest("/v1/me", { accessToken });
-    const role = profile.is_admin ? "admin" : "user";
-    if (role !== auth.user.role) {
-      await (await getCollection("users")).updateOne(
-        { _id: new ObjectId(auth.user.id) },
-        { $set: { role, updatedAt: new Date() } },
-      );
-      auth.user.role = role;
-    }
+    const identity = await resolveChandlerIdentity(profile, accessToken);
+    const user = await upsertChandlerUser(profile, { identity });
+    auth.user.role = user.role;
+    auth.user.edition = { key: user.editionKey || "gulong", name: user.editionName || "古龙版", source: user.editionSource || "default" };
   }
   if (auth.user.role !== "admin") {
     return { error: c.json({ code: "FORBIDDEN", message: "仅管理员可执行此操作" }, 403) };
@@ -607,7 +608,9 @@ app.openapi(registerRoute, async (c) => {
     displayName: input.displayName,
     inviteCode: input.inviteCode,
   });
-  const user = await upsertChandlerUser(auth.user, { username: input.username });
+  await markChandlerProductEdition(auth.access_token, auth.user.id, "gulong", "website-registration").catch(() => null);
+  const identity = { role: auth.user.is_admin || isChandlerBootstrapAdmin(auth.user) ? "admin" : "user", editionKey: "gulong", editionName: "古龙版", editionSource: "website-registration" };
+  const user = await upsertChandlerUser(auth.user, { username: input.username, identity, defaultEdition: "gulong", forceEdition: true });
   await issueSession(c, user._id, { externalAuth: externalAuthFromResponse(auth) });
   return c.json(
     {
@@ -619,6 +622,7 @@ app.openapi(registerRoute, async (c) => {
         avatar: user.avatar || null,
         authProvider: "chandler",
         role: user.role,
+        edition: { key: user.editionKey, name: user.editionName, source: user.editionSource },
         createdAt: user.createdAt,
       },
     },
@@ -636,8 +640,11 @@ app.openapi(loginRoute, async (c) => {
 
   const input = c.req.valid("json");
   const chandlerAuth = await loginWithChandler(input.identifier, input.password);
+  const identity = await resolveChandlerIdentity(chandlerAuth.user, chandlerAuth.access_token);
   const user = await upsertChandlerUser(chandlerAuth.user, {
     username: input.identifier.includes("@") ? undefined : input.identifier,
+    identity,
+    defaultEdition: "gulong",
   });
   await issueSession(c, user._id, { externalAuth: externalAuthFromResponse(chandlerAuth) });
   return c.json({
@@ -649,6 +656,7 @@ app.openapi(loginRoute, async (c) => {
       avatar: user.avatar || null,
       authProvider: "chandler",
       role: user.role,
+      edition: { key: user.editionKey, name: user.editionName, source: user.editionSource },
       createdAt: user.createdAt,
     },
   });
@@ -667,8 +675,31 @@ app.get("/api/account/dashboard", async (c) => {
   const auth = await authenticate(c);
   if (auth.error) return auth.error;
   const ownerId = new ObjectId(auth.user.id);
-  const chandlerSubscriptionsPromise = auth.kind === "session" && auth.user.authProvider === "chandler"
-    ? getChandlerAccessToken(auth.session).then((accessToken) => chandlerRequest("/v1/me/subscriptions", { accessToken, timeoutMs: 5_000 })).catch(() => null)
+  let chandlerAccessToken = null;
+  if (auth.kind === "session" && auth.user.authProvider === "chandler") {
+    try {
+      chandlerAccessToken = await getChandlerAccessToken(auth.session);
+      const profile = await chandlerRequest("/v1/me", { accessToken: chandlerAccessToken, timeoutMs: 5_000 });
+      const identity = await resolveChandlerIdentity(profile, chandlerAccessToken);
+      const synchronizedUser = await upsertChandlerUser(profile, { identity, defaultEdition: "gulong" });
+      auth.user.role = synchronizedUser.role;
+      auth.user.edition = {
+        key: synchronizedUser.editionKey || "gulong",
+        name: synchronizedUser.editionName || "古龙版",
+        source: synchronizedUser.editionSource || "default",
+      };
+    } catch {
+      // Keep the dashboard available during a transient Chandler outage. The
+      // desktop bootstrap administrator still receives the same fail-safe role
+      // used by the desktop client.
+      if (auth.user.role !== "admin" && isChandlerBootstrapAdmin(auth.user)) {
+        await (await getCollection("users")).updateOne({ _id: ownerId }, { $set: { role: "admin", updatedAt: new Date() } });
+        auth.user.role = "admin";
+      }
+    }
+  }
+  const chandlerSubscriptionsPromise = chandlerAccessToken
+    ? chandlerRequest("/v1/me/subscriptions", { accessToken: chandlerAccessToken, timeoutMs: 5_000 }).catch(() => null)
     : Promise.resolve(null);
   const [user, subscription, wallet, uploads, feedback, payments, offlineOrders, minimax, chandlerSubscriptions] = await Promise.all([
     (await getCollection("users")).findOne({ _id: ownerId }),
@@ -701,6 +732,11 @@ app.get("/api/account/dashboard", async (c) => {
       avatar: user?.avatar || null,
       bio: user?.bio || "",
       role: user?.role || auth.user.role,
+      edition: {
+        key: user?.editionKey || auth.user.edition?.key || "gulong",
+        name: user?.editionName || auth.user.edition?.name || "古龙版",
+        source: user?.editionSource || auth.user.edition?.source || "default",
+      },
       createdAt: user?.createdAt,
     },
     subscription: effectiveSubscription ? {
@@ -1211,29 +1247,37 @@ app.post("/api/release-worker/channels/sync", async (c) => {
     const groupId = String(assignment.groupId || "").trim();
     const channel = channelMap.get(groupId);
     if (chandlerUserId && channel) {
+      const edition = productEditionFromChannel(channel);
       assignmentMap.set(chandlerUserId, {
         chandlerUserId,
         displayName: String(assignment.displayName || "").trim().slice(0, 160),
         groupId,
         channelId: channel._id,
+        editionKey: edition.key,
+        editionName: edition.name,
         updatedAt: now,
       });
     }
   }
   const normalizedAssignments = [...assignmentMap.values()];
   const releaseAssignments = await getCollection("releaseAssignments");
+  const previousAssignedUserIds = await releaseAssignments.distinct("chandlerUserId");
   await releaseAssignments.deleteMany({});
   if (normalizedAssignments.length) await releaseAssignments.insertMany(normalizedAssignments, { ordered: false });
   const users = await getCollection("users");
-  await users.updateMany(
-    { releaseChannelGroupId: { $exists: true } },
-    { $unset: { releaseChannelId: "", releaseChannelGroupId: "" }, $set: { updatedAt: now } },
-  );
+  const currentAssignedUserIds = new Set(normalizedAssignments.map((assignment) => assignment.chandlerUserId));
+  const removedAssignedUserIds = previousAssignedUserIds.filter((id) => !currentAssignedUserIds.has(String(id)));
+  if (removedAssignedUserIds.length) {
+    await users.updateMany(
+      { chandlerUserId: { $in: removedAssignedUserIds } },
+      { $unset: { releaseChannelId: "", releaseChannelGroupId: "", releaseChannelSource: "" }, $set: { updatedAt: now } },
+    );
+  }
   if (normalizedAssignments.length) {
     await users.bulkWrite(normalizedAssignments.map((assignment) => ({
       updateOne: {
         filter: { chandlerUserId: assignment.chandlerUserId },
-        update: { $set: { releaseChannelId: assignment.channelId, releaseChannelGroupId: assignment.groupId, updatedAt: now } },
+        update: { $set: { releaseChannelId: assignment.channelId, releaseChannelGroupId: assignment.groupId, releaseChannelSource: "desktop-theme-access", editionKey: assignment.editionKey, editionName: assignment.editionName, editionSource: "desktop-theme-access", updatedAt: now } },
       },
     })), { ordered: false });
   }

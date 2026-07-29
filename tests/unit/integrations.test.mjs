@@ -3,7 +3,13 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import app from "../../server/app.js";
 import platform from "../../api/platform.js";
-import { chandlerConfig, externalAuthFromResponse } from "../../server/chandler.js";
+import {
+  chandlerConfig,
+  externalAuthFromResponse,
+  isChandlerBootstrapAdmin,
+  productEdition,
+  productEditionFromChannel,
+} from "../../server/chandler.js";
 import { cosConfig, sanitizeFilename } from "../../server/cos.js";
 import { readExternalAuth, readUserSecret, sealExternalAuth, sealUserSecret } from "../../server/security.js";
 
@@ -29,6 +35,8 @@ test("user provider keys use purpose-bound encryption", () => {
 
 test("official Chandler and Chengdu COS defaults stay pinned", () => {
   assert.equal(chandlerConfig().baseUrl, "https://api.chandler.work");
+  assert.equal(chandlerConfig().applicationId, "cm_89be865af1af48f4a83406f0cf1a472e");
+  assert.equal(chandlerConfig().airosApplicationId, "cm_8b022909f72d4daab8379517271e9658");
   assert.equal(chandlerConfig().monthlyPriceFen, 29_800);
   assert.equal(chandlerConfig().yearlyPriceFen, 298_000);
   const cos = cosConfig();
@@ -36,6 +44,23 @@ test("official Chandler and Chengdu COS defaults stay pinned", () => {
   assert.equal(cos.region, "ap-chengdu");
   assert.equal(cos.domain, "gulong-1259744534.cos.ap-chengdu.myqcloud.com");
   assert.equal(typeof cos.configured, "boolean");
+});
+
+test("desktop product editions and bootstrap administrator map to website identities", () => {
+  assert.deepEqual(productEdition("gulong"), { key: "gulong", name: "古龙版" });
+  assert.deepEqual(productEdition("Airos 永生花"), { key: "yongshenghua", name: "永生花版" });
+  assert.deepEqual(productEditionFromChannel({ profileKey: "yongshenghua" }), { key: "yongshenghua", name: "永生花版" });
+  assert.equal(isChandlerBootstrapAdmin({ email: "1186664388@qq.com" }), true);
+  assert.equal(isChandlerBootstrapAdmin({ email: "member@example.com" }), false);
+});
+
+test("website typography keeps all declared font sizes at or above 18px", async () => {
+  const css = await readFile(new URL("../../src/styles.css", import.meta.url), "utf8");
+  const undersized = [...css.matchAll(/font-size\s*:\s*(\d+(?:\.\d+)?)px/gi)]
+    .map((match) => Number(match[1]))
+    .filter((size) => size < 18);
+  assert.deepEqual(undersized, []);
+  assert.match(css, /\.account-sidebar\s+nav\s+button[\s\S]*?font-size:\s*18px/);
 });
 
 test("COS object filenames cannot escape their assigned prefix", () => {

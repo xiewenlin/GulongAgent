@@ -4,6 +4,29 @@ import { readExternalAuth, sealExternalAuth } from "./security.js";
 
 const DEFAULT_BASE_URL = "https://api.chandler.work";
 const DEFAULT_APPLICATION_ID = "cm_89be865af1af48f4a83406f0cf1a472e";
+const DEFAULT_AIROS_APPLICATION_ID = "cm_8b022909f72d4daab8379517271e9658";
+const BOOTSTRAP_ADMIN_EMAIL = "1186664388@qq.com";
+
+const PRODUCT_EDITIONS = Object.freeze({
+  gulong: Object.freeze({ key: "gulong", name: "古龙版" }),
+  yongshenghua: Object.freeze({ key: "yongshenghua", name: "永生花版" }),
+});
+
+export function productEdition(value = "gulong") {
+  const normalized = String(value || "").trim().toLowerCase();
+  return normalized.includes("yongshenghua") || normalized.includes("airos") || normalized.includes("永生花")
+    ? PRODUCT_EDITIONS.yongshenghua
+    : PRODUCT_EDITIONS.gulong;
+}
+
+export function productEditionFromChannel(channel) {
+  if (!channel) return null;
+  return productEdition(channel.profileKey || channel.name || (channel.themeNames || []).join(" "));
+}
+
+export function isChandlerBootstrapAdmin(user) {
+  return String(user?.email || "").trim().toLowerCase() === BOOTSTRAP_ADMIN_EMAIL;
+}
 
 export class ChandlerError extends Error {
   constructor(message, { status = 502, code = "CHANDLER_ERROR", detail } = {}) {
@@ -19,6 +42,7 @@ export function chandlerConfig() {
   return {
     baseUrl: (process.env.CHANDLER_API_BASE || DEFAULT_BASE_URL).replace(/\/$/, ""),
     applicationId: process.env.CHANDLER_APPLICATION_ID?.trim() || DEFAULT_APPLICATION_ID,
+    airosApplicationId: process.env.CHANDLER_AIROS_APPLICATION_ID?.trim() || DEFAULT_AIROS_APPLICATION_ID,
     monthlyPriceFen: Number(process.env.CHANDLER_MONTHLY_PRICE_FEN || 29_800),
     yearlyPriceFen: Number(process.env.CHANDLER_YEARLY_PRICE_FEN || 298_000),
   };
@@ -101,9 +125,109 @@ export function logoutFromChandler(refreshToken) {
   });
 }
 
-export async function upsertChandlerUser(chandlerUser, { username } = {}) {
+function responseAttributes(payload) {
+  const root = payload?.data || payload || {};
+  return root.attributes && typeof root.attributes === "object" && !Array.isArray(root.attributes) ? root.attributes : {};
+}
+
+function responseMembers(payload) {
+  const root = payload?.data || payload || {};
+  if (Array.isArray(root)) return root;
+  return Array.isArray(root.members) ? root.members : [];
+}
+
+function memberRole(payload, user) {
+  const email = String(user?.email || "").trim().toLowerCase();
+  const id = String(user?.id || "");
+  const member = responseMembers(payload).find((item) => {
+    const nested = item.user || {};
+    return String(item.user_id || nested.id || nested.user_id || "") === id
+      || String(item.email || nested.email || "").trim().toLowerCase() === email;
+  });
+  return String(member?.role || "").trim().toLowerCase() || null;
+}
+
+function editionFromAttributes(attributes, fallbackKey) {
+  const marker = attributes.product_edition
+    || attributes.edition
+    || attributes.release_profile_key
+    || attributes.application_key
+    || attributes.theme_name;
+  if (!marker) return null;
+  return {
+    ...productEdition(marker || fallbackKey),
+    updatedAt: Number(attributes.product_edition_updated_at_unix_ms || attributes.edition_updated_at_unix_ms || 0),
+  };
+}
+
+async function applicationIdentitySnapshot(accessToken, user, applicationId, editionKey) {
+  const encodedApplication = encodeURIComponent(applicationId);
+  const encodedUser = encodeURIComponent(user.id);
+  const [members, attributePayload] = await Promise.all([
+    chandlerRequest(`/v1/me/oauth/clients/${encodedApplication}/members`, { accessToken, timeoutMs: 5_000 }).catch(() => null),
+    chandlerRequest(`/v1/me/oauth/clients/${encodedApplication}/users/${encodedUser}/attributes`, { accessToken, timeoutMs: 5_000 }).catch(() => null),
+  ]);
+  const attributes = responseAttributes(attributePayload);
+  return {
+    editionKey,
+    role: memberRole(members, user),
+    attributes,
+    hasApplicationState: Boolean(memberRole(members, user)) || Object.keys(attributes).length > 0,
+    explicitEdition: editionFromAttributes(attributes, editionKey),
+  };
+}
+
+export async function resolveChandlerIdentity(user, accessToken) {
+  const fallbackRole = user?.is_admin || isChandlerBootstrapAdmin(user) ? "admin" : "user";
+  if (fallbackRole === "admin" || !accessToken || !user?.id) return { role: fallbackRole, editionKey: "gulong", editionName: "古龙版", editionSource: "default" };
+  const config = chandlerConfig();
+  const snapshots = await Promise.all([
+    applicationIdentitySnapshot(accessToken, user, config.applicationId, "gulong"),
+    applicationIdentitySnapshot(accessToken, user, config.airosApplicationId, "yongshenghua"),
+  ]);
+  const teamAdministrator = snapshots.every((snapshot) => ["owner", "admin"].includes(snapshot.role))
+    && snapshots.every((snapshot) => !["user", "free", "member"].includes(String(snapshot.attributes.role || "").toLowerCase()));
+  const explicit = snapshots.map((snapshot) => snapshot.explicitEdition).filter(Boolean).sort((left, right) => right.updatedAt - left.updatedAt)[0];
+  const activeApplications = snapshots.filter((snapshot) => snapshot.hasApplicationState);
+  const inferredKey = explicit?.key
+    || (activeApplications.length === 1 ? activeApplications[0].editionKey : "gulong");
+  const edition = productEdition(inferredKey);
+  return {
+    role: fallbackRole === "admin" || teamAdministrator ? "admin" : "user",
+    editionKey: edition.key,
+    editionName: edition.name,
+    editionSource: explicit ? "chandler-attributes" : activeApplications.length === 1 ? "chandler-application" : "default",
+  };
+}
+
+export async function markChandlerProductEdition(accessToken, userId, editionValue = "gulong", source = "website") {
+  const edition = productEdition(editionValue);
+  const applicationId = edition.key === "yongshenghua" ? chandlerConfig().airosApplicationId : chandlerConfig().applicationId;
+  const path = `/v1/me/oauth/clients/${encodeURIComponent(applicationId)}/users/${encodeURIComponent(userId)}/attributes`;
+  const current = await chandlerRequest(path, { accessToken, timeoutMs: 5_000 }).catch(() => null);
+  const attributes = responseAttributes(current);
+  return chandlerRequest(path, {
+    method: "PUT",
+    accessToken,
+    timeoutMs: 5_000,
+    body: {
+      attributes: {
+        ...attributes,
+        product_edition: edition.key,
+        product_edition_name: edition.name,
+        product_edition_source: source,
+        product_edition_updated_at_unix_ms: Date.now(),
+      },
+    },
+  });
+}
+
+export async function upsertChandlerUser(chandlerUser, { username, identity, defaultEdition, forceEdition = false } = {}) {
   const users = await getCollection("users");
   const releaseAssignment = await (await getCollection("releaseAssignments")).findOne({ chandlerUserId: chandlerUser.id });
+  const assignmentChannel = releaseAssignment?.channelId
+    ? await (await getCollection("releaseChannels")).findOne({ _id: releaseAssignment.channelId })
+    : null;
   const now = new Date();
   const email = chandlerUser.email?.trim() || null;
   const emailNormalized = email?.toLowerCase();
@@ -126,6 +250,23 @@ export async function upsertChandlerUser(chandlerUser, { username } = {}) {
   }
 
   const canonical = emailMatch || chandlerMatch;
+  const assignmentEdition = releaseAssignment?.editionKey
+    ? productEdition(releaseAssignment.editionKey)
+    : productEditionFromChannel(assignmentChannel);
+  const inferredEdition = identity?.editionKey ? productEdition(identity.editionKey) : null;
+  const existingEdition = canonical?.editionKey ? productEdition(canonical.editionKey) : null;
+  const requestedEdition = defaultEdition ? productEdition(defaultEdition) : null;
+  const edition = assignmentEdition
+    || (forceEdition ? requestedEdition : null)
+    || (identity?.editionSource !== "default" ? inferredEdition : null)
+    || existingEdition
+    || requestedEdition
+    || inferredEdition
+    || PRODUCT_EDITIONS.gulong;
+  const editionSource = assignmentEdition ? "desktop-theme-access"
+    : forceEdition ? "website-registration"
+      : identity?.editionSource !== "default" ? identity?.editionSource
+        : canonical?.editionSource || identity?.editionSource || "default";
   const record = {
     chandlerUserId: chandlerUser.id,
     email,
@@ -133,7 +274,10 @@ export async function upsertChandlerUser(chandlerUser, { username } = {}) {
     displayName: canonical?.displayNameUserManaged ? canonical.displayName : chandlerUser.display_name || null,
     avatar: chandlerUser.avatar || null,
     emailVerified: Boolean(chandlerUser.email_verified),
-    role: chandlerUser.is_admin ? "admin" : "user",
+    role: identity?.role || (chandlerUser.is_admin || isChandlerBootstrapAdmin(chandlerUser) ? "admin" : "user"),
+    editionKey: edition.key,
+    editionName: edition.name,
+    editionSource,
     status: "active",
     authProvider: "chandler",
     ...(releaseAssignment?.channelId ? { releaseChannelId: releaseAssignment.channelId, releaseChannelGroupId: releaseAssignment.groupId } : {}),
@@ -157,7 +301,7 @@ export async function upsertChandlerUser(chandlerUser, { username } = {}) {
   } catch (error) {
     // Two simultaneous first logins may both observe no local shadow record.
     // The winner creates it; the loser retries against that new canonical user.
-    if (error?.code === 11000) return upsertChandlerUser(chandlerUser, { username });
+    if (error?.code === 11000) return upsertChandlerUser(chandlerUser, { username, identity, defaultEdition, forceEdition });
     throw error;
   }
 }

@@ -11,6 +11,10 @@
 
 官网不保存 Chandler 密码。Access Token 和 Refresh Token 使用 `SESSION_SECRET` 派生的 AES-256-GCM 密钥加密后存入服务端会话；浏览器只持有 HttpOnly 会话 Cookie。
 
+Chandler 用户是全局账号：在古龙版桌面端或永生花版桌面端注册的用户名/邮箱与密码，可直接登录官网；官网注册的账号默认写入古龙应用属性并归属“古龙版”，因此也可直接用于古龙版桌面端登录。官网分别通过 `CHANDLER_APPLICATION_ID` 与 `CHANDLER_AIROS_APPLICATION_ID` 识别两个桌面产品。
+
+身份与产品版本是两条独立信息：`role` 表示管理员或普通用户，`editionKey` / `editionName` 表示古龙版或永生花版，会员状态来自订阅系统，不会覆盖管理员身份。发行渠道同步结果优先于应用属性；没有历史标记的兼容账号默认归为古龙版。
+
 ## 2. Chandler 接口映射
 
 | 官网能力 | Chandler 公共 OpenAPI |

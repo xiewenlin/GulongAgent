@@ -133,6 +133,11 @@ function publicUser(user) {
     avatar: user.avatar || null,
     authProvider: user.authProvider || "local",
     role: user.role || "user",
+    edition: {
+      key: user.editionKey || "gulong",
+      name: user.editionName || "古龙版",
+      source: user.editionSource || "default",
+    },
     createdAt: user.createdAt,
   };
 }
