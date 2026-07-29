@@ -127,6 +127,7 @@ test("trusted release protocol enforces direct-COS integrity metadata", async ()
   assert.match(source, /"Content-Type": "application\/vnd\.microsoft\.portable-executable"/);
   assert.match(source, /"x-cos-meta-sha256": sha256/);
   assert.match(source, /"x-cos-meta-release-version": version/);
+  assert.match(source, /createPresignedPutUrl\(objectKey, \{ expires: 60 \* 60, headers: requiredHeaders \}\)/);
   assert.match(source, /actualBytes !== upload\.bytes \|\| actualSha256 !== upload\.sha256 \|\| actualVersion !== upload\.version/);
   assert.match(source, /latestRelease: null,[\s\S]*?distributionStatus: "uploading"/);
 });

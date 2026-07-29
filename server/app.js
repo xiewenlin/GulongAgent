@@ -1506,12 +1506,13 @@ app.openapi(adminManualReleaseUploadRoute, async (c) => {
     updatedAt: now,
     expiresAt,
   });
+  const requiredHeaders = { "Content-Type": "application/octet-stream" };
   return c.json({
     uploadId: result.insertedId.toString(),
-    uploadUrl: createPresignedPutUrl(objectKey, { expires: 60 * 60 }),
+    uploadUrl: createPresignedPutUrl(objectKey, { expires: 60 * 60, headers: requiredHeaders }),
     objectKey,
     expiresIn: 3600,
-    requiredHeaders: { "Content-Type": "application/octet-stream" },
+    requiredHeaders,
     storage: { provider: "腾讯云 COS", ...cosConfig() },
   }, 201);
 });
@@ -1704,7 +1705,7 @@ app.openapi(releaseWorkerPrepareRoute, async (c) => {
   return c.json({
     publishId: publishId.toString(),
     channelId: channel._id.toString(),
-    uploadUrl: createPresignedPutUrl(objectKey, { expires: 60 * 60 }),
+    uploadUrl: createPresignedPutUrl(objectKey, { expires: 60 * 60, headers: requiredHeaders }),
     objectKey,
     expiresIn: 3600,
     requiredHeaders,

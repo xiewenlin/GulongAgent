@@ -38,13 +38,14 @@ function objectParams(key) {
   return { Bucket: config.bucket, Region: config.region, Key: key };
 }
 
-export function createPresignedPutUrl(key, { expires = 20 * 60 } = {}) {
+export function createPresignedPutUrl(key, { expires = 20 * 60, headers } = {}) {
   const cos = getClient();
   return cos.getObjectUrl({
     ...objectParams(key),
     Method: "PUT",
     Sign: true,
     Expires: expires,
+    Headers: headers,
     Protocol: "https:",
   });
 }
@@ -92,4 +93,3 @@ export function sanitizeFilename(value, fallback = "file.bin") {
     .slice(0, 160);
   return normalized || fallback;
 }
-
