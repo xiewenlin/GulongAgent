@@ -68,6 +68,7 @@ import {
 } from "./cos.js";
 import { buildAdminAnalyticsDashboard, recordAnalyticsEvent } from "./analytics.js";
 import { recoverExpiredDirectReleaseLock } from "./release-lock.js";
+import { OFFLINE_REVIEW_REJECTION_REASON, offlineReviewWechatMessage } from "./offline-review.js";
 
 const app = new OpenAPIHono();
 
@@ -253,6 +254,136 @@ async function releaseChannelAvailability(channel) {
     channels: await getCollection("releaseChannels"),
     deleteStoredObject: deleteObject,
   });
+}
+
+function bearerToken(c) {
+  const authorization = String(c.req.header("authorization") || "");
+  return authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
+}
+
+async function authenticateDesktopChandler(c, { admin = false } = {}) {
+  const accessToken = bearerToken(c);
+  if (!accessToken || accessToken.startsWith("gla_live_")) {
+    return { error: c.json({ code: "CHANDLER_SESSION_REQUIRED", message: "请在古龙桌面端登录 Chandler 账号" }, 401) };
+  }
+  const payload = await chandlerRequest("/v1/me", { accessToken, timeoutMs: 8_000 });
+  const chandlerUser = payload?.user || payload;
+  if (!chandlerUser?.id) return { error: c.json({ code: "CHANDLER_SESSION_REQUIRED", message: "无法识别当前 Chandler 账号" }, 401) };
+  const identity = await resolveChandlerIdentity(chandlerUser, accessToken);
+  const user = await upsertChandlerUser(chandlerUser, { identity, defaultEdition: "gulong" });
+  if (admin && identity.role !== "admin") {
+    return { error: c.json({ code: "ADMIN_REQUIRED", message: "只有管理员账号对应的桌面端微信可以接收和处理审核订单" }, 403) };
+  }
+  return { accessToken, chandlerUser, user, identity };
+}
+
+async function enqueueOfflineReviewEvent(order, source = "new-order") {
+  const now = new Date();
+  await (await getCollection("offlinePaymentReviewEvents")).updateOne(
+    { orderId: order._id },
+    {
+      $set: { orderNo: order.orderNo, status: "pending", source, availableAt: now, updatedAt: now },
+      $unset: { claimedBy: "", claimedByChandlerUserId: "", workerId: "", leaseUntil: "", notifiedAt: "", outboundId: "", completedAt: "", action: "", actionMessageId: "" },
+      $setOnInsert: { createdAt: now },
+      $inc: { generation: 1 },
+    },
+    { upsert: true },
+  );
+}
+
+function desktopReviewEvent(event, order) {
+  return {
+    eventId: event._id.toString(),
+    generation: Number(event.generation || 1),
+    orderId: order._id.toString(),
+    orderNo: order.orderNo,
+    cycle: order.cycle,
+    amountFen: order.amountFen,
+    userEmail: order.userEmail || null,
+    message: offlineReviewWechatMessage(order),
+    status: event.status,
+    leaseUntil: event.leaseUntil || null,
+  };
+}
+
+async function approveOfflinePayment({ orderId, actorUserId, actorChandlerUserId, accessToken, validFrom, validUntil }) {
+  const orders = await getCollection("offlinePayments");
+  const order = await orders.findOne({ _id: new ObjectId(orderId) });
+  if (!order || !["pending", "approved"].includes(order.status)) return { error: { code: "ORDER_STATE_CHANGED", message: "申请不存在或已经被拒绝", status: 409 } };
+  const alreadyApproved = order.status === "approved";
+  const storedStart = alreadyApproved ? new Date(order.validFrom) : null;
+  const storedEnd = alreadyApproved ? new Date(order.validUntil) : null;
+  const start = storedStart && !Number.isNaN(storedStart.getTime())
+    ? storedStart
+    : safeDate(validFrom) || (order.upgradeFrom === "month" && order.upgradeBaseStart ? new Date(order.upgradeBaseStart) : new Date());
+  const end = storedEnd && !Number.isNaN(storedEnd.getTime())
+    ? storedEnd
+    : safeDate(validUntil, true) || new Date(start);
+  if (!alreadyApproved && !validUntil) {
+    if (order.cycle === "year") end.setFullYear(end.getFullYear() + 1);
+    else end.setMonth(end.getMonth() + 1);
+  }
+  if (end <= start) return { error: { code: "VALIDATION_ERROR", message: "订阅截止日期必须晚于生效日期", status: 400 } };
+  const now = new Date();
+  const partnerData = { ...order.partnerData, review_status: "approved", business_payment_status: "paid_offline", reviewed_by: actorChandlerUserId || null, reviewed_at: now.toISOString(), valid_from: start.toISOString(), valid_until: end.toISOString() };
+  if (!alreadyApproved) {
+    const changed = await orders.updateOne(
+      { _id: order._id, status: "pending" },
+      { $set: { status: "approved", partnerData, validFrom: start, validUntil: end, reviewedBy: new ObjectId(actorUserId), reviewedAt: now, updatedAt: now } },
+    );
+    if (!changed.modifiedCount) return { error: { code: "ORDER_STATE_CHANGED", message: "订单状态已变化，请刷新后重试", status: 409 } };
+  }
+  await Promise.all([
+    (await getCollection("subscriptions")).updateOne(
+      { ownerId: order.ownerId },
+      { $set: { plan: "member", cycle: order.cycle, provider: "offline", status: "active", currentPeriodStart: start, currentPeriodEnd: end, autoRenew: false, updatedAt: now }, $setOnInsert: { createdAt: now } },
+      { upsert: true },
+    ),
+    (await getCollection("notifications")).updateOne(
+      { ownerId: order.ownerId, type: "offline_payment_approved", orderId: order._id },
+      { $set: { title: "线下支付审核已通过", message: `订单 ${order.orderNo} 已确认到账，会员权益已经生效。`, orderNo: order.orderNo, readAt: null, updatedAt: now }, $setOnInsert: { createdAt: now } },
+      { upsert: true },
+    ),
+  ]);
+  if (accessToken && order.chandlerOrderNo) {
+    await chandlerRequest(`/v1/me/orders/${encodeURIComponent(order.chandlerOrderNo)}/partner-data?client_id=${encodeURIComponent(chandlerConfig().applicationId)}`, { method: "PUT", accessToken, body: { partner_data: partnerData } }).catch(() => null);
+  }
+  if (accessToken && order.chandlerUserId) {
+    try {
+      const path = `/v1/me/oauth/clients/${encodeURIComponent(chandlerConfig().applicationId)}/users/${encodeURIComponent(order.chandlerUserId)}/attributes`;
+      const current = await chandlerRequest(path, { accessToken });
+      const attributes = current.attributes && typeof current.attributes === "object" ? current.attributes : {};
+      await chandlerRequest(path, { method: "PUT", accessToken, body: { attributes: { ...attributes, subscription_status: "active", subscription_source: "offline_review", subscription_order_no: order.orderNo, subscription_valid_from: start.toISOString(), subscription_valid_until: end.toISOString(), subscription_valid_from_unix_ms: start.getTime(), subscription_valid_until_unix_ms: end.getTime(), subscription_reviewed_at_unix_ms: now.getTime() } } });
+    } catch { /* Website MongoDB remains authoritative and desktop reads it directly. */ }
+  }
+  return { ok: true, orderNo: order.orderNo, status: "approved", validFrom: start, validUntil: end, message: "审核已通过，会员权益已经生效并可由桌面端立即同步" };
+}
+
+async function rejectOfflinePayment({ orderId, actorUserId, actorChandlerUserId, accessToken, reason }) {
+  const orders = await getCollection("offlinePayments");
+  const order = await orders.findOne({ _id: new ObjectId(orderId) });
+  if (!order || !["pending", "rejected"].includes(order.status)) return { error: { code: "ORDER_STATE_CHANGED", message: "申请不存在或已经通过", status: 409 } };
+  const alreadyRejected = order.status === "rejected";
+  const normalizedReason = String(alreadyRejected ? order.reviewReason : reason || OFFLINE_REVIEW_REJECTION_REASON).trim();
+  if (normalizedReason.length < 2 || normalizedReason.length > 500) return { error: { code: "VALIDATION_ERROR", message: "请填写 2–500 字的拒绝原因", status: 400 } };
+  const now = new Date();
+  const partnerData = { ...order.partnerData, review_status: "rejected", business_payment_status: "rejected_offline", rejection_reason: normalizedReason, reviewed_by: actorChandlerUserId || null, reviewed_at: now.toISOString() };
+  if (!alreadyRejected) {
+    const changed = await orders.updateOne(
+      { _id: order._id, status: "pending" },
+      { $set: { status: "rejected", reviewReason: normalizedReason, partnerData, reviewedBy: new ObjectId(actorUserId), reviewedAt: now, rejectedAt: now, updatedAt: now } },
+    );
+    if (!changed.modifiedCount) return { error: { code: "ORDER_STATE_CHANGED", message: "订单状态已变化，请刷新后重试", status: 409 } };
+  }
+  await (await getCollection("notifications")).updateOne(
+    { ownerId: order.ownerId, type: "offline_payment_rejected", orderId: order._id },
+    { $set: { title: "线下支付申请未通过", message: `订单 ${order.orderNo} 未通过审核，请查看原因并调整后重新申请。`, reason: normalizedReason, orderNo: order.orderNo, readAt: null, updatedAt: now }, $setOnInsert: { createdAt: now } },
+    { upsert: true },
+  );
+  if (accessToken && order.chandlerOrderNo) {
+    await chandlerRequest(`/v1/me/orders/${encodeURIComponent(order.chandlerOrderNo)}/partner-data?client_id=${encodeURIComponent(chandlerConfig().applicationId)}`, { method: "PUT", accessToken, body: { partner_data: partnerData } }).catch(() => null);
+  }
+  return { ok: true, orderNo: order.orderNo, status: "rejected", reason: normalizedReason, message: `审核已拒绝，原因已经同步给用户：${normalizedReason}` };
 }
 
 function publicReleaseMetadata(channel, edition = productEditionFromChannel(channel)) {
@@ -568,6 +699,76 @@ const getSubscriptionPricingRoute = createRoute({
   responses: {
     200: { description: "当前生效的订阅价格快照", content: { "application/json": { schema: z.object({ revision: z.string(), currency: z.literal("CNY"), monthly: SubscriptionPricePointSchema, yearly: SubscriptionPricePointSchema, updatedAt: z.coerce.date() }) } } },
   },
+});
+
+const DesktopReviewEventSchema = z.object({
+  eventId: z.string(),
+  generation: z.number().int().min(1),
+  orderId: z.string(),
+  orderNo: z.string(),
+  cycle: z.enum(["month", "year"]),
+  amountFen: z.number().int(),
+  userEmail: z.string().nullable(),
+  message: z.string(),
+  status: z.enum(["leased", "awaiting_action"]),
+  leaseUntil: z.coerce.date().nullable(),
+});
+
+const desktopReviewBindRoute = createRoute({
+  method: "post",
+  path: "/api/v1/admin/wechat-review/bind",
+  tags: ["Desktop Synchronization"],
+  summary: "绑定管理员桌面端微信审核工作器",
+  description: "使用桌面端当前 Chandler Bearer Token 验证全局管理员。普通用户与会员统一返回 403，不会获得待审核订单。",
+  security: [{ bearerAuth: [] }],
+  request: { body: { content: { "application/json": { schema: z.object({ workerId: z.string().min(16).max(160), channel: z.literal("personal-wechat") }) } } } },
+  responses: {
+    200: { description: "管理员工作器已绑定", content: { "application/json": { schema: z.object({ ok: z.literal(true), workerId: z.string(), administrator: z.object({ id: z.string(), displayName: z.string().nullable(), email: z.string().nullable() }) }) } } },
+    401: { description: "Chandler 登录失效", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "非管理员不推送", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const desktopReviewClaimRoute = createRoute({
+  method: "post",
+  path: "/api/v1/admin/wechat-review/claim",
+  tags: ["Desktop Synchronization"],
+  summary: "领取下一个微信端线下支付审核提醒",
+  description: "每个管理员微信工作器同一时间只领取一个订单，使回复数字 1/2 始终对应唯一订单。没有待审核订单时 event 为 null。",
+  security: [{ bearerAuth: [] }],
+  request: { body: { content: { "application/json": { schema: z.object({ workerId: z.string().min(16).max(160) }) } } } },
+  responses: { 200: { description: "审核事件", content: { "application/json": { schema: z.object({ event: DesktopReviewEventSchema.nullable() }) } } }, 403: { description: "非管理员不推送", content: { "application/json": { schema: ErrorSchema } } } },
+});
+
+const desktopReviewNotifiedRoute = createRoute({
+  method: "post",
+  path: "/api/v1/admin/wechat-review/{eventId}/notified",
+  tags: ["Desktop Synchronization"],
+  summary: "确认审核菜单已经进入管理员微信发送队列",
+  security: [{ bearerAuth: [] }],
+  request: { params: z.object({ eventId: z.string().min(1).max(100) }), body: { content: { "application/json": { schema: z.object({ workerId: z.string().min(16).max(160), outboundId: z.string().min(1).max(200) }) } } } },
+  responses: { 200: { description: "等待数字回复", content: { "application/json": { schema: z.object({ ok: z.literal(true), status: z.literal("awaiting_action") }) } } }, 409: { description: "事件已变化", content: { "application/json": { schema: ErrorSchema } } } },
+});
+
+const desktopReviewActionRoute = createRoute({
+  method: "post",
+  path: "/api/v1/admin/wechat-review/{eventId}/action",
+  tags: ["Desktop Synchronization"],
+  summary: "通过管理员微信数字回复审核订单",
+  description: "action=approve 对应回复 1；action=reject 对应回复 2。拒绝时可附带 reason，否则使用安全默认原因。操作完成后会员权益立即写入官网并同步 Chandler。",
+  security: [{ bearerAuth: [] }],
+  request: { params: z.object({ eventId: z.string().min(1).max(100) }), body: { content: { "application/json": { schema: z.object({ workerId: z.string().min(16).max(160), action: z.enum(["approve", "reject"]), reason: z.string().min(2).max(500).optional(), messageId: z.string().max(200).optional() }) } } } },
+  responses: { 200: { description: "审核完成", content: { "application/json": { schema: z.object({ ok: z.literal(true), orderNo: z.string(), status: z.enum(["approved", "rejected"]), message: z.string() }).passthrough() } } }, 403: { description: "非管理员或工作器不匹配", content: { "application/json": { schema: ErrorSchema } } }, 409: { description: "订单已经审核", content: { "application/json": { schema: ErrorSchema } } } },
+});
+
+const desktopSubscriptionStatusRoute = createRoute({
+  method: "get",
+  path: "/api/v1/desktop/account/subscription",
+  tags: ["Desktop Synchronization"],
+  summary: "桌面端读取官网实时会员权益",
+  description: "使用当前 Chandler Bearer Token 映射官网账号，返回 MongoDB 权威订阅状态；线下订单通过后桌面端下次轮询即可立即解锁。",
+  security: [{ bearerAuth: [] }],
+  responses: { 200: { description: "实时订阅状态", content: { "application/json": { schema: z.object({ isMember: z.boolean(), subscription: z.record(z.string(), z.unknown()).nullable(), checkedAt: z.coerce.date() }) } } }, 401: { description: "Chandler 登录失效", content: { "application/json": { schema: ErrorSchema } } } },
 });
 
 const ChandlerAdminUserSchema = z.object({
@@ -1216,9 +1417,14 @@ app.delete("/api/auth/account", async (c) => {
   }
   await revokeSession(c);
   if (user.avatarObjectKey) await deleteObject(user.avatarObjectKey).catch(() => {});
+  const offlineOrderIds = await (await getCollection("offlinePayments"))
+    .find({ ownerId })
+    .project({ _id: 1 })
+    .toArray();
   await Promise.all([
     (await getCollection("sessions")).deleteMany({ userId: ownerId }),
-    ...["apiKeys", "tasks", "memories", "feedback", "payments", "subscriptions", "wallets", "uploads", "offlinePayments", "userConfigurations", "notifications", "avatarUploads"]
+    (await getCollection("offlinePaymentReviewEvents")).deleteMany({ orderId: { $in: offlineOrderIds.map((order) => order._id) } }),
+    ...["apiKeys", "tasks", "memories", "feedback", "payments", "subscriptions", "wallets", "uploads", "offlinePayments", "userConfigurations", "notifications", "avatarUploads", "offlinePaymentReviewWorkers"]
       .map((name) => getCollection(name).then((collection) => collection.deleteMany({ ownerId }))),
   ]);
   await (await getCollection("users")).deleteOne({ _id: ownerId });
@@ -2396,6 +2602,10 @@ app.post("/api/billing/orders", async (c) => {
       createdAt: now,
       updatedAt: now,
     });
+    // The claim endpoint can backfill any pending order, so a transient queue
+    // write must never turn a durably created payment order into a client-side
+    // failure that the user may submit twice.
+    await enqueueOfflineReviewEvent({ _id: result.insertedId, orderNo }, "new-order").catch(() => null);
     return c.json({ id: result.insertedId.toString(), orderNo, status: "pending_review", mode: "offline", amountFen, upgradeCreditFen }, 201);
   }
 
@@ -2603,54 +2813,21 @@ app.post("/api/admin/offline-payments/:id/approve", async (c) => {
   const rejected = requireTrustedMutation(c); if (rejected) return rejected;
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
   if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "ORDER_NOT_FOUND", message: "线下支付申请不存在" }, 404);
-  const orders = await getCollection("offlinePayments");
-  const order = await orders.findOne({ _id: new ObjectId(c.req.param("id")), status: "pending" });
-  if (!order) return c.json({ code: "ORDER_NOT_FOUND", message: "申请不存在或已经审核" }, 404);
   const body = await c.req.json().catch(() => ({}));
-  const start = safeDate(body.validFrom) || (order.upgradeFrom === "month" && order.upgradeBaseStart ? new Date(order.upgradeBaseStart) : new Date());
-  const end = safeDate(body.validUntil, true) || new Date(start);
-  if (!body.validUntil) {
-    if (order.cycle === "year") end.setFullYear(end.getFullYear() + 1);
-    else end.setMonth(end.getMonth() + 1);
-  }
-  if (end <= start) return c.json({ code: "VALIDATION_ERROR", message: "订阅截止日期必须晚于生效日期" }, 400);
-  const now = new Date();
-  const partnerData = {
-    ...order.partnerData,
-    review_status: "approved",
-    business_payment_status: "paid_offline",
-    reviewed_by: readExternalAuth(auth.session)?.chandlerUserId,
-    reviewed_at: now.toISOString(),
-    valid_from: start.toISOString(),
-    valid_until: end.toISOString(),
-  };
-  await Promise.all([
-    orders.updateOne({ _id: order._id, status: "pending" }, { $set: { status: "approved", partnerData, validFrom: start, validUntil: end, reviewedBy: new ObjectId(auth.user.id), reviewedAt: now, updatedAt: now } }),
-    (await getCollection("subscriptions")).updateOne(
-      { ownerId: order.ownerId },
-      { $set: { plan: "member", cycle: order.cycle, provider: "offline", status: "active", currentPeriodStart: start, currentPeriodEnd: end, autoRenew: false, updatedAt: now }, $setOnInsert: { createdAt: now } },
-      { upsert: true },
-    ),
-    (await getCollection("notifications")).insertOne({ ownerId: order.ownerId, type: "offline_payment_approved", title: "线下支付审核已通过", message: `订单 ${order.orderNo} 已确认到账，会员权益已经生效。`, orderId: order._id, orderNo: order.orderNo, readAt: null, createdAt: now }),
-  ]);
-  const accessToken = await getChandlerAccessToken(auth.session).catch(() => null);
-  if (accessToken && order.chandlerOrderNo) {
-    try {
-      await chandlerRequest(`/v1/me/orders/${encodeURIComponent(order.chandlerOrderNo)}/partner-data?client_id=${encodeURIComponent(chandlerConfig().applicationId)}`, { method: "PUT", accessToken, body: { partner_data: partnerData } });
-    } catch { /* Approval remains durable in MongoDB; sync can be retried. */ }
-  }
-  if (accessToken && order.chandlerUserId) {
-    try {
-      const current = await chandlerRequest(`/v1/me/oauth/clients/${encodeURIComponent(chandlerConfig().applicationId)}/users/${encodeURIComponent(order.chandlerUserId)}/attributes`, { accessToken });
-      const attributes = current.attributes && typeof current.attributes === "object" ? current.attributes : {};
-      await chandlerRequest(`/v1/me/oauth/clients/${encodeURIComponent(chandlerConfig().applicationId)}/users/${encodeURIComponent(order.chandlerUserId)}/attributes`, {
-        method: "PUT",
-        accessToken,
-        body: { attributes: { ...attributes, subscription_status: "active", subscription_source: "offline_review", subscription_order_no: order.orderNo, subscription_valid_from: start.toISOString(), subscription_valid_until: end.toISOString() } },
-      });
-    } catch { /* The website remains authoritative for this approval until Chandler sync succeeds. */ }
-  }
-  return c.json({ ok: true, orderNo: order.orderNo, status: "approved", validFrom: start, validUntil: end });
+  const result = await approveOfflinePayment({
+    orderId: c.req.param("id"),
+    actorUserId: auth.user.id,
+    actorChandlerUserId: readExternalAuth(auth.session)?.chandlerUserId,
+    accessToken: await getChandlerAccessToken(auth.session).catch(() => null),
+    validFrom: body.validFrom,
+    validUntil: body.validUntil,
+  });
+  if (result.error) return c.json({ code: result.error.code, message: result.error.message }, result.error.status);
+  await (await getCollection("offlinePaymentReviewEvents")).updateOne(
+    { orderId: new ObjectId(c.req.param("id")), status: { $in: ["pending", "leased", "awaiting_action"] } },
+    { $set: { status: "completed", action: "approve", completedAt: new Date(), updatedAt: new Date() } },
+  );
+  return c.json(result);
 });
 
 app.post("/api/admin/offline-payments/:id/reject", async (c) => {
@@ -2658,28 +2835,20 @@ app.post("/api/admin/offline-payments/:id/reject", async (c) => {
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
   if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "ORDER_NOT_FOUND", message: "线下支付申请不存在" }, 404);
   const body = await c.req.json().catch(() => ({}));
-  const reason = String(body.reason || "").trim();
-  if (reason.length < 2 || reason.length > 500) return c.json({ code: "VALIDATION_ERROR", message: "请填写 2–500 字的拒绝原因" }, 400);
-  const orders = await getCollection("offlinePayments");
-  const order = await orders.findOne({ _id: new ObjectId(c.req.param("id")), status: "pending" });
-  if (!order) return c.json({ code: "ORDER_NOT_FOUND", message: "申请不存在或已经审核" }, 404);
-  const now = new Date();
-  const partnerData = { ...order.partnerData, review_status: "rejected", business_payment_status: "rejected_offline", rejection_reason: reason, reviewed_by: readExternalAuth(auth.session)?.chandlerUserId, reviewed_at: now.toISOString() };
-  const update = await orders.updateOne(
-    { _id: order._id, status: "pending" },
-    { $set: { status: "rejected", reviewReason: reason, partnerData, reviewedBy: new ObjectId(auth.user.id), reviewedAt: now, rejectedAt: now, updatedAt: now } },
+  const result = await rejectOfflinePayment({
+    orderId: c.req.param("id"),
+    actorUserId: auth.user.id,
+    actorChandlerUserId: readExternalAuth(auth.session)?.chandlerUserId,
+    accessToken: await getChandlerAccessToken(auth.session).catch(() => null),
+    reason: body.reason,
+  });
+  if (result.error) return c.json({ code: result.error.code, message: result.error.message }, result.error.status);
+  await (await getCollection("offlinePaymentReviewEvents")).updateOne(
+    { orderId: new ObjectId(c.req.param("id")), status: { $in: ["pending", "leased", "awaiting_action"] } },
+    { $set: { status: "completed", action: "reject", completedAt: new Date(), updatedAt: new Date() } },
   );
-  if (!update.modifiedCount) return c.json({ code: "ORDER_STATE_CHANGED", message: "订单状态已变化，请刷新后重试" }, 409);
-  await (await getCollection("notifications")).insertOne({ ownerId: order.ownerId, type: "offline_payment_rejected", title: "线下支付申请未通过", message: `订单 ${order.orderNo} 未通过审核，请查看原因并调整后重新申请。`, reason, orderId: order._id, orderNo: order.orderNo, readAt: null, createdAt: now });
-  const accessToken = await getChandlerAccessToken(auth.session).catch(() => null);
-  if (accessToken && order.chandlerOrderNo) {
-    try {
-      await chandlerRequest(`/v1/me/orders/${encodeURIComponent(order.chandlerOrderNo)}/partner-data?client_id=${encodeURIComponent(chandlerConfig().applicationId)}`, { method: "PUT", accessToken, body: { partner_data: partnerData } });
-    } catch { /* MongoDB remains the authoritative review queue. */ }
-  }
-  return c.json({ ok: true, orderNo: order.orderNo, status: "rejected", reason });
+  return c.json(result);
 });
-
 app.post("/api/billing/offline-payments/:id/resubmit", async (c) => {
   const rejected = requireTrustedMutation(c); if (rejected) return rejected;
   const auth = await authenticate(c); if (auth.error) return auth.error;
@@ -2699,7 +2868,226 @@ app.post("/api/billing/offline-payments/:id/resubmit", async (c) => {
   );
   if (!result.modifiedCount) return c.json({ code: "ORDER_STATE_CHANGED", message: "订单状态已变化，请刷新后重试" }, 409);
   await (await getCollection("notifications")).updateMany({ ownerId, orderId: order._id, type: "offline_payment_rejected", readAt: null }, { $set: { readAt: now } });
+  await enqueueOfflineReviewEvent(order, "resubmission").catch(() => null);
   return c.json({ ok: true, orderNo: order.orderNo, status: "pending" });
+});
+
+app.openapi(desktopReviewBindRoute, async (c) => {
+  const auth = await authenticateDesktopChandler(c, { admin: true });
+  if (auth.error) return auth.error;
+  const { workerId, channel } = c.req.valid("json");
+  const workers = await getCollection("offlinePaymentReviewWorkers");
+  const existing = await workers.findOne({ workerId });
+  if (existing && String(existing.ownerId) !== String(auth.user._id)) {
+    return c.json({ code: "WORKER_ALREADY_BOUND", message: "此桌面审核工作器已绑定其他管理员账号" }, 409);
+  }
+  const now = new Date();
+  await workers.updateOne(
+    { workerId },
+    {
+      $set: {
+        ownerId: auth.user._id,
+        chandlerUserId: String(auth.chandlerUser.id),
+        channel,
+        enabled: true,
+        lastSeenAt: now,
+        updatedAt: now,
+      },
+      $setOnInsert: { createdAt: now },
+    },
+    { upsert: true },
+  );
+  return c.json({
+    ok: true,
+    workerId,
+    administrator: {
+      id: String(auth.chandlerUser.id),
+      displayName: auth.user.displayName || auth.chandlerUser.display_name || auth.chandlerUser.name || null,
+      email: auth.user.email || auth.chandlerUser.email || null,
+    },
+  });
+});
+
+app.openapi(desktopReviewClaimRoute, async (c) => {
+  const auth = await authenticateDesktopChandler(c, { admin: true });
+  if (auth.error) return auth.error;
+  const { workerId } = c.req.valid("json");
+  const ownerId = auth.user._id;
+  const workers = await getCollection("offlinePaymentReviewWorkers");
+  const worker = await workers.findOne({ workerId, ownerId, enabled: true, channel: "personal-wechat" });
+  if (!worker) return c.json({ code: "WORKER_NOT_BOUND", message: "请先在管理员桌面端绑定当前微信会话" }, 403);
+  const rate = await enforceRateLimit(`desktop-review-claim:${workerId}`, { limit: 90, windowMs: 60_000 });
+  if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "审核任务轮询过于频繁" }, 429);
+
+  const now = new Date();
+  const events = await getCollection("offlinePaymentReviewEvents");
+  const orders = await getCollection("offlinePayments");
+  await Promise.all([
+    workers.updateOne({ _id: worker._id }, { $set: { lastSeenAt: now, updatedAt: now } }),
+    events.updateMany(
+      { status: "leased", leaseUntil: { $lte: now } },
+      { $set: { status: "pending", availableAt: now, updatedAt: now }, $unset: { claimedBy: "", claimedByChandlerUserId: "", workerId: "", leaseUntil: "", claimedAt: "" } },
+    ),
+  ]);
+
+  const outstanding = await events.findOne({ claimedBy: ownerId, workerId, status: { $in: ["leased", "awaiting_action"] } }, { sort: { claimedAt: 1 } });
+  if (outstanding) {
+    const order = await orders.findOne({ _id: outstanding.orderId, status: "pending" });
+    if (order) return c.json({ event: desktopReviewEvent(outstanding, order) });
+    await events.updateOne({ _id: outstanding._id }, { $set: { status: "cancelled", completedAt: now, updatedAt: now } });
+  }
+
+  let event = await events.findOneAndUpdate(
+    { status: "pending", availableAt: { $lte: now } },
+    {
+      $set: {
+        status: "leased",
+        claimedBy: ownerId,
+        claimedByChandlerUserId: String(auth.chandlerUser.id),
+        workerId,
+        claimedAt: now,
+        leaseUntil: new Date(now.getTime() + 2 * 60_000),
+        updatedAt: now,
+      },
+    },
+    { sort: { createdAt: 1 }, returnDocument: "after" },
+  );
+
+  if (!event) {
+    const pendingOrder = await orders.findOne({ status: "pending" }, { sort: { createdAt: 1 } });
+    if (!pendingOrder) return c.json({ event: null });
+    const knownEvent = await events.findOne({ orderId: pendingOrder._id });
+    if (!knownEvent || ["completed", "cancelled"].includes(knownEvent.status)) {
+      await enqueueOfflineReviewEvent(pendingOrder, "backfill");
+      event = await events.findOneAndUpdate(
+        { orderId: pendingOrder._id, status: "pending", availableAt: { $lte: now } },
+        {
+          $set: {
+            status: "leased",
+            claimedBy: ownerId,
+            claimedByChandlerUserId: String(auth.chandlerUser.id),
+            workerId,
+            claimedAt: now,
+            leaseUntil: new Date(now.getTime() + 2 * 60_000),
+            updatedAt: now,
+          },
+        },
+        { returnDocument: "after" },
+      );
+    }
+  }
+  if (!event) return c.json({ event: null });
+  const order = await orders.findOne({ _id: event.orderId, status: "pending" });
+  if (!order) {
+    await events.updateOne({ _id: event._id }, { $set: { status: "cancelled", completedAt: now, updatedAt: now } });
+    return c.json({ event: null });
+  }
+  return c.json({ event: desktopReviewEvent(event, order) });
+});
+
+app.openapi(desktopReviewNotifiedRoute, async (c) => {
+  const auth = await authenticateDesktopChandler(c, { admin: true });
+  if (auth.error) return auth.error;
+  const { eventId } = c.req.valid("param");
+  const { workerId, outboundId } = c.req.valid("json");
+  if (!ObjectId.isValid(eventId)) return c.json({ code: "REVIEW_EVENT_NOT_FOUND", message: "审核事件不存在" }, 404);
+  const worker = await (await getCollection("offlinePaymentReviewWorkers")).findOne({ workerId, ownerId: auth.user._id, enabled: true, channel: "personal-wechat" });
+  if (!worker) return c.json({ code: "WORKER_NOT_BOUND", message: "当前桌面微信工作器未绑定此管理员" }, 403);
+  const now = new Date();
+  const events = await getCollection("offlinePaymentReviewEvents");
+  const changed = await events.updateOne(
+    { _id: new ObjectId(eventId), claimedBy: auth.user._id, workerId, status: "leased", leaseUntil: { $gt: now } },
+    { $set: { status: "awaiting_action", outboundId, notifiedAt: now, updatedAt: now }, $unset: { leaseUntil: "" } },
+  );
+  if (!changed.modifiedCount) {
+    const refreshed = await events.updateOne(
+      { _id: new ObjectId(eventId), claimedBy: auth.user._id, workerId, status: "awaiting_action" },
+      { $set: { outboundId, notifiedAt: now, updatedAt: now } },
+    );
+    if (!refreshed.matchedCount) return c.json({ code: "REVIEW_EVENT_CHANGED", message: "审核事件已过期或已由其他管理员处理" }, 409);
+  }
+  return c.json({ ok: true, status: "awaiting_action" });
+});
+
+app.openapi(desktopReviewActionRoute, async (c) => {
+  const auth = await authenticateDesktopChandler(c, { admin: true });
+  if (auth.error) return auth.error;
+  const { eventId } = c.req.valid("param");
+  const { workerId, action, reason, messageId } = c.req.valid("json");
+  if (!ObjectId.isValid(eventId)) return c.json({ code: "REVIEW_EVENT_NOT_FOUND", message: "审核事件不存在" }, 404);
+  const worker = await (await getCollection("offlinePaymentReviewWorkers")).findOne({ workerId, ownerId: auth.user._id, enabled: true, channel: "personal-wechat" });
+  if (!worker) return c.json({ code: "WORKER_NOT_BOUND", message: "当前桌面微信工作器未绑定此管理员" }, 403);
+  const now = new Date();
+  const events = await getCollection("offlinePaymentReviewEvents");
+  const event = await events.findOneAndUpdate(
+    {
+      _id: new ObjectId(eventId),
+      claimedBy: auth.user._id,
+      claimedByChandlerUserId: String(auth.chandlerUser.id),
+      workerId,
+      $or: [{ status: "awaiting_action" }, { status: "leased", leaseUntil: { $gt: now } }],
+    },
+    { $set: { status: "processing", actionStartedAt: now, updatedAt: now } },
+    { returnDocument: "after" },
+  );
+  if (!event) return c.json({ code: "REVIEW_EVENT_CHANGED", message: "订单已处理、审核菜单已过期或微信会话不匹配" }, 409);
+
+  const input = {
+    orderId: event.orderId.toString(),
+    actorUserId: auth.user._id.toString(),
+    actorChandlerUserId: String(auth.chandlerUser.id),
+    accessToken: auth.accessToken,
+  };
+  let result;
+  try {
+    result = action === "approve"
+      ? await approveOfflinePayment(input)
+      : await rejectOfflinePayment({ ...input, reason });
+  } catch (error) {
+    await events.updateOne(
+      { _id: event._id, status: "processing" },
+      { $set: { status: "awaiting_action", updatedAt: new Date() }, $unset: { actionStartedAt: "" } },
+    ).catch(() => null);
+    throw error;
+  }
+  if (result.error) {
+    const terminal = result.error.code === "ORDER_STATE_CHANGED";
+    await events.updateOne(
+      { _id: event._id, status: "processing" },
+      terminal
+        ? { $set: { status: "cancelled", completedAt: new Date(), updatedAt: new Date() } }
+        : { $set: { status: "awaiting_action", updatedAt: new Date() }, $unset: { actionStartedAt: "" } },
+    );
+    return c.json({ code: result.error.code, message: result.error.message }, result.error.status);
+  }
+  await events.updateOne(
+    { _id: event._id, status: "processing" },
+    { $set: { status: "completed", action, actionMessageId: messageId || null, completedAt: new Date(), updatedAt: new Date() }, $unset: { leaseUntil: "", actionStartedAt: "" } },
+  );
+  return c.json(result);
+});
+
+app.openapi(desktopSubscriptionStatusRoute, async (c) => {
+  const auth = await authenticateDesktopChandler(c);
+  if (auth.error) return auth.error;
+  const now = new Date();
+  const subscription = await (await getCollection("subscriptions")).findOne({ ownerId: auth.user._id });
+  const active = subscription?.status === "active" && safeDate(subscription.currentPeriodEnd)?.getTime() > now.getTime();
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  c.header("Pragma", "no-cache");
+  return c.json({
+    isMember: auth.identity.role === "admin" || Boolean(active),
+    subscription: subscription ? {
+      plan: subscription.plan || "member",
+      cycle: subscription.cycle || null,
+      provider: subscription.provider || null,
+      status: active ? "active" : subscription.status || "inactive",
+      currentPeriodStart: subscription.currentPeriodStart || null,
+      currentPeriodEnd: subscription.currentPeriodEnd || null,
+      autoRenew: Boolean(subscription.autoRenew),
+    } : null,
+    checkedAt: now,
+  });
 });
 
 app.openapi(createTaskRoute, async (c) => {
@@ -2823,16 +3211,16 @@ app.openapi(getMiniMaxConfigurationRoute, async (c) => {
 app.openAPIRegistry.registerComponent("securitySchemes", "bearerAuth", {
   type: "http",
   scheme: "bearer",
-  bearerFormat: "Gulong API Key",
-  description: "Authorization: Bearer gla_live_...",
+  bearerFormat: "Gulong API Key / Chandler Access Token",
+  description: "开发者接口使用 gla_live_...；桌面同步接口使用桌面端当前 Chandler Access Token。",
 });
 
 app.doc("/api/openapi.json", {
   openapi: "3.1.0",
   info: {
     title: "古龙 Gulong Agent Engine API",
-    version: "1.4.0",
-    description: "面向开发者的任务执行、长期记忆、用户模型配置、第二大脑附件、发行版本、Chandler 统一账号、计费与管理员经营分析接口。API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
+    version: "1.5.0",
+    description: "面向开发者的任务执行、长期记忆、用户模型配置、第二大脑附件、发行版本、Chandler 统一账号、计费、管理员经营分析与桌面端个人微信订单审核接口。API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
   },
   servers: [
     { url: "/", description: "当前环境" },

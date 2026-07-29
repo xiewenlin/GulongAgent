@@ -13,6 +13,11 @@ import {
 import { cosConfig, sanitizeFilename } from "../../server/cos.js";
 import { readExternalAuth, readUserSecret, sealExternalAuth, sealUserSecret } from "../../server/security.js";
 import { recoverExpiredDirectReleaseLock } from "../../server/release-lock.js";
+import {
+  OFFLINE_REVIEW_REJECTION_REASON,
+  offlineReviewWechatMessage,
+  parseOfflineReviewWechatAction,
+} from "../../server/offline-review.js";
 
 test("Chandler session tokens are encrypted and round-trip server-side", () => {
   const auth = externalAuthFromResponse({
@@ -93,6 +98,11 @@ test("OpenAPI document includes Chandler admin, offline credentials, dated attac
   assert.ok(document.paths["/api/admin/chandler/prices"]);
   assert.ok(document.paths["/api/admin/chandler/entitlement-requests"]);
   assert.ok(document.paths["/api/admin/analytics/dashboard"]);
+  assert.ok(document.paths["/api/v1/admin/wechat-review/bind"]);
+  assert.ok(document.paths["/api/v1/admin/wechat-review/claim"]);
+  assert.ok(document.paths["/api/v1/admin/wechat-review/{eventId}/notified"]);
+  assert.ok(document.paths["/api/v1/admin/wechat-review/{eventId}/action"]);
+  assert.ok(document.paths["/api/v1/desktop/account/subscription"]);
   assert.ok(document.paths["/api/admin/release-channels/{id}/manual-upload"]);
   assert.ok(document.paths["/api/admin/release-uploads/{id}/complete"]);
   assert.ok(document.paths["/api/release-worker/releases/prepare"]);
@@ -217,6 +227,8 @@ test("Vercel consolidates nested account and configuration routes", async () => 
   assert.ok(sources.includes("/api/v1/configuration/:path*"));
   assert.ok(sources.includes("/api/v1/account/:path*"));
   assert.ok(sources.includes("/api/v1/pricing/:path*"));
+  assert.ok(sources.includes("/api/v1/admin/:path*"));
+  assert.ok(sources.includes("/api/v1/desktop/:path*"));
   assert.ok(sources.includes("/api/billing/:path*"));
   assert.ok(sources.includes("/api/users/:id/avatar"));
   assert.ok(sources.includes("/api/admin/analytics/:path*"));
@@ -224,6 +236,48 @@ test("Vercel consolidates nested account and configuration routes", async () => 
   assert.ok(sources.includes("/api/admin/release-channels/:id/manual-upload"));
   assert.ok(sources.includes("/api/admin/release-uploads/:id/complete"));
   assert.ok(sources.includes("/api/release-worker/:path*"));
+});
+
+test("administrator WeChat review menu accepts only explicit numeric actions", () => {
+  assert.deepEqual(parseOfflineReviewWechatAction("1"), { action: "approve", reason: null });
+  assert.deepEqual(parseOfflineReviewWechatAction("１"), { action: "approve", reason: null });
+  assert.deepEqual(parseOfflineReviewWechatAction("２ 付款截图不清晰"), { action: "reject", reason: "付款截图不清晰" });
+  assert.deepEqual(parseOfflineReviewWechatAction("2"), { action: "reject", reason: OFFLINE_REVIEW_REJECTION_REASON });
+  assert.equal(parseOfflineReviewWechatAction("好的"), null);
+  const message = offlineReviewWechatMessage({ orderNo: "GL20260729001", cycle: "year", amountFen: 298000, userEmail: "member@example.com" });
+  assert.match(message, /GL20260729001/);
+  assert.match(message, /1、审核通过/);
+  assert.match(message, /2、审核拒绝/);
+  assert.match(message, /仅当前已绑定的管理员微信会话/);
+});
+
+test("desktop WeChat review API validates Chandler administrators and a bound worker", async () => {
+  const source = await readFile(new URL("../../server/app.js", import.meta.url), "utf8");
+  assert.match(source, /authenticateDesktopChandler\(c, \{ admin: true \}\)/);
+  assert.match(source, /identity\.role !== "admin"/);
+  assert.match(source, /workerId, ownerId: auth\.user\._id, enabled: true, channel: "personal-wechat"/);
+  assert.match(source, /enqueueOfflineReviewEvent\(\{ _id: result\.insertedId, orderNo \}, "new-order"\)/);
+  assert.match(source, /enqueueOfflineReviewEvent\(order, "resubmission"\)/);
+  assert.match(source, /subscription_valid_until_unix_ms: end\.getTime\(\)/);
+  assert.match(source, /private, no-store, max-age=0/);
+
+  for (const request of [
+    new Request("http://localhost/api/v1/admin/wechat-review/bind", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workerId: "gulong-desktop-unauthorized", channel: "personal-wechat" }),
+    }),
+    new Request("http://localhost/api/v1/admin/wechat-review/claim", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workerId: "gulong-desktop-unauthorized" }),
+    }),
+    new Request("http://localhost/api/v1/desktop/account/subscription"),
+  ]) {
+    const response = await app.request(request);
+    assert.equal(response.status, 401);
+    assert.equal((await response.json()).code, "CHANDLER_SESSION_REQUIRED");
+  }
 });
 
 test("download page explains both desktop editions", async () => {

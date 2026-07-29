@@ -145,6 +145,22 @@ export async function ensureIndexes() {
           { status: 1, reviewedAt: -1, updatedAt: -1 },
           { name: "offline_payments_analytics" },
         ),
+        db.collection("offlinePaymentReviewEvents").createIndex(
+          { orderId: 1 },
+          { unique: true, name: "uniq_offline_payment_review_order" },
+        ),
+        db.collection("offlinePaymentReviewEvents").createIndex(
+          { status: 1, availableAt: 1, createdAt: 1 },
+          { name: "offline_payment_review_queue" },
+        ),
+        db.collection("offlinePaymentReviewWorkers").createIndex(
+          { workerId: 1 },
+          { unique: true, name: "uniq_offline_payment_review_worker" },
+        ),
+        db.collection("offlinePaymentReviewWorkers").createIndex(
+          { ownerId: 1, enabled: 1, updatedAt: -1 },
+          { name: "offline_payment_review_workers_by_admin" },
+        ),
         db.collection("notifications").createIndex(
           { ownerId: 1, createdAt: -1 },
           { name: "notifications_by_owner" },

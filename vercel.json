@@ -109,6 +109,14 @@
       "destination": "/api/platform?_platform_path=v1/pricing/:path*"
     },
     {
+      "source": "/api/v1/admin/:path*",
+      "destination": "/api/platform?_platform_path=v1/admin/:path*"
+    },
+    {
+      "source": "/api/v1/desktop/:path*",
+      "destination": "/api/platform?_platform_path=v1/desktop/:path*"
+    },
+    {
       "source": "/((?!api/).*)",
       "destination": "/index.html"
     }
