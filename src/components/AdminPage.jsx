@@ -18,6 +18,7 @@ import {
   LockKey,
   MagnifyingGlass,
   Package,
+  PencilSimple,
   Plus,
   RocketLaunch,
   ShieldCheck,
@@ -171,64 +172,113 @@ function ChandlerPriceManager() {
   </section>;
 }
 
+function emptyPartnerForm() {
+  return { name: "", industry: "", websiteUrl: "https://", logoMode: "upload", logoUrl: "", logoObjectKey: null, logoFile: null, promotionObjectKey: null, promotionUrl: null, promotionFile: null, removePromotion: false, nodeAction: "website", sort: 100, enabled: true, currentLogoPreviewUrl: null, currentPromotionPreviewUrl: null };
+}
+
+function PartnerFormModal({ editing, form, setForm, busy, onClose, onSubmit }) {
+  const hasCurrentPromotion = Boolean(form.currentPromotionPreviewUrl);
+  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}><form className="admin-form-modal partner-form-modal" onSubmit={onSubmit}>
+    <button className="modal-close" type="button" disabled={busy} onClick={onClose}><X size={18} /></button>
+    <span>{editing ? "EDIT PARTNER" : "NEW PARTNER"}</span><h2>{editing ? `修改 ${editing.name}` : "新建合作伙伴"}</h2>
+    {editing && <div className="partner-existing-assets"><div><span>当前 Logo</span><img src={form.currentLogoPreviewUrl} alt={`${editing.name} 当前 Logo`} /></div>{form.currentPromotionPreviewUrl && <div><span>当前宣传图</span><img src={form.currentPromotionPreviewUrl} alt={`${editing.name} 当前宣传图`} /></div>}<p>选择新图片后，系统会先从腾讯云 COS 删除旧图片，再上传并绑定新图片。</p></div>}
+    <div className="admin-form-grid">
+      <label><span>企业名称</span><input required minLength={2} maxLength={80} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：中科智能" /></label>
+      <label><span>企业所属行业</span><input required maxLength={80} value={form.industry} onChange={(event) => setForm({ ...form, industry: event.target.value })} placeholder="例如：人工智能软件" /></label>
+      <label className="span-2"><span>官网网址</span><input required type="url" value={form.websiteUrl} onChange={(event) => setForm({ ...form, websiteUrl: event.target.value })} placeholder="https://example.com" /></label>
+      <label><span>Logo 方式</span><select value={form.logoMode} onChange={(event) => setForm({ ...form, logoMode: event.target.value })}><option value="upload">上传企业 Logo（推荐）</option><option value="generated">根据名称自动生成</option><option value="url">使用 HTTPS 图片链接</option></select></label>
+      {form.logoMode === "upload" && <label><span>{editing ? "替换企业 Logo（可选）" : "企业 Logo 图片"}</span><input required={!editing && !form.logoObjectKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => setForm({ ...form, logoFile: event.target.files?.[0] || null })} /></label>}
+      {form.logoMode === "url" && <label><span>Logo 图片链接</span><input required type="url" value={form.logoUrl || ""} onChange={(event) => setForm({ ...form, logoUrl: event.target.value })} placeholder="https://example.com/logo.png" /></label>}
+      <label><span>{editing ? "替换宣传图片（可选）" : "宣传图片（可选）"}</span><input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => setForm({ ...form, promotionFile: event.target.files?.[0] || null, removePromotion: false })} /></label>
+      <label><span>点击 Logo 后</span><select value={form.nodeAction} onChange={(event) => setForm({ ...form, nodeAction: event.target.value })}><option value="website">新标签页打开官网</option><option value="promotion">弹窗放大宣传图片</option></select></label>
+      <label><span>首页排序</span><input type="number" value={form.sort} onChange={(event) => setForm({ ...form, sort: Number(event.target.value) })} /></label>
+      {editing && hasCurrentPromotion && <label className="partner-remove-asset"><input type="checkbox" checked={form.removePromotion} onChange={(event) => setForm({ ...form, removePromotion: event.target.checked, promotionFile: null })} /><span>删除当前宣传图片</span></label>}
+    </div>
+    <div className="logo-generation-hint"><ImageSquare size={25} /><div><strong>{editing ? "替换顺序受保护" : "行业自动分类"}</strong><p>{editing ? "图片替换严格执行“删除旧图 → 上传新图 → 保存资料”；其他资料修改不会重复上传图片。" : "系统会根据“企业所属行业”和企业名称归入科技、金融、教育、医疗、商业、工业、文化等网络簇；首页节点会自动进入对应行业轨道。"}</p></div></div>
+    <button className="button primary full" disabled={busy}>{busy ? (editing ? "正在更新伙伴资料" : "正在上传到 COS 并创建") : (editing ? "保存修改并同步品牌神经网络" : "创建伙伴并加入品牌神经网络")}</button>
+  </form></div>;
+}
+
 function PartnerManager() {
   const [partners, setPartners] = useState([]);
   const [formOpen, setFormOpen] = useState(false);
-  const emptyForm = { name: "", industry: "", websiteUrl: "https://", logoMode: "upload", logoUrl: "", logoFile: null, promotionFile: null, nodeAction: "website", sort: 100, enabled: true };
-  const [form, setForm] = useState(emptyForm);
-  const [state, setState] = useState({ busy: false, message: "" });
+  const [editing, setEditing] = useState(null);
+  const [form, setForm] = useState(emptyPartnerForm);
+  const [state, setState] = useState({ busy: false, message: "", tone: "info" });
 
   async function load() {
     try { setPartners((await apiFetch("/api/admin/partners")).partners || []); }
-    catch (error) { setState({ busy: false, message: error.message }); }
+    catch (error) { setState({ busy: false, message: error.message, tone: "error" }); }
   }
   useEffect(() => { load(); }, []);
 
-  async function uploadAsset(file, kind) {
-    const ticket = await apiFetch("/api/admin/partners/assets/presign", {
-      method: "POST",
-      body: JSON.stringify({ filename: file.name, size: file.size, contentType: file.type, kind }),
+  function closeForm() { setFormOpen(false); setEditing(null); setForm(emptyPartnerForm()); }
+  function openCreate() { setEditing(null); setForm(emptyPartnerForm()); setFormOpen(true); }
+  function openEdit(partner) {
+    setEditing(partner);
+    setForm({
+      ...emptyPartnerForm(),
+      name: partner.name,
+      industry: partner.industryInput || partner.industryName || "其他",
+      websiteUrl: partner.websiteUrl,
+      logoMode: partner.logoMode || "generated",
+      logoUrl: partner.logoUrl || "",
+      logoObjectKey: partner.logoObjectKey || null,
+      promotionObjectKey: partner.promotionObjectKey || null,
+      promotionUrl: partner.promotionUrl || null,
+      nodeAction: partner.nodeAction || "website",
+      sort: Number(partner.sort ?? 100),
+      enabled: partner.enabled !== false,
+      currentLogoPreviewUrl: partner.logoPreviewUrl,
+      currentPromotionPreviewUrl: partner.promotionPreviewUrl || null,
     });
+    setFormOpen(true);
+  }
+
+  async function uploadAsset(file, kind, partnerId = null) {
+    const endpoint = partnerId ? `/api/admin/partners/${partnerId}/assets/replace` : "/api/admin/partners/assets/presign";
+    const ticket = await apiFetch(endpoint, { method: "POST", body: JSON.stringify({ filename: file.name, size: file.size, contentType: file.type, kind }) });
     let response;
-    try {
-      response = await fetch(ticket.uploadUrl, { method: "PUT", mode: "cors", headers: ticket.requiredHeaders || {}, body: file });
-    } catch {
-      throw new Error("无法连接腾讯云 COS，请刷新页面后重试；如果持续失败，请检查存储桶是否允许 www.sologle.com 跨域上传");
-    }
+    try { response = await fetch(ticket.uploadUrl, { method: "PUT", mode: "cors", headers: ticket.requiredHeaders || {}, body: file }); }
+    catch { throw new Error("无法连接腾讯云 COS，请刷新页面后重试；如果持续失败，请检查存储桶是否允许 www.sologle.com 跨域上传"); }
     if (!response.ok) throw new Error(`腾讯云 COS 上传失败（${response.status}）`);
     return ticket.objectKey;
   }
 
-  async function create(event) {
+  function partnerPayload(logoObjectKey, promotionObjectKey) {
+    return { name: form.name, industry: form.industry, websiteUrl: form.websiteUrl, logoMode: form.logoMode, logoUrl: form.logoMode === "url" ? form.logoUrl : null, logoObjectKey: form.logoMode === "upload" ? logoObjectKey : null, promotionObjectKey, promotionUrl: form.removePromotion ? null : form.promotionUrl, nodeAction: form.nodeAction, sort: form.sort, enabled: form.enabled };
+  }
+
+  async function save(event) {
     event.preventDefault();
-    setState({ busy: true, message: "" });
+    setState({ busy: true, message: "", tone: "info" });
     try {
-      if (form.logoMode === "upload" && !form.logoFile) throw new Error("请选择企业 Logo 图片");
-      if (form.nodeAction === "promotion" && !form.promotionFile) throw new Error("选择“宣传图片”跳转时，请上传宣传图片");
-      const [logoObjectKey, promotionObjectKey] = await Promise.all([
-        form.logoMode === "upload" ? uploadAsset(form.logoFile, "logo") : null,
-        form.promotionFile ? uploadAsset(form.promotionFile, "promotion") : null,
-      ]);
-      const { logoFile, promotionFile, ...payload } = form;
-      await apiFetch("/api/admin/partners", { method: "POST", body: JSON.stringify({ ...payload, logoObjectKey, promotionObjectKey }) });
-      setForm(emptyForm);
-      setFormOpen(false);
-      setState({ busy: false, message: "合作伙伴已创建，行业已自动分类，首页品牌神经网络会自动更新。" });
+      let logoObjectKey = form.logoMode === "upload" ? form.logoObjectKey : null;
+      let promotionObjectKey = form.removePromotion ? null : form.promotionObjectKey;
+      if (form.logoMode === "upload" && !logoObjectKey && !form.logoFile) throw new Error("请选择企业 Logo 图片");
+      if (form.logoMode === "upload" && form.logoFile) logoObjectKey = await uploadAsset(form.logoFile, "logo", editing?.id);
+      if (form.promotionFile) promotionObjectKey = await uploadAsset(form.promotionFile, "promotion", editing?.id);
+      if (form.nodeAction === "promotion" && !promotionObjectKey && !form.promotionUrl) throw new Error("选择“宣传图片”跳转时，请上传宣传图片");
+      const payload = partnerPayload(logoObjectKey, promotionObjectKey);
+      if (editing) await apiFetch(`/api/admin/partners/${editing.id}`, { method: "PUT", body: JSON.stringify(payload) });
+      else await apiFetch("/api/admin/partners", { method: "POST", body: JSON.stringify(payload) });
+      closeForm();
+      setState({ busy: false, message: editing ? "合作伙伴修改已保存，首页品牌神经网络已同步更新。" : "合作伙伴已创建，行业已自动分类，首页品牌神经网络会自动更新。", tone: "success" });
       await load();
-    } catch (error) { setState({ busy: false, message: error.message }); }
+    } catch (error) { setState({ busy: false, message: error.message, tone: "error" }); await load(); }
   }
 
   async function remove(id) {
-    if (!window.confirm("确定删除这个合作伙伴吗？首页会立即停止展示。")) return;
-    await apiFetch(`/api/admin/partners/${id}`, { method: "DELETE" });
-    await load();
+    if (!window.confirm("确定删除这个合作伙伴吗？对应的 COS 图片也会删除，首页会立即停止展示。")) return;
+    try { await apiFetch(`/api/admin/partners/${id}`, { method: "DELETE" }); setState({ busy: false, message: "合作伙伴及其 COS 图片已删除。", tone: "success" }); await load(); }
+    catch (error) { setState({ busy: false, message: error.message, tone: "error" }); }
   }
 
   return <section className="admin-module">
-    <header className="admin-module-head"><div><span>PARTNER ECOSYSTEM</span><h2>合作伙伴管理</h2><p>上传企业 Logo、官网与宣传图片；系统根据企业行业自动归类，并同步到首页品牌神经网络。</p></div><button className="button primary" onClick={() => setFormOpen(true)}><Plus size={17} /> 新建合作伙伴</button></header>
-    {state.message && <AdminNotice tone={state.message.startsWith("合作伙伴已") ? "success" : "error"}>{state.message}</AdminNotice>}
-    {partners.length ? <div className="admin-partner-grid">{partners.map((partner) => <article key={partner.id}><div className="admin-logo-frame"><img src={partner.logoPreviewUrl} alt={`${partner.name} Logo`} /></div><div><strong>{partner.name}</strong><a href={partner.websiteUrl} target="_blank" rel="noreferrer">{new URL(partner.websiteUrl).hostname} <ArrowSquareOut size={13} /></a><small>{partner.industryName || "其他行业"} · {partner.logoMode === "upload" ? "COS Logo" : partner.logoMode === "generated" ? "自动 Logo" : "外部 Logo"} · 排序 {partner.sort}</small>{partner.promotionPreviewUrl && <a className="partner-promo-link" href={partner.promotionPreviewUrl} target="_blank" rel="noreferrer"><ImageSquare size={16} /> 查看宣传图片</a>}</div><button className="icon-danger" onClick={() => remove(partner.id)} aria-label={`删除 ${partner.name}`}><Trash size={17} /></button></article>)}</div> : <EmptyState icon={Handshake} title="还没有合作伙伴" text="创建第一家伙伴后，首页会自动出现品牌神经网络。" />}
-    {formOpen && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !state.busy && setFormOpen(false)}><form className="admin-form-modal partner-form-modal" onSubmit={create}><button className="modal-close" type="button" disabled={state.busy} onClick={() => setFormOpen(false)}><X size={18} /></button><span>NEW PARTNER</span><h2>新建合作伙伴</h2><div className="admin-form-grid"><label><span>企业名称</span><input required minLength={2} maxLength={80} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：中科智能" /></label><label><span>企业所属行业</span><input required maxLength={80} value={form.industry} onChange={(event) => setForm({ ...form, industry: event.target.value })} placeholder="例如：人工智能软件" /></label><label className="span-2"><span>官网网址</span><input required type="url" value={form.websiteUrl} onChange={(event) => setForm({ ...form, websiteUrl: event.target.value })} placeholder="https://example.com" /></label><label><span>Logo 方式</span><select value={form.logoMode} onChange={(event) => setForm({ ...form, logoMode: event.target.value })}><option value="upload">上传企业 Logo（推荐）</option><option value="generated">根据名称自动生成</option><option value="url">使用 HTTPS 图片链接</option></select></label>{form.logoMode === "upload" && <label><span>企业 Logo 图片</span><input required type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => setForm({ ...form, logoFile: event.target.files?.[0] || null })} /></label>}{form.logoMode === "url" && <label><span>Logo 图片链接</span><input required type="url" value={form.logoUrl} onChange={(event) => setForm({ ...form, logoUrl: event.target.value })} placeholder="https://example.com/logo.png" /></label>}<label><span>宣传图片（可选）</span><input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => setForm({ ...form, promotionFile: event.target.files?.[0] || null })} /></label><label><span>点击 Logo 后</span><select value={form.nodeAction} onChange={(event) => setForm({ ...form, nodeAction: event.target.value })}><option value="website">新标签页打开官网</option><option value="promotion">弹窗放大宣传图片</option></select></label><label><span>首页排序</span><input type="number" value={form.sort} onChange={(event) => setForm({ ...form, sort: Number(event.target.value) })} /></label></div><div className="logo-generation-hint"><ImageSquare size={25} /><div><strong>行业自动分类</strong><p>系统会根据“企业所属行业”和企业名称归入科技、金融、教育、医疗、商业、工业、文化等网络簇；首页节点会自动进入对应行业轨道。</p></div></div><button className="button primary full" disabled={state.busy}>{state.busy ? "正在上传到 COS 并创建" : "创建伙伴并加入品牌神经网络"}</button></form></div>}
+    <header className="admin-module-head"><div><span>PARTNER ECOSYSTEM</span><h2>合作伙伴管理</h2><p>创建、修改企业 Logo、官网与宣传图片；图片替换先清理 COS 旧图，再同步首页品牌神经网络。</p></div><button className="button primary" onClick={openCreate}><Plus size={17} /> 新建合作伙伴</button></header>
+    {state.message && <AdminNotice tone={state.tone}>{state.message}</AdminNotice>}
+    {partners.length ? <div className="admin-partner-grid">{partners.map((partner) => <article key={partner.id}><div className="admin-logo-frame"><img src={partner.logoPreviewUrl} alt={`${partner.name} Logo`} /></div><div><strong>{partner.name}</strong><a href={partner.websiteUrl} target="_blank" rel="noreferrer">{new URL(partner.websiteUrl).hostname} <ArrowSquareOut size={13} /></a><small>{partner.industryName || "其他行业"} · {partner.logoMode === "upload" ? "COS Logo" : partner.logoMode === "generated" ? "自动 Logo" : "外部 Logo"} · 排序 {partner.sort}</small>{partner.promotionPreviewUrl && <a className="partner-promo-link" href={partner.promotionPreviewUrl} target="_blank" rel="noreferrer"><ImageSquare size={16} /> 查看宣传图片</a>}</div><div className="admin-partner-actions"><button className="icon-edit" onClick={() => openEdit(partner)} aria-label={`修改 ${partner.name}`}><PencilSimple size={17} /></button><button className="icon-danger" onClick={() => remove(partner.id)} aria-label={`删除 ${partner.name}`}><Trash size={17} /></button></div></article>)}</div> : <EmptyState icon={Handshake} title="还没有合作伙伴" text="创建第一家伙伴后，首页会自动出现品牌神经网络。" />}
+    {formOpen && <PartnerFormModal editing={editing} form={form} setForm={setForm} busy={state.busy} onClose={closeForm} onSubmit={save} />}
   </section>;
 }
 

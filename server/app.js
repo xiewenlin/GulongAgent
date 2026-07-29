@@ -188,6 +188,25 @@ function partnerLogoUrl(partner) {
   return partner.logoMode === "url" ? partner.logoUrl : `/api/partners/${partner._id}/logo.svg`;
 }
 
+function partnerAssetUploadInput(body) {
+  const kind = body.kind === "promotion" ? "promotion" : body.kind === "logo" ? "logo" : null;
+  const contentType = String(body.contentType || "").toLowerCase();
+  const size = Number(body.size);
+  const filename = sanitizeFilename(body.filename, `${kind || "image"}.png`);
+  if (!kind || !["image/png", "image/jpeg", "image/webp", "image/gif"].includes(contentType) || !Number.isSafeInteger(size) || size < 1 || size > 30 * 1024 * 1024) return null;
+  return { kind, contentType, size, filename };
+}
+
+function partnerAssetUploadTicket({ kind, contentType, filename }) {
+  const objectKey = `partners/assets/${kind}/${Date.now()}-${randomBytes(10).toString("hex")}-${filename}`;
+  return {
+    uploadUrl: createPresignedPutUrl(objectKey, { headers: { "Content-Type": contentType } }),
+    objectKey,
+    expiresIn: 1200,
+    requiredHeaders: { "Content-Type": contentType },
+  };
+}
+
 function safeDate(value, endOfDay = false) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ""))) return null;
   const date = new Date(`${value}T${endOfDay ? "23:59:59.999" : "00:00:00.000"}+08:00`);
@@ -1752,11 +1771,8 @@ app.post("/api/admin/partners/assets/presign", async (c) => {
   const rejected = requireTrustedMutation(c); if (rejected) return rejected;
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
   const body = await c.req.json();
-  const kind = body.kind === "promotion" ? "promotion" : body.kind === "logo" ? "logo" : null;
-  const contentType = String(body.contentType || "").toLowerCase();
-  const size = Number(body.size);
-  const filename = sanitizeFilename(body.filename, `${kind || "image"}.png`);
-  if (!kind || !["image/png", "image/jpeg", "image/webp", "image/gif"].includes(contentType) || !Number.isSafeInteger(size) || size < 1 || size > 30 * 1024 * 1024) {
+  const input = partnerAssetUploadInput(body);
+  if (!input) {
     return c.json({ code: "VALIDATION_ERROR", message: "仅支持 PNG、JPG、WebP 或 GIF 图片，单张不超过 30 MB" }, 400);
   }
   try {
@@ -1764,8 +1780,39 @@ app.post("/api/admin/partners/assets/presign", async (c) => {
   } catch {
     return c.json({ code: "COS_CORS_CONFIGURATION_FAILED", message: "腾讯云 COS 暂未允许官网上传图片，请确认当前密钥具有存储桶跨域配置权限后重试" }, 503);
   }
-  const objectKey = `partners/assets/${kind}/${Date.now()}-${randomBytes(10).toString("hex")}-${filename}`;
-  return c.json({ uploadUrl: createPresignedPutUrl(objectKey, { headers: { "Content-Type": contentType } }), objectKey, expiresIn: 1200, requiredHeaders: { "Content-Type": contentType } }, 201);
+  return c.json(partnerAssetUploadTicket(input), 201);
+});
+
+app.post("/api/admin/partners/:id/assets/replace", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "NOT_FOUND", message: "合作伙伴不存在" }, 404);
+  const body = await c.req.json();
+  const input = partnerAssetUploadInput(body);
+  if (!input) return c.json({ code: "VALIDATION_ERROR", message: "仅支持 PNG、JPG、WebP 或 GIF 图片，单张不超过 30 MB" }, 400);
+  try {
+    await ensureBrowserUploadCors();
+  } catch {
+    return c.json({ code: "COS_CORS_CONFIGURATION_FAILED", message: "腾讯云 COS 暂未允许官网上传图片，请确认当前密钥具有存储桶跨域配置权限后重试" }, 503);
+  }
+  const partners = await getCollection("partners");
+  const partnerId = new ObjectId(c.req.param("id"));
+  const partner = await partners.findOne({ _id: partnerId });
+  if (!partner) return c.json({ code: "NOT_FOUND", message: "合作伙伴不存在" }, 404);
+  const assetField = input.kind === "logo" ? "logoObjectKey" : "promotionObjectKey";
+  const previousObjectKey = partner[assetField] || null;
+  if (previousObjectKey) {
+    try {
+      await deleteObject(previousObjectKey);
+    } catch {
+      return c.json({ code: "COS_DELETE_FAILED", message: "旧图片尚未从腾讯云 COS 删除，请稍后重试" }, 502);
+    }
+    await partners.updateOne(
+      { _id: partnerId, [assetField]: previousObjectKey },
+      { $set: { [assetField]: null, updatedAt: new Date() } },
+    );
+  }
+  return c.json({ ...partnerAssetUploadTicket(input), previousDeleted: Boolean(previousObjectKey) }, 201);
 });
 
 app.post("/api/admin/partners", async (c) => {
@@ -1805,6 +1852,10 @@ app.put("/api/admin/partners/:id", async (c) => {
   const rejected = requireTrustedMutation(c); if (rejected) return rejected;
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
   if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "NOT_FOUND", message: "合作伙伴不存在" }, 404);
+  const partners = await getCollection("partners");
+  const partnerId = new ObjectId(c.req.param("id"));
+  const current = await partners.findOne({ _id: partnerId });
+  if (!current) return c.json({ code: "NOT_FOUND", message: "合作伙伴不存在" }, 404);
   const body = await c.req.json();
   const name = String(body.name || "").trim();
   const websiteUrl = parseHttpUrl(body.websiteUrl);
@@ -1819,12 +1870,34 @@ app.put("/api/admin/partners/:id", async (c) => {
   if (name.length < 2 || name.length > 80 || industry.length < 2 || industry.length > 80 || !websiteUrl || (logoMode === "url" && !logoUrl) || (logoMode === "upload" && !logoObjectKey) || (nodeAction === "promotion" && !promotionObjectKey && !promotionUrl)) {
     return c.json({ code: "VALIDATION_ERROR", message: "企业名称、所属行业、官网网址或 Logo 信息不正确" }, 400);
   }
-  const result = await (await getCollection("partners")).updateOne(
-    { _id: new ObjectId(c.req.param("id")) },
+  const bypassedReplacementFlow = [
+    current.logoObjectKey && logoObjectKey && current.logoObjectKey !== logoObjectKey,
+    current.promotionObjectKey && promotionObjectKey && current.promotionObjectKey !== promotionObjectKey,
+  ].some(Boolean);
+  if (bypassedReplacementFlow) {
+    return c.json({ code: "PARTNER_ASSET_REPLACE_REQUIRED", message: "替换图片前必须先调用图片替换接口删除 COS 旧图" }, 409);
+  }
+  const changedObjectKeys = [
+    logoObjectKey && logoObjectKey !== current.logoObjectKey ? logoObjectKey : null,
+    promotionObjectKey && promotionObjectKey !== current.promotionObjectKey ? promotionObjectKey : null,
+  ].filter(Boolean);
+  if (changedObjectKeys.length) {
+    try { await Promise.all(changedObjectKeys.map((objectKey) => headObject(objectKey))); }
+    catch { return c.json({ code: "ASSET_NOT_FOUND", message: "新的 Logo 或宣传图片尚未完整上传到 COS" }, 409); }
+  }
+  const staleObjectKeys = [
+    current.logoObjectKey && current.logoObjectKey !== logoObjectKey ? current.logoObjectKey : null,
+    current.promotionObjectKey && current.promotionObjectKey !== promotionObjectKey ? current.promotionObjectKey : null,
+  ].filter(Boolean);
+  if (staleObjectKeys.length) {
+    try { await Promise.all(staleObjectKeys.map((objectKey) => deleteObject(objectKey))); }
+    catch { return c.json({ code: "COS_DELETE_FAILED", message: "旧图片尚未从腾讯云 COS 删除，合作伙伴资料未修改" }, 502); }
+  }
+  const result = await partners.updateOne(
+    { _id: partnerId },
     { $set: { name, websiteUrl, logoMode, logoUrl, logoObjectKey, promotionObjectKey, promotionUrl, nodeAction, ...classification, enabled: body.enabled !== false, sort: Number(body.sort || 100), updatedAt: new Date() } },
   );
-  if (!result.matchedCount) return c.json({ code: "NOT_FOUND", message: "合作伙伴不存在" }, 404);
-  return c.json({ ok: true });
+  return c.json({ ok: Boolean(result.matchedCount), classification });
 });
 
 app.delete("/api/admin/partners/:id", async (c) => {

@@ -14,3 +14,5 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 - Preserve the ivory porcelain base, jade-green actions, pale-gold accents, restrained borders and shadows, and code-native light product UI.
 - The first 1536 × 1024 viewport must contain the hero, 理解/组装/执行/进化 flow, and four-capability strip.
 - Keep all theme variants light, calm, and legible; do not introduce gradients or a dark default theme.
+- The partner-brand neural network may use a contained dark holographic canvas, matching the Second Brain visualization, while the surrounding homepage remains light and porcelain-toned.
+- Partner-network rotation must pause only through its explicit control. Hovering a node or the canvas must never pause it, and the removed bottom status/instruction card must not be restored.

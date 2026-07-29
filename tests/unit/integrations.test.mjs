@@ -92,6 +92,32 @@ test("COS browser uploads allow both official domains without removing existing 
   assert.deepEqual(merged[1].AllowedHeader, ["*"]);
 });
 
+test("partner edits delete replaced COS images before issuing the next browser upload", async () => {
+  const serverSource = await readFile(new URL("../../server/app.js", import.meta.url), "utf8");
+  const routeStart = serverSource.indexOf('app.post("/api/admin/partners/:id/assets/replace"');
+  const routeEnd = serverSource.indexOf('app.post("/api/admin/partners"', routeStart);
+  const replacementRoute = serverSource.slice(routeStart, routeEnd);
+  assert.ok(routeStart > 0);
+  assert.ok(replacementRoute.indexOf("await deleteObject(previousObjectKey)") < replacementRoute.indexOf("partnerAssetUploadTicket(input)"));
+  assert.match(replacementRoute, /\[assetField\]: null/);
+  assert.match(serverSource, /PARTNER_ASSET_REPLACE_REQUIRED/);
+
+  const adminSource = await readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8");
+  assert.match(adminSource, /修改 \$\{editing\.name\}/);
+  assert.match(adminSource, /当前 Logo/);
+  assert.match(adminSource, /\/assets\/replace/);
+  assert.match(adminSource, /保存修改并同步品牌神经网络/);
+});
+
+test("partner hologram uses explicit controls without hover-to-pause messaging", async () => {
+  const source = await readFile(new URL("../../src/components/PartnerNetwork.jsx", import.meta.url), "utf8");
+  assert.match(source, /复位视角/);
+  assert.match(source, /全息预览/);
+  assert.match(source, /createPortal\(networkStage, document\.body\)/);
+  assert.doesNotMatch(source, /onMouseEnter=.*setPaused/);
+  assert.doesNotMatch(source, /已暂停，方便选择节点|partner-network-note/);
+});
+
 test("OpenAPI document includes Chandler admin, offline credentials, dated attachments and releases", async () => {
   const response = await app.request("http://localhost/api/openapi.json");
   assert.equal(response.status, 200);
@@ -245,6 +271,7 @@ test("Vercel consolidates nested account and configuration routes", async () => 
   assert.ok(sources.includes("/api/admin/analytics/:path*"));
   assert.ok(sources.includes("/api/admin/partners"));
   assert.ok(sources.includes("/api/admin/partners/assets/presign"));
+  assert.ok(sources.includes("/api/admin/partners/:id/assets/replace"));
   assert.ok(sources.includes("/api/analytics/:path*"));
   assert.ok(sources.includes("/api/admin/release-channels/:id/manual-upload"));
   assert.ok(sources.includes("/api/admin/release-uploads/:id/complete"));

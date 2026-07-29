@@ -26,6 +26,31 @@
 
 final result: passed
 
+## 2026-07-30 合作伙伴全息神经网络与编辑流程
+
+### 视觉依据与实现证据
+
+- 参考页面截图：`docs/design/partner-network-reference-yeschic.png`
+- 控件参考图：`C:/Users/YCAI/AppData/Local/Temp/codex-clipboard-f73e579a-b9f9-4ef3-8e01-6aa5fe65a5e8.png`
+- 删除区域参考图：`C:/Users/YCAI/AppData/Local/Temp/codex-clipboard-08a86539-dea2-4198-a9ce-f4c9a0677c1e.png`
+- 全息网络实现：`docs/design/partner-network-fullscreen.png`
+- 右上角控件实现：`docs/design/partner-network-controls.png`
+- 合作伙伴编辑弹窗：`docs/design/partner-admin-edit.png`
+- 对照视口：参考页与实现页均为 1280 × 720。
+
+### 交互与视觉验收
+
+- P1：首轮节点在左上区域出现重叠；已按行业组重新分散纬度偏移并收敛前景节点最大尺寸，第二轮对照通过。
+- P1：鼠标移入节点或画布时动画保持运行，只能使用“暂停/继续”按钮控制。
+- P1：已删除“品牌网络正在实时旋转 / 已暂停，方便选择节点”底部提示卡片及相关样式。
+- P1：暂停、继续、复位视角、全息预览和退出全屏均可操作；拖拽旋转、滚轮缩放可用。
+- P1：合作伙伴编辑弹窗支持查看当前 Logo/宣传图、替换或删除图片，保存后同步品牌神经网络。
+- P2：控件固定在画布右上角，图标、字号、边框和深色半透明质感与参考图一致。
+- P2：全息画布使用真实合作伙伴 Logo 和真实行业分类数据，外层官网仍保持玉瓷浅色视觉。
+- 可访问性：按钮包含可读文本/`aria-label`，全屏支持 Escape 退出，键盘焦点样式沿用全站系统。
+
+final result: passed
+
 ## 2026-07-29 全站 18px 与账号身份修复
 
 ### 对照基础

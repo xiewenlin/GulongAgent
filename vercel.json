@@ -65,6 +65,10 @@
       "destination": "/api/platform?_platform_path=admin/partners/:id"
     },
     {
+      "source": "/api/admin/partners/:id/assets/replace",
+      "destination": "/api/platform?_platform_path=admin/partners/:id/assets/replace"
+    },
+    {
       "source": "/api/admin/partners",
       "destination": "/api/platform?_platform_path=admin/partners"
     },
