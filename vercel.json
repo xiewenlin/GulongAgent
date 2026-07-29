@@ -21,6 +21,42 @@
   ],
   "rewrites": [
     {
+      "source": "/api/releases/:path*",
+      "destination": "/api/platform?_platform_path=releases/:path*"
+    },
+    {
+      "source": "/api/partners/:id/logo.svg",
+      "destination": "/api/platform?_platform_path=partners/:id/logo.svg"
+    },
+    {
+      "source": "/api/brain/uploads/:path*",
+      "destination": "/api/platform?_platform_path=brain/uploads/:path*"
+    },
+    {
+      "source": "/api/admin/chandler/:path*",
+      "destination": "/api/platform?_platform_path=admin/chandler/:path*"
+    },
+    {
+      "source": "/api/admin/partners/:id",
+      "destination": "/api/platform?_platform_path=admin/partners/:id"
+    },
+    {
+      "source": "/api/admin/brain-attachments/:id/download",
+      "destination": "/api/platform?_platform_path=admin/brain-attachments/:id/download"
+    },
+    {
+      "source": "/api/admin/offline-payments/:id/:action",
+      "destination": "/api/platform?_platform_path=admin/offline-payments/:id/:action"
+    },
+    {
+      "source": "/api/release-worker/:path*",
+      "destination": "/api/platform?_platform_path=release-worker/:path*"
+    },
+    {
+      "source": "/api/v1/brain/attachments/:path*",
+      "destination": "/api/platform?_platform_path=v1/brain/attachments/:path*"
+    },
+    {
       "source": "/((?!api/).*)",
       "destination": "/index.html"
     }

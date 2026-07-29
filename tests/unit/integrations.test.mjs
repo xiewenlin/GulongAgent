@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import app from "../../server/app.js";
+import platform from "../../api/platform.js";
 import { chandlerConfig, externalAuthFromResponse } from "../../server/chandler.js";
 import { cosConfig, sanitizeFilename } from "../../server/cos.js";
 import { readExternalAuth, sealExternalAuth } from "../../server/security.js";
@@ -47,4 +48,10 @@ test("OpenAPI document includes Chandler admin, offline credentials, dated attac
   assert.ok(document.paths["/api/admin/chandler/catalog"]);
   assert.ok(document.paths["/api/admin/chandler/prices"]);
   assert.ok(document.paths["/api/admin/chandler/entitlement-requests"]);
+});
+
+test("Vercel platform entry restores nested API paths", async () => {
+  const response = await platform.fetch(new Request("https://example.test/api/platform?_platform_path=releases/latest"));
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { release: null });
 });
