@@ -1,4 +1,6 @@
 import {
+  createCipheriv,
+  createDecipheriv,
   createHash,
   createHmac,
   randomBytes,
@@ -63,7 +65,7 @@ export function fingerprintIp(value = "unknown") {
     .slice(0, 24);
 }
 
-export async function issueSession(c, userId) {
+export async function issueSession(c, userId, { externalAuth } = {}) {
   await ensureIndexes();
   const raw = `gls_${randomBytes(32).toString("base64url")}`;
   const now = new Date();
@@ -75,6 +77,7 @@ export async function issueSession(c, userId) {
     expiresAt,
     lastSeenAt: now,
     ipFingerprint: fingerprintIp(c.req.header("x-forwarded-for") || "local"),
+    ...(externalAuth ? { externalAuth: sealExternalAuth(externalAuth) } : {}),
   });
   setCookie(c, SESSION_COOKIE, raw, {
     httpOnly: true,
@@ -126,9 +129,48 @@ function publicUser(user) {
     id: user._id.toString(),
     username: user.username || null,
     email: user.email || null,
+    displayName: user.displayName || null,
+    avatar: user.avatar || null,
+    authProvider: user.authProvider || "local",
     role: user.role || "user",
     createdAt: user.createdAt,
   };
+}
+
+function externalAuthKey() {
+  return createHash("sha256")
+    .update(`gulong-external-auth:${secret("SESSION_SECRET")}`)
+    .digest();
+}
+
+export function sealExternalAuth(value) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", externalAuthKey(), iv);
+  const ciphertext = Buffer.concat([
+    cipher.update(JSON.stringify(value), "utf8"),
+    cipher.final(),
+  ]);
+  return [
+    "v1",
+    iv.toString("base64url"),
+    cipher.getAuthTag().toString("base64url"),
+    ciphertext.toString("base64url"),
+  ].join(".");
+}
+
+export function readExternalAuth(session) {
+  try {
+    const [version, ivValue, tagValue, ciphertextValue] = String(session?.externalAuth || "").split(".");
+    if (version !== "v1") return null;
+    const decipher = createDecipheriv("aes-256-gcm", externalAuthKey(), Buffer.from(ivValue, "base64url"));
+    decipher.setAuthTag(Buffer.from(tagValue, "base64url"));
+    return JSON.parse(Buffer.concat([
+      decipher.update(Buffer.from(ciphertextValue, "base64url")),
+      decipher.final(),
+    ]).toString("utf8"));
+  } catch {
+    return null;
+  }
 }
 
 async function authenticateApiKey(raw, requiredScopes) {

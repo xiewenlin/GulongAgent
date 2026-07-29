@@ -6,12 +6,15 @@ import {
   Database,
   Devices,
   FlowArrow,
+  Handshake,
   Palette,
   PuzzlePiece,
   ShieldCheck,
   Sparkle,
   WindowsLogo,
 } from "@phosphor-icons/react";
+import { useEffect, useState } from "react";
+import { apiFetch } from "../api.js";
 import { capabilities, workflowSteps } from "../data/site.js";
 import { ProductDemo } from "./ProductDemo.jsx";
 
@@ -22,7 +25,13 @@ const iconMap = {
   devices: Devices,
 };
 
-export function HomePage({ navigate, openTheme, themeIcon }) {
+export function HomePage({ navigate, openTheme, themeIcon, downloadLatest }) {
+  const [partners, setPartners] = useState([]);
+
+  useEffect(() => {
+    apiFetch("/api/partners").then((result) => setPartners(result.partners || [])).catch(() => setPartners([]));
+  }, []);
+
   return (
     <>
       <main id="main-content">
@@ -34,7 +43,7 @@ export function HomePage({ navigate, openTheme, themeIcon }) {
             <h2>让每个人，都拥有自己的 <em>AI 团队</em></h2>
             <p>把目标交给古龙：它会自动选择最合适的模型，调用插件、技能与工作流，把执行经验沉淀进第二大脑，并让每一步都可追溯、可恢复、可持续。</p>
             <div className="hero-actions">
-              <button className="button primary" type="button" onClick={() => navigate("/download")}><WindowsLogo size={20} weight="fill" /> 下载 Windows 版</button>
+              <button className="button primary" type="button" onClick={downloadLatest}><WindowsLogo size={20} weight="fill" /> 下载 Windows 版</button>
               <button className="button secondary" type="button" onClick={() => navigate("/developer")}><Code size={20} /> 开发者接入</button>
             </div>
             <div className="trust-row">
@@ -83,6 +92,15 @@ export function HomePage({ navigate, openTheme, themeIcon }) {
           })}
         </section>
 
+        {partners.length > 0 && (
+          <section className="partners-section section-shell" aria-labelledby="partners-title">
+            <div className="partners-heading"><div className="partners-symbol"><Handshake size={24} weight="duotone" /></div><div><span>合作伙伴</span><h2 id="partners-title">他们都在用古龙智能引擎</h2><p>与值得信赖的团队一起，把可持续进化的智能体能力带进真实业务。</p></div></div>
+            <div className="partner-logo-grid">
+              {partners.map((partner) => <a key={partner.id} href={partner.websiteUrl} target="_blank" rel="noopener noreferrer" aria-label={`访问 ${partner.name} 官网`}><img src={partner.logoUrl} alt={`${partner.name} Logo`} loading="lazy" /><span>{partner.name}</span></a>)}
+            </div>
+          </section>
+        )}
+
         <section className="local-first section-shell" id="brain">
           <div>
             <span className="section-kicker">LOCAL-FIRST, CLOUD-READY</span>
@@ -102,7 +120,7 @@ export function HomePage({ navigate, openTheme, themeIcon }) {
         <section className="closing-cta section-shell">
           <img src={themeIcon} alt="古龙主题图标" />
           <div><span>你的 AI 团队，今天开始成长</span><h2>把下一个想法交给古龙</h2></div>
-          <button className="button primary" type="button" onClick={() => navigate("/download")}>免费下载 <ArrowRight size={18} /></button>
+          <button className="button primary" type="button" onClick={downloadLatest}>免费下载 <ArrowRight size={18} /></button>
         </section>
       </main>
     </>

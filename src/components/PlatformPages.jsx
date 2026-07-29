@@ -40,11 +40,13 @@ function EmptyConfig({ children }) {
 
 export function DownloadPage({ themeIcon }) {
   const [links, setLinks] = useState([]);
+  const [release, setRelease] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [downloadError, setDownloadError] = useState("");
 
   useEffect(() => {
     apiFetch("/api/downloads")
-      .then((result) => setLinks(result.links || []))
+      .then((result) => { setLinks(result.links || []); setRelease(result.release || null); })
       .catch(() => setLinks([]))
       .finally(() => setLoading(false));
   }, []);
@@ -55,15 +57,28 @@ export function DownloadPage({ themeIcon }) {
     { id: "baidu", name: "百度网盘", text: "覆盖广泛，支持提取码与断点续传", accent: "blue" },
   ];
 
+  async function downloadRelease() {
+    if (!release?.channelId) return;
+    setDownloadError("");
+    try {
+      const result = await apiFetch(`/api/releases/${release.channelId}/download`);
+      window.location.assign(result.url);
+    } catch (error) {
+      setDownloadError(error.message);
+    }
+  }
+
   return (
     <main id="main-content">
       <PageIntro eyebrow="WINDOWS DESKTOP" title="下载古龙桌面版" description="完整离线安装，优先使用内置 Node、Git 与能力包；联网时仅在需要时修复组件。" />
       <section className="download-layout section-shell">
         <article className="download-primary">
           <div className="download-mark"><img src={themeIcon} alt="古龙主题图标" /></div>
-          <div><span>Windows 10 / 11 · x64</span><h2>古龙 Gulong Agent Engine</h2><p>本地优先运行，内置插件、技能、工作流与恢复机制。下载后即可安装，无需额外配置开发环境。</p></div>
-          <div className="release-meta"><span>最新稳定版</span><strong>v0.17.2</strong><small>完整离线安装包</small></div>
+          <div><span>Windows 10 / 11 · x64</span><h2>古龙 Gulong Agent Engine</h2><p>安装包由“用户管理 → 主题访问权限”对应发行渠道自动构建，并在腾讯云 COS 中仅保留最新版本。</p>{release && <button className="button primary" type="button" onClick={downloadRelease}><DownloadSimple size={18} /> 直接下载最新版</button>}</div>
+          <div className="release-meta"><span>{release?.channelName || "默认发行渠道"}</span><strong>{release?.version ? `v${release.version.replace(/^v/i, "")}` : "准备中"}</strong><small>{release?.filename || "完整离线安装包"}</small></div>
         </article>
+        {release && <div className="release-integrity"><span>SHA-256</span><code>{release.sha256 || "构建完成后公布"}</code><small>{release.bytes ? `${(release.bytes / 1024 / 1024).toFixed(1)} MB` : ""} · {release.signatureStatus || "签名状态待确认"}</small></div>}
+        {downloadError && <div className="form-error">{downloadError}</div>}
         <div className="download-providers">
           {providers.map((provider) => {
             const link = links.find((item) => item.id === provider.id);
@@ -76,7 +91,7 @@ export function DownloadPage({ themeIcon }) {
             );
           })}
         </div>
-        <div className="download-note"><ShieldCheck size={22} /><div><strong>安装包安全说明</strong><p>下载后请核对官网公布的版本与 SHA-256。正式发行前需配置 Windows 代码签名证书，避免“未知发布者”提示。</p></div></div>
+        <div className="download-note"><ShieldCheck size={22} /><div><strong>安装包安全说明</strong><p>直接下载链接为腾讯云 COS 的 15 分钟限时签名地址。下载后请核对版本与 SHA-256；企业发行仍建议配置 Windows 代码签名证书。</p></div></div>
       </section>
     </main>
   );
@@ -209,8 +224,8 @@ export function PricingPage({ user, openAuth, navigate }) {
     <main id="main-content">
       <PageIntro eyebrow="SIMPLE PRICING" title="把成本花在真正困难的任务上" description="普通能力永久免费；会员解锁第二大脑、多端消息、本地模型与完整创作流水线。" />
       <section className="pricing-controls section-shell">
-        <div className="cycle-switch"><button className={cycle === "month" ? "active" : ""} onClick={() => setCycle("month")}>按月订阅</button><button className={cycle === "year" ? "active" : ""} onClick={() => setCycle("year")}>按年订阅 <span>省 ¥1,377</span></button></div>
-        <div className="provider-switch"><span>支付方式</span><button className={provider === "wechat" ? "active" : ""} onClick={() => setProvider("wechat")}>微信支付</button><button className={provider === "alipay" ? "active" : ""} onClick={() => setProvider("alipay")}>支付宝</button></div>
+        <div className="cycle-switch"><button className={cycle === "month" ? "active" : ""} onClick={() => setCycle("month")}>按月订阅</button><button className={cycle === "year" ? "active" : ""} onClick={() => setCycle("year")}>按年订阅 <span>省 ¥596</span></button></div>
+        <div className="provider-switch"><span>支付方式</span><button className={provider === "wechat" ? "active" : ""} onClick={() => setProvider("wechat")}>微信支付</button><button className={provider === "alipay" ? "active" : ""} onClick={() => setProvider("alipay")}>支付宝</button><button className={provider === "offline" ? "active" : ""} onClick={() => setProvider("offline")}>线下支付</button></div>
       </section>
       <section className="pricing-grid section-shell">
         {plans.map((plan) => (
@@ -234,8 +249,11 @@ export function PricingPage({ user, openAuth, navigate }) {
 }
 
 function PaymentDialog({ payment, provider, onClose }) {
+  if (payment.mode === "offline") {
+    return <div className="modal-backdrop"><section className="payment-modal" role="dialog" aria-modal="true"><button className="modal-close" onClick={onClose}><X size={19} /></button><div className="payment-logo"><ShieldCheck size={28} /></div><h2>线下支付申请已提交</h2><p>申请单 {payment.orderNo} 已进入管理员审核队列。确认到账后，会员有效期会同步到 Chandler 与古龙桌面端。</p><div className="form-success">待审核 · {formatMoney(payment.amountFen)}</div><button className="button primary full" onClick={onClose}>我知道了</button></section></div>;
+  }
   return (
-    <div className="modal-backdrop"><section className="payment-modal" role="dialog" aria-modal="true"><button className="modal-close" onClick={onClose}><X size={19} /></button><div className="payment-logo"><CreditCard size={28} /></div><h2>{provider === "wechat" ? "微信支付" : "支付宝"}</h2><p>订单 {payment.orderNo} 已创建。请在新的支付窗口完成付款。</p><a className="button primary full" href={payment.paymentUrl} target="_blank" rel="noreferrer">打开支付页面 <ArrowRight size={17} /></a><small>支付完成后，会员权益会由签名验证通过的异步通知自动生效。</small></section></div>
+    <div className="modal-backdrop"><section className="payment-modal" role="dialog" aria-modal="true"><button className="modal-close" onClick={onClose}><X size={19} /></button><div className="payment-logo"><CreditCard size={28} /></div><h2>{provider === "wechat" ? "微信支付" : "支付宝"}</h2><p>订单 {payment.orderNo} 已由 Chandler 创建。{payment.qrCodeDataUrl ? "请扫码完成付款。" : "请在新的支付窗口完成付款。"}</p>{payment.qrCodeDataUrl && <img className="payment-qr" src={payment.qrCodeDataUrl} alt="微信支付二维码" />}{payment.paymentUrl && !payment.qrCodeDataUrl && <a className="button primary full" href={payment.paymentUrl} target="_blank" rel="noreferrer">打开支付页面 <ArrowRight size={17} /></a>}<small>支付结果、订阅与余额由 Chandler 公共 OpenAPI 统一记录。</small></section></div>
   );
 }
 
@@ -247,7 +265,7 @@ function RechargeDialog({ provider, onClose, navigate }) {
     event.preventDefault();
     setBusy(true);
     try {
-      const result = await apiFetch("/api/billing/orders", { method: "POST", body: JSON.stringify({ kind: "recharge", provider, amountFen: Math.round(amount * 100) }) });
+      const result = await apiFetch("/api/billing/orders", { method: "POST", body: JSON.stringify({ kind: "recharge", provider: provider === "offline" ? "wechat" : provider, amountFen: Math.round(amount * 100) }) });
       if (result.paymentUrl?.startsWith("/")) navigate(result.paymentUrl);
       else window.open(result.paymentUrl, "_blank", "noopener,noreferrer");
       onClose();
@@ -268,14 +286,23 @@ export function BrainUploadPanel({ user, openAuth, embedded = false }) {
     if (!file) return setMessage("请选择 ZIP 文件");
     setBusy(true); setMessage(""); setProgress(5);
     try {
-      const { upload } = await import("@vercel/blob/client");
-      await upload(`second-brain/${user.id}/${file.name}`, file, {
-        access: "public",
-        handleUploadUrl: "/api/uploads/token",
-        clientPayload: JSON.stringify({ kind: "brain" }),
-        multipart: true,
-        onUploadProgress: ({ percentage }) => setProgress(Math.round(percentage)),
+      const ticket = await apiFetch("/api/brain/uploads/presign", {
+        method: "POST",
+        body: JSON.stringify({ filename: file.name, size: file.size, contentType: file.type || "application/zip" }),
       });
+      await new Promise((resolve, reject) => {
+        const request = new XMLHttpRequest();
+        request.open("PUT", ticket.uploadUrl, true);
+        Object.entries(ticket.requiredHeaders || {}).forEach(([name, value]) => request.setRequestHeader(name, value));
+        request.upload.onprogress = (progressEvent) => {
+          if (progressEvent.lengthComputable) setProgress(Math.max(5, Math.round((progressEvent.loaded / progressEvent.total) * 96)));
+        };
+        request.onerror = () => reject(new Error("上传到腾讯云 COS 失败，请检查网络和存储桶跨域配置"));
+        request.onload = () => request.status >= 200 && request.status < 300 ? resolve() : reject(new Error(`腾讯云 COS 返回 ${request.status}`));
+        request.send(file);
+      });
+      await apiFetch(`/api/brain/uploads/${ticket.uploadId}/complete`, { method: "POST", body: "{}" });
+      setProgress(100);
       setMessage("上传完成，已进入自动分析队列。后续版本会基于对话记录定位问题、挖掘需求并生成升级建议。");
       setFile(null);
     } catch (reason) {
@@ -286,14 +313,14 @@ export function BrainUploadPanel({ user, openAuth, embedded = false }) {
   return (
       <section className={`upload-grid ${embedded ? "embedded" : "section-shell"}`}>
         <form className="upload-card" onSubmit={uploadFile}>
-          <div className="upload-drop"><FileZip size={42} /><h2>上传第二大脑 ZIP</h2><p>支持分片直传，单个文件最大 500 MB；仅账号本人可查看处理记录。</p><label className="button secondary"><UploadSimple size={18} /> 选择 ZIP<input type="file" accept=".zip,application/zip,application/x-zip-compressed" onChange={(event) => setFile(event.target.files?.[0] || null)} hidden /></label>{file && <div className="file-chip"><FileZip size={17} /><span>{file.name}</span><small>{(file.size / 1024 / 1024).toFixed(1)} MB</small></div>}</div>
+          <div className="upload-drop"><FileZip size={42} /><h2>上传第二大脑 ZIP</h2><p>浏览器直传腾讯云 COS，单个文件最大 2 GB；下载地址短时签名，仅授权账号和管理员可获取。</p><label className="button secondary"><UploadSimple size={18} /> 选择 ZIP<input type="file" accept=".zip,application/zip,application/x-zip-compressed" onChange={(event) => setFile(event.target.files?.[0] || null)} hidden /></label>{file && <div className="file-chip"><FileZip size={17} /><span>{file.name}</span><small>{(file.size / 1024 / 1024).toFixed(1)} MB</small></div>}</div>
           {busy && <div className="upload-progress"><span style={{ width: `${progress}%` }} /><em>{progress}%</em></div>}
           {message && <div className={message.startsWith("上传完成") ? "form-success" : "form-error"}>{message}</div>}
           <button className="button primary full" type="submit" disabled={busy || !file}><CloudArrowUp size={18} /> {busy ? "正在安全上传" : "开始上传并排队分析"}</button>
         </form>
         <aside className="upload-explainer">
           <h2>文件会经历什么？</h2>
-          {[["01", "安全接收", "浏览器直传文件存储，MongoDB 仅记录索引、状态与所有权。"], ["02", "结构扫描", "识别会话、笔记、素材和索引，不执行压缩包中的程序。"], ["03", "问题与需求挖掘", "聚类错误、重复操作与未满足需求，形成可审阅报告。"], ["04", "升级建议", "生成产品优化与工作流迭代建议，未经确认不会自动发布。"]].map(([n, title, text]) => <article key={n}><span>{n}</span><div><strong>{title}</strong><p>{text}</p></div></article>)}
+          {[["01", "COS 安全接收", "浏览器通过限时签名直传成都地域 COS，MongoDB 只保存索引、状态与所有权。"], ["02", "结构扫描", "识别会话、笔记、素材和索引，不执行压缩包中的程序。"], ["03", "问题与需求挖掘", "聚类错误、重复操作与未满足需求，形成可审阅报告。"], ["04", "升级建议", "生成产品优化与工作流迭代建议，未经确认不会自动发布。"]].map(([n, title, text]) => <article key={n}><span>{n}</span><div><strong>{title}</strong><p>{text}</p></div></article>)}
         </aside>
       </section>
   );

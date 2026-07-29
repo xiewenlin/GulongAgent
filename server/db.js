@@ -57,6 +57,10 @@ export async function ensureIndexes() {
           { emailNormalized: 1 },
           { unique: true, sparse: true, name: "uniq_email" },
         ),
+        db.collection("users").createIndex(
+          { chandlerUserId: 1 },
+          { unique: true, sparse: true, name: "uniq_chandler_user" },
+        ),
         db.collection("sessions").createIndex(
           { tokenHash: 1 },
           { unique: true, name: "uniq_session_token" },
@@ -88,6 +92,38 @@ export async function ensureIndexes() {
         db.collection("uploads").createIndex(
           { ownerId: 1, createdAt: -1 },
           { name: "uploads_by_owner" },
+        ),
+        db.collection("uploads").createIndex(
+          { kind: 1, createdAt: -1, originalName: 1 },
+          { name: "uploads_admin_search" },
+        ),
+        db.collection("partners").createIndex(
+          { sort: 1, createdAt: -1 },
+          { name: "partners_public_order" },
+        ),
+        db.collection("releaseChannels").createIndex(
+          { groupId: 1 },
+          { unique: true, name: "uniq_release_group" },
+        ),
+        db.collection("releaseChannels").createIndex(
+          { enabled: 1, isDefault: 1, sort: 1 },
+          { name: "release_channel_download" },
+        ),
+        db.collection("releaseAssignments").createIndex(
+          { chandlerUserId: 1 },
+          { unique: true, name: "uniq_release_assignment_user" },
+        ),
+        db.collection("releaseAssignments").createIndex(
+          { groupId: 1, updatedAt: -1 },
+          { name: "release_assignments_by_group" },
+        ),
+        db.collection("releaseJobs").createIndex(
+          { status: 1, createdAt: 1 },
+          { name: "release_job_queue" },
+        ),
+        db.collection("offlinePayments").createIndex(
+          { orderNo: 1 },
+          { unique: true, name: "uniq_offline_payment_order" },
         ),
       ]);
     })().catch((error) => {

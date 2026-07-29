@@ -7,14 +7,18 @@
 ## 已实现
 
 - 玉瓷、日出、青竹、鸢尾 4 套可持久化浅色主题，并配有独立 3D 圆形徽章
-- 用户名 + 密码、邮箱 + 密码两种注册/登录方式
+- Chandler 公共 OpenAPI 统一账号：邮箱注册，用户名/邮箱 + 密码登录，服务端自动刷新令牌，官网不保存密码
+- Chandler 离线权益凭据：RS256 JWT、JWKS 离线验签与可选设备绑定
 - 每位开发者最多 10 个可撤销 API Key，按 scope 授权
 - 智能体任务、任务状态、第二大脑记忆、工作流开放接口
 - Scalar 在线接口文档与 OpenAPI 3.1 JSON
-- 飞书、夸克、百度网盘下载渠道，可通过环境变量或管理员接口配置
-- 第二大脑 ZIP 分片直传与分析排队记录
+- 合作伙伴管理、自动生成 SVG Logo、首页品牌墙与安全官网跳转
+- “主题访问权限”用户分组自动同步为发行渠道，后台一键发版，每个渠道只保留最新版
+- 腾讯云 COS 存储第二大脑 ZIP 和 Windows 安装包；MongoDB 提供关键词/日期检索索引
+- 第二大脑附件后台列表、手动下载及按日期拉取最新附件 API
 - 文字反馈与最多 9 张问题截图
-- 单次充值、月付/年付会员、到期取消、支付宝/微信支付签名与回调验证
+- Chandler 微信/支付宝收银台、单次充值、月/年订阅、线下支付申请与管理员确认到账
+- 官网后台直连 Chandler 管理接口：用户搜索、账号冻结/恢复、订阅查看、权益双人审批与不可变价格版本发布
 - MongoDB Atlas 索引、会话 TTL、限流 TTL、连接池复用
 
 ## 技术架构
@@ -23,17 +27,18 @@
 flowchart LR
   A[React 19 + Vite] --> B[Hono API]
   B --> C[(MongoDB Atlas)]
-  A --> D[Vercel Blob]
-  B --> E[支付宝开放平台]
-  B --> F[微信支付 API v3]
+  A -->|限时签名直传| D[腾讯云 COS 成都]
+  B --> E[Chandler 公共 OpenAPI]
+  E --> F[支付宝 / 微信支付]
+  H[Windows 发行工作器] -->|领取任务与上传安装包| B
   G[第三方开发者] -->|Bearer API Key| B
 ```
 
 - 前端：React 19、Vite 6、Phosphor Icons，静态资源由 Vercel Edge CDN 分发。
 - 后端：Hono、Zod OpenAPI，运行在 Vercel Node Functions。
 - 数据库：MongoDB Node.js 原生驱动，跨热实例复用连接池。
-- 文件：Vercel Blob 客户端分片直传，服务端签发受类型、大小与用户约束的上传令牌。
-- 安全：scrypt 加盐密码、HttpOnly 会话、API Key 摘要存储、来源校验、限流、支付回调验签。
+- 文件：腾讯云 COS 私有对象，服务端签发短时 PUT/GET URL；MongoDB 只保存所有权、状态与搜索元数据。反馈截图仍可使用 Vercel Blob。
+- 安全：Chandler 统一身份、加密保存的服务端令牌、HttpOnly 会话、API Key 摘要、来源校验、限流与最小权限 CAM。
 
 ## 本地开发
 
@@ -52,13 +57,14 @@ npm run dev
 
 - `MONGODB_URI` / `MONGODB_DB`：MongoDB Atlas
 - `SESSION_SECRET` / `API_KEY_PEPPER`：会话与 API Key 摘要密钥
-- `BLOB_READ_WRITE_TOKEN`：Vercel Blob
-- `PAYMENT_MODE`：`mock` 或 `live`
-- `ALIPAY_*`：支付宝 RSA2 应用、商户私钥、平台公钥与回调
-- `WECHATPAY_*`：微信支付 API v3 商户、证书、私钥与回调
+- `CHANDLER_*`：Chandler API 地址、古龙应用 ID 与当前价格版本
+- `TENCENT_SECRET_ID` / `TENCENT_SECRET_KEY`：仅授予目标 Bucket 所需操作的 CAM 子账号密钥
+- `COS_BUCKET` / `COS_REGION` / `COS_DOMAIN`：`gulong-1259744534`、`ap-chengdu` 与请求域名
+- `RELEASE_WORKER_KEY`：官网与受信任 Windows 发行工作器共享的长随机密钥
+- `BLOB_READ_WRITE_TOKEN`：仅用于问题反馈截图
 - `DOWNLOAD_*`：飞书、夸克与百度网盘链接
 
-真实自动续订需分别开通支付宝周期扣款和微信委托代扣产品，并补充渠道签约参数。未配置商户凭证时应保持 `PAYMENT_MODE=mock`，不会产生真实扣款。
+支付商户参数、订阅、余额和权益由 Chandler 统一管理。线下支付在 MongoDB 中保留审核队列，并将审批结果同步到 Chandler 用户扩展属性。
 
 ## API 文档
 
@@ -67,6 +73,10 @@ npm run dev
 - `/api/docs`：交互式 Scalar 文档
 - `/api/openapi.json`：OpenAPI 3.1 规范
 - 开放接口认证：`Authorization: Bearer gla_live_...`
+- 按日期下载附件：`GET /api/v1/brain/attachments/latest?date=YYYY-MM-DD`
+- Chandler 管理接口：`/api/admin/chandler/users`、`/api/admin/chandler/catalog`、`/api/admin/chandler/prices`
+
+完整集成边界与生产配置见 [docs/integration-deployment.md](docs/integration-deployment.md)，Windows 发行工作器说明见 [docs/release-worker.md](docs/release-worker.md)。
 
 ## 验证
 

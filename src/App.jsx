@@ -4,6 +4,7 @@ import {
   ChatCircleText,
   CheckCircle,
   DownloadSimple,
+  GearSix,
   Key,
   List,
   Palette,
@@ -16,6 +17,7 @@ import {
 import { useEffect, useState } from "react";
 import { apiFetch } from "./api.js";
 import { AccountModal } from "./components/AccountModal.jsx";
+import { AdminPage } from "./components/AdminPage.jsx";
 import { HomePage } from "./components/HomePage.jsx";
 import { ProductManualPage } from "./components/ProductManualPage.jsx";
 import { SecondBrainPage } from "./components/SecondBrainPage.jsx";
@@ -171,9 +173,21 @@ export function App() {
     setAccountOpen(false);
   }
 
+  async function downloadLatest() {
+    try {
+      const latest = await apiFetch("/api/releases/latest");
+      if (!latest.release?.channelId) return navigate("/download");
+      const result = await apiFetch(`/api/releases/${latest.release.channelId}/download`);
+      window.location.assign(result.url);
+    } catch {
+      navigate("/download");
+    }
+  }
+
   const pathname = window.location.pathname;
   let page;
-  if (pathname === "/manual") page = <ProductManualPage navigate={navigate} />;
+  if (pathname === "/admin") page = <AdminPage user={user} openAuth={openAuth} />;
+  else if (pathname === "/manual") page = <ProductManualPage navigate={navigate} />;
   else if (pathname === "/brain") page = <SecondBrainPage user={user} openAuth={openAuth} navigate={navigate} />;
   else if (pathname === "/download") page = <DownloadPage themeIcon={themeIcon} />;
   else if (pathname === "/developer") page = <DeveloperPage user={user} openAuth={openAuth} />;
@@ -181,7 +195,7 @@ export function App() {
   else if (pathname === "/upload") page = <BrainUploadPage user={user} openAuth={openAuth} />;
   else if (pathname === "/feedback") page = <FeedbackPage user={user} />;
   else if (pathname === "/payment/mock") page = <MockPaymentPage user={user} navigate={navigate} />;
-  else page = <HomePage navigate={navigate} openTheme={() => setThemeOpen(true)} themeIcon={themeIcon} />;
+  else page = <HomePage navigate={navigate} openTheme={() => setThemeOpen(true)} themeIcon={themeIcon} downloadLatest={downloadLatest} />;
 
   return (
     <div className="site-app">
@@ -201,10 +215,10 @@ export function App() {
             {user ? (
               <div className="account-menu-wrap">
                 <button className="account-trigger" type="button" onClick={() => setAccountOpen(!accountOpen)}><UserCircle size={21} /><span>{user.username || user.email}</span><CaretDown size={14} /></button>
-                {accountOpen && <div className="account-menu"><button onClick={() => navigate("/developer")}><Key size={17} /> API Key</button><button onClick={() => navigate("/upload")}><UploadSimple size={17} /> 第二大脑上传</button><button onClick={() => navigate("/feedback")}><ChatCircleText size={17} /> 问题反馈</button><button className="danger" onClick={logout}><SignOut size={17} /> 退出登录</button></div>}
+                {accountOpen && <div className="account-menu">{user.role === "admin" && <button onClick={() => navigate("/admin")}><GearSix size={17} /> 管理员后台</button>}<button onClick={() => navigate("/developer")}><Key size={17} /> API Key</button><button onClick={() => navigate("/upload")}><UploadSimple size={17} /> 第二大脑上传</button><button onClick={() => navigate("/feedback")}><ChatCircleText size={17} /> 问题反馈</button><button className="danger" onClick={logout}><SignOut size={17} /> 退出登录</button></div>}
               </div>
             ) : <button className="login-button" type="button" onClick={() => openAuth("login")}><SignIn size={17} /> 登录</button>}
-            <button className="button primary header-download" type="button" onClick={() => navigate("/download")}><DownloadSimple size={17} /> 下载 Windows 版</button>
+            <button className="button primary header-download" type="button" onClick={downloadLatest}><DownloadSimple size={17} /> 下载 Windows 版</button>
             <button className="mobile-menu" type="button" aria-label={mobileOpen ? "关闭菜单" : "打开菜单"} onClick={() => setMobileOpen(!mobileOpen)}>{mobileOpen ? <X size={22} /> : <List size={22} />}</button>
           </div>
         </div>
