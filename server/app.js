@@ -26,6 +26,8 @@ import {
   revokeSession,
   verifyPassword,
   readExternalAuth,
+  readUserSecret,
+  sealUserSecret,
 } from "./security.js";
 import { enforceRateLimit } from "./rate-limit.js";
 import {
@@ -158,6 +160,11 @@ function safeDate(value, endOfDay = false) {
 
 function objectSize(head) {
   return Number(head?.headers?.["content-length"] || head?.ContentLength || head?.contentLength || 0);
+}
+
+function brainProgress(item) {
+  if (Number.isFinite(item?.progress)) return Math.max(0, Math.min(100, Number(item.progress)));
+  return ({ uploading: 20, queued_for_analysis: 40, analyzing: 72, completed: 100, failed: 100 })[item?.status] || 0;
 }
 
 function workerAuthorized(c) {
@@ -320,6 +327,21 @@ const latestReleaseRoute = createRoute({
   tags: ["Releases"],
   summary: "读取当前账号可用的最新 Windows 版本",
   responses: { 200: { description: "最新发行元数据", content: { "application/json": { schema: z.object({ release: z.object({ channelId: z.string(), channelName: z.string(), version: z.string(), filename: z.string(), bytes: z.number(), sha256: z.string(), signatureStatus: z.string(), publishedAt: z.coerce.date() }).nullable() }) } } } },
+});
+
+const getMiniMaxConfigurationRoute = createRoute({
+  method: "get",
+  path: "/api/v1/configuration/minimax",
+  tags: ["User Configuration"],
+  summary: "桌面端读取当前用户的 MiniMax 配置",
+  description: "只接受具有 configuration:read 权限的古龙 API Key。返回当前 Key 所属用户自己的 MiniMax 配置；响应禁止缓存。",
+  security: [{ bearerAuth: [] }],
+  responses: {
+    200: { description: "MiniMax 运行配置", content: { "application/json": { schema: z.object({ provider: z.literal("minimax"), apiKey: z.string(), apiHost: z.url(), model: z.string(), updatedAt: z.coerce.date() }) } } },
+    401: { description: "未认证", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "必须使用带权限的 API Key", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "尚未配置", content: { "application/json": { schema: ErrorSchema } } },
+  },
 });
 
 const ChandlerAdminUserSchema = z.object({
@@ -585,6 +607,151 @@ app.get("/api/auth/me", async (c) => {
   });
 });
 
+app.get("/api/account/dashboard", async (c) => {
+  const auth = await authenticate(c);
+  if (auth.error) return auth.error;
+  const ownerId = new ObjectId(auth.user.id);
+  const chandlerSubscriptionsPromise = auth.kind === "session" && auth.user.authProvider === "chandler"
+    ? getChandlerAccessToken(auth.session).then((accessToken) => chandlerRequest("/v1/me/subscriptions", { accessToken, timeoutMs: 5_000 })).catch(() => null)
+    : Promise.resolve(null);
+  const [user, subscription, wallet, uploads, feedback, payments, offlineOrders, minimax, chandlerSubscriptions] = await Promise.all([
+    (await getCollection("users")).findOne({ _id: ownerId }),
+    (await getCollection("subscriptions")).findOne({ ownerId }),
+    (await getCollection("wallets")).findOne({ ownerId }),
+    (await getCollection("uploads")).find({ ownerId, kind: "brain" }).sort({ createdAt: -1 }).limit(50).toArray(),
+    (await getCollection("feedback")).find({ ownerId }).sort({ createdAt: -1 }).limit(20).toArray(),
+    (await getCollection("payments")).find({ ownerId }).sort({ createdAt: -1 }).limit(20).toArray(),
+    (await getCollection("offlinePayments")).find({ ownerId }).sort({ createdAt: -1 }).limit(20).toArray(),
+    (await getCollection("userConfigurations")).findOne({ ownerId, provider: "minimax" }),
+    chandlerSubscriptionsPromise,
+  ]);
+  const remoteSubscription = (chandlerSubscriptions?.subscriptions || []).find((item) => item.status === "active") || null;
+  const effectiveSubscription = subscription?.status === "active" ? subscription : remoteSubscription ? {
+    plan: remoteSubscription.sku_name || remoteSubscription.product_name || "member",
+    cycle: remoteSubscription.billing_interval || remoteSubscription.cycle || null,
+    provider: remoteSubscription.channel || "chandler",
+    status: remoteSubscription.status,
+    currentPeriodStart: remoteSubscription.current_period_start || null,
+    currentPeriodEnd: remoteSubscription.current_period_end || null,
+    autoRenew: remoteSubscription.cancel_at_period_end !== true,
+    cancelAtPeriodEnd: Boolean(remoteSubscription.cancel_at_period_end),
+  } : null;
+  return c.json({
+    profile: {
+      id: auth.user.id,
+      username: user?.username || null,
+      email: user?.email || null,
+      displayName: user?.displayName || null,
+      avatar: user?.avatar || null,
+      bio: user?.bio || "",
+      role: user?.role || auth.user.role,
+      createdAt: user?.createdAt,
+    },
+    subscription: effectiveSubscription ? {
+      plan: effectiveSubscription.plan,
+      cycle: effectiveSubscription.cycle,
+      provider: effectiveSubscription.provider,
+      status: effectiveSubscription.status,
+      currentPeriodStart: effectiveSubscription.currentPeriodStart,
+      currentPeriodEnd: effectiveSubscription.currentPeriodEnd,
+      autoRenew: Boolean(effectiveSubscription.autoRenew),
+      cancelAtPeriodEnd: Boolean(effectiveSubscription.cancelAtPeriodEnd),
+    } : null,
+    balanceFen: wallet?.balanceFen || 0,
+    brainUploads: uploads.map((item) => ({
+      id: item._id.toString(),
+      originalName: item.originalName || item.pathname?.split("/").pop() || "第二大脑.zip",
+      size: item.size || 0,
+      status: item.status,
+      progress: brainProgress(item),
+      result: item.result || null,
+      feedback: item.feedback || null,
+      createdAt: item.createdAt,
+      completedAt: item.completedAt || null,
+      updatedAt: item.updatedAt || item.createdAt,
+    })),
+    feedback: feedback.map((item) => ({
+      id: item._id.toString(),
+      message: item.message,
+      status: item.status,
+      response: item.response || item.adminResponse || null,
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt || item.createdAt,
+    })),
+    orders: [
+      ...payments.map((item) => ({ id: item._id.toString(), orderNo: item.orderNo, kind: item.kind, cycle: item.cycle, provider: item.provider, amountFen: item.amountFen, status: item.status, createdAt: item.createdAt })),
+      ...offlineOrders.map((item) => ({ id: item._id.toString(), orderNo: item.orderNo, kind: "subscription", cycle: item.cycle, provider: "offline", amountFen: item.amountFen, status: item.status, createdAt: item.createdAt })),
+    ].sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt)).slice(0, 30),
+    minimax: minimax ? {
+      configured: true,
+      maskedKey: `••••••••${minimax.keyLast4 || ""}`,
+      apiHost: minimax.apiHost,
+      model: minimax.model,
+      updatedAt: minimax.updatedAt,
+    } : { configured: false, maskedKey: null, apiHost: "https://api.minimax.chat/v1", model: "MiniMax-M2.1" },
+  });
+});
+
+app.put("/api/account/profile", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  const body = await c.req.json();
+  const displayName = String(body.displayName || "").trim();
+  const username = String(body.username || "").trim();
+  const bio = String(body.bio || "").trim();
+  if (displayName.length < 1 || displayName.length > 64 || bio.length > 240 || (username && (username.length < 3 || username.length > 32 || !/^[\p{L}\p{N}_-]+$/u.test(username)))) {
+    return c.json({ code: "VALIDATION_ERROR", message: "昵称、用户名或个人简介格式不正确" }, 400);
+  }
+  const update = { displayName, displayNameUserManaged: true, bio, updatedAt: new Date() };
+  if (username) {
+    update.username = username;
+    update.usernameNormalized = normalizeUsername(username);
+  }
+  const user = await (await getCollection("users")).findOneAndUpdate(
+    { _id: new ObjectId(auth.user.id) },
+    { $set: update },
+    { returnDocument: "after" },
+  );
+  return c.json({ user: { id: user._id.toString(), username: user.username || null, email: user.email || null, displayName: user.displayName || null, avatar: user.avatar || null, bio: user.bio || "", role: user.role || "user" } });
+});
+
+app.put("/api/account/integrations/minimax", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  const body = await c.req.json();
+  const ownerId = new ObjectId(auth.user.id);
+  const configurations = await getCollection("userConfigurations");
+  const existing = await configurations.findOne({ ownerId, provider: "minimax" });
+  const apiKey = String(body.apiKey || "").trim();
+  const apiHost = String(body.apiHost || existing?.apiHost || "https://api.minimax.chat/v1").trim().replace(/\/$/, "");
+  const model = String(body.model || existing?.model || "MiniMax-M2.1").trim();
+  let parsedHost;
+  try { parsedHost = new URL(apiHost); } catch { parsedHost = null; }
+  if ((!existing?.apiKeyEncrypted && apiKey.length < 8) || apiKey.length > 500 || !parsedHost || parsedHost.protocol !== "https:" || model.length < 2 || model.length > 100) {
+    return c.json({ code: "VALIDATION_ERROR", message: "MiniMax API Key、HTTPS 接口地址或模型名称不正确" }, 400);
+  }
+  const now = new Date();
+  const values = {
+    apiHost: parsedHost.toString().replace(/\/$/, ""),
+    model,
+    updatedAt: now,
+    ...(apiKey ? { apiKeyEncrypted: sealUserSecret(apiKey, "minimax-api-key"), keyLast4: apiKey.slice(-4) } : {}),
+  };
+  await configurations.updateOne(
+    { ownerId, provider: "minimax" },
+    { $set: values, $setOnInsert: { ownerId, provider: "minimax", createdAt: now } },
+    { upsert: true },
+  );
+  return c.json({ configured: true, maskedKey: `••••••••${apiKey ? apiKey.slice(-4) : existing.keyLast4 || ""}`, apiHost: values.apiHost, model, updatedAt: now });
+});
+
+app.delete("/api/account/integrations/minimax", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  await (await getCollection("userConfigurations")).deleteOne({ ownerId: new ObjectId(auth.user.id), provider: "minimax" });
+  return c.json({ ok: true });
+});
+
 app.openapi(issueOfflineCredentialRoute, async (c) => {
   if (!isTrustedBrowserRequest(c)) return c.json({ code: "ORIGIN_REJECTED", message: "请求来源不受信任" }, 403);
   const auth = await authenticate(c);
@@ -626,10 +793,11 @@ app.delete("/api/auth/account", async (c) => {
     return c.json({ code: "INVALID_CREDENTIALS", message: "密码不正确，账户未删除" }, 401);
   }
   await revokeSession(c);
-  await Promise.all(
-    ["sessions", "apiKeys", "tasks", "memories", "feedback", "payments", "subscriptions", "wallets", "uploads"]
+  await Promise.all([
+    (await getCollection("sessions")).deleteMany({ userId: ownerId }),
+    ...["apiKeys", "tasks", "memories", "feedback", "payments", "subscriptions", "wallets", "uploads", "offlinePayments", "userConfigurations"]
       .map((name) => getCollection(name).then((collection) => collection.deleteMany({ ownerId }))),
-  );
+  ]);
   await (await getCollection("users")).deleteOne({ _id: ownerId });
   return c.json({ ok: true });
 });
@@ -654,7 +822,7 @@ app.post("/api/developer/keys", async (c) => {
   const body = await c.req.json();
   const name = String(body.name || "").trim();
   const scopes = Array.isArray(body.scopes) ? body.scopes : ["tasks:read", "tasks:write"];
-  const allowedScopes = new Set(["tasks:read", "tasks:write", "brain:read", "brain:write", "brain:attachments:read", "workflows:read"]);
+  const allowedScopes = new Set(["tasks:read", "tasks:write", "brain:read", "brain:write", "brain:attachments:read", "workflows:read", "configuration:read"]);
   if (name.length < 2 || name.length > 40 || scopes.some((scope) => !allowedScopes.has(scope)) || (scopes.includes("brain:attachments:read") && auth.user.role !== "admin")) {
     return c.json({ code: "VALIDATION_ERROR", message: "API Key 名称或权限不正确" }, 400);
   }
@@ -1279,6 +1447,9 @@ app.get("/api/admin/brain-attachments", async (c) => {
       originalName: item.originalName || item.pathname?.split("/").pop(),
       size: item.size,
       status: item.status,
+      progress: brainProgress(item),
+      result: item.result || null,
+      feedback: item.feedback || null,
       createdAt: item.createdAt,
       completedAt: item.completedAt,
       owner: (() => { const user = userMap.get(item.ownerId?.toString()); return user ? { id: user._id.toString(), email: user.email, username: user.username, displayName: user.displayName } : null; })(),
@@ -1293,6 +1464,28 @@ app.get("/api/admin/brain-attachments/:id/download", async (c) => {
   const upload = await (await getCollection("uploads")).findOne({ _id: new ObjectId(c.req.param("id")), kind: "brain", objectKey: { $exists: true } });
   if (!upload) return c.json({ code: "ATTACHMENT_NOT_FOUND", message: "附件不存在" }, 404);
   return c.json({ url: createPresignedDownloadUrl(upload.objectKey, { filename: upload.originalName }), filename: upload.originalName, expiresIn: 900 });
+});
+
+app.put("/api/admin/brain-attachments/:id", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "ATTACHMENT_NOT_FOUND", message: "附件不存在" }, 404);
+  const body = await c.req.json();
+  const status = ["queued_for_analysis", "analyzing", "completed", "failed"].includes(body.status) ? body.status : null;
+  const progress = Number(body.progress);
+  const result = String(body.result || "").trim();
+  const feedback = String(body.feedback || "").trim();
+  if (!status || !Number.isFinite(progress) || progress < 0 || progress > 100 || result.length > 20_000 || feedback.length > 5_000) {
+    return c.json({ code: "VALIDATION_ERROR", message: "处理状态、进度或反馈内容不正确" }, 400);
+  }
+  const now = new Date();
+  const updated = await (await getCollection("uploads")).findOneAndUpdate(
+    { _id: new ObjectId(c.req.param("id")), kind: "brain" },
+    { $set: { status, progress: Math.round(progress), result: result || null, feedback: feedback || null, updatedAt: now, ...(status === "completed" ? { completedAt: now } : {}) } },
+    { returnDocument: "after" },
+  );
+  if (!updated) return c.json({ code: "ATTACHMENT_NOT_FOUND", message: "附件不存在" }, 404);
+  return c.json({ id: updated._id.toString(), status: updated.status, progress: brainProgress(updated), result: updated.result, feedback: updated.feedback, updatedAt: updated.updatedAt });
 });
 
 app.openapi(latestBrainAttachmentRoute, async (c) => {
@@ -1739,6 +1932,18 @@ app.openapi(listWorkflowsRoute, async (c) => {
   });
 });
 
+app.openapi(getMiniMaxConfigurationRoute, async (c) => {
+  const auth = await authenticate(c, { scopes: ["configuration:read"] });
+  if (auth.error) return auth.error;
+  if (auth.kind !== "apiKey") return c.json({ code: "API_KEY_REQUIRED", message: "请使用具有 configuration:read 权限的 API Key" }, 403);
+  const configuration = await (await getCollection("userConfigurations")).findOne({ ownerId: new ObjectId(auth.user.id), provider: "minimax" });
+  const apiKey = readUserSecret(configuration?.apiKeyEncrypted, "minimax-api-key");
+  if (!configuration || !apiKey) return c.json({ code: "CONFIGURATION_NOT_FOUND", message: "当前用户尚未配置 MiniMax API Key" }, 404);
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  c.header("Pragma", "no-cache");
+  return c.json({ provider: "minimax", apiKey, apiHost: configuration.apiHost, model: configuration.model, updatedAt: configuration.updatedAt });
+});
+
 app.openAPIRegistry.registerComponent("securitySchemes", "bearerAuth", {
   type: "http",
   scheme: "bearer",
@@ -1750,8 +1955,8 @@ app.doc("/api/openapi.json", {
   openapi: "3.1.0",
   info: {
     title: "古龙 Gulong Agent Engine API",
-    version: "1.1.0",
-    description: "面向开发者的任务执行、长期记忆、第二大脑附件、发行版本、Chandler 统一账号与计费接口。API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
+    version: "1.2.0",
+    description: "面向开发者的任务执行、长期记忆、用户模型配置、第二大脑附件、发行版本、Chandler 统一账号与计费接口。API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
   },
   servers: [
     { url: "/", description: "当前环境" },

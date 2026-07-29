@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import app from "../../server/app.js";
 import platform from "../../api/platform.js";
 import { chandlerConfig, externalAuthFromResponse } from "../../server/chandler.js";
 import { cosConfig, sanitizeFilename } from "../../server/cos.js";
-import { readExternalAuth, sealExternalAuth } from "../../server/security.js";
+import { readExternalAuth, readUserSecret, sealExternalAuth, sealUserSecret } from "../../server/security.js";
 
 test("Chandler session tokens are encrypted and round-trip server-side", () => {
   const auth = externalAuthFromResponse({
@@ -17,6 +18,13 @@ test("Chandler session tokens are encrypted and round-trip server-side", () => {
   assert.equal(sealed.includes("access-secret"), false);
   assert.equal(sealed.includes("refresh-secret"), false);
   assert.deepEqual(readExternalAuth({ externalAuth: sealed }), auth);
+});
+
+test("user provider keys use purpose-bound encryption", () => {
+  const sealed = sealUserSecret("minimax-secret-key", "minimax-api-key");
+  assert.equal(sealed.includes("minimax-secret-key"), false);
+  assert.equal(readUserSecret(sealed, "another-provider"), null);
+  assert.equal(readUserSecret(sealed, "minimax-api-key"), "minimax-secret-key");
 });
 
 test("official Chandler and Chengdu COS defaults stay pinned", () => {
@@ -42,6 +50,7 @@ test("OpenAPI document includes Chandler admin, offline credentials, dated attac
   assert.ok(document.paths["/api/auth/offline-credential"]);
   assert.ok(document.paths["/api/v1/brain/attachments/latest"]);
   assert.ok(document.paths["/api/releases/latest"]);
+  assert.ok(document.paths["/api/v1/configuration/minimax"]);
   assert.ok(document.paths["/api/admin/chandler/users"]);
   assert.ok(document.paths["/api/admin/chandler/users/{id}/status"]);
   assert.ok(document.paths["/api/admin/chandler/users/{id}/subscriptions"]);
@@ -54,4 +63,11 @@ test("Vercel platform entry restores nested API paths", async () => {
   const response = await platform.fetch(new Request("https://example.test/api/platform?_platform_path=releases/latest"));
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { release: null });
+});
+
+test("Vercel consolidates nested account and configuration routes", async () => {
+  const configuration = JSON.parse(await readFile(new URL("../../vercel.json", import.meta.url), "utf8"));
+  const sources = configuration.rewrites.map((rewrite) => rewrite.source);
+  assert.ok(sources.includes("/api/account/:path*"));
+  assert.ok(sources.includes("/api/v1/configuration/:path*"));
 });

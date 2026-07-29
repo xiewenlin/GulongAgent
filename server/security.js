@@ -137,15 +137,15 @@ function publicUser(user) {
   };
 }
 
-function externalAuthKey() {
+function encryptedValueKey(purpose = "external-auth") {
   return createHash("sha256")
-    .update(`gulong-external-auth:${secret("SESSION_SECRET")}`)
+    .update(`gulong-${purpose}:${secret("SESSION_SECRET")}`)
     .digest();
 }
 
-export function sealExternalAuth(value) {
+function sealEncryptedValue(value, purpose) {
   const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", externalAuthKey(), iv);
+  const cipher = createCipheriv("aes-256-gcm", encryptedValueKey(purpose), iv);
   const ciphertext = Buffer.concat([
     cipher.update(JSON.stringify(value), "utf8"),
     cipher.final(),
@@ -158,11 +158,11 @@ export function sealExternalAuth(value) {
   ].join(".");
 }
 
-export function readExternalAuth(session) {
+function readEncryptedValue(sealed, purpose) {
   try {
-    const [version, ivValue, tagValue, ciphertextValue] = String(session?.externalAuth || "").split(".");
+    const [version, ivValue, tagValue, ciphertextValue] = String(sealed || "").split(".");
     if (version !== "v1") return null;
-    const decipher = createDecipheriv("aes-256-gcm", externalAuthKey(), Buffer.from(ivValue, "base64url"));
+    const decipher = createDecipheriv("aes-256-gcm", encryptedValueKey(purpose), Buffer.from(ivValue, "base64url"));
     decipher.setAuthTag(Buffer.from(tagValue, "base64url"));
     return JSON.parse(Buffer.concat([
       decipher.update(Buffer.from(ciphertextValue, "base64url")),
@@ -171,6 +171,22 @@ export function readExternalAuth(session) {
   } catch {
     return null;
   }
+}
+
+export function sealExternalAuth(value) {
+  return sealEncryptedValue(value, "external-auth");
+}
+
+export function readExternalAuth(session) {
+  return readEncryptedValue(session?.externalAuth, "external-auth");
+}
+
+export function sealUserSecret(value, purpose) {
+  return sealEncryptedValue(value, `user-secret:${purpose}`);
+}
+
+export function readUserSecret(sealed, purpose) {
+  return readEncryptedValue(sealed, `user-secret:${purpose}`);
 }
 
 async function authenticateApiKey(raw, requiredScopes) {

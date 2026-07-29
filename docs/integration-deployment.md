@@ -5,7 +5,7 @@
 ## 1. 系统边界
 
 - Chandler：用户注册与登录、管理员角色、订阅目录、支付宝/微信预支付、用户订阅、离线权益凭据、双人审批。
-- 古龙官网 MongoDB：加密会话引用、开发者 API Key、合作伙伴、第二大脑文件索引、线下支付审核队列、发行渠道与发版任务。
+- 古龙官网 MongoDB：加密会话引用、开发者 API Key、用户加密模型配置、合作伙伴、第二大脑文件索引、线下支付审核队列、发行渠道与发版任务。
 - 腾讯云 COS：第二大脑 ZIP 与 Windows 安装包的私有对象存储。
 - Windows 发行工作器：读取桌面端主题权限文件，领取官网发版任务，调用既有发布工作流并直传 COS。
 
@@ -17,6 +17,7 @@
 | --- | --- |
 | 注册 / 登录 / 刷新 / 退出 | `/v1/auth/register`、`/v1/auth/login`、`/v1/auth/refresh`、`/v1/auth/logout` |
 | 月 / 年订阅 | `/v1/checkout/subscriptions` + `/v1/pay/orders/{order}/prepay` |
+| 当前用户订阅状态 | `/v1/me/subscriptions` |
 | 单次充值 / 线下订单镜像 | `/v1/pay/orders` |
 | 离线权益凭据 | `/v1/me/entitlements/offline-credential` |
 | 管理员用户搜索 | `/v1/admin/users` |
@@ -27,7 +28,17 @@
 
 管理员执行官网本地操作前会再次读取 Chandler `/v1/me`，防止管理员权限撤销后旧会话继续操作。
 
-## 3. COS 对象布局
+## 3. 用户后台与桌面端模型配置
+
+- 用户后台：`/account`
+- 聚合数据：`GET /api/account/dashboard`
+- 修改个人资料：`PUT /api/account/profile`
+- 保存 / 删除 MiniMax 配置：`PUT` / `DELETE /api/account/integrations/minimax`
+- 桌面端拉取：`GET /api/v1/configuration/minimax`
+
+MiniMax API Key 使用由 `SESSION_SECRET` 派生且用途隔离的 AES-256-GCM 密钥加密。网页只返回掩码；桌面端接口只接受属于该用户且具有 `configuration:read` scope 的古龙 API Key，响应设置 `Cache-Control: private, no-store`。管理员不能跨用户读取模型密钥。
+
+## 4. COS 对象布局
 
 ```text
 second-brain/{gulong-user-id}/{YYYY-MM-DD}/{random}-{filename}.zip
@@ -45,21 +56,22 @@ Bucket CORS 至少允许：
 - Allowed-Headers：`Content-Type`、`Authorization`、`x-cos-*`
 - Expose-Headers：`ETag`、`Content-Length`
 
-## 4. 第二大脑管理员与开放接口
+## 5. 第二大脑管理员与开放接口
 
 - 管理列表：`GET /api/admin/brain-attachments?keyword=&from=YYYY-MM-DD&to=YYYY-MM-DD`
 - 手动下载：`GET /api/admin/brain-attachments/{id}/download`
+- 更新处理进度、结果与用户反馈：`PUT /api/admin/brain-attachments/{id}`
 - 按日期取最新：`GET /api/v1/brain/attachments/latest?date=YYYY-MM-DD&keyword=`
 
 最后一个接口只接受管理员会话，或属于管理员且拥有 `brain:attachments:read` scope 的古龙 API Key。
 
-## 5. 发行渠道
+## 6. 发行渠道
 
 桌面端 `user-theme-access.json` 中每个 `group` 对应一个官网发行渠道，`assignments` 把 Chandler 用户 ID 映射到渠道。工作器每轮启动都会同步分组及成员；已经登录过官网的用户会立即更新，尚未登录的用户会在首次登录时命中保存的映射。
 
 发版任务状态：`queued → building → uploading → completed`。请求上传地址前，官网按产品要求先删除该渠道旧对象，再为新安装包签发 PUT URL；上传完成后校验对象大小并写入最新版元数据。
 
-## 6. 必需生产变量
+## 7. 必需生产变量
 
 除 MongoDB 与会话密钥外，需要：
 

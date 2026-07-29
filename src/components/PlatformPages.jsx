@@ -124,7 +124,7 @@ export function DeveloperPage({ user, openAuth }) {
     try {
       const result = await apiFetch("/api/developer/keys", {
         method: "POST",
-        body: JSON.stringify({ name, scopes: ["tasks:read", "tasks:write", "workflows:read"] }),
+        body: JSON.stringify({ name, scopes: ["tasks:read", "tasks:write", "workflows:read", "configuration:read"] }),
       });
       setFreshKey(result.apiKey);
       setName("");
@@ -148,7 +148,7 @@ export function DeveloperPage({ user, openAuth }) {
       <PageIntro
         eyebrow="GULONG OPEN PLATFORM"
         title="把古龙引擎接入你的产品"
-        description="用一套安全、可审计的 API 调用任务执行、第二大脑与工作流能力。每位开发者都能生成独立 API Key。"
+        description="用一套安全、可审计的 API 调用任务执行、第二大脑、工作流与个人模型配置。每位开发者都能生成独立 API Key。"
         actions={<><a className="button secondary" href="/api/docs" target="_blank" rel="noreferrer"><BookOpen size={18} /> 在线接口文档</a><a className="button primary" href="#api-keys"><Key size={18} /> 获取 API Key</a></>}
       />
 
@@ -241,7 +241,7 @@ export function PricingPage({ user, openAuth, navigate }) {
         ))}
       </section>
       {error && <div className="page-error section-shell">{error}</div>}
-      <section className="recharge-callout section-shell"><div className="wallet-orb"><Wallet size={28} /></div><div><h3>单次充值</h3><p>不订阅也可以按需充值余额，后续用于按量调用模型与工作流。</p></div><button className="button secondary" onClick={() => user ? setPayment({ recharge: true }) : openAuth("login")}><CreditCard size={18} /> 充值余额</button></section>
+      <section className="recharge-callout section-shell" id="recharge"><div className="wallet-orb"><Wallet size={28} /></div><div><h3>单次充值</h3><p>不订阅也可以按需充值余额，后续用于按量调用模型与工作流。</p></div><button className="button secondary" onClick={() => user ? setPayment({ recharge: true }) : openAuth("login")}><CreditCard size={18} /> 充值余额</button></section>
       {payment && !payment.recharge && <PaymentDialog payment={payment} provider={provider} onClose={() => setPayment(null)} />}
       {payment?.recharge && <RechargeDialog provider={provider} onClose={() => setPayment(null)} navigate={navigate} />}
     </main>

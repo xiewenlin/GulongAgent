@@ -41,6 +41,7 @@ export async function chandlerRequest(path, {
   accessToken,
   apiKey,
   body,
+  timeoutMs = 15_000,
 } = {}) {
   const headers = { Accept: "application/json" };
   if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -52,7 +53,7 @@ export async function chandlerRequest(path, {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (error) {
     throw new ChandlerError("无法连接 Chandler，请检查网络后重试", { detail: error.message });
@@ -105,11 +106,31 @@ export async function upsertChandlerUser(chandlerUser, { username } = {}) {
   const releaseAssignment = await (await getCollection("releaseAssignments")).findOne({ chandlerUserId: chandlerUser.id });
   const now = new Date();
   const email = chandlerUser.email?.trim() || null;
+  const emailNormalized = email?.toLowerCase();
+  let chandlerMatch = await users.findOne({ chandlerUserId: chandlerUser.id });
+  let emailMatch = emailNormalized ? await users.findOne({ emailNormalized }) : null;
+
+  // Older website accounts were created before Chandler became the identity
+  // provider. Bind the existing e-mail owner instead of inserting a second user,
+  // otherwise MongoDB's unique e-mail index turns a successful login into 409.
+  if (chandlerMatch && emailMatch && !chandlerMatch._id.equals(emailMatch._id)) {
+    const canonicalId = emailMatch._id;
+    const duplicateId = chandlerMatch._id;
+    await Promise.all([
+      ...["apiKeys", "tasks", "memories", "feedback", "payments", "subscriptions", "wallets", "uploads", "offlinePayments", "userConfigurations"]
+        .map(async (name) => (await getCollection(name)).updateMany({ ownerId: duplicateId }, { $set: { ownerId: canonicalId } })),
+      (await getCollection("sessions")).updateMany({ userId: duplicateId }, { $set: { userId: canonicalId } }),
+    ]);
+    await users.deleteOne({ _id: duplicateId });
+    chandlerMatch = emailMatch;
+  }
+
+  const canonical = emailMatch || chandlerMatch;
   const record = {
     chandlerUserId: chandlerUser.id,
     email,
-    emailNormalized: email?.toLowerCase(),
-    displayName: chandlerUser.display_name || null,
+    emailNormalized,
+    displayName: canonical?.displayNameUserManaged ? canonical.displayName : chandlerUser.display_name || null,
     avatar: chandlerUser.avatar || null,
     emailVerified: Boolean(chandlerUser.email_verified),
     role: chandlerUser.is_admin ? "admin" : "user",
@@ -118,16 +139,27 @@ export async function upsertChandlerUser(chandlerUser, { username } = {}) {
     ...(releaseAssignment?.channelId ? { releaseChannelId: releaseAssignment.channelId, releaseChannelGroupId: releaseAssignment.groupId } : {}),
     updatedAt: now,
   };
-  if (username) {
-    record.username = username.trim();
-    record.usernameNormalized = username.trim().toLowerCase();
+  if (username && !canonical?.username) {
+    const requestedUsername = username.trim();
+    const usernameNormalized = requestedUsername.toLowerCase();
+    const usernameOwner = await users.findOne({ usernameNormalized });
+    if (!usernameOwner || usernameOwner._id.equals(canonical?._id)) {
+      record.username = requestedUsername;
+      record.usernameNormalized = usernameNormalized;
+    }
   }
-  const result = await users.findOneAndUpdate(
-    { chandlerUserId: chandlerUser.id },
-    { $set: record, $setOnInsert: { createdAt: now } },
-    { upsert: true, returnDocument: "after" },
-  );
-  return result;
+  try {
+    return await users.findOneAndUpdate(
+      canonical ? { _id: canonical._id } : { chandlerUserId: chandlerUser.id },
+      { $set: record, $setOnInsert: { createdAt: now } },
+      { upsert: true, returnDocument: "after" },
+    );
+  } catch (error) {
+    // Two simultaneous first logins may both observe no local shadow record.
+    // The winner creates it; the loser retries against that new canonical user.
+    if (error?.code === 11000) return upsertChandlerUser(chandlerUser, { username });
+    throw error;
+  }
 }
 
 function accessExpiresAt(auth) {

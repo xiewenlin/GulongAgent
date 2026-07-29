@@ -17,6 +17,7 @@ import {
 import { useEffect, useState } from "react";
 import { apiFetch } from "./api.js";
 import { AccountModal } from "./components/AccountModal.jsx";
+import { AccountDashboard } from "./components/AccountDashboard.jsx";
 import { AdminPage } from "./components/AdminPage.jsx";
 import { HomePage } from "./components/HomePage.jsx";
 import { ProductManualPage } from "./components/ProductManualPage.jsx";
@@ -187,6 +188,7 @@ export function App() {
   const pathname = window.location.pathname;
   let page;
   if (pathname === "/admin") page = <AdminPage user={user} openAuth={openAuth} />;
+  else if (pathname === "/account") page = <AccountDashboard user={user} openAuth={openAuth} navigate={navigate} onUser={setUser} />;
   else if (pathname === "/manual") page = <ProductManualPage navigate={navigate} />;
   else if (pathname === "/brain") page = <SecondBrainPage user={user} openAuth={openAuth} navigate={navigate} />;
   else if (pathname === "/download") page = <DownloadPage themeIcon={themeIcon} />;
@@ -214,8 +216,8 @@ export function App() {
             <button className="theme-button" type="button" aria-label="自定义主题" onClick={() => setThemeOpen(true)}><Palette size={18} /></button>
             {user ? (
               <div className="account-menu-wrap">
-                <button className="account-trigger" type="button" onClick={() => setAccountOpen(!accountOpen)}><UserCircle size={21} /><span>{user.username || user.email}</span><CaretDown size={14} /></button>
-                {accountOpen && <div className="account-menu">{user.role === "admin" && <button onClick={() => navigate("/admin")}><GearSix size={17} /> 管理员后台</button>}<button onClick={() => navigate("/developer")}><Key size={17} /> API Key</button><button onClick={() => navigate("/upload")}><UploadSimple size={17} /> 第二大脑上传</button><button onClick={() => navigate("/feedback")}><ChatCircleText size={17} /> 问题反馈</button><button className="danger" onClick={logout}><SignOut size={17} /> 退出登录</button></div>}
+                <button className="account-trigger" type="button" onClick={() => setAccountOpen(!accountOpen)}><UserCircle size={21} /><span>{user.displayName || user.username || "古龙用户"}</span><CaretDown size={14} /></button>
+                {accountOpen && <div className="account-menu"><button onClick={() => navigate("/account")}><UserCircle size={17} /> 用户后台</button>{user.role === "admin" && <button onClick={() => navigate("/admin")}><GearSix size={17} /> 后台管理</button>}<button onClick={() => navigate("/developer")}><Key size={17} /> API Key</button><button onClick={() => navigate("/upload")}><UploadSimple size={17} /> 第二大脑上传</button><button onClick={() => navigate("/feedback")}><ChatCircleText size={17} /> 问题反馈</button><button className="danger" onClick={logout}><SignOut size={17} /> 退出登录</button></div>}
               </div>
             ) : <button className="login-button" type="button" onClick={() => openAuth("login")}><SignIn size={17} /> 登录</button>}
             <button className="button primary header-download" type="button" onClick={downloadLatest}><DownloadSimple size={17} /> 下载 Windows 版</button>

@@ -125,6 +125,10 @@ export async function ensureIndexes() {
           { orderNo: 1 },
           { unique: true, name: "uniq_offline_payment_order" },
         ),
+        db.collection("userConfigurations").createIndex(
+          { ownerId: 1, provider: 1 },
+          { unique: true, name: "uniq_user_provider_configuration" },
+        ),
       ]);
     })().catch((error) => {
       indexPromise = undefined;

@@ -7,6 +7,7 @@ import {
   Cube,
   DownloadSimple,
   FileZip,
+  GearSix,
   Handshake,
   ImageSquare,
   LockKey,
@@ -176,6 +177,7 @@ function BrainAttachmentManager() {
   const [items, setItems] = useState([]);
   const [pagination, setPagination] = useState({ total: 0, page: 1, pages: 0 });
   const [message, setMessage] = useState("");
+  const [processing, setProcessing] = useState(null);
 
   async function load(page = 1) {
     setMessage("");
@@ -194,12 +196,21 @@ function BrainAttachmentManager() {
     } catch (error) { setMessage(error.message); }
   }
 
+  async function saveProcessing(event) {
+    event.preventDefault();
+    try {
+      await apiFetch(`/api/admin/brain-attachments/${processing.id}`, { method: "PUT", body: JSON.stringify(processing) });
+      setProcessing(null); setMessage("处理进度与反馈已保存，用户后台会立即显示最新结果。"); await load();
+    } catch (error) { setMessage(error.message); }
+  }
+
   return <section className="admin-module">
     <header className="admin-module-head"><div><span>TENCENT COS ARCHIVE</span><h2>第二大脑附件</h2><p>按文件名模糊搜索、按北京时间日期筛选，并生成 15 分钟有效的私有下载地址。</p></div><div className="storage-badge"><CloudArrowDown size={18} /><span>成都 COS</span><strong>gulong-1259744534</strong></div></header>
     <form className="admin-filterbar" onSubmit={(event) => { event.preventDefault(); load(1); }}><label><MagnifyingGlass size={17} /><input value={filters.keyword} onChange={(event) => setFilters({ ...filters, keyword: event.target.value })} placeholder="搜索文件名关键词" /></label><label><CalendarBlank size={17} /><input type="date" value={filters.from} onChange={(event) => setFilters({ ...filters, from: event.target.value })} /></label><span>至</span><label><CalendarBlank size={17} /><input type="date" value={filters.to} onChange={(event) => setFilters({ ...filters, to: event.target.value })} /></label><button className="button secondary"><MagnifyingGlass size={16} /> 搜索</button></form>
-    {message && <AdminNotice tone="error">{message}</AdminNotice>}
-    {items.length ? <div className="admin-table"><div className="admin-table-head"><span>附件</span><span>提交用户</span><span>提交时间</span><span>状态</span><span>操作</span></div>{items.map((item) => <article key={item.id}><div className="file-cell"><FileZip size={21} /><div><strong>{item.originalName}</strong><small>{(item.size / 1024 / 1024).toFixed(1)} MB</small></div></div><div><strong>{item.owner?.displayName || item.owner?.username || "未命名用户"}</strong><small>{item.owner?.email || "—"}</small></div><time>{new Date(item.createdAt).toLocaleString("zh-CN")}</time><span className="status-pill ready">{item.status === "queued_for_analysis" ? "待分析" : item.status}</span><button className="button small secondary" onClick={() => download(item)}><DownloadSimple size={15} /> 下载</button></article>)}</div> : <EmptyState icon={FileZip} title="当前筛选范围没有附件" text="调整关键词或日期后重新搜索。" />}
+    {message && <AdminNotice tone={message.startsWith("处理进度") ? "success" : "error"}>{message}</AdminNotice>}
+    {items.length ? <div className="admin-table"><div className="admin-table-head"><span>附件</span><span>提交用户</span><span>提交时间</span><span>状态</span><span>操作</span></div>{items.map((item) => <article key={item.id}><div className="file-cell"><FileZip size={21} /><div><strong>{item.originalName}</strong><small>{(item.size / 1024 / 1024).toFixed(1)} MB</small></div></div><div><strong>{item.owner?.displayName || item.owner?.username || "未命名用户"}</strong><small>{item.owner?.email || "—"}</small></div><time>{new Date(item.createdAt).toLocaleString("zh-CN")}</time><span className="status-pill ready">{item.status === "queued_for_analysis" ? `待分析 · ${item.progress}%` : item.status === "analyzing" ? `分析中 · ${item.progress}%` : item.status === "completed" ? "已完成" : item.status === "failed" ? "失败" : item.status}</span><div className="admin-table-actions"><button className="button small ghost" onClick={() => setProcessing({ id: item.id, status: item.status === "uploading" ? "queued_for_analysis" : item.status, progress: item.progress || 0, result: item.result || "", feedback: item.feedback || "" })}><GearSix size={15} /> 处理</button><button className="button small secondary" onClick={() => download(item)}><DownloadSimple size={15} /> 下载</button></div></article>)}</div> : <EmptyState icon={FileZip} title="当前筛选范围没有附件" text="调整关键词或日期后重新搜索。" />}
     <footer className="admin-module-footer"><span>共 {pagination.total || 0} 个附件</span><code>GET /api/v1/brain/attachments/latest?date={today}</code><button className="button small ghost" disabled={(pagination.page || 1) >= (pagination.pages || 1)} onClick={() => load((pagination.page || 1) + 1)}>下一页</button></footer>
+    {processing && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setProcessing(null)}><form className="admin-form-modal" onSubmit={saveProcessing}><button className="modal-close" type="button" onClick={() => setProcessing(null)}><X size={18} /></button><span>ANALYSIS FEEDBACK</span><h2>更新处理进度与结果</h2><div className="admin-form-grid"><label><span>处理状态</span><select value={processing.status} onChange={(event) => setProcessing({ ...processing, status: event.target.value })}><option value="queued_for_analysis">等待分析</option><option value="analyzing">正在分析</option><option value="completed">处理完成</option><option value="failed">处理失败</option></select></label><label><span>处理进度（0–100）</span><input type="number" min="0" max="100" required value={processing.progress} onChange={(event) => setProcessing({ ...processing, progress: Number(event.target.value) })} /></label><label className="span-2"><span>分析结果</span><textarea maxLength={20000} value={processing.result} onChange={(event) => setProcessing({ ...processing, result: event.target.value })} placeholder="说明发现的问题、需求洞察、可执行改进建议……" /></label><label className="span-2"><span>给用户的反馈</span><textarea maxLength={5000} value={processing.feedback} onChange={(event) => setProcessing({ ...processing, feedback: event.target.value })} placeholder="这段内容会直接显示在用户后台。" /></label></div><AdminNotice>保存后，提交用户会在“用户后台 → 第二大脑”立即看到最新进度、分析结果和反馈。</AdminNotice><button className="button primary full">保存并反馈用户</button></form></div>}
   </section>;
 }
 

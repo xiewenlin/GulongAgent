@@ -33,6 +33,10 @@
       "destination": "/api/platform?_platform_path=brain/uploads/:path*"
     },
     {
+      "source": "/api/account/:path*",
+      "destination": "/api/platform?_platform_path=account/:path*"
+    },
+    {
       "source": "/api/admin/chandler/:path*",
       "destination": "/api/platform?_platform_path=admin/chandler/:path*"
     },
@@ -45,6 +49,10 @@
       "destination": "/api/platform?_platform_path=admin/brain-attachments/:id/download"
     },
     {
+      "source": "/api/admin/brain-attachments/:id",
+      "destination": "/api/platform?_platform_path=admin/brain-attachments/:id"
+    },
+    {
       "source": "/api/admin/offline-payments/:id/:action",
       "destination": "/api/platform?_platform_path=admin/offline-payments/:id/:action"
     },
@@ -55,6 +63,10 @@
     {
       "source": "/api/v1/brain/attachments/:path*",
       "destination": "/api/platform?_platform_path=v1/brain/attachments/:path*"
+    },
+    {
+      "source": "/api/v1/configuration/:path*",
+      "destination": "/api/platform?_platform_path=v1/configuration/:path*"
     },
     {
       "source": "/((?!api/).*)",

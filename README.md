@@ -8,8 +8,11 @@
 
 - 玉瓷、日出、青竹、鸢尾 4 套可持久化浅色主题，并配有独立 3D 圆形徽章
 - Chandler 公共 OpenAPI 统一账号：邮箱注册，用户名/邮箱 + 密码登录，服务端自动刷新令牌，官网不保存密码
+- 普通用户后台：第二大脑处理进度与反馈、会员与余额、订单、个人资料和 MiniMax 配置
+- 旧官网账号首次 Chandler 登录时按已验证邮箱安全归并，保留历史上传、订单、API Key 与反馈
 - Chandler 离线权益凭据：RS256 JWT、JWKS 离线验签与可选设备绑定
 - 每位开发者最多 10 个可撤销 API Key，按 scope 授权
+- MiniMax API Key 使用 AES-256-GCM 加密保存；桌面端可通过 `configuration:read` 独立权限读取自己的配置
 - 智能体任务、任务状态、第二大脑记忆、工作流开放接口
 - Scalar 在线接口文档与 OpenAPI 3.1 JSON
 - 合作伙伴管理、自动生成 SVG Logo、首页品牌墙与安全官网跳转
@@ -74,6 +77,7 @@ npm run dev
 - `/api/openapi.json`：OpenAPI 3.1 规范
 - 开放接口认证：`Authorization: Bearer gla_live_...`
 - 按日期下载附件：`GET /api/v1/brain/attachments/latest?date=YYYY-MM-DD`
+- 桌面端用户配置：`GET /api/v1/configuration/minimax`（需要 `configuration:read`）
 - Chandler 管理接口：`/api/admin/chandler/users`、`/api/admin/chandler/catalog`、`/api/admin/chandler/prices`
 
 完整集成边界与生产配置见 [docs/integration-deployment.md](docs/integration-deployment.md)，Windows 发行工作器说明见 [docs/release-worker.md](docs/release-worker.md)。
