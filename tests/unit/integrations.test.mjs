@@ -152,6 +152,22 @@ test("price publishing uses an in-product confirmation and a Chandler permission
   assert.match(serverSource, /price_source:\s*"website-local"/);
 });
 
+test("offline payment review separates pending work from reviewed history", async () => {
+  const [adminSource, serverSource, css] = await Promise.all([
+    readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/styles.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(adminSource, /className="offline-review-tabs"/);
+  assert.match(adminSource, /label:\s*"订单处理"/);
+  assert.match(adminSource, /<span>待审核<\/span>/);
+  assert.match(adminSource, /<span>已审核<\/span>/);
+  assert.match(adminSource, /status=\$\{tab\}/);
+  assert.match(serverSource, /requestedStatus === "reviewed"/);
+  assert.match(serverSource, /summary:\s*\{\s*pending:\s*pendingCount,\s*reviewed:\s*approvedCount \+ rejectedCount/);
+  assert.match(css, /\.offline-review-tabs\s*\{/);
+});
+
 test("trusted release protocol enforces direct-COS integrity metadata", async () => {
   const source = await readFile(new URL("../../server/app.js", import.meta.url), "utf8");
   assert.match(source, /"Content-Type": "application\/vnd\.microsoft\.portable-executable"/);

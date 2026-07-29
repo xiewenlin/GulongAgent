@@ -3656,6 +3656,7 @@ textarea:focus {
 .status-pill { width: fit-content; padding: 5px 8px; display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: var(--bg-soft); font-size: 18px; font-weight: 800; }
 .status-pill.ready, .status-pill.approved { color: #2f7659; border-color: #c4dfcd; background: #f2faf5; }
 .status-pill.pending { color: #9a6a28; border-color: #e8d5b4; background: #fffaf0; }
+.status-pill.rejected { color: #9a4c42; border-color: #efc7c0; background: #fff0ed; }
 .admin-module-footer { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 18px; }
 .admin-module-footer code { flex: 1; padding: 8px 10px; overflow: hidden; color: var(--jade); border: 1px solid var(--line); border-radius: 8px; background: var(--bg-soft); text-overflow: ellipsis; white-space: nowrap; }
 
@@ -3761,6 +3762,12 @@ textarea:focus {
 .job-status strong { font-size: 18px; }
 
 .offline-order-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.offline-review-tabs { width: fit-content; margin-bottom: 16px; padding: 5px; display: flex; align-items: center; gap: 5px; border: 1px solid var(--line); border-radius: 14px; background: var(--bg-soft); }
+.offline-review-tabs button { min-width: 150px; min-height: 48px; padding: 7px 10px 7px 16px; display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--muted); border: 0; border-radius: 10px; background: transparent; font: inherit; font-size: 18px; font-weight: 850; cursor: pointer; transition: color .2s ease, background .2s ease, box-shadow .2s ease; }
+.offline-review-tabs button strong { min-width: 30px; height: 30px; padding: 0 8px; display: inline-flex; align-items: center; justify-content: center; color: inherit; border: 1px solid color-mix(in srgb, currentColor 24%, transparent); border-radius: 999px; font-size: 18px; }
+.offline-review-tabs button:hover { color: var(--ink); }
+.offline-review-tabs button.active { color: var(--jade); background: var(--surface); box-shadow: 0 5px 18px rgba(29, 64, 58, .09); }
+.offline-review-tabs button.active strong { color: #fff; border-color: var(--jade); background: var(--jade); }
 .offline-order-grid article { padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
 .offline-order-grid article > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .offline-order-grid header span, .offline-order-grid header strong { display: block; }
@@ -3847,6 +3854,8 @@ textarea:focus {
   .price-publish-impact { margin: 18px 20px 0; }
   .price-publish-actions { padding: 18px 20px 22px; }
   .price-publish-actions .button { min-width: 0; flex: 1; }
+  .offline-review-tabs { width: 100%; }
+  .offline-review-tabs button { min-width: 0; flex: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {

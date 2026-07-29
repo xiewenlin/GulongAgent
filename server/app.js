@@ -2720,13 +2720,24 @@ app.get("/api/billing/offline-orders", async (c) => {
 
 app.get("/api/admin/offline-payments", async (c) => {
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
-  const status = ["pending", "approved", "rejected"].includes(c.req.query("status")) ? c.req.query("status") : undefined;
-  const orders = await (await getCollection("offlinePayments"))
-    .find(status ? { status } : {})
-    .sort({ createdAt: -1 })
-    .limit(100)
-    .toArray();
-  return c.json({ orders: orders.map((order) => ({ ...order, id: order._id.toString(), ownerId: order.ownerId.toString(), _id: undefined })) });
+  const requestedStatus = c.req.query("status");
+  const filter = requestedStatus === "reviewed"
+    ? { status: { $in: ["approved", "rejected"] } }
+    : ["pending", "approved", "rejected"].includes(requestedStatus)
+      ? { status: requestedStatus }
+      : {};
+  const sort = requestedStatus === "reviewed" ? { reviewedAt: -1, updatedAt: -1 } : { createdAt: -1 };
+  const offlinePayments = await getCollection("offlinePayments");
+  const [orders, pendingCount, approvedCount, rejectedCount] = await Promise.all([
+    offlinePayments.find(filter).sort(sort).limit(100).toArray(),
+    offlinePayments.countDocuments({ status: "pending" }),
+    offlinePayments.countDocuments({ status: "approved" }),
+    offlinePayments.countDocuments({ status: "rejected" }),
+  ]);
+  return c.json({
+    orders: orders.map((order) => ({ ...order, id: order._id.toString(), ownerId: order.ownerId.toString(), _id: undefined })),
+    summary: { pending: pendingCount, reviewed: approvedCount + rejectedCount, approved: approvedCount, rejected: rejectedCount },
+  });
 });
 
 app.post("/api/admin/offline-payments/:id/approve", async (c) => {
