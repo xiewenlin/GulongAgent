@@ -65,6 +65,10 @@
       "destination": "/api/platform?_platform_path=admin/partners/:id"
     },
     {
+      "source": "/api/admin/partners",
+      "destination": "/api/platform?_platform_path=admin/partners"
+    },
+    {
       "source": "/api/admin/partners/assets/presign",
       "destination": "/api/platform?_platform_path=admin/partners/assets/presign"
     },

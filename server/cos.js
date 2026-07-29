@@ -6,6 +6,12 @@ const DEFAULT_REGION = "ap-chengdu";
 const DEFAULT_DOMAIN = "gulong-1259744534.cos.ap-chengdu.myqcloud.com";
 
 let client;
+let browserUploadCorsPromise;
+
+const OFFICIAL_BROWSER_ORIGINS = [
+  "https://www.sologle.com",
+  "https://sologle.com",
+];
 
 function required(name) {
   const value = process.env[name]?.trim();
@@ -36,6 +42,68 @@ function getClient() {
 function objectParams(key) {
   const config = cosConfig();
   return { Bucket: config.bucket, Region: config.region, Key: key };
+}
+
+function bucketParams() {
+  const config = cosConfig();
+  return { Bucket: config.bucket, Region: config.region };
+}
+
+function ruleValues(rule, singular) {
+  const value = rule?.[`${singular}s`] ?? rule?.[singular] ?? [];
+  return (Array.isArray(value) ? value : [value]).map(String);
+}
+
+export function browserUploadCorsRule(origins = OFFICIAL_BROWSER_ORIGINS) {
+  return {
+    AllowedOrigin: [...new Set(origins.map(String).filter(Boolean))],
+    AllowedMethod: ["PUT", "POST", "GET", "HEAD"],
+    AllowedHeader: ["*"],
+    ExposeHeader: ["ETag", "x-cos-request-id"],
+    MaxAgeSeconds: 600,
+  };
+}
+
+export function browserUploadCorsReady(rules, origins = OFFICIAL_BROWSER_ORIGINS) {
+  return origins.every((origin) => (rules || []).some((rule) => {
+    const allowedOrigins = ruleValues(rule, "AllowedOrigin");
+    const allowedMethods = ruleValues(rule, "AllowedMethod").map((method) => method.toUpperCase());
+    const allowedHeaders = ruleValues(rule, "AllowedHeader").map((header) => header.toLowerCase());
+    return (allowedOrigins.includes(origin) || allowedOrigins.includes("*"))
+      && allowedMethods.includes("PUT")
+      && (allowedHeaders.includes("*") || allowedHeaders.includes("content-type"));
+  }));
+}
+
+export async function ensureBrowserUploadCors() {
+  if (!browserUploadCorsPromise) {
+    browserUploadCorsPromise = (async () => {
+      const cos = getClient();
+      let configuredOrigin;
+      try {
+        configuredOrigin = new URL(process.env.APP_ORIGIN?.trim()).origin;
+      } catch {
+        configuredOrigin = undefined;
+      }
+      const origins = [...new Set([
+        ...OFFICIAL_BROWSER_ORIGINS,
+        ...(configuredOrigin?.startsWith("https://") ? [configuredOrigin] : []),
+      ])];
+      const current = await cos.getBucketCors(bucketParams());
+      const rules = Array.isArray(current?.CORSRules) ? current.CORSRules : [];
+      if (browserUploadCorsReady(rules, origins)) return { changed: false, origins };
+      await cos.putBucketCors({
+        ...bucketParams(),
+        CORSRules: [...rules, browserUploadCorsRule(origins)],
+        ResponseVary: "true",
+      });
+      return { changed: true, origins };
+    })().catch((error) => {
+      browserUploadCorsPromise = undefined;
+      throw error;
+    });
+  }
+  return browserUploadCorsPromise;
 }
 
 export function createPresignedPutUrl(key, { expires = 20 * 60, headers } = {}) {

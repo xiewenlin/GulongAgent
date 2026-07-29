@@ -63,6 +63,7 @@ import {
   createPresignedDownloadUrl,
   createPresignedPutUrl,
   deleteObject,
+  ensureBrowserUploadCors,
   headObject,
   sanitizeFilename,
 } from "./cos.js";
@@ -1757,6 +1758,11 @@ app.post("/api/admin/partners/assets/presign", async (c) => {
   const filename = sanitizeFilename(body.filename, `${kind || "image"}.png`);
   if (!kind || !["image/png", "image/jpeg", "image/webp", "image/gif"].includes(contentType) || !Number.isSafeInteger(size) || size < 1 || size > 30 * 1024 * 1024) {
     return c.json({ code: "VALIDATION_ERROR", message: "仅支持 PNG、JPG、WebP 或 GIF 图片，单张不超过 30 MB" }, 400);
+  }
+  try {
+    await ensureBrowserUploadCors();
+  } catch {
+    return c.json({ code: "COS_CORS_CONFIGURATION_FAILED", message: "腾讯云 COS 暂未允许官网上传图片，请确认当前密钥具有存储桶跨域配置权限后重试" }, 503);
   }
   const objectKey = `partners/assets/${kind}/${Date.now()}-${randomBytes(10).toString("hex")}-${filename}`;
   return c.json({ uploadUrl: createPresignedPutUrl(objectKey, { headers: { "Content-Type": contentType } }), objectKey, expiresIn: 1200, requiredHeaders: { "Content-Type": contentType } }, 201);

@@ -189,7 +189,12 @@ function PartnerManager() {
       method: "POST",
       body: JSON.stringify({ filename: file.name, size: file.size, contentType: file.type, kind }),
     });
-    const response = await fetch(ticket.uploadUrl, { method: "PUT", headers: ticket.requiredHeaders || {}, body: file });
+    let response;
+    try {
+      response = await fetch(ticket.uploadUrl, { method: "PUT", mode: "cors", headers: ticket.requiredHeaders || {}, body: file });
+    } catch {
+      throw new Error("无法连接腾讯云 COS，请刷新页面后重试；如果持续失败，请检查存储桶是否允许 www.sologle.com 跨域上传");
+    }
     if (!response.ok) throw new Error(`腾讯云 COS 上传失败（${response.status}）`);
     return ticket.objectKey;
   }

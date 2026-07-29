@@ -10,7 +10,7 @@ import {
   productEdition,
   productEditionFromChannel,
 } from "../../server/chandler.js";
-import { cosConfig, sanitizeFilename } from "../../server/cos.js";
+import { browserUploadCorsReady, browserUploadCorsRule, cosConfig, sanitizeFilename } from "../../server/cos.js";
 import { readExternalAuth, readUserSecret, sealExternalAuth, sealUserSecret } from "../../server/security.js";
 import { recoverExpiredDirectReleaseLock } from "../../server/release-lock.js";
 import {
@@ -79,6 +79,17 @@ test("website body typography stays at 18px while the restored scaled product pr
 test("COS object filenames cannot escape their assigned prefix", () => {
   assert.equal(sanitizeFilename("../第二大脑:2026?.zip"), "..-第二大脑-2026-.zip");
   assert.equal(sanitizeFilename("  "), "file.bin");
+});
+
+test("COS browser uploads allow both official domains without removing existing rules", () => {
+  const origins = ["https://www.sologle.com", "https://sologle.com"];
+  assert.equal(browserUploadCorsReady([], origins), false);
+  const existing = [{ AllowedOrigins: ["https://example.com"], AllowedMethods: ["GET"], AllowedHeaders: ["*"] }];
+  const merged = [...existing, browserUploadCorsRule(origins)];
+  assert.equal(browserUploadCorsReady(merged, origins), true);
+  assert.deepEqual(merged[0], existing[0]);
+  assert.deepEqual(merged[1].AllowedMethod, ["PUT", "POST", "GET", "HEAD"]);
+  assert.deepEqual(merged[1].AllowedHeader, ["*"]);
 });
 
 test("OpenAPI document includes Chandler admin, offline credentials, dated attachments and releases", async () => {
@@ -232,6 +243,8 @@ test("Vercel consolidates nested account and configuration routes", async () => 
   assert.ok(sources.includes("/api/billing/:path*"));
   assert.ok(sources.includes("/api/users/:id/avatar"));
   assert.ok(sources.includes("/api/admin/analytics/:path*"));
+  assert.ok(sources.includes("/api/admin/partners"));
+  assert.ok(sources.includes("/api/admin/partners/assets/presign"));
   assert.ok(sources.includes("/api/analytics/:path*"));
   assert.ok(sources.includes("/api/admin/release-channels/:id/manual-upload"));
   assert.ok(sources.includes("/api/admin/release-uploads/:id/complete"));
