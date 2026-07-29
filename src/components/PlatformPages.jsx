@@ -10,6 +10,7 @@ import {
   CreditCard,
   DownloadSimple,
   FileZip,
+  FlowerLotus,
   Images,
   Key,
   LockKey,
@@ -40,13 +41,17 @@ function EmptyConfig({ children }) {
 
 export function DownloadPage({ themeIcon }) {
   const [links, setLinks] = useState([]);
-  const [release, setRelease] = useState(null);
+  const [releases, setReleases] = useState({});
   const [loading, setLoading] = useState(true);
   const [downloadError, setDownloadError] = useState("");
+  const [downloading, setDownloading] = useState("");
 
   useEffect(() => {
     apiFetch("/api/downloads")
-      .then((result) => { setLinks(result.links || []); setRelease(result.release || null); })
+      .then((result) => {
+        setLinks(result.links || []);
+        setReleases(Object.fromEntries((result.editions || []).map((item) => [item.editionKey, item])));
+      })
       .catch(() => setLinks([]))
       .finally(() => setLoading(false));
   }, []);
@@ -57,29 +62,70 @@ export function DownloadPage({ themeIcon }) {
     { id: "baidu", name: "百度网盘", text: "覆盖广泛，支持提取码与断点续传", accent: "blue" },
   ];
 
-  async function downloadRelease() {
-    if (!release?.channelId) return;
-    trackAnalyticsEvent("DOWNLOAD_CLICK");
+  const editions = [
+    {
+      key: "gulong",
+      eyebrow: "GULONG ESSENTIAL",
+      name: "古龙基础版",
+      tagline: "通用、稳定、开箱即用",
+      description: "面向个人用户、独立开发者与小型团队的标准版本。第一次接触古龙，直接选择这一版即可。",
+      suitable: "适合希望快速拥有 AI 团队，并使用官方标准能力与持续更新的用户。",
+      features: ["完整智能体引擎与任务工作流", "第二大脑、技能与插件能力", "本地优先的数据与模型配置"],
+    },
+    {
+      key: "yongshenghua",
+      eyebrow: "IMMORTAL FLOWER CUSTOM",
+      name: "永生花定制版",
+      tagline: "专属品牌、独立渠道、定制体验",
+      description: "面向永生花既有用户、品牌合作方与需要专属外观、权限策略和发行节奏的组织。",
+      suitable: "适合已通过永生花端注册，或需要品牌化部署与专属发行渠道的用户。",
+      features: ["继承古龙基础版核心引擎", "永生花品牌界面与专属配置", "独立权限分组与版本发行通道"],
+    },
+  ];
+
+  async function downloadRelease(editionKey) {
+    if (!releases[editionKey]?.channelId) return;
+    trackAnalyticsEvent("DOWNLOAD_CLICK", { edition: editionKey });
     setDownloadError("");
+    setDownloading(editionKey);
     try {
-      const result = await apiFetch(`/api/releases/${release.channelId}/download`);
+      const result = await apiFetch(`/api/downloads/${editionKey}/download`);
       window.location.assign(result.url);
     } catch (error) {
       setDownloadError(error.message);
+    } finally {
+      setDownloading("");
     }
   }
 
   return (
     <main id="main-content">
-      <PageIntro eyebrow="WINDOWS DESKTOP" title="下载古龙桌面版" description="完整离线安装，优先使用内置 Node、Git 与能力包；联网时仅在需要时修复组件。" />
+      <PageIntro eyebrow="WINDOWS DESKTOP" title="选择适合你的古龙桌面版" description="两个版本共享可靠的古龙智能体核心。基础版适合绝大多数用户；永生花定制版为特定品牌、账号体系与发行渠道提供专属体验。" />
       <section className="download-layout section-shell">
-        <article className="download-primary">
-          <div className="download-mark"><img src={themeIcon} alt="古龙主题图标" /></div>
-          <div><span>Windows 10 / 11 · x64</span><h2>古龙 Gulong Agent Engine</h2><p>安装包由“用户管理 → 主题访问权限”对应发行渠道自动构建，并在腾讯云 COS 中仅保留最新版本。</p>{release && <button className="button primary" type="button" onClick={downloadRelease}><DownloadSimple size={18} /> 直接下载最新版</button>}</div>
-          <div className="release-meta"><span>{release?.channelName || "默认发行渠道"}</span><strong>{release?.version ? `v${release.version.replace(/^v/i, "")}` : "准备中"}</strong><small>{release?.filename || "完整离线安装包"}</small></div>
-        </article>
-        {release && <div className="release-integrity"><span>SHA-256</span><code>{release.sha256 || "构建完成后公布"}</code><small>{release.bytes ? `${(release.bytes / 1024 / 1024).toFixed(1)} MB` : ""} · {release.signatureStatus || "签名状态待确认"}</small></div>}
+        <div className="edition-choice-intro"><span>一分钟选对版本</span><strong>第一次使用选基础版；已有永生花账号或需要专属品牌体验，选定制版。</strong></div>
+        <div className="download-edition-grid">
+          {editions.map((edition) => {
+            const release = releases[edition.key];
+            const isCustom = edition.key === "yongshenghua";
+            return <article key={edition.key} className={`download-edition-card ${isCustom ? "custom" : "essential"}`}>
+              <header>
+                <div className={`download-edition-mark ${isCustom ? "flower" : ""}`}>{isCustom ? <FlowerLotus size={54} weight="duotone" /> : <img src={themeIcon} alt="古龙基础版图标" />}</div>
+                <div><span>{edition.eyebrow}</span><h2>{edition.name}</h2><strong>{edition.tagline}</strong></div>
+              </header>
+              <p className="edition-description">{edition.description}</p>
+              <div className="edition-suitable"><span>更适合</span><p>{edition.suitable}</p></div>
+              <ul>{edition.features.map((feature) => <li key={feature}><CheckCircle size={20} weight="fill" /> {feature}</li>)}</ul>
+              <div className="edition-release">
+                <div><span>Windows 10 / 11 · x64</span><strong>{release?.version ? `v${release.version.replace(/^v/i, "")}` : loading ? "正在读取版本" : "版本准备中"}</strong><small>{release?.filename || "完整离线安装包"}</small></div>
+                <button className={`button full ${isCustom ? "secondary" : "primary"}`} type="button" disabled={!release || downloading === edition.key} onClick={() => downloadRelease(edition.key)}><DownloadSimple size={19} /> {downloading === edition.key ? "正在获取安全链接" : release ? `下载${edition.name}` : "安装包准备中"}</button>
+              </div>
+              {release && <div className="edition-integrity"><span>SHA-256</span><code title={release.sha256}>{release.sha256 || "发布后公布"}</code><small>{release.bytes ? `${(release.bytes / 1024 / 1024).toFixed(1)} MB` : ""} · {release.signatureStatus || "签名状态待确认"}</small></div>}
+            </article>;
+          })}
+        </div>
+        <div className="edition-decision-guide"><div><span>01</span><p><strong>个人首次使用</strong>选择古龙基础版，配置更直接，官方默认能力完整。</p></div><div><span>02</span><p><strong>已有永生花账号</strong>选择永生花定制版，登录后匹配对应品牌与权限。</p></div><div><span>03</span><p><strong>团队品牌化部署</strong>选择永生花定制版，使用独立发行节奏与定制配置。</p></div></div>
         {downloadError && <div className="form-error">{downloadError}</div>}
+        <div className="download-subheading"><span>ALTERNATIVE DOWNLOAD</span><h2>备用下载通道</h2><p>如果直接下载速度不理想，可以使用下方网盘链接。网盘内容由管理员统一维护。</p></div>
         <div className="download-providers">
           {providers.map((provider) => {
             const link = links.find((item) => item.id === provider.id);
@@ -92,7 +138,7 @@ export function DownloadPage({ themeIcon }) {
             );
           })}
         </div>
-        <div className="download-note"><ShieldCheck size={22} /><div><strong>安装包安全说明</strong><p>直接下载链接为腾讯云 COS 的 15 分钟限时签名地址。下载后请核对版本与 SHA-256；企业发行仍建议配置 Windows 代码签名证书。</p></div></div>
+        <div className="download-note"><ShieldCheck size={22} /><div><strong>安装包安全说明</strong><p>两个版本分别读取所属发行渠道的唯一最新版。直接下载链接为腾讯云 COS 的 15 分钟限时签名地址；下载后可核对页面公布的版本号、文件大小与 SHA-256。</p></div></div>
       </section>
     </main>
   );
@@ -195,7 +241,8 @@ export function DeveloperPage({ user, openAuth }) {
 
 export function PricingPage({ user, openAuth, navigate }) {
   const [cycle, setCycle] = useState("month");
-  const [provider, setProvider] = useState("wechat");
+  const [paymentMode, setPaymentMode] = useState("online");
+  const [onlineProvider, setOnlineProvider] = useState("wechat");
   const [autoRenew, setAutoRenew] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -206,12 +253,16 @@ export function PricingPage({ user, openAuth, navigate }) {
     if (plan.id === "free") return navigate("/download");
     if (plan.id === "custom") return navigate("/feedback");
     trackAnalyticsEvent("CHECKOUT_START", { path: "/pricing" });
+    if (paymentMode === "offline") {
+      setPayment({ mode: "offline-cashier", cycle, amountFen: cycle === "year" ? plan.yearlyFen : plan.monthlyFen, planName: plan.name });
+      return;
+    }
     setBusy(true);
     setError("");
     try {
       const result = await apiFetch("/api/billing/orders", {
         method: "POST",
-        body: JSON.stringify({ kind: "subscription", cycle, provider, autoRenew }),
+        body: JSON.stringify({ kind: "subscription", cycle, provider: onlineProvider, autoRenew }),
       });
       if (result.paymentUrl?.startsWith("/")) navigate(result.paymentUrl);
       else setPayment(result);
@@ -227,7 +278,7 @@ export function PricingPage({ user, openAuth, navigate }) {
       <PageIntro eyebrow="SIMPLE PRICING" title="把成本花在真正困难的任务上" description="普通能力永久免费；会员解锁第二大脑、多端消息、本地模型与完整创作流水线。" />
       <section className="pricing-controls section-shell">
         <div className="cycle-switch"><button className={cycle === "month" ? "active" : ""} onClick={() => setCycle("month")}>按月订阅</button><button className={cycle === "year" ? "active" : ""} onClick={() => setCycle("year")}>按年订阅 <span>省 ¥596</span></button></div>
-        <div className="provider-switch"><span>支付方式</span><button className={provider === "wechat" ? "active" : ""} onClick={() => setProvider("wechat")}>微信支付</button><button className={provider === "alipay" ? "active" : ""} onClick={() => setProvider("alipay")}>支付宝</button><button className={provider === "offline" ? "active" : ""} onClick={() => setProvider("offline")}>线下支付</button></div>
+        <div className="payment-method-control"><div className="provider-switch"><span>支付方式</span><button className={paymentMode === "online" ? "active" : ""} onClick={() => setPaymentMode("online")}>线上支付</button><button className={paymentMode === "offline" ? "active" : ""} onClick={() => { setPaymentMode("offline"); setAutoRenew(false); }}>线下支付</button></div>{paymentMode === "online" && <div className="online-channel-switch" aria-label="线上支付渠道"><span>选择渠道</span><button className={onlineProvider === "wechat" ? "active" : ""} onClick={() => setOnlineProvider("wechat")}>微信支付</button><button className={onlineProvider === "alipay" ? "active" : ""} onClick={() => setOnlineProvider("alipay")}>支付宝</button></div>}</div>
       </section>
       <section className="pricing-grid section-shell">
         {plans.map((plan) => (
@@ -237,22 +288,35 @@ export function PricingPage({ user, openAuth, navigate }) {
             <div className="plan-price">{plan.pricing || formatMoney(cycle === "year" ? plan.yearlyFen : plan.monthlyFen)}{!plan.pricing && <em>/{cycle === "year" ? "年" : "月"}</em>}</div>
             {plan.subpricing && <p className="plan-subprice">{plan.subpricing}</p>}
             <ul>{plan.features.map((feature) => <li key={feature}><Check size={17} weight="bold" /> {feature}</li>)}</ul>
-            {plan.id === "member" && <label className="auto-renew"><input type="checkbox" checked={autoRenew} onChange={(event) => setAutoRenew(event.target.checked)} /><span><strong>到期自动续订</strong><small>可随时取消；实际扣款需完成支付渠道签约。</small></span></label>}
+            {plan.id === "member" && <label className={`auto-renew ${paymentMode === "offline" ? "disabled" : ""}`}><input type="checkbox" disabled={paymentMode === "offline"} checked={autoRenew} onChange={(event) => setAutoRenew(event.target.checked)} /><span><strong>{paymentMode === "offline" ? "人工审核到账" : "到期自动续订"}</strong><small>{paymentMode === "offline" ? "线下订单确认后开通本期会员，续费时需重新提交。" : "可随时取消；实际扣款需完成支付渠道签约。"}</small></span></label>}
             <button className={`button full ${plan.featured ? "primary" : "secondary"}`} disabled={busy} onClick={() => startPayment(plan)}>{plan.id === "free" ? "免费下载" : plan.id === "custom" ? "联系定制" : "立即开通"}</button>
           </article>
         ))}
       </section>
       {error && <div className="page-error section-shell">{error}</div>}
       <section className="recharge-callout section-shell" id="recharge"><div className="wallet-orb"><Wallet size={28} /></div><div><h3>单次充值</h3><p>不订阅也可以按需充值余额，后续用于按量调用模型与工作流。</p></div><button className="button secondary" onClick={() => user ? setPayment({ recharge: true }) : openAuth("login")}><CreditCard size={18} /> 充值余额</button></section>
-      {payment && !payment.recharge && <PaymentDialog payment={payment} provider={provider} onClose={() => setPayment(null)} />}
-      {payment?.recharge && <RechargeDialog provider={provider} onClose={() => setPayment(null)} navigate={navigate} />}
+      {payment && !payment.recharge && <PaymentDialog payment={payment} provider={onlineProvider} onPayment={setPayment} onClose={() => setPayment(null)} />}
+      {payment?.recharge && <RechargeDialog provider={onlineProvider} onClose={() => setPayment(null)} navigate={navigate} />}
     </main>
   );
 }
 
-function PaymentDialog({ payment, provider, onClose }) {
+function PaymentDialog({ payment, provider, onPayment, onClose }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function confirmOffline() {
+    setBusy(true); setError("");
+    try {
+      const result = await apiFetch("/api/billing/orders", { method: "POST", body: JSON.stringify({ kind: "subscription", cycle: payment.cycle, provider: "offline", autoRenew: false }) });
+      onPayment(result);
+    } catch (reason) { setError(reason.message); }
+    finally { setBusy(false); }
+  }
+  if (payment.mode === "offline-cashier") {
+    return <div className="modal-backdrop"><section className="payment-modal offline-payment-modal" role="dialog" aria-modal="true"><button className="modal-close" disabled={busy} onClick={onClose}><X size={19} /></button><div className="payment-logo"><ShieldCheck size={28} /></div><span className="payment-eyebrow">OFFLINE PAYMENT</span><h2>扫码支付后提交人工审核</h2><p>请扫描企业收款码完成付款。付款后点击“我已支付”，系统会创建待审核订单。</p><img className="payment-qr enterprise-qr" src="/assets/enterprise-payment-qr.jpg" alt="古龙企业微信收款码" /><div className="offline-payment-summary"><span>{payment.cycle === "year" ? "年度会员" : "月度会员"}</span><strong>{formatMoney(payment.amountFen)}</strong></div>{error && <div className="form-error">{error}</div>}<div className="payment-dialog-actions"><button className="button secondary" disabled={busy} onClick={onClose}>返回套餐</button><button className="button primary" disabled={busy} onClick={confirmOffline}>{busy ? "正在提交" : "我已支付"}</button></div></section></div>;
+  }
   if (payment.mode === "offline") {
-    return <div className="modal-backdrop"><section className="payment-modal" role="dialog" aria-modal="true"><button className="modal-close" onClick={onClose}><X size={19} /></button><div className="payment-logo"><ShieldCheck size={28} /></div><h2>线下支付申请已提交</h2><p>申请单 {payment.orderNo} 已进入管理员审核队列。确认到账后，会员有效期会同步到 Chandler 与古龙桌面端。</p><div className="form-success">待审核 · {formatMoney(payment.amountFen)}</div><button className="button primary full" onClick={onClose}>我知道了</button></section></div>;
+    return <div className="modal-backdrop"><section className="payment-modal offline-payment-modal" role="dialog" aria-modal="true"><button className="modal-close" onClick={onClose}><X size={19} /></button><div className="payment-logo"><ShieldCheck size={28} /></div><span className="payment-eyebrow">PAYMENT SUBMITTED</span><h2>已提交，等待管理员审核</h2><p>订单 <strong>{payment.orderNo}</strong> 已进入审核队列。到账确认后，会员权益会同步到古龙官网与桌面端。</p><div className="form-success">待审核 · {formatMoney(payment.amountFen)}</div><img className="payment-qr service-qr" src="/assets/customer-service-wechat.jpg" alt="古龙客服微信二维码" /><small>如需补充付款信息，可扫码联系古龙客服。</small><button className="button primary full" onClick={onClose}>我知道了</button></section></div>;
   }
   return (
     <div className="modal-backdrop"><section className="payment-modal" role="dialog" aria-modal="true"><button className="modal-close" onClick={onClose}><X size={19} /></button><div className="payment-logo"><CreditCard size={28} /></div><h2>{provider === "wechat" ? "微信支付" : "支付宝"}</h2><p>订单 {payment.orderNo} 已由 Chandler 创建。{payment.qrCodeDataUrl ? "请扫码完成付款。" : "请在新的支付窗口完成付款。"}</p>{payment.qrCodeDataUrl && <img className="payment-qr" src={payment.qrCodeDataUrl} alt="微信支付二维码" />}{payment.paymentUrl && !payment.qrCodeDataUrl && <a className="button primary full" href={payment.paymentUrl} target="_blank" rel="noreferrer">打开支付页面 <ArrowRight size={17} /></a>}<small>支付结果、订阅与余额由 Chandler 公共 OpenAPI 统一记录。</small></section></div>

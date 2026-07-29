@@ -5,6 +5,7 @@ import {
   ChartLineUp,
   CheckCircle,
   CloudArrowDown,
+  CloudArrowUp,
   Cube,
   DownloadSimple,
   FileZip,
@@ -49,6 +50,7 @@ function ChandlerUserManager() {
   const [meta, setMeta] = useState({});
   const [selected, setSelected] = useState(null);
   const [subscriptions, setSubscriptions] = useState([]);
+  const [subscriptionMeta, setSubscriptionMeta] = useState({});
   const [grant, setGrant] = useState(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState("");
@@ -65,10 +67,10 @@ function ChandlerUserManager() {
   useEffect(() => { load(); }, []);
 
   async function inspect(user) {
-    setSelected(user); setSubscriptions([]); setMessage("");
+    setSelected(user); setSubscriptions([]); setSubscriptionMeta({}); setMessage("");
     try {
       const result = await apiFetch(`/api/admin/chandler/users/${encodeURIComponent(user.id)}/subscriptions`);
-      setSubscriptions(result.subscriptions || []);
+      setSubscriptions(result.subscriptions || []); setSubscriptionMeta(result.meta || {});
     } catch (error) { setMessage(error.message); }
   }
 
@@ -102,11 +104,12 @@ function ChandlerUserManager() {
   }
 
   return <section className="admin-module">
-    <header className="admin-module-head"><div><span>CHANDLER IDENTITY CONTROL</span><h2>用户与订阅</h2><p>搜索 Chandler 真实用户、冻结或恢复账号、查看订阅，并发起权益双人审批。</p></div><div className="storage-badge"><ShieldCheck size={18} /><span>数据来源</span><strong>Chandler OpenAPI</strong></div></header>
+    <header className="admin-module-head"><div><span>CHANDLER IDENTITY CONTROL</span><h2>用户与订阅</h2><p>搜索 Chandler 真实用户、冻结或恢复账号、查看订阅，并发起权益双人审批。</p></div><div className="storage-badge"><ShieldCheck size={18} /><span>数据来源</span><strong>{meta.permissionLimited ? "官网同步用户" : "Chandler OpenAPI"}</strong></div></header>
     <form className="admin-filterbar" onSubmit={load}><label><MagnifyingGlass size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索邮箱、昵称、手机号" /></label><button className="button secondary" disabled={busy === "search"}><MagnifyingGlass size={16} /> {busy === "search" ? "搜索中" : "搜索"}</button><span>共 {meta.total ?? users.length} 个结果</span></form>
     {message && <AdminNotice tone={message.includes("已") ? "success" : "error"}>{message}</AdminNotice>}
-    {users.length ? <div className="chandler-user-list">{users.map((user) => <article key={user.id}><div className="chandler-user-avatar">{(user.display_name || user.email || "U").slice(0, 1).toUpperCase()}</div><div><strong>{user.display_name || "未设置昵称"}</strong><span>{user.email || user.phone || user.id}</span><small>{user.id}</small></div><span className={`status-pill ${user.status || "active"}`}>{user.status === "disabled" ? "已冻结" : user.status === "deleted" ? "已删除" : "正常"}</span><div className="admin-row-actions"><button className="button small ghost" onClick={() => inspect(user)}>订阅详情</button>{user.status !== "deleted" && <button className="button small secondary" disabled={busy === user.id} onClick={() => changeStatus(user)}>{user.status === "disabled" ? "恢复" : "冻结"}</button>}<button className="button small primary" onClick={() => setGrant({ user, entitlementCode: "gulong.member", validUntil: new Date(Date.now() + 365 * 86400_000).toISOString().slice(0, 16), reason: "管理员根据线下合同申请开通古龙会员权益" })}>申请权益</button></div></article>)}</div> : <EmptyState icon={UsersThree} title="没有匹配用户" text="尝试使用邮箱、昵称或手机号的一部分重新搜索。" />}
-    {selected && <div className="admin-detail-panel"><header><div><span>SUBSCRIPTIONS</span><h3>{selected.display_name || selected.email || selected.id} 的订阅</h3></div><button className="icon-danger" onClick={() => setSelected(null)}><X size={17} /></button></header>{subscriptions.length ? subscriptions.map((subscription, index) => <article key={subscription.id || index}><strong>{subscription.status || "unknown"}</strong><span>{subscription.sku_name || subscription.sku_id || subscription.product_name || "订阅套餐"}</span><time>有效至 {subscription.current_period_end ? new Date(subscription.current_period_end).toLocaleString("zh-CN") : subscription.valid_until ? new Date(subscription.valid_until).toLocaleString("zh-CN") : "未返回"}</time></article>) : <p>该用户当前没有订阅记录。</p>}</div>}
+    {meta.permissionLimited && <AdminNotice>Chandler 管理接口未向当前账号开放，已自动切换为官网同步用户与本地订阅视图；查看、搜索和线下审核可继续使用，全局冻结与权益审批需 Chandler 授权。</AdminNotice>}
+    {users.length ? <div className="chandler-user-list">{users.map((user) => <article key={user.id}><div className="chandler-user-avatar">{(user.display_name || user.email || "U").slice(0, 1).toUpperCase()}</div><div><strong>{user.display_name || "未设置昵称"}</strong><span>{user.email || user.phone || user.id}</span><small>{user.edition_name ? `${user.edition_name} · ` : ""}{user.id}</small></div><span className={`status-pill ${user.status || "active"}`}>{user.status === "disabled" ? "已冻结" : user.status === "deleted" ? "已删除" : "正常"}</span><div className="admin-row-actions"><button className="button small ghost" onClick={() => inspect(user)}>订阅详情</button>{!meta.permissionLimited && user.status !== "deleted" && <button className="button small secondary" disabled={busy === user.id} onClick={() => changeStatus(user)}>{user.status === "disabled" ? "恢复" : "冻结"}</button>}{!meta.permissionLimited && <button className="button small primary" onClick={() => setGrant({ user, entitlementCode: "gulong.member", validUntil: new Date(Date.now() + 365 * 86400_000).toISOString().slice(0, 16), reason: "管理员根据线下合同申请开通古龙会员权益" })}>申请权益</button>}</div></article>)}</div> : <EmptyState icon={UsersThree} title="没有匹配用户" text="尝试使用邮箱、昵称或手机号的一部分重新搜索。" />}
+    {selected && <div className="admin-detail-panel"><header><div><span>SUBSCRIPTIONS</span><h3>{selected.display_name || selected.email || selected.id} 的订阅</h3></div><button className="icon-danger" onClick={() => setSelected(null)}><X size={17} /></button></header>{subscriptionMeta.permissionLimited && <AdminNotice>当前显示官网订阅与线下支付审核记录。</AdminNotice>}{subscriptions.length ? subscriptions.map((subscription, index) => <article key={subscription.id || index}><strong>{subscription.status || "unknown"}</strong><span>{subscription.sku_name || subscription.sku_id || subscription.product_name || "订阅套餐"}</span><time>有效至 {subscription.current_period_end ? new Date(subscription.current_period_end).toLocaleString("zh-CN") : subscription.valid_until ? new Date(subscription.valid_until).toLocaleString("zh-CN") : subscription.status === "pending_review" ? "等待审核" : "未返回"}</time></article>) : <p>该用户当前没有订阅记录。</p>}</div>}
     {grant && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setGrant(null)}><form className="admin-form-modal" onSubmit={requestGrant}><button className="modal-close" type="button" onClick={() => setGrant(null)}><X size={18} /></button><span>DUAL APPROVAL</span><h2>申请订阅权益</h2><p>目标用户：{grant.user.email || grant.user.id}</p><div className="admin-form-grid"><label><span>权益代码</span><input required value={grant.entitlementCode} onChange={(event) => setGrant({ ...grant, entitlementCode: event.target.value })} /></label><label><span>有效期至</span><input required type="datetime-local" value={grant.validUntil} onChange={(event) => setGrant({ ...grant, validUntil: event.target.value })} /></label><label className="span-2"><span>申请原因</span><textarea required minLength={2} maxLength={1024} value={grant.reason} onChange={(event) => setGrant({ ...grant, reason: event.target.value })} /></label></div><AdminNotice>申请将进入 Chandler 双人审批，申请人不能审批自己的请求。</AdminNotice><button className="button primary full" disabled={busy === "grant"}>{busy === "grant" ? "提交中" : "提交审批"}</button></form></div>}
   </section>;
 }
@@ -139,7 +142,8 @@ function ChandlerPriceManager() {
 function PartnerManager() {
   const [partners, setPartners] = useState([]);
   const [formOpen, setFormOpen] = useState(false);
-  const [form, setForm] = useState({ name: "", websiteUrl: "https://", logoMode: "generated", logoUrl: "", sort: 100, enabled: true });
+  const emptyForm = { name: "", industry: "", websiteUrl: "https://", logoMode: "upload", logoUrl: "", logoFile: null, promotionFile: null, nodeAction: "website", sort: 100, enabled: true };
+  const [form, setForm] = useState(emptyForm);
   const [state, setState] = useState({ busy: false, message: "" });
 
   async function load() {
@@ -148,14 +152,31 @@ function PartnerManager() {
   }
   useEffect(() => { load(); }, []);
 
+  async function uploadAsset(file, kind) {
+    const ticket = await apiFetch("/api/admin/partners/assets/presign", {
+      method: "POST",
+      body: JSON.stringify({ filename: file.name, size: file.size, contentType: file.type, kind }),
+    });
+    const response = await fetch(ticket.uploadUrl, { method: "PUT", headers: ticket.requiredHeaders || {}, body: file });
+    if (!response.ok) throw new Error(`腾讯云 COS 上传失败（${response.status}）`);
+    return ticket.objectKey;
+  }
+
   async function create(event) {
     event.preventDefault();
     setState({ busy: true, message: "" });
     try {
-      await apiFetch("/api/admin/partners", { method: "POST", body: JSON.stringify(form) });
-      setForm({ name: "", websiteUrl: "https://", logoMode: "generated", logoUrl: "", sort: 100, enabled: true });
+      if (form.logoMode === "upload" && !form.logoFile) throw new Error("请选择企业 Logo 图片");
+      if (form.nodeAction === "promotion" && !form.promotionFile) throw new Error("选择“宣传图片”跳转时，请上传宣传图片");
+      const [logoObjectKey, promotionObjectKey] = await Promise.all([
+        form.logoMode === "upload" ? uploadAsset(form.logoFile, "logo") : null,
+        form.promotionFile ? uploadAsset(form.promotionFile, "promotion") : null,
+      ]);
+      const { logoFile, promotionFile, ...payload } = form;
+      await apiFetch("/api/admin/partners", { method: "POST", body: JSON.stringify({ ...payload, logoObjectKey, promotionObjectKey }) });
+      setForm(emptyForm);
       setFormOpen(false);
-      setState({ busy: false, message: "合作伙伴已创建，首页模块会自动更新。" });
+      setState({ busy: false, message: "合作伙伴已创建，行业已自动分类，首页品牌神经网络会自动更新。" });
       await load();
     } catch (error) { setState({ busy: false, message: error.message }); }
   }
@@ -167,10 +188,10 @@ function PartnerManager() {
   }
 
   return <section className="admin-module">
-    <header className="admin-module-head"><div><span>PARTNER ECOSYSTEM</span><h2>合作伙伴管理</h2><p>生成品牌 Logo、绑定官网域名，并自动展示到首页“他们都在用古龙智能引擎”。</p></div><button className="button primary" onClick={() => setFormOpen(true)}><Plus size={17} /> 新建合作伙伴</button></header>
+    <header className="admin-module-head"><div><span>PARTNER ECOSYSTEM</span><h2>合作伙伴管理</h2><p>上传企业 Logo、官网与宣传图片；系统根据企业行业自动归类，并同步到首页品牌神经网络。</p></div><button className="button primary" onClick={() => setFormOpen(true)}><Plus size={17} /> 新建合作伙伴</button></header>
     {state.message && <AdminNotice tone={state.message.startsWith("合作伙伴已") ? "success" : "error"}>{state.message}</AdminNotice>}
-    {partners.length ? <div className="admin-partner-grid">{partners.map((partner) => <article key={partner.id}><div className="admin-logo-frame"><img src={partner.logoPreviewUrl} alt={`${partner.name} Logo`} /></div><div><strong>{partner.name}</strong><a href={partner.websiteUrl} target="_blank" rel="noreferrer">{new URL(partner.websiteUrl).hostname} <ArrowSquareOut size={13} /></a><small>{partner.logoMode === "generated" ? "官网自动生成 Logo" : "使用外部 Logo"} · 排序 {partner.sort}</small></div><button className="icon-danger" onClick={() => remove(partner.id)} aria-label={`删除 ${partner.name}`}><Trash size={17} /></button></article>)}</div> : <EmptyState icon={Handshake} title="还没有合作伙伴" text="创建第一家伙伴后，首页会自动出现品牌展示模块。" />}
-    {formOpen && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setFormOpen(false)}><form className="admin-form-modal" onSubmit={create}><button className="modal-close" type="button" onClick={() => setFormOpen(false)}><X size={18} /></button><span>NEW PARTNER</span><h2>新建合作伙伴</h2><div className="admin-form-grid"><label><span>合作伙伴名称</span><input required minLength={2} maxLength={80} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：中科智能" /></label><label><span>官网域名链接</span><input required type="url" value={form.websiteUrl} onChange={(event) => setForm({ ...form, websiteUrl: event.target.value })} placeholder="https://example.com" /></label><label><span>Logo 方式</span><select value={form.logoMode} onChange={(event) => setForm({ ...form, logoMode: event.target.value })}><option value="generated">根据名称自动生成</option><option value="url">使用 HTTPS 图片链接</option></select></label>{form.logoMode === "url" && <label><span>Logo 图片链接</span><input required type="url" value={form.logoUrl} onChange={(event) => setForm({ ...form, logoUrl: event.target.value })} placeholder="https://example.com/logo.png" /></label>}<label><span>首页排序</span><input type="number" value={form.sort} onChange={(event) => setForm({ ...form, sort: Number(event.target.value) })} /></label></div><div className="logo-generation-hint"><ImageSquare size={25} /><div><strong>自动生成规则</strong><p>使用品牌名称、东方玉瓷留白和古龙主题色生成响应式 SVG，可直接用于首页浅色背景。</p></div></div><button className="button primary full" disabled={state.busy}>{state.busy ? "正在创建" : "生成 Logo 并创建伙伴"}</button></form></div>}
+    {partners.length ? <div className="admin-partner-grid">{partners.map((partner) => <article key={partner.id}><div className="admin-logo-frame"><img src={partner.logoPreviewUrl} alt={`${partner.name} Logo`} /></div><div><strong>{partner.name}</strong><a href={partner.websiteUrl} target="_blank" rel="noreferrer">{new URL(partner.websiteUrl).hostname} <ArrowSquareOut size={13} /></a><small>{partner.industryName || "其他行业"} · {partner.logoMode === "upload" ? "COS Logo" : partner.logoMode === "generated" ? "自动 Logo" : "外部 Logo"} · 排序 {partner.sort}</small>{partner.promotionPreviewUrl && <a className="partner-promo-link" href={partner.promotionPreviewUrl} target="_blank" rel="noreferrer"><ImageSquare size={16} /> 查看宣传图片</a>}</div><button className="icon-danger" onClick={() => remove(partner.id)} aria-label={`删除 ${partner.name}`}><Trash size={17} /></button></article>)}</div> : <EmptyState icon={Handshake} title="还没有合作伙伴" text="创建第一家伙伴后，首页会自动出现品牌神经网络。" />}
+    {formOpen && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !state.busy && setFormOpen(false)}><form className="admin-form-modal partner-form-modal" onSubmit={create}><button className="modal-close" type="button" disabled={state.busy} onClick={() => setFormOpen(false)}><X size={18} /></button><span>NEW PARTNER</span><h2>新建合作伙伴</h2><div className="admin-form-grid"><label><span>企业名称</span><input required minLength={2} maxLength={80} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：中科智能" /></label><label><span>企业所属行业</span><input required maxLength={80} value={form.industry} onChange={(event) => setForm({ ...form, industry: event.target.value })} placeholder="例如：人工智能软件" /></label><label className="span-2"><span>官网网址</span><input required type="url" value={form.websiteUrl} onChange={(event) => setForm({ ...form, websiteUrl: event.target.value })} placeholder="https://example.com" /></label><label><span>Logo 方式</span><select value={form.logoMode} onChange={(event) => setForm({ ...form, logoMode: event.target.value })}><option value="upload">上传企业 Logo（推荐）</option><option value="generated">根据名称自动生成</option><option value="url">使用 HTTPS 图片链接</option></select></label>{form.logoMode === "upload" && <label><span>企业 Logo 图片</span><input required type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => setForm({ ...form, logoFile: event.target.files?.[0] || null })} /></label>}{form.logoMode === "url" && <label><span>Logo 图片链接</span><input required type="url" value={form.logoUrl} onChange={(event) => setForm({ ...form, logoUrl: event.target.value })} placeholder="https://example.com/logo.png" /></label>}<label><span>宣传图片（可选）</span><input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => setForm({ ...form, promotionFile: event.target.files?.[0] || null })} /></label><label><span>点击 Logo 后</span><select value={form.nodeAction} onChange={(event) => setForm({ ...form, nodeAction: event.target.value })}><option value="website">新标签页打开官网</option><option value="promotion">弹窗放大宣传图片</option></select></label><label><span>首页排序</span><input type="number" value={form.sort} onChange={(event) => setForm({ ...form, sort: Number(event.target.value) })} /></label></div><div className="logo-generation-hint"><ImageSquare size={25} /><div><strong>行业自动分类</strong><p>系统会根据“企业所属行业”和企业名称归入科技、金融、教育、医疗、商业、工业、文化等网络簇；首页节点会自动进入对应行业轨道。</p></div></div><button className="button primary full" disabled={state.busy}>{state.busy ? "正在上传到 COS 并创建" : "创建伙伴并加入品牌神经网络"}</button></form></div>}
   </section>;
 }
 
@@ -211,7 +232,7 @@ function BrainAttachmentManager() {
     <header className="admin-module-head"><div><span>TENCENT COS ARCHIVE</span><h2>第二大脑附件</h2><p>按文件名模糊搜索、按北京时间日期筛选，并生成 15 分钟有效的私有下载地址。</p></div><div className="storage-badge"><CloudArrowDown size={18} /><span>成都 COS</span><strong>gulong-1259744534</strong></div></header>
     <form className="admin-filterbar" onSubmit={(event) => { event.preventDefault(); load(1); }}><label><MagnifyingGlass size={17} /><input value={filters.keyword} onChange={(event) => setFilters({ ...filters, keyword: event.target.value })} placeholder="搜索文件名关键词" /></label><label><CalendarBlank size={17} /><input type="date" value={filters.from} onChange={(event) => setFilters({ ...filters, from: event.target.value })} /></label><span>至</span><label><CalendarBlank size={17} /><input type="date" value={filters.to} onChange={(event) => setFilters({ ...filters, to: event.target.value })} /></label><button className="button secondary"><MagnifyingGlass size={16} /> 搜索</button></form>
     {message && <AdminNotice tone={message.startsWith("处理进度") ? "success" : "error"}>{message}</AdminNotice>}
-    {items.length ? <div className="admin-table"><div className="admin-table-head"><span>附件</span><span>提交用户</span><span>提交时间</span><span>状态</span><span>操作</span></div>{items.map((item) => <article key={item.id}><div className="file-cell"><FileZip size={21} /><div><strong>{item.originalName}</strong><small>{(item.size / 1024 / 1024).toFixed(1)} MB</small></div></div><div><strong>{item.owner?.displayName || item.owner?.username || "未命名用户"}</strong><small>{item.owner?.email || "—"}</small></div><time>{new Date(item.createdAt).toLocaleString("zh-CN")}</time><span className="status-pill ready">{item.status === "queued_for_analysis" ? `待分析 · ${item.progress}%` : item.status === "analyzing" ? `分析中 · ${item.progress}%` : item.status === "completed" ? "已完成" : item.status === "failed" ? "失败" : item.status}</span><div className="admin-table-actions"><button className="button small ghost" onClick={() => setProcessing({ id: item.id, status: item.status === "uploading" ? "queued_for_analysis" : item.status, progress: item.progress || 0, result: item.result || "", feedback: item.feedback || "" })}><GearSix size={15} /> 处理</button><button className="button small secondary" onClick={() => download(item)}><DownloadSimple size={15} /> 下载</button></div></article>)}</div> : <EmptyState icon={FileZip} title="当前筛选范围没有附件" text="调整关键词或日期后重新搜索。" />}
+    {items.length ? <div className="admin-table brain-attachment-table"><div className="admin-table-head"><span>附件</span><span>提交用户</span><span>提交时间</span><span>状态</span><span>操作</span></div>{items.map((item) => <article key={item.id}><div className="file-cell"><FileZip size={21} /><div><strong title={item.originalName}>{item.originalName}</strong><small>{(item.size / 1024 / 1024).toFixed(1)} MB</small></div></div><div><strong title={item.owner?.displayName || item.owner?.username || "未命名用户"}>{item.owner?.displayName || item.owner?.username || "未命名用户"}</strong><small title={item.owner?.email || "—"}>{item.owner?.email || "—"}</small></div><time>{new Date(item.createdAt).toLocaleString("zh-CN")}</time><span className="status-pill ready">{item.status === "queued_for_analysis" ? `待分析 · ${item.progress}%` : item.status === "analyzing" ? `分析中 · ${item.progress}%` : item.status === "completed" ? "已完成" : item.status === "failed" ? "失败" : item.status}</span><div className="admin-table-actions"><button className="button small ghost" onClick={() => setProcessing({ id: item.id, status: item.status === "uploading" ? "queued_for_analysis" : item.status, progress: item.progress || 0, result: item.result || "", feedback: item.feedback || "" })}><GearSix size={15} /> 处理</button><button className="button small secondary" onClick={() => download(item)}><DownloadSimple size={15} /> 下载</button></div></article>)}</div> : <EmptyState icon={FileZip} title="当前筛选范围没有附件" text="调整关键词或日期后重新搜索。" />}
     <footer className="admin-module-footer"><span>共 {pagination.total || 0} 个附件</span><code>GET /api/v1/brain/attachments/latest?date={today}</code><button className="button small ghost" disabled={(pagination.page || 1) >= (pagination.pages || 1)} onClick={() => load((pagination.page || 1) + 1)}>下一页</button></footer>
     {processing && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setProcessing(null)}><form className="admin-form-modal" onSubmit={saveProcessing}><button className="modal-close" type="button" onClick={() => setProcessing(null)}><X size={18} /></button><span>ANALYSIS FEEDBACK</span><h2>更新处理进度与结果</h2><div className="admin-form-grid"><label><span>处理状态</span><select value={processing.status} onChange={(event) => setProcessing({ ...processing, status: event.target.value })}><option value="queued_for_analysis">等待分析</option><option value="analyzing">正在分析</option><option value="completed">处理完成</option><option value="failed">处理失败</option></select></label><label><span>处理进度（0–100）</span><input type="number" min="0" max="100" required value={processing.progress} onChange={(event) => setProcessing({ ...processing, progress: Number(event.target.value) })} /></label><label className="span-2"><span>分析结果</span><textarea maxLength={20000} value={processing.result} onChange={(event) => setProcessing({ ...processing, result: event.target.value })} placeholder="说明发现的问题、需求洞察、可执行改进建议……" /></label><label className="span-2"><span>给用户的反馈</span><textarea maxLength={5000} value={processing.feedback} onChange={(event) => setProcessing({ ...processing, feedback: event.target.value })} placeholder="这段内容会直接显示在用户后台。" /></label></div><AdminNotice>保存后，提交用户会在“用户后台 → 第二大脑”立即看到最新进度、分析结果和反馈。</AdminNotice><button className="button primary full">保存并反馈用户</button></form></div>}
   </section>;
@@ -223,6 +244,7 @@ function VersionManager() {
   const [jobs, setJobs] = useState([]);
   const [open, setOpen] = useState(true);
   const [message, setMessage] = useState("");
+  const [manualUpload, setManualUpload] = useState(null);
 
   async function load() {
     try {
@@ -242,12 +264,43 @@ function VersionManager() {
     } catch (error) { setMessage(error.message); }
   }
 
+  async function uploadRelease(event) {
+    event.preventDefault();
+    if (!manualUpload?.file) return;
+    setManualUpload((current) => ({ ...current, busy: true, error: "", progress: 2 }));
+    try {
+      const { channel, file, version } = manualUpload;
+      const ticket = await apiFetch(`/api/admin/release-channels/${channel.id}/manual-upload`, {
+        method: "POST",
+        body: JSON.stringify({ filename: file.name, bytes: file.size, version }),
+      });
+      await new Promise((resolve, reject) => {
+        const request = new XMLHttpRequest();
+        request.open("PUT", ticket.uploadUrl, true);
+        Object.entries(ticket.requiredHeaders || {}).forEach(([name, value]) => request.setRequestHeader(name, value));
+        request.upload.onprogress = (progressEvent) => {
+          if (progressEvent.lengthComputable) setManualUpload((current) => ({ ...current, progress: Math.max(2, Math.round((progressEvent.loaded / progressEvent.total) * 96)) }));
+        };
+        request.onerror = () => reject(new Error("上传到腾讯云 COS 失败，请检查网络和 COS 跨域配置"));
+        request.onload = () => request.status >= 200 && request.status < 300 ? resolve() : reject(new Error(`腾讯云 COS 返回 ${request.status}`));
+        request.send(file);
+      });
+      await apiFetch(`/api/admin/release-uploads/${ticket.uploadId}/complete`, { method: "POST", body: "{}" });
+      setMessage(`${channel.name} 的 v${version} 已上传并切换为最新版本。`);
+      setManualUpload(null);
+      await load();
+    } catch (error) {
+      setManualUpload((current) => ({ ...current, busy: false, error: error.message, progress: 0 }));
+    }
+  }
+
   return <section className="admin-module">
     <header className="admin-module-head"><div><span>RELEASE CONTROL PLANE</span><h2>版本管理</h2><p>每个“主题访问权限”用户分组对应一个发行渠道；每个渠道只保留一个最新安装包。</p></div><button className="button secondary" onClick={load}><ArrowClockwise size={17} /> 刷新状态</button></header>
     <AdminNotice>发版按钮只创建一个渠道任务。Windows 发行工作器会调用会话 019f91fb… 产出的安全脚本，完成测试、品牌事务、NSIS 打包、SHA-256 与 COS 上传。</AdminNotice>
-    {message && <AdminNotice tone={message.includes("进入发行队列") ? "success" : "error"}>{message}</AdminNotice>}
-    <div className="release-picker"><button className="release-picker-trigger" onClick={() => setOpen(!open)}><div><span>选择用户分组 / 发行渠道</span><strong>{channels.length ? `${channels.length} 个可用渠道` : "等待工作器同步分组"}</strong></div><MagnifyingGlass size={19} /></button>{open && <div className="release-picker-menu"><label><MagnifyingGlass size={16} /><input autoFocus value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="输入用户分组关键词" /></label><div>{filtered.map((channel) => <article key={channel.id}><div><strong>{channel.name}</strong><small>允许主题：{(channel.themeNames || []).join("、")}</small>{channel.latestRelease && <span>当前 v{channel.latestRelease.version} · {new Date(channel.latestRelease.publishedAt).toLocaleString("zh-CN")}</span>}</div><button className="button small primary" onClick={() => release(channel)}><RocketLaunch size={15} /> 发版</button></article>)}{!filtered.length && <p className="release-picker-empty">没有匹配的用户分组。请先运行发行工作器同步桌面端权限文件。</p>}</div></div>}</div>
+    {message && <AdminNotice tone={message.includes("进入发行队列") || message.includes("已上传并切换") ? "success" : "error"}>{message}</AdminNotice>}
+    <div className="release-picker"><button className="release-picker-trigger" onClick={() => setOpen(!open)}><div><span>选择用户分组 / 发行渠道</span><strong>{channels.length ? `${channels.length} 个可用渠道` : "等待工作器同步分组"}</strong></div><MagnifyingGlass size={19} /></button>{open && <div className="release-picker-menu"><label><MagnifyingGlass size={16} /><input autoFocus value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="输入用户分组关键词" /></label><div>{filtered.map((channel) => <article key={channel.id}><div><strong>{channel.name}</strong><small>允许主题：{(channel.themeNames || []).join("、")}</small>{channel.latestRelease && <span>当前 v{channel.latestRelease.version} · {new Date(channel.latestRelease.publishedAt).toLocaleString("zh-CN")}</span>}</div><div className="release-channel-actions"><button className="button small secondary" onClick={() => setManualUpload({ channel, version: channel.latestRelease?.version || "1.0.0", file: null, busy: false, error: "", progress: 0 })}><CloudArrowUp size={15} /> 上传</button><button className="button small primary" onClick={() => release(channel)}><RocketLaunch size={15} /> 发版</button></div></article>)}{!filtered.length && <p className="release-picker-empty">没有匹配的用户分组。请先运行发行工作器同步桌面端权限文件。</p>}</div></div>}</div>
     <div className="release-job-list"><h3>最近发版任务</h3>{jobs.length ? jobs.map((job) => <article key={job.id}><div className={`job-status ${job.status}`}><span /><strong>{job.status === "queued" ? "排队" : job.status === "building" ? "构建中" : job.status === "uploading" ? "上传中" : job.status === "completed" ? "已发布" : "失败"}</strong></div><div><strong>{job.channelName}</strong><small>{job.version ? `v${job.version}` : "等待生成版本号"} · {new Date(job.createdAt).toLocaleString("zh-CN")}</small></div>{job.error && <p>{job.error}</p>}</article>) : <EmptyState icon={RocketLaunch} title="还没有发版任务" text="从上方用户分组列表选择一个渠道开始发版。" />}</div>
+    {manualUpload && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !manualUpload.busy && setManualUpload(null)}><form className="admin-form-modal release-upload-modal" onSubmit={uploadRelease}><button className="modal-close" type="button" disabled={manualUpload.busy} onClick={() => setManualUpload(null)}><X size={18} /></button><span>MANUAL COS RELEASE</span><h2>上传新版本</h2><p>发行渠道：<strong>{manualUpload.channel.name}</strong></p><div className="admin-form-grid"><label><span>版本号</span><input required maxLength={40} value={manualUpload.version} onChange={(event) => setManualUpload({ ...manualUpload, version: event.target.value })} placeholder="例如 1.6.0" /></label><label><span>Windows 安装包</span><input required type="file" accept=".exe,.msix,.msixbundle,.zip,application/octet-stream" onChange={(event) => setManualUpload({ ...manualUpload, file: event.target.files?.[0] || null })} /></label></div><AdminNotice>文件将从浏览器直传成都 COS。新文件校验成功后才替换线上版本，随后清理该渠道旧安装包。</AdminNotice>{manualUpload.busy && <div className="upload-progress"><span style={{ width: `${manualUpload.progress}%` }} /><em>{manualUpload.progress}%</em></div>}{manualUpload.error && <div className="form-error">{manualUpload.error}</div>}<button className="button primary full" disabled={manualUpload.busy || !manualUpload.file}><CloudArrowUp size={18} /> {manualUpload.busy ? "正在上传并校验" : "上传并设为最新版"}</button></form></div>}
   </section>;
 }
 

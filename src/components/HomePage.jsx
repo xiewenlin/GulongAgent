@@ -6,7 +6,6 @@ import {
   Database,
   Devices,
   FlowArrow,
-  Handshake,
   Palette,
   PuzzlePiece,
   ShieldCheck,
@@ -17,6 +16,7 @@ import { useEffect, useState } from "react";
 import { apiFetch } from "../api.js";
 import { capabilities, workflowSteps } from "../data/site.js";
 import { ProductDemo } from "./ProductDemo.jsx";
+import { PartnerNetwork } from "./PartnerNetwork.jsx";
 
 const iconMap = {
   route: FlowArrow,
@@ -92,14 +92,7 @@ export function HomePage({ navigate, openTheme, themeIcon, downloadLatest }) {
           })}
         </section>
 
-        {partners.length > 0 && (
-          <section className="partners-section section-shell" aria-labelledby="partners-title">
-            <div className="partners-heading"><div className="partners-symbol"><Handshake size={24} weight="duotone" /></div><div><span>合作伙伴</span><h2 id="partners-title">他们都在用古龙智能引擎</h2><p>与值得信赖的团队一起，把可持续进化的智能体能力带进真实业务。</p></div></div>
-            <div className="partner-logo-grid">
-              {partners.map((partner) => <a key={partner.id} href={partner.websiteUrl} target="_blank" rel="noopener noreferrer" aria-label={`访问 ${partner.name} 官网`}><img src={partner.logoUrl} alt={`${partner.name} Logo`} loading="lazy" /><span>{partner.name}</span></a>)}
-            </div>
-          </section>
-        )}
+        {partners.length > 0 && <PartnerNetwork partners={partners} />}
 
         <section className="local-first section-shell" id="brain">
           <div>

@@ -363,19 +363,19 @@ export function SecondBrainPage({ user, openAuth, navigate }) {
         <NeuralHologramDemo />
       </section>
 
-      <section className="brain-retrieval section-shell">
+      <section className="brain-retrieval section-shell" id="retrieval">
         <div className="brain-section-copy"><span>04 · 检索与思考</span><h2>先找证据，再组织答案</h2><p>古龙不会先让模型“凭感觉回忆”。它先在本地合并多路检索结果，再把同一份证据池交给综合思考，并强制标注引用与知识缺口。</p></div>
         <div className="retrieval-pipeline">
           <div className="retrieval-sources">
             {[{icon: MagnifyingGlass, title: 'FTS5 / BM25', text: '精确命中关键词与原文'}, {icon: ChartScatter, title: '本地向量', text: '找到表达不同但含义相近的内容'}, {icon: Graph, title: '知识图谱', text: '沿人物、项目与事件关系扩展'}, {icon: CirclesFour, title: '时间线', text: '理解结论在何时发生、是否过期'}].map(({icon: Icon, title, text}) => <article key={title}><Icon size={22} /><div><strong>{title}</strong><p>{text}</p></div></article>)}
           </div>
-          <div className="rrf-core"><span>RRF</span><strong>合并排序</strong><small>先 ACL 过滤<br />再召回与融合</small></div>
+          <div className="rrf-core"><div><span>RRF</span><strong>合并排序</strong><small>先 ACL 过滤<br />再召回与融合</small></div></div>
           <div className="retrieval-answer"><Quotes size={31} weight="duotone" /><span>带引用综合思考</span><h3>每个关键结论，都能回到原始证据。</h3><p>输出使用 [E#] 标记证据，并明确说明仍缺少什么信息。</p><div><span>[E1] 产品评审纪要</span><span>[E2] 会话原文</span><span>[E3] 版本记录</span></div></div>
         </div>
       </section>
 
-      <section className="brain-agent section-shell">
-        <div className="brain-agent-copy"><span>05 · Agent 交互</span><h2>记忆不只是“被搜索”，<br />它会参与下一次行动。</h2><p>当你提出一个目标，Agent 会先识别来源与权限，再读取相关证据、判断冲突和陈旧程度，最后把经过引用的结论交给计划与工作流。</p><button className="text-link" onClick={() => navigate("/manual#workflow")}>查看动态工作流用法 <ArrowRight size={17} /></button></div>
+      <section className="brain-agent section-shell" id="agent-memory">
+        <div className="brain-agent-copy"><span>05 · Agent 交互</span><h2>记忆不只是“被搜索”<em>它会参与下一次行动。</em></h2><p>当你提出一个目标，Agent 会先识别来源与权限，再读取相关证据、判断冲突和陈旧程度，最后把经过引用的结论交给计划与工作流。</p><button className="text-link" onClick={() => navigate("/manual#workflow")}>查看动态工作流用法 <ArrowRight size={17} /></button></div>
         <div className="agent-loop">
           {[['你的目标', '自然语言与文件'], ['权限过滤', 'source_id + ACL'], ['证据召回', '全文 · 向量 · 图谱 · 时间'], ['综合思考', '引用 · 冲突 · 知识缺口'], ['计划与执行', '模型 · 技能 · 工作流'], ['经验回写', '确认后进入 Vault']].map(([title, text], index) => <article key={title}><span>0{index + 1}</span><div><strong>{title}</strong><p>{text}</p></div>{index < 5 && <ArrowRight size={18} />}</article>)}
         </div>

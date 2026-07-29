@@ -133,6 +133,10 @@ export async function ensureIndexes() {
           { status: 1, createdAt: 1 },
           { name: "release_job_queue" },
         ),
+        db.collection("releaseUploads").createIndex(
+          { channelId: 1, status: 1, expiresAt: 1 },
+          { name: "release_manual_uploads" },
+        ),
         db.collection("offlinePayments").createIndex(
           { orderNo: 1 },
           { unique: true, name: "uniq_offline_payment_order" },

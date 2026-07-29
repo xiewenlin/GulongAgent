@@ -154,6 +154,30 @@ function generatedPartnerLogo(partner) {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 160" role="img" aria-label="${escapeXml(name)} Logo"><rect width="320" height="160" rx="28" fill="#fffdfa"/><rect x="1" y="1" width="318" height="158" rx="27" fill="none" stroke="#e9e4d9"/><circle cx="78" cy="80" r="46" fill="${primary}"/><circle cx="78" cy="80" r="36" fill="none" stroke="${accent}" stroke-width="3"/><text x="78" y="91" text-anchor="middle" font-family="system-ui,Segoe UI,sans-serif" font-size="34" font-weight="800" fill="#fff">${escapeXml(mark)}</text><text x="142" y="73" font-family="system-ui,Segoe UI,sans-serif" font-size="22" font-weight="750" fill="#172522">${escapeXml(name.slice(0, 12))}</text><text x="142" y="99" font-family="system-ui,Segoe UI,sans-serif" font-size="12" letter-spacing="2" fill="#7d857f">GULONG PARTNER</text></svg>`;
 }
 
+const PARTNER_INDUSTRIES = [
+  { key: "technology", name: "科技与人工智能", keywords: /人工智能|\bai\b|智能|科技|软件|互联网|云计算|数据|机器人|芯片|saas/i },
+  { key: "finance", name: "金融与保险", keywords: /金融|银行|保险|证券|基金|支付|投资|财富/i },
+  { key: "education", name: "教育与培训", keywords: /教育|学校|大学|学院|培训|课程|学习/i },
+  { key: "healthcare", name: "医疗与健康", keywords: /医疗|医药|健康|医院|诊所|生物|养老/i },
+  { key: "commerce", name: "零售与商业", keywords: /零售|电商|商贸|消费|餐饮|酒店|门店|品牌/i },
+  { key: "industry", name: "工业与制造", keywords: /工业|制造|汽车|能源|建筑|工程|物流|供应链|农业/i },
+  { key: "culture", name: "文化与传媒", keywords: /文化|传媒|影视|游戏|出版|旅游|艺术|设计|广告/i },
+  { key: "public", name: "政务与公共服务", keywords: /政府|政务|公共|协会|公益|研究院|事业单位/i },
+  { key: "services", name: "专业服务", keywords: /咨询|法律|会计|人力|服务|地产|知识产权/i },
+];
+
+function classifyPartnerIndustry(industry, name = "") {
+  const input = String(industry || "").trim().slice(0, 80);
+  const haystack = `${input} ${name}`;
+  const match = PARTNER_INDUSTRIES.find((item) => item.keywords.test(haystack));
+  return { industryInput: input || "其他", industryKey: match?.key || "other", industryName: match?.name || "其他行业" };
+}
+
+function partnerLogoUrl(partner) {
+  if (partner.logoMode === "upload" && partner.logoObjectKey) return `/api/partners/${partner._id}/image/logo`;
+  return partner.logoMode === "url" ? partner.logoUrl : `/api/partners/${partner._id}/logo.svg`;
+}
+
 function safeDate(value, endOfDay = false) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ""))) return null;
   const date = new Date(`${value}T${endOfDay ? "23:59:59.999" : "00:00:00.000"}+08:00`);
@@ -173,6 +197,48 @@ function workerAuthorized(c) {
   const configured = process.env.RELEASE_WORKER_KEY?.trim();
   const provided = c.req.header("x-release-worker-key")?.trim();
   return Boolean(configured && provided && hashOpaqueToken(configured, "release-worker") === hashOpaqueToken(provided, "release-worker"));
+}
+
+function publicReleaseMetadata(channel, edition = productEditionFromChannel(channel)) {
+  const latest = channel?.latestRelease;
+  if (!edition || channel?.distributionStatus === "uploading" || !latest?.objectKey) return null;
+  return {
+    editionKey: edition.key,
+    editionName: edition.name,
+    channelId: channel._id.toString(),
+    channelName: channel.name,
+    version: latest.version,
+    filename: latest.filename,
+    bytes: latest.bytes,
+    sha256: latest.sha256,
+    signatureStatus: latest.signatureStatus,
+    publishedAt: latest.publishedAt,
+  };
+}
+
+async function publicEditionChannels() {
+  if (!isDatabaseConfigured()) return new Map();
+  const channels = await (await getCollection("releaseChannels"))
+    .find({ enabled: true, distributionStatus: { $ne: "uploading" }, "latestRelease.objectKey": { $exists: true } })
+    .sort({ isDefault: -1, "latestRelease.publishedAt": -1, sort: 1 })
+    .limit(128)
+    .toArray();
+  const result = new Map();
+  for (const channel of channels) {
+    const edition = productEditionFromChannel(channel);
+    if (edition && !result.has(edition.key)) result.set(edition.key, channel);
+  }
+  return result;
+}
+
+function cosHeadMetadata(head, headerName) {
+  const normalized = String(headerName || "").toLowerCase();
+  const headers = head?.headers || {};
+  const direct = Object.entries(headers).find(([name]) => name.toLowerCase() === normalized)?.[1];
+  if (direct != null) return String(direct);
+  const metadataKey = normalized.replace(/^x-cos-meta-/, "");
+  const metadata = head?.Metadata || head?.metadata || {};
+  return String(metadata[metadataKey] ?? metadata[metadataKey.toLowerCase()] ?? "");
 }
 
 const AuthResponseSchema = z.object({ user: PublicUserSchema });
@@ -331,6 +397,105 @@ const latestReleaseRoute = createRoute({
   responses: { 200: { description: "最新发行元数据", content: { "application/json": { schema: z.object({ release: z.object({ channelId: z.string(), channelName: z.string(), version: z.string(), filename: z.string(), bytes: z.number(), sha256: z.string(), signatureStatus: z.string(), publishedAt: z.coerce.date() }).nullable() }) } } } },
 });
 
+const adminManualReleaseUploadRoute = createRoute({
+  method: "post",
+  path: "/api/admin/release-channels/{id}/manual-upload",
+  tags: ["Admin · Releases"],
+  summary: "创建发行渠道的手动 COS 上传任务",
+  description: "管理员获取限时 PUT 地址后从浏览器直传腾讯云 COS。上传完成前不会移除当前线上版本。",
+  request: {
+    params: z.object({ id: z.string().min(1).max(100) }),
+    body: { content: { "application/json": { schema: z.object({ filename: z.string().min(1).max(180), bytes: z.number().int().min(1024).max(5 * 1024 * 1024 * 1024), version: z.string().min(1).max(40) }) } } },
+  },
+  responses: {
+    201: { description: "COS 直传凭据", content: { "application/json": { schema: z.object({ uploadId: z.string(), uploadUrl: z.url(), objectKey: z.string(), expiresIn: z.number(), requiredHeaders: z.record(z.string(), z.string()) }).passthrough() } } },
+    400: { description: "安装包信息无效", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "非管理员", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "渠道已有任务", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const adminCompleteManualReleaseUploadRoute = createRoute({
+  method: "post",
+  path: "/api/admin/release-uploads/{id}/complete",
+  tags: ["Admin · Releases"],
+  summary: "校验并发布手动上传的安装包",
+  description: "核对 COS 对象大小，原子切换渠道最新版，成功后再清理旧安装包。",
+  request: { params: z.object({ id: z.string().min(1).max(100) }) },
+  responses: {
+    200: { description: "新版本已生效", content: { "application/json": { schema: z.object({ ok: z.literal(true), channelId: z.string(), latestRelease: z.record(z.string(), z.unknown()), cleanupWarning: z.string().nullable() }) } } },
+    403: { description: "非管理员", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "上传任务不存在", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "对象不完整或渠道版本冲突", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const releaseWorkerPrepareRoute = createRoute({
+  method: "post",
+  path: "/api/release-worker/releases/prepare",
+  tags: ["Release Worker"],
+  summary: "准备桌面端直传发行",
+  description: "使用 X-Release-Worker-Key 认证。按 groupId 同步发行渠道，移除该渠道旧 COS 对象并暂停下载，然后返回 1 小时有效的 COS PUT 地址。安装包不经过 Vercel 请求体。",
+  request: {
+    headers: z.object({ "x-release-worker-key": z.string().min(1) }),
+    body: { content: { "application/json": { schema: z.object({
+      groupId: z.string().min(1).max(160),
+      channelName: z.string().min(1).max(160).optional(),
+      profileKey: z.string().max(80).optional(),
+      themeNames: z.array(z.string().min(1).max(80)).max(20).optional(),
+      menuSelection: z.number().int().min(1).max(10_000).optional(),
+      filename: z.string().min(1).max(180),
+      version: z.string().min(1).max(40),
+      bytes: z.number().int().min(1024).max(5 * 1024 * 1024 * 1024),
+      sha256: z.string().regex(/^[0-9A-Fa-f]{64}$/),
+      signatureStatus: z.string().min(1).max(80),
+      receipt: z.record(z.string(), z.unknown()).optional(),
+    }) } } },
+  },
+  responses: {
+    201: { description: "直传发行凭据", content: { "application/json": { schema: z.object({ publishId: z.string(), channelId: z.string(), uploadUrl: z.url(), objectKey: z.string(), expiresIn: z.number(), requiredHeaders: z.record(z.string(), z.string()), downloadPath: z.string() }).passthrough() } } },
+    400: { description: "发行元数据无效", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "工作器认证失败", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "该渠道正在发行", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const releaseWorkerCompleteRoute = createRoute({
+  method: "post",
+  path: "/api/release-worker/releases/{publishId}/complete",
+  tags: ["Release Worker"],
+  summary: "校验并完成桌面端发行",
+  description: "HEAD 同时核对 Content-Length 与 x-cos-meta-sha256，随后将完整 receipt 与 latestRelease 原子回写到发行渠道。",
+  request: {
+    headers: z.object({ "x-release-worker-key": z.string().min(1) }),
+    params: z.object({ publishId: z.string().min(1).max(100) }),
+    body: { content: { "application/json": { schema: z.object({ receipt: z.record(z.string(), z.unknown()) }) } } },
+  },
+  responses: {
+    200: { description: "发行已生效", content: { "application/json": { schema: z.object({ ok: z.literal(true), channelId: z.string(), downloadPath: z.string(), latestPath: z.string(), release: z.record(z.string(), z.unknown()) }) } } },
+    401: { description: "工作器认证失败", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "发行尝试不存在", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "COS 完整性或渠道状态不一致", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const releaseWorkerFailRoute = createRoute({
+  method: "post",
+  path: "/api/release-worker/releases/{publishId}/fail",
+  tags: ["Release Worker"],
+  summary: "标记桌面端发行失败",
+  request: {
+    headers: z.object({ "x-release-worker-key": z.string().min(1) }),
+    params: z.object({ publishId: z.string().min(1).max(100) }),
+    body: { content: { "application/json": { schema: z.object({ error: z.string().min(1).max(4000) }) } } },
+  },
+  responses: {
+    200: { description: "失败状态已记录", content: { "application/json": { schema: z.object({ ok: z.literal(true) }) } } },
+    401: { description: "工作器认证失败", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "发行尝试不存在", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 const getMiniMaxConfigurationRoute = createRoute({
   method: "get",
   path: "/api/v1/configuration/minimax",
@@ -361,7 +526,7 @@ const adminListChandlerUsersRoute = createRoute({
   path: "/api/admin/chandler/users",
   tags: ["Admin · Chandler"],
   summary: "搜索 Chandler 平台用户",
-  description: "仅接受已登录的 Chandler 管理员会话。查询结果直接来自 Chandler 公共 OpenAPI。",
+  description: "优先读取 Chandler 公共 OpenAPI；当当前管理员未获 Chandler 全局用户权限时，自动返回官网已同步的用户影子与本地订阅视图。",
   request: { query: z.object({ q: z.string().max(160).optional(), status: z.enum(["active", "disabled", "deleted"]).optional(), page: z.coerce.number().int().min(1).optional(), limit: z.coerce.number().int().min(1).max(100).optional() }) },
   responses: {
     200: { description: "Chandler 用户列表", content: { "application/json": { schema: z.object({ users: z.array(ChandlerAdminUserSchema), meta: z.record(z.string(), z.unknown()).optional() }).passthrough() } } },
@@ -947,8 +1112,37 @@ app.openapi(adminListChandlerUsersRoute, async (c) => {
   });
   if (query.q) params.set("q", query.q.trim());
   if (query.status) params.set("status", query.status);
-  const accessToken = await getChandlerAccessToken(auth.session);
-  return c.json(await chandlerRequest(`/v1/admin/users?${params}`, { accessToken }));
+  try {
+    const accessToken = await getChandlerAccessToken(auth.session);
+    return c.json(await chandlerRequest(`/v1/admin/users?${params}`, { accessToken }));
+  } catch (error) {
+    const page = query.page || 1;
+    const limit = query.limit || 30;
+    const filter = {};
+    if (query.status) filter.status = query.status;
+    if (query.q?.trim()) {
+      const keyword = query.q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      filter.$or = ["email", "username", "displayName", "chandlerUserId"].map((field) => ({ [field]: { $regex: keyword, $options: "i" } }));
+    }
+    const usersCollection = await getCollection("users");
+    const [users, total] = await Promise.all([
+      usersCollection.find(filter, { projection: { passwordHash: 0 } }).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).toArray(),
+      usersCollection.countDocuments(filter),
+    ]);
+    return c.json({
+      users: users.map((user) => ({
+        id: user.chandlerUserId || user._id.toString(),
+        website_user_id: user._id.toString(),
+        email: user.email || null,
+        display_name: user.displayName || user.username || null,
+        status: user.status || "active",
+        role: user.role || "user",
+        edition_name: user.editionName || "古龙版",
+        created_at: user.createdAt?.toISOString?.() || new Date(user.createdAt || 0).toISOString(),
+      })),
+      meta: { total, page, limit, pages: Math.ceil(total / limit), source: "website-shadow", permissionLimited: true, warning: error.message },
+    });
+  }
 });
 
 app.openapi(adminSetChandlerUserStatusRoute, async (c) => {
@@ -965,9 +1159,38 @@ app.openapi(adminSetChandlerUserStatusRoute, async (c) => {
 
 app.openapi(adminChandlerUserSubscriptionsRoute, async (c) => {
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
-  const accessToken = await getChandlerAccessToken(auth.session);
-  const subscriptions = await chandlerRequest(`/v1/admin/users/${encodeURIComponent(c.req.valid("param").id)}/subscriptions`, { accessToken });
-  return c.json(subscriptions);
+  const userId = c.req.valid("param").id;
+  try {
+    const accessToken = await getChandlerAccessToken(auth.session);
+    const subscriptions = await chandlerRequest(`/v1/admin/users/${encodeURIComponent(userId)}/subscriptions`, { accessToken });
+    return c.json(subscriptions);
+  } catch (error) {
+    const idFilter = ObjectId.isValid(userId) ? [{ _id: new ObjectId(userId) }, { chandlerUserId: userId }] : [{ chandlerUserId: userId }];
+    const user = await (await getCollection("users")).findOne({ $or: idFilter });
+    if (!user) return c.json({ subscriptions: [], meta: { source: "website-shadow", permissionLimited: true, warning: error.message } });
+    const [subscription, offlineOrders] = await Promise.all([
+      (await getCollection("subscriptions")).findOne({ ownerId: user._id }),
+      (await getCollection("offlinePayments")).find({ ownerId: user._id }).sort({ createdAt: -1 }).limit(10).toArray(),
+    ]);
+    const local = subscription ? [{
+      id: subscription._id.toString(),
+      status: subscription.status,
+      sku_name: subscription.cycle === "year" ? "古龙年度会员" : "古龙月度会员",
+      current_period_end: subscription.currentPeriodEnd,
+      provider: subscription.provider,
+      source: "website",
+    }] : [];
+    for (const order of offlineOrders) local.push({
+      id: order._id.toString(),
+      status: order.status === "pending" ? "pending_review" : order.status,
+      sku_name: order.cycle === "year" ? "线下年度会员" : "线下月度会员",
+      valid_until: order.validUntil || null,
+      provider: "offline",
+      order_no: order.orderNo,
+      source: "website",
+    });
+    return c.json({ subscriptions: local, meta: { source: "website-shadow", permissionLimited: true, warning: error.message } });
+  }
 });
 
 app.openapi(adminChandlerCatalogRoute, async (c) => {
@@ -1037,7 +1260,12 @@ app.get("/api/partners", async (c) => {
       id: partner._id.toString(),
       name: partner.name,
       websiteUrl: partner.websiteUrl,
-      logoUrl: partner.logoMode === "url" ? partner.logoUrl : `/api/partners/${partner._id}/logo.svg`,
+      logoUrl: partnerLogoUrl(partner),
+      promotionalImageUrl: partner.promotionObjectKey ? `/api/partners/${partner._id}/image/promotion` : partner.promotionUrl || null,
+      nodeAction: partner.nodeAction === "promotion" && (partner.promotionObjectKey || partner.promotionUrl) ? "promotion" : "website",
+      industryInput: partner.industryInput || "其他",
+      industryKey: partner.industryKey || "other",
+      industryName: partner.industryName || "其他行业",
     })),
   });
 });
@@ -1053,6 +1281,17 @@ app.get("/api/partners/:id/logo.svg", async (c) => {
   });
 });
 
+app.get("/api/partners/:id/image/:kind", async (c) => {
+  if (!ObjectId.isValid(c.req.param("id"))) return c.text("Not found", 404);
+  const kind = c.req.param("kind");
+  if (!['logo', 'promotion'].includes(kind)) return c.text("Not found", 404);
+  const partner = await (await getCollection("partners")).findOne({ _id: new ObjectId(c.req.param("id")), enabled: true });
+  const objectKey = kind === "logo" ? partner?.logoObjectKey : partner?.promotionObjectKey;
+  if (!objectKey) return c.text("Not found", 404);
+  c.header("Cache-Control", "private, no-store");
+  return c.redirect(createPresignedDownloadUrl(objectKey, { expires: 10 * 60 }), 302);
+});
+
 app.get("/api/admin/partners", async (c) => {
   const auth = await requireAdmin(c);
   if (auth.error) return auth.error;
@@ -1062,9 +1301,25 @@ app.get("/api/admin/partners", async (c) => {
       ...partner,
       id: partner._id.toString(),
       _id: undefined,
-      logoPreviewUrl: partner.logoMode === "url" ? partner.logoUrl : `/api/partners/${partner._id}/logo.svg`,
+      logoPreviewUrl: partnerLogoUrl(partner),
+      promotionPreviewUrl: partner.promotionObjectKey ? `/api/partners/${partner._id}/image/promotion` : partner.promotionUrl || null,
     })),
   });
+});
+
+app.post("/api/admin/partners/assets/presign", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  const body = await c.req.json();
+  const kind = body.kind === "promotion" ? "promotion" : body.kind === "logo" ? "logo" : null;
+  const contentType = String(body.contentType || "").toLowerCase();
+  const size = Number(body.size);
+  const filename = sanitizeFilename(body.filename, `${kind || "image"}.png`);
+  if (!kind || !["image/png", "image/jpeg", "image/webp", "image/gif"].includes(contentType) || !Number.isSafeInteger(size) || size < 1 || size > 30 * 1024 * 1024) {
+    return c.json({ code: "VALIDATION_ERROR", message: "仅支持 PNG、JPG、WebP 或 GIF 图片，单张不超过 30 MB" }, 400);
+  }
+  const objectKey = `partners/assets/${kind}/${Date.now()}-${randomBytes(10).toString("hex")}-${filename}`;
+  return c.json({ uploadUrl: createPresignedPutUrl(objectKey), objectKey, expiresIn: 1200, requiredHeaders: { "Content-Type": contentType } }, 201);
 });
 
 app.post("/api/admin/partners", async (c) => {
@@ -1073,21 +1328,31 @@ app.post("/api/admin/partners", async (c) => {
   const body = await c.req.json();
   const name = String(body.name || "").trim();
   const websiteUrl = parseHttpUrl(body.websiteUrl);
-  const logoMode = body.logoMode === "url" ? "url" : "generated";
+  const logoMode = body.logoMode === "upload" ? "upload" : body.logoMode === "url" ? "url" : "generated";
   const logoUrl = logoMode === "url" ? parseHttpUrl(body.logoUrl) : null;
-  if (name.length < 2 || name.length > 80 || !websiteUrl || (logoMode === "url" && !logoUrl)) {
-    return c.json({ code: "VALIDATION_ERROR", message: "合作伙伴名称、官网域名或 Logo 链接不正确" }, 400);
+  const logoObjectKey = logoMode === "upload" && String(body.logoObjectKey || "").startsWith("partners/assets/logo/") ? String(body.logoObjectKey) : null;
+  const promotionObjectKey = String(body.promotionObjectKey || "").startsWith("partners/assets/promotion/") ? String(body.promotionObjectKey) : null;
+  const promotionUrl = body.promotionUrl ? parseHttpUrl(body.promotionUrl) : null;
+  const nodeAction = body.nodeAction === "promotion" ? "promotion" : "website";
+  const industry = String(body.industry || "").trim();
+  const classification = classifyPartnerIndustry(industry, name);
+  if (name.length < 2 || name.length > 80 || industry.length < 2 || industry.length > 80 || !websiteUrl || (logoMode === "url" && !logoUrl) || (logoMode === "upload" && !logoObjectKey) || (nodeAction === "promotion" && !promotionObjectKey && !promotionUrl)) {
+    return c.json({ code: "VALIDATION_ERROR", message: "企业名称、所属行业、官网网址或 Logo 信息不正确" }, 400);
+  }
+  if (logoObjectKey || promotionObjectKey) {
+    try { await Promise.all([logoObjectKey && headObject(logoObjectKey), promotionObjectKey && headObject(promotionObjectKey)].filter(Boolean)); }
+    catch { return c.json({ code: "ASSET_NOT_FOUND", message: "Logo 或宣传图片尚未完整上传到 COS" }, 409); }
   }
   const now = new Date();
   const result = await (await getCollection("partners")).insertOne({
-    name, websiteUrl, logoMode, logoUrl,
+    name, websiteUrl, logoMode, logoUrl, logoObjectKey, promotionObjectKey, promotionUrl, nodeAction, ...classification,
     enabled: body.enabled !== false,
     sort: Number.isFinite(Number(body.sort)) ? Number(body.sort) : 100,
     createdBy: new ObjectId(auth.user.id),
     createdAt: now,
     updatedAt: now,
   });
-  return c.json({ id: result.insertedId.toString(), logoUrl: logoMode === "url" ? logoUrl : `/api/partners/${result.insertedId}/logo.svg` }, 201);
+  return c.json({ id: result.insertedId.toString(), logoUrl: logoMode === "upload" ? `/api/partners/${result.insertedId}/image/logo` : logoMode === "url" ? logoUrl : `/api/partners/${result.insertedId}/logo.svg`, classification }, 201);
 });
 
 app.put("/api/admin/partners/:id", async (c) => {
@@ -1097,14 +1362,20 @@ app.put("/api/admin/partners/:id", async (c) => {
   const body = await c.req.json();
   const name = String(body.name || "").trim();
   const websiteUrl = parseHttpUrl(body.websiteUrl);
-  const logoMode = body.logoMode === "url" ? "url" : "generated";
+  const logoMode = body.logoMode === "upload" ? "upload" : body.logoMode === "url" ? "url" : "generated";
   const logoUrl = logoMode === "url" ? parseHttpUrl(body.logoUrl) : null;
-  if (name.length < 2 || name.length > 80 || !websiteUrl || (logoMode === "url" && !logoUrl)) {
-    return c.json({ code: "VALIDATION_ERROR", message: "合作伙伴名称、官网域名或 Logo 链接不正确" }, 400);
+  const logoObjectKey = logoMode === "upload" && String(body.logoObjectKey || "").startsWith("partners/assets/logo/") ? String(body.logoObjectKey) : null;
+  const promotionObjectKey = String(body.promotionObjectKey || "").startsWith("partners/assets/promotion/") ? String(body.promotionObjectKey) : null;
+  const promotionUrl = body.promotionUrl ? parseHttpUrl(body.promotionUrl) : null;
+  const nodeAction = body.nodeAction === "promotion" ? "promotion" : "website";
+  const industry = String(body.industry || "").trim();
+  const classification = classifyPartnerIndustry(industry, name);
+  if (name.length < 2 || name.length > 80 || industry.length < 2 || industry.length > 80 || !websiteUrl || (logoMode === "url" && !logoUrl) || (logoMode === "upload" && !logoObjectKey) || (nodeAction === "promotion" && !promotionObjectKey && !promotionUrl)) {
+    return c.json({ code: "VALIDATION_ERROR", message: "企业名称、所属行业、官网网址或 Logo 信息不正确" }, 400);
   }
   const result = await (await getCollection("partners")).updateOne(
     { _id: new ObjectId(c.req.param("id")) },
-    { $set: { name, websiteUrl, logoMode, logoUrl, enabled: body.enabled !== false, sort: Number(body.sort || 100), updatedAt: new Date() } },
+    { $set: { name, websiteUrl, logoMode, logoUrl, logoObjectKey, promotionObjectKey, promotionUrl, nodeAction, ...classification, enabled: body.enabled !== false, sort: Number(body.sort || 100), updatedAt: new Date() } },
   );
   if (!result.matchedCount) return c.json({ code: "NOT_FOUND", message: "合作伙伴不存在" }, 404);
   return c.json({ ok: true });
@@ -1114,7 +1385,11 @@ app.delete("/api/admin/partners/:id", async (c) => {
   const rejected = requireTrustedMutation(c); if (rejected) return rejected;
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
   if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "NOT_FOUND", message: "合作伙伴不存在" }, 404);
-  await (await getCollection("partners")).deleteOne({ _id: new ObjectId(c.req.param("id")) });
+  const partners = await getCollection("partners");
+  const partner = await partners.findOne({ _id: new ObjectId(c.req.param("id")) });
+  if (!partner) return c.json({ code: "NOT_FOUND", message: "合作伙伴不存在" }, 404);
+  await partners.deleteOne({ _id: partner._id });
+  await Promise.allSettled([partner.logoObjectKey && deleteObject(partner.logoObjectKey), partner.promotionObjectKey && deleteObject(partner.promotionObjectKey)].filter(Boolean));
   return c.json({ ok: true });
 });
 
@@ -1131,19 +1406,7 @@ app.openapi(latestReleaseRoute, async (c) => {
       : { isDefault: true, enabled: true };
   let channel = filter._id === null ? null : await (await getCollection("releaseChannels")).findOne(filter);
   if (!channel) channel = await (await getCollection("releaseChannels")).findOne({ enabled: true }, { sort: { sort: 1, updatedAt: -1 } });
-  const latest = channel?.latestRelease;
-  return c.json({
-    release: latest?.objectKey ? {
-      channelId: channel._id.toString(),
-      channelName: channel.name,
-      version: latest.version,
-      filename: latest.filename,
-      bytes: latest.bytes,
-      sha256: latest.sha256,
-      signatureStatus: latest.signatureStatus,
-      publishedAt: latest.publishedAt,
-    } : null,
-  });
+  return c.json({ release: publicReleaseMetadata(channel) });
 });
 
 app.get("/api/releases/:channelId/download", async (c) => {
@@ -1151,6 +1414,7 @@ app.get("/api/releases/:channelId/download", async (c) => {
   const id = c.req.param("channelId");
   if (!ObjectId.isValid(id)) return c.json({ code: "RELEASE_NOT_FOUND", message: "发行渠道不存在" }, 404);
   const channel = await (await getCollection("releaseChannels")).findOne({ _id: new ObjectId(id), enabled: true });
+  if (channel?.distributionStatus === "uploading") return c.json({ code: "RELEASE_UPDATING", message: "该渠道正在上传新版本，请稍后重试" }, 409);
   if (!channel?.latestRelease?.objectKey) return c.json({ code: "RELEASE_NOT_FOUND", message: "该渠道尚未上传新版本" }, 404);
   if (!channel.isDefault && auth?.user?.role !== "admin") {
     const user = auth?.user?.id ? await (await getCollection("users")).findOne({ _id: new ObjectId(auth.user.id) }) : null;
@@ -1202,6 +1466,319 @@ app.post("/api/admin/release-jobs", async (c) => {
     updatedAt: now,
   });
   return c.json({ id: result.insertedId.toString(), status: "queued", channelName: channel.name }, 201);
+});
+
+app.openapi(adminManualReleaseUploadRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  const id = c.req.valid("param").id;
+  if (!ObjectId.isValid(id)) return c.json({ code: "CHANNEL_NOT_FOUND", message: "发行渠道不存在" }, 404);
+  const body = c.req.valid("json");
+  const filename = sanitizeFilename(body.filename, "Gulong-Agent-Setup.exe");
+  const bytes = Number(body.bytes);
+  const version = String(body.version || "").trim();
+  const extension = filename.toLowerCase().match(/\.(exe|msix|msixbundle|zip)$/)?.[1];
+  if (!extension || !Number.isSafeInteger(bytes) || bytes < 1024 || bytes > 5 * 1024 * 1024 * 1024 || !/^[0-9A-Za-z][0-9A-Za-z._+-]{0,39}$/.test(version)) {
+    return c.json({ code: "VALIDATION_ERROR", message: "请提供有效版本号和不超过 5 GB 的 Windows 安装包" }, 400);
+  }
+  const channel = await (await getCollection("releaseChannels")).findOne({ _id: new ObjectId(id), enabled: true });
+  if (!channel) return c.json({ code: "CHANNEL_NOT_FOUND", message: "发行渠道不存在或已停用" }, 404);
+  const [activeJob, activeUpload] = await Promise.all([
+    (await getCollection("releaseJobs")).findOne({ channelId: channel._id, status: { $in: ["queued", "building", "uploading"] } }),
+    (await getCollection("releaseUploads")).findOne({ channelId: channel._id, status: { $in: ["prepared", "uploading"] }, expiresAt: { $gt: new Date() } }),
+  ]);
+  if (activeJob || activeUpload || channel.distributionStatus === "uploading") return c.json({ code: "RELEASE_IN_PROGRESS", message: "该渠道已有发版或上传任务正在进行" }, 409);
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 60 * 60_000);
+  const objectKey = `releases/${channel._id}/manual/${Date.now()}-${randomBytes(8).toString("hex")}-${filename}`;
+  const result = await (await getCollection("releaseUploads")).insertOne({
+    channelId: channel._id,
+    channelName: channel.name,
+    requestedBy: new ObjectId(auth.user.id),
+    objectKey,
+    previousObjectKey: channel.latestRelease?.objectKey || null,
+    filename,
+    version,
+    bytes,
+    status: "uploading",
+    source: "admin-browser",
+    createdAt: now,
+    updatedAt: now,
+    expiresAt,
+  });
+  return c.json({
+    uploadId: result.insertedId.toString(),
+    uploadUrl: createPresignedPutUrl(objectKey, { expires: 60 * 60 }),
+    objectKey,
+    expiresIn: 3600,
+    requiredHeaders: { "Content-Type": "application/octet-stream" },
+    storage: { provider: "腾讯云 COS", ...cosConfig() },
+  }, 201);
+});
+
+app.openapi(adminCompleteManualReleaseUploadRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  const id = c.req.valid("param").id;
+  if (!ObjectId.isValid(id)) return c.json({ code: "UPLOAD_NOT_FOUND", message: "版本上传记录不存在" }, 404);
+  const uploads = await getCollection("releaseUploads");
+  const upload = await uploads.findOne({ _id: new ObjectId(id), status: "uploading" });
+  if (!upload) return c.json({ code: "UPLOAD_NOT_FOUND", message: "版本上传记录不存在或已经完成" }, 404);
+  let head;
+  try { head = await headObject(upload.objectKey); }
+  catch { return c.json({ code: "UPLOAD_NOT_FOUND", message: "COS 中尚未找到完整安装包，请确认上传完成后重试" }, 409); }
+  const actualBytes = objectSize(head);
+  if (!actualBytes || actualBytes !== upload.bytes) {
+    return c.json({ code: "UPLOAD_SIZE_MISMATCH", message: "COS 中安装包大小与上传声明不一致" }, 409);
+  }
+  const channels = await getCollection("releaseChannels");
+  const channel = await channels.findOne({ _id: upload.channelId, enabled: true });
+  if (!channel) return c.json({ code: "CHANNEL_NOT_FOUND", message: "发行渠道不存在或已停用" }, 404);
+  if ((channel.latestRelease?.objectKey || null) !== upload.previousObjectKey) {
+    return c.json({ code: "RELEASE_CHANGED", message: "该渠道的线上版本已发生变化，请重新选择文件上传" }, 409);
+  }
+  const now = new Date();
+  const latestRelease = {
+    objectKey: upload.objectKey,
+    filename: upload.filename,
+    version: upload.version,
+    bytes: upload.bytes,
+    sha256: "manual-pending",
+    signatureStatus: "manual-upload",
+    source: "admin-browser",
+    publishedAt: now,
+  };
+  const swapped = await channels.updateOne(
+    { _id: channel._id, updatedAt: channel.updatedAt },
+    { $set: { latestRelease, distributionStatus: "ready", updatedAt: now }, $unset: { releaseError: "", releaseFailedAt: "" } },
+  );
+  if (!swapped.modifiedCount) return c.json({ code: "RELEASE_CHANGED", message: "发行渠道刚刚被更新，请重新上传" }, 409);
+  await uploads.updateOne({ _id: upload._id }, { $set: { status: "completed", completedAt: now, updatedAt: now } });
+  let cleanupWarning = null;
+  if (upload.previousObjectKey && upload.previousObjectKey !== upload.objectKey) {
+    try { await deleteObject(upload.previousObjectKey); }
+    catch {
+      cleanupWarning = "新版本已生效，但旧文件清理失败，系统已记录待清理对象";
+      await uploads.updateOne({ _id: upload._id }, { $set: { cleanupPendingObjectKey: upload.previousObjectKey } });
+    }
+  }
+  return c.json({ ok: true, channelId: channel._id.toString(), latestRelease, cleanupWarning });
+});
+
+app.openapi(releaseWorkerPrepareRoute, async (c) => {
+  if (!workerAuthorized(c)) return c.json({ code: "UNAUTHORIZED", message: "发行工作器凭据无效" }, 401);
+  const body = c.req.valid("json");
+  const groupId = String(body.groupId).trim();
+  const filename = sanitizeFilename(body.filename, "Gulong-Agent-Setup.exe");
+  const version = String(body.version).trim();
+  const sha256 = String(body.sha256).trim().toUpperCase();
+  const signatureStatus = String(body.signatureStatus).trim();
+  if (!filename.toLowerCase().endsWith(".exe") || !/^[0-9A-Za-z][0-9A-Za-z._+-]{0,39}$/.test(version) || !/^[0-9A-F]{64}$/.test(sha256) || !signatureStatus) {
+    return c.json({ code: "VALIDATION_ERROR", message: "请提供有效的 EXE 文件名、版本号、SHA-256 和签名状态" }, 400);
+  }
+
+  const channels = await getCollection("releaseChannels");
+  let channel = await channels.findOne({ groupId });
+  const now = new Date();
+  if (!channel) {
+    const defaultChannel = await channels.findOne({ isDefault: true, enabled: true });
+    const edition = productEditionFromChannel({ profileKey: body.profileKey, name: body.channelName || groupId });
+    const inserted = await channels.insertOne({
+      groupId,
+      name: String(body.channelName || groupId).trim().slice(0, 160),
+      profileKey: String(body.profileKey || edition?.key || "gulong").trim().slice(0, 80),
+      themeNames: (body.themeNames || []).map(String).filter(Boolean).slice(0, 20),
+      menuSelection: Number(body.menuSelection || 1),
+      enabled: true,
+      isDefault: !defaultChannel && edition?.key === "gulong",
+      sort: Number(body.menuSelection || 100),
+      source: "trusted-release-worker",
+      createdAt: now,
+      updatedAt: now,
+    });
+    channel = await channels.findOne({ _id: inserted.insertedId });
+  } else {
+    await channels.updateOne(
+      { _id: channel._id },
+      { $set: {
+        name: String(body.channelName || channel.name || groupId).trim().slice(0, 160),
+        profileKey: String(body.profileKey || channel.profileKey || "").trim().slice(0, 80),
+        themeNames: body.themeNames?.length ? body.themeNames.map(String).filter(Boolean).slice(0, 20) : (channel.themeNames || []),
+        menuSelection: Number(body.menuSelection || channel.menuSelection || 1),
+        enabled: true,
+        source: channel.source || "trusted-release-worker",
+        updatedAt: now,
+      } },
+    );
+    channel = await channels.findOne({ _id: channel._id });
+  }
+
+  const activeAttempt = await (await getCollection("releaseUploads")).findOne({
+    channelId: channel._id,
+    status: { $in: ["prepared", "uploading"] },
+    expiresAt: { $gt: now },
+  });
+  if (activeAttempt) {
+    return c.json({ code: "RELEASE_IN_PROGRESS", message: "该渠道已有版本正在直传" }, 409);
+  }
+  if (channel.distributionStatus === "uploading") {
+    const staleAttempt = channel.releasePublishId
+      ? await (await getCollection("releaseUploads")).findOne({ _id: channel.releasePublishId, protocol: "trusted-worker-v1", status: "prepared" })
+      : null;
+    if (staleAttempt?.expiresAt && new Date(staleAttempt.expiresAt) > now) {
+      return c.json({ code: "RELEASE_IN_PROGRESS", message: "该渠道已有版本正在直传" }, 409);
+    }
+    if (staleAttempt) {
+      await deleteObject(staleAttempt.objectKey).catch(() => {});
+      await (await getCollection("releaseUploads")).updateOne({ _id: staleAttempt._id }, { $set: { status: "expired", error: "上传凭据已过期", failedAt: now, updatedAt: now } });
+    }
+    await channels.updateOne(
+      { _id: channel._id, distributionStatus: "uploading" },
+      { $set: { distributionStatus: "failed", releaseError: "上一次上传已过期", releaseFailedAt: now, updatedAt: now }, $unset: { releasePublishId: "", releaseUpdatingAt: "" } },
+    );
+    channel = await channels.findOne({ _id: channel._id });
+  }
+
+  const publishId = new ObjectId();
+  const previousRelease = channel.latestRelease || null;
+  const marked = await channels.updateOne(
+    { _id: channel._id, distributionStatus: { $ne: "uploading" }, updatedAt: channel.updatedAt },
+    {
+      $set: {
+        latestRelease: null,
+        distributionStatus: "uploading",
+        releasePublishId: publishId,
+        releaseUpdatingAt: now,
+        updatedAt: now,
+      },
+      $unset: { releaseError: "", releaseFailedAt: "" },
+    },
+  );
+  if (!marked.modifiedCount) return c.json({ code: "RELEASE_IN_PROGRESS", message: "该渠道状态刚刚发生变化，请重试" }, 409);
+
+  try {
+    if (previousRelease?.objectKey) await deleteObject(previousRelease.objectKey);
+  } catch (error) {
+    await channels.updateOne(
+      { _id: channel._id, releasePublishId: publishId },
+      { $set: { latestRelease: previousRelease, distributionStatus: "ready", updatedAt: new Date() }, $unset: { releasePublishId: "", releaseUpdatingAt: "" } },
+    );
+    return c.json({ code: "COS_DELETE_FAILED", message: "旧版本清理失败，未开启新版本上传" }, 502);
+  }
+
+  const objectKey = `releases/${groupId}/direct/${Date.now()}-${randomBytes(8).toString("hex")}-${filename}`;
+  const expiresAt = new Date(now.getTime() + 60 * 60_000);
+  try {
+    await (await getCollection("releaseUploads")).insertOne({
+      _id: publishId,
+      protocol: "trusted-worker-v1",
+      channelId: channel._id,
+      channelName: channel.name,
+      groupId,
+      objectKey,
+      previousRelease,
+      filename,
+      version,
+      bytes: body.bytes,
+      sha256,
+      signatureStatus,
+      prepareReceipt: body.receipt || null,
+      status: "prepared",
+      createdAt: now,
+      updatedAt: now,
+      expiresAt,
+    });
+  } catch (error) {
+    await channels.updateOne(
+      { _id: channel._id, releasePublishId: publishId },
+      { $set: { distributionStatus: "failed", releaseError: "发行尝试记录创建失败", releaseFailedAt: new Date(), updatedAt: new Date() }, $unset: { releasePublishId: "" } },
+    );
+    throw error;
+  }
+
+  const requiredHeaders = {
+    "Content-Type": "application/vnd.microsoft.portable-executable",
+    "x-cos-meta-sha256": sha256,
+    "x-cos-meta-release-version": version,
+  };
+  return c.json({
+    publishId: publishId.toString(),
+    channelId: channel._id.toString(),
+    uploadUrl: createPresignedPutUrl(objectKey, { expires: 60 * 60 }),
+    objectKey,
+    expiresIn: 3600,
+    requiredHeaders,
+    downloadPath: `/api/releases/${channel._id}/download`,
+    storage: { provider: "腾讯云 COS", ...cosConfig() },
+  }, 201);
+});
+
+app.openapi(releaseWorkerCompleteRoute, async (c) => {
+  if (!workerAuthorized(c)) return c.json({ code: "UNAUTHORIZED", message: "发行工作器凭据无效" }, 401);
+  const publishId = c.req.valid("param").publishId;
+  if (!ObjectId.isValid(publishId)) return c.json({ code: "PUBLISH_NOT_FOUND", message: "发行尝试不存在" }, 404);
+  const uploads = await getCollection("releaseUploads");
+  const upload = await uploads.findOne({ _id: new ObjectId(publishId), protocol: "trusted-worker-v1", status: "prepared" });
+  if (!upload) return c.json({ code: "PUBLISH_NOT_FOUND", message: "发行尝试不存在或已经完成" }, 404);
+  let head;
+  try { head = await headObject(upload.objectKey); }
+  catch { return c.json({ code: "UPLOAD_NOT_FOUND", message: "COS 中尚未找到完整安装包" }, 409); }
+  const actualBytes = objectSize(head);
+  const actualSha256 = cosHeadMetadata(head, "x-cos-meta-sha256").trim().toUpperCase();
+  const actualVersion = cosHeadMetadata(head, "x-cos-meta-release-version").trim();
+  if (actualBytes !== upload.bytes || actualSha256 !== upload.sha256 || actualVersion !== upload.version) {
+    return c.json({ code: "UPLOAD_INTEGRITY_MISMATCH", message: "COS 安装包大小、SHA-256 或版本元数据与 prepare 声明不一致" }, 409);
+  }
+
+  const body = c.req.valid("json");
+  const now = new Date();
+  const latestRelease = {
+    objectKey: upload.objectKey,
+    filename: upload.filename,
+    version: upload.version,
+    bytes: upload.bytes,
+    sha256: upload.sha256,
+    signatureStatus: upload.signatureStatus,
+    receipt: body.receipt,
+    prepareReceipt: upload.prepareReceipt,
+    source: "trusted-release-worker",
+    publishedAt: now,
+  };
+  const channels = await getCollection("releaseChannels");
+  const published = await channels.updateOne(
+    { _id: upload.channelId, distributionStatus: "uploading", releasePublishId: upload._id },
+    {
+      $set: { latestRelease, distributionStatus: "ready", updatedAt: now },
+      $unset: { releasePublishId: "", releaseUpdatingAt: "", releaseError: "", releaseFailedAt: "" },
+    },
+  );
+  if (!published.modifiedCount) return c.json({ code: "RELEASE_CHANGED", message: "发行渠道状态已变化，拒绝覆盖" }, 409);
+  await uploads.updateOne({ _id: upload._id }, { $set: { status: "completed", receipt: body.receipt, completedAt: now, updatedAt: now } });
+  return c.json({
+    ok: true,
+    channelId: upload.channelId.toString(),
+    downloadPath: `/api/releases/${upload.channelId}/download`,
+    latestPath: "/api/releases/latest",
+    release: publicReleaseMetadata({ _id: upload.channelId, name: upload.channelName, latestRelease }),
+  });
+});
+
+app.openapi(releaseWorkerFailRoute, async (c) => {
+  if (!workerAuthorized(c)) return c.json({ code: "UNAUTHORIZED", message: "发行工作器凭据无效" }, 401);
+  const publishId = c.req.valid("param").publishId;
+  if (!ObjectId.isValid(publishId)) return c.json({ code: "PUBLISH_NOT_FOUND", message: "发行尝试不存在" }, 404);
+  const uploads = await getCollection("releaseUploads");
+  const upload = await uploads.findOne({ _id: new ObjectId(publishId), protocol: "trusted-worker-v1", status: "prepared" });
+  if (!upload) return c.json({ code: "PUBLISH_NOT_FOUND", message: "发行尝试不存在或已经结束" }, 404);
+  const body = c.req.valid("json");
+  const now = new Date();
+  await deleteObject(upload.objectKey).catch(() => {});
+  await uploads.updateOne({ _id: upload._id }, { $set: { status: "failed", error: body.error, failedAt: now, updatedAt: now } });
+  await (await getCollection("releaseChannels")).updateOne(
+    { _id: upload.channelId, releasePublishId: upload._id },
+    { $set: { distributionStatus: "failed", releaseError: body.error, releaseFailedAt: now, updatedAt: now }, $unset: { releasePublishId: "", releaseUpdatingAt: "" } },
+  );
+  return c.json({ ok: true });
 });
 
 app.post("/api/release-worker/channels/sync", async (c) => {
@@ -1303,17 +1880,16 @@ app.post("/api/release-worker/jobs/:id/upload", async (c) => {
   const job = await (await getCollection("releaseJobs")).findOne({ _id: new ObjectId(c.req.param("id")), status: "building" });
   if (!job) return c.json({ code: "JOB_NOT_BUILDING", message: "发版任务不在可上传状态" }, 409);
   const channel = await (await getCollection("releaseChannels")).findOne({ _id: job.channelId });
+  if (channel?.distributionStatus === "uploading") return c.json({ code: "RELEASE_IN_PROGRESS", message: "该渠道正在通过直传协议更新" }, 409);
   const filename = sanitizeFilename(body.filename, "Gulong-Agent-Setup.exe");
   const bytes = Number(body.bytes);
   if (!filename.toLowerCase().endsWith(".exe") || !Number.isSafeInteger(bytes) || bytes < 1024 || bytes > 5 * 1024 * 1024 * 1024) {
     return c.json({ code: "VALIDATION_ERROR", message: "安装包文件名或大小无效" }, 400);
   }
-  if (channel?.latestRelease?.objectKey) await deleteObject(channel.latestRelease.objectKey);
-  await (await getCollection("releaseChannels")).updateOne({ _id: job.channelId }, { $unset: { latestRelease: "" }, $set: { updatedAt: new Date() } });
   const objectKey = `releases/${channel.groupId}/${Date.now()}-${randomBytes(8).toString("hex")}-${filename}`;
   await (await getCollection("releaseJobs")).updateOne(
     { _id: job._id },
-    { $set: { status: "uploading", objectKey, filename, version: String(body.version || "").slice(0, 40), bytes, sha256: String(body.sha256 || "").toUpperCase(), signatureStatus: String(body.signatureStatus || "unknown").slice(0, 40), updatedAt: new Date() } },
+    { $set: { status: "uploading", objectKey, previousObjectKey: channel?.latestRelease?.objectKey || null, filename, version: String(body.version || "").slice(0, 40), bytes, sha256: String(body.sha256 || "").toUpperCase(), signatureStatus: String(body.signatureStatus || "unknown").slice(0, 40), updatedAt: new Date() } },
   );
   return c.json({ uploadUrl: createPresignedPutUrl(objectKey, { expires: 60 * 60 }), objectKey, expiresIn: 3600 });
 });
@@ -1338,10 +1914,18 @@ app.post("/api/release-worker/jobs/:id/complete", async (c) => {
     receipt: body.receipt || null,
     publishedAt: now,
   };
-  await Promise.all([
-    (await getCollection("releaseChannels")).updateOne({ _id: job.channelId }, { $set: { latestRelease, updatedAt: now } }),
-    (await getCollection("releaseJobs")).updateOne({ _id: job._id }, { $set: { status: "completed", completedAt: now, updatedAt: now } }),
-  ]);
+  const channels = await getCollection("releaseChannels");
+  const channel = await channels.findOne({ _id: job.channelId });
+  if ((channel?.latestRelease?.objectKey || null) !== (job.previousObjectKey || null)) {
+    return c.json({ code: "RELEASE_CHANGED", message: "该渠道最新版已变化，拒绝覆盖" }, 409);
+  }
+  const swapped = await channels.updateOne({ _id: job.channelId, updatedAt: channel.updatedAt }, { $set: { latestRelease, distributionStatus: "ready", updatedAt: now }, $unset: { releaseError: "", releaseFailedAt: "" } });
+  if (!swapped.modifiedCount) return c.json({ code: "RELEASE_CHANGED", message: "该渠道刚刚被更新，拒绝覆盖" }, 409);
+  await (await getCollection("releaseJobs")).updateOne({ _id: job._id }, { $set: { status: "completed", completedAt: now, updatedAt: now } });
+  if (job.previousObjectKey && job.previousObjectKey !== job.objectKey) {
+    try { await deleteObject(job.previousObjectKey); }
+    catch { await (await getCollection("releaseJobs")).updateOne({ _id: job._id }, { $set: { cleanupPendingObjectKey: job.previousObjectKey } }); }
+  }
   return c.json({ ok: true, publishedAt: now });
 });
 
@@ -1367,25 +1951,35 @@ app.get("/api/downloads", async (c) => {
       code: process.env.DOWNLOAD_BAIDU_CODE || null,
     },
   ];
-  if (!isDatabaseConfigured()) return c.json({ links: defaults, release: null });
-  const [custom, channel] = await Promise.all([
+  if (!isDatabaseConfigured()) return c.json({ links: defaults, release: null, editions: [] });
+  const [custom, editionChannels] = await Promise.all([
     (await getCollection("downloadLinks")).find({ enabled: true }).sort({ sort: 1 }).toArray(),
-    (await getCollection("releaseChannels")).findOne({ isDefault: true, enabled: true }),
+    publicEditionChannels(),
   ]);
+  const editions = ["gulong", "yongshenghua"]
+    .map((key) => publicReleaseMetadata(editionChannels.get(key)))
+    .filter(Boolean);
   return c.json({
     links: custom.length
       ? custom.map(({ _id, provider, label, url, code }) => ({ id: provider || _id.toString(), label, url, code }))
       : defaults,
-    release: channel?.latestRelease?.objectKey ? {
-      channelId: channel._id.toString(),
-      channelName: channel.name,
-      version: channel.latestRelease.version,
-      filename: channel.latestRelease.filename,
-      bytes: channel.latestRelease.bytes,
-      sha256: channel.latestRelease.sha256,
-      signatureStatus: channel.latestRelease.signatureStatus,
-      publishedAt: channel.latestRelease.publishedAt,
-    } : null,
+    release: editions.find((item) => item.editionKey === "gulong") || null,
+    editions,
+  });
+});
+
+app.get("/api/downloads/:edition/download", async (c) => {
+  const editionKey = String(c.req.param("edition") || "").trim().toLowerCase();
+  if (!["gulong", "yongshenghua"].includes(editionKey)) return c.json({ code: "RELEASE_NOT_FOUND", message: "桌面版本类型不存在" }, 404);
+  const channels = await publicEditionChannels();
+  const channel = channels.get(editionKey);
+  if (!channel?.latestRelease?.objectKey) return c.json({ code: "RELEASE_NOT_FOUND", message: "该桌面版本正在准备中" }, 404);
+  return c.json({
+    url: createPresignedDownloadUrl(channel.latestRelease.objectKey, { filename: channel.latestRelease.filename }),
+    filename: channel.latestRelease.filename,
+    channelId: channel._id.toString(),
+    editionKey,
+    expiresIn: 900,
   });
 });
 
@@ -1672,16 +2266,25 @@ app.post("/api/billing/orders", async (c) => {
   }
   if (!cycle && kind === "subscription") return c.json({ code: "VALIDATION_ERROR", message: "订阅周期不正确" }, 400);
   if (provider === "offline" && kind !== "subscription") return c.json({ code: "VALIDATION_ERROR", message: "线下支付仅用于会员订阅审核" }, 400);
-  const accessToken = await getChandlerAccessToken(auth.session);
   const orderNo = `GL${Date.now()}${randomBytes(4).toString("hex").toUpperCase()}`;
   const autoRenew = kind === "subscription" && Boolean(body.autoRenew);
   const now = new Date();
 
   if (provider === "offline") {
-    const plans = await listCatalogPlans();
+    let plans = [];
+    try { plans = await listCatalogPlans(); }
+    catch { /* The website keeps accepting offline review orders while Chandler catalog access is unavailable. */ }
     const marker = cycle === "year" ? "year" : "month";
-    const plan = plans.find((item) => `${item.skuType} ${item.billingInterval}`.toLowerCase().includes(marker));
-    if (!plan) return c.json({ code: "PLAN_NOT_CONFIGURED", message: "Chandler 当前没有对应订阅套餐" }, 503);
+    const plan = plans.find((item) => `${item.skuType} ${item.billingInterval}`.toLowerCase().includes(marker)) || {
+      productId: "gulong-member",
+      productName: "古龙会员",
+      skuId: cycle === "year" ? "gulong-member-year" : "gulong-member-month",
+      skuName: cycle === "year" ? "年度订阅会员" : "月度订阅会员",
+      skuType: cycle,
+      billingInterval: cycle,
+      amountFen,
+      source: "website-fallback",
+    };
     const partnerData = {
       schema_version: 2,
       application_key: "gulong-web",
@@ -1702,6 +2305,7 @@ app.post("/api/billing/orders", async (c) => {
     };
     let chandlerOrderNo = null;
     try {
+      const accessToken = await getChandlerAccessToken(auth.session);
       const mirrored = await createDirectPaymentOrder(accessToken, {
         merchantOrderNo: orderNo,
         channel: "wechat",
@@ -1730,6 +2334,7 @@ app.post("/api/billing/orders", async (c) => {
     return c.json({ id: result.insertedId.toString(), orderNo, status: "pending_review", mode: "offline", amountFen }, 201);
   }
 
+  const accessToken = await getChandlerAccessToken(auth.session);
   let result;
   if (kind === "subscription") {
     result = await createSubscriptionCheckout(accessToken, { cycle, channel: provider });

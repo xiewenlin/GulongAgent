@@ -29,6 +29,10 @@
       "destination": "/api/platform?_platform_path=partners/:id/logo.svg"
     },
     {
+      "source": "/api/partners/:id/image/:kind",
+      "destination": "/api/platform?_platform_path=partners/:id/image/:kind"
+    },
+    {
       "source": "/api/brain/uploads/:path*",
       "destination": "/api/platform?_platform_path=brain/uploads/:path*"
     },
@@ -51,6 +55,18 @@
     {
       "source": "/api/admin/partners/:id",
       "destination": "/api/platform?_platform_path=admin/partners/:id"
+    },
+    {
+      "source": "/api/admin/partners/assets/presign",
+      "destination": "/api/platform?_platform_path=admin/partners/assets/presign"
+    },
+    {
+      "source": "/api/admin/release-channels/:id/manual-upload",
+      "destination": "/api/platform?_platform_path=admin/release-channels/:id/manual-upload"
+    },
+    {
+      "source": "/api/admin/release-uploads/:id/complete",
+      "destination": "/api/platform?_platform_path=admin/release-uploads/:id/complete"
     },
     {
       "source": "/api/admin/brain-attachments/:id/download",

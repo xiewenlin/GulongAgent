@@ -54,9 +54,16 @@ test("desktop product editions and bootstrap administrator map to website identi
   assert.equal(isChandlerBootstrapAdmin({ email: "member@example.com" }), false);
 });
 
-test("website typography keeps all declared font sizes at or above 18px", async () => {
+test("website body typography stays at 18px while the restored scaled product preview remains compact", async () => {
   const css = await readFile(new URL("../../src/styles.css", import.meta.url), "utf8");
-  const undersized = [...css.matchAll(/font-size\s*:\s*(\d+(?:\.\d+)?)px/gi)]
+  const previewStart = css.indexOf(".product-toolbar {");
+  const previewEnd = css.indexOf(".hero-product small { font-size: inherit; }", previewStart) + ".hero-product small { font-size: inherit; }".length;
+  assert.ok(previewStart > 0 && previewEnd > previewStart);
+  const previewCss = css.slice(previewStart, previewEnd);
+  const previewSizes = [...previewCss.matchAll(/font-size\s*:\s*(\d+(?:\.\d+)?)px/gi)].map((match) => Number(match[1])).filter((size) => size < 18);
+  assert.deepEqual(previewSizes, [12, 10, 16, 7, 16, 8, 10, 7]);
+  const bodyCss = `${css.slice(0, previewStart)}${css.slice(previewEnd)}`;
+  const undersized = [...bodyCss.matchAll(/font-size\s*:\s*(\d+(?:\.\d+)?)px/gi)]
     .map((match) => Number(match[1]))
     .filter((size) => size < 18);
   assert.deepEqual(undersized, []);
@@ -83,6 +90,11 @@ test("OpenAPI document includes Chandler admin, offline credentials, dated attac
   assert.ok(document.paths["/api/admin/chandler/prices"]);
   assert.ok(document.paths["/api/admin/chandler/entitlement-requests"]);
   assert.ok(document.paths["/api/admin/analytics/dashboard"]);
+  assert.ok(document.paths["/api/admin/release-channels/{id}/manual-upload"]);
+  assert.ok(document.paths["/api/admin/release-uploads/{id}/complete"]);
+  assert.ok(document.paths["/api/release-worker/releases/prepare"]);
+  assert.ok(document.paths["/api/release-worker/releases/{publishId}/complete"]);
+  assert.ok(document.paths["/api/release-worker/releases/{publishId}/fail"]);
 });
 
 test("Vercel platform entry restores nested API paths", async () => {
@@ -98,4 +110,23 @@ test("Vercel consolidates nested account and configuration routes", async () => 
   assert.ok(sources.includes("/api/v1/configuration/:path*"));
   assert.ok(sources.includes("/api/admin/analytics/:path*"));
   assert.ok(sources.includes("/api/analytics/:path*"));
+  assert.ok(sources.includes("/api/admin/release-channels/:id/manual-upload"));
+  assert.ok(sources.includes("/api/admin/release-uploads/:id/complete"));
+  assert.ok(sources.includes("/api/release-worker/:path*"));
+});
+
+test("download page explains both desktop editions", async () => {
+  const source = await readFile(new URL("../../src/components/PlatformPages.jsx", import.meta.url), "utf8");
+  assert.match(source, /古龙基础版/);
+  assert.match(source, /永生花定制版/);
+  assert.match(source, /\/api\/downloads\/\$\{editionKey\}\/download/);
+});
+
+test("trusted release protocol enforces direct-COS integrity metadata", async () => {
+  const source = await readFile(new URL("../../server/app.js", import.meta.url), "utf8");
+  assert.match(source, /"Content-Type": "application\/vnd\.microsoft\.portable-executable"/);
+  assert.match(source, /"x-cos-meta-sha256": sha256/);
+  assert.match(source, /"x-cos-meta-release-version": version/);
+  assert.match(source, /actualBytes !== upload\.bytes \|\| actualSha256 !== upload\.sha256 \|\| actualVersion !== upload\.version/);
+  assert.match(source, /latestRelease: null,[\s\S]*?distributionStatus: "uploading"/);
 });
