@@ -3699,6 +3699,11 @@ textarea:focus {
 .price-sync-state.ready { color: #2f7659; background: #edf8f1; }
 .price-sync-state.scheduled { color: #315f92; background: #edf5ff; }
 .price-sync-state.pending { color: #9a6a28; background: #fff5df; }
+.price-live-api { margin-bottom: 16px; padding: 14px 17px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 13px; color: var(--jade); border: 1px solid color-mix(in srgb, var(--jade) 26%, var(--line)); border-radius: 14px; background: color-mix(in srgb, var(--jade) 5%, var(--surface)); }
+.price-live-api strong, .price-live-api code { display: block; }
+.price-live-api strong { color: var(--ink); font-size: 18px; }
+.price-live-api code { margin-top: 4px; color: var(--jade); font-size: 18px; }
+.price-live-api > span { color: var(--muted); font-size: 18px; }
 
 .price-publish-modal { width: min(720px, 100%); padding: 0; overflow: hidden; border-color: color-mix(in srgb, var(--gold) 45%, var(--line)); box-shadow: 0 30px 90px rgba(26, 48, 44, .22); }
 .price-publish-modal .modal-close { top: 18px; right: 18px; z-index: 2; color: var(--ink); background: color-mix(in srgb, var(--surface) 84%, transparent); backdrop-filter: blur(8px); }
@@ -3714,6 +3719,9 @@ textarea:focus {
 .price-compare span, .price-compare small { color: var(--muted); font-size: 18px; }
 .price-compare strong { color: var(--ink-strong); font-size: 30px; letter-spacing: -.035em; }
 .price-compare article.target strong { color: var(--jade); }
+.price-edit-target label { min-height: 52px; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; color: var(--jade); border-bottom: 2px solid color-mix(in srgb, var(--jade) 42%, var(--line)); }
+.price-edit-target label em { font-size: 26px; font-style: normal; font-weight: 900; }
+.price-edit-target input { min-width: 0; width: 100%; padding: 0; color: var(--jade); border: 0; background: transparent; font: inherit; font-size: 30px; font-weight: 900; outline: 0; }
 .price-effective-field { margin: 0 32px; display: grid; gap: 9px; }
 .price-effective-field > span { display: flex; align-items: center; gap: 7px; color: var(--ink); font-size: 18px; font-weight: 850; }
 .price-effective-field input { width: 100%; min-height: 52px; padding: 0 14px; color: var(--ink); border: 1px solid var(--line-strong); border-radius: 11px; background: var(--surface); font: inherit; font-size: 18px; }
@@ -3854,6 +3862,8 @@ textarea:focus {
   .price-publish-impact { margin: 18px 20px 0; }
   .price-publish-actions { padding: 18px 20px 22px; }
   .price-publish-actions .button { min-width: 0; flex: 1; }
+  .price-live-api { grid-template-columns: auto minmax(0, 1fr); }
+  .price-live-api > span { grid-column: 1 / -1; }
   .offline-review-tabs { width: 100%; }
   .offline-review-tabs button { min-width: 0; flex: 1; }
 }

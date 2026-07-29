@@ -67,6 +67,7 @@ import {
   sanitizeFilename,
 } from "./cos.js";
 import { buildAdminAnalyticsDashboard, recordAnalyticsEvent } from "./analytics.js";
+import { recoverExpiredDirectReleaseLock } from "./release-lock.js";
 
 const app = new OpenAPIHono();
 
@@ -74,6 +75,8 @@ const MINIMAX_API_HOST = "https://api.minimaxi.com/v1";
 const MINIMAX_DEFAULT_MODEL = "MiniMax-M3";
 const AVATAR_MAX_BYTES = 10 * 1024 * 1024;
 const AVATAR_CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+const SUBSCRIPTION_PRICE_MIN_FEN = 100;
+const SUBSCRIPTION_PRICE_MAX_FEN = 5_000_000;
 
 const ErrorSchema = z.object({
   code: z.string().openapi({ example: "VALIDATION_ERROR" }),
@@ -208,10 +211,48 @@ async function effectiveLocalPrice({ skuId, cycle, at = new Date() } = {}) {
   return (await getCollection("pricingVersions")).findOne(filter, { sort: { effectiveAt: -1, createdAt: -1 } });
 }
 
+async function currentSubscriptionPricing(at = new Date()) {
+  const config = chandlerConfig();
+  const [monthVersion, yearVersion] = isDatabaseConfigured()
+    ? await Promise.all([
+        effectiveLocalPrice({ cycle: "month", at }),
+        effectiveLocalPrice({ cycle: "year", at }),
+      ])
+    : [null, null];
+  const point = (cycle, version, fallbackAmountFen) => ({
+    cycle,
+    amountFen: version?.amountFen ?? fallbackAmountFen,
+    amountCny: (version?.amountFen ?? fallbackAmountFen) / 100,
+    currency: version?.currency || "CNY",
+    source: version ? "website-admin" : "default",
+    versionId: version?._id?.toString() || null,
+    effectiveAt: version?.effectiveAt || null,
+    updatedAt: version?.updatedAt || version?.createdAt || null,
+  });
+  const monthly = point("month", monthVersion, config.monthlyPriceFen);
+  const yearly = point("year", yearVersion, config.yearlyPriceFen);
+  const updatedAt = [monthly.updatedAt, yearly.updatedAt].filter(Boolean).sort((left, right) => new Date(right) - new Date(left))[0] || new Date(0);
+  return {
+    revision: `${monthly.versionId || `default-${monthly.amountFen}`}.${yearly.versionId || `default-${yearly.amountFen}`}`,
+    currency: "CNY",
+    monthly,
+    yearly,
+    updatedAt,
+  };
+}
+
 function workerAuthorized(c) {
   const configured = process.env.RELEASE_WORKER_KEY?.trim();
   const provided = c.req.header("x-release-worker-key")?.trim();
   return Boolean(configured && provided && hashOpaqueToken(configured, "release-worker") === hashOpaqueToken(provided, "release-worker"));
+}
+
+async function releaseChannelAvailability(channel) {
+  return recoverExpiredDirectReleaseLock(channel, {
+    uploads: await getCollection("releaseUploads"),
+    channels: await getCollection("releaseChannels"),
+    deleteStoredObject: deleteObject,
+  });
 }
 
 function publicReleaseMetadata(channel, edition = productEditionFromChannel(channel)) {
@@ -244,16 +285,6 @@ async function publicEditionChannels() {
     if (edition && !result.has(edition.key)) result.set(edition.key, channel);
   }
   return result;
-}
-
-function cosHeadMetadata(head, headerName) {
-  const normalized = String(headerName || "").toLowerCase();
-  const headers = head?.headers || {};
-  const direct = Object.entries(headers).find(([name]) => name.toLowerCase() === normalized)?.[1];
-  if (direct != null) return String(direct);
-  const metadataKey = normalized.replace(/^x-cos-meta-/, "");
-  const metadata = head?.Metadata || head?.metadata || {};
-  return String(metadata[metadataKey] ?? metadata[metadataKey.toLowerCase()] ?? "");
 }
 
 const AuthResponseSchema = z.object({ user: PublicUserSchema });
@@ -449,29 +480,11 @@ const releaseWorkerPrepareRoute = createRoute({
   method: "post",
   path: "/api/release-worker/releases/prepare",
   tags: ["Release Worker"],
-  summary: "准备桌面端直传发行",
-  description: "使用 X-Release-Worker-Key 认证。按 groupId 同步发行渠道，移除该渠道旧 COS 对象并暂停下载，然后返回 1 小时有效的 COS PUT 地址。安装包不经过 Vercel 请求体。",
-  request: {
-    headers: z.object({ "x-release-worker-key": z.string().min(1) }),
-    body: { content: { "application/json": { schema: z.object({
-      groupId: z.string().min(1).max(160),
-      channelName: z.string().min(1).max(160).optional(),
-      profileKey: z.string().max(80).optional(),
-      themeNames: z.array(z.string().min(1).max(80)).max(20).optional(),
-      menuSelection: z.number().int().min(1).max(10_000).optional(),
-      filename: z.string().min(1).max(180),
-      version: z.string().min(1).max(40),
-      bytes: z.number().int().min(1024).max(5 * 1024 * 1024 * 1024),
-      sha256: z.string().regex(/^[0-9A-Fa-f]{64}$/),
-      signatureStatus: z.string().min(1).max(80),
-      receipt: z.record(z.string(), z.unknown()).optional(),
-    }) } } },
-  },
+  summary: "旧版桌面端直传发行（已停用）",
+  description: "此协议已永久停用。发行只能由管理员在版本管理中显式选择“手动上传”或创建“手动打包发布”任务。",
+  deprecated: true,
   responses: {
-    201: { description: "直传发行凭据", content: { "application/json": { schema: z.object({ publishId: z.string(), channelId: z.string(), uploadUrl: z.url(), objectKey: z.string(), expiresIn: z.number(), requiredHeaders: z.record(z.string(), z.string()), downloadPath: z.string() }).passthrough() } } },
-    400: { description: "发行元数据无效", content: { "application/json": { schema: ErrorSchema } } },
-    401: { description: "工作器认证失败", content: { "application/json": { schema: ErrorSchema } } },
-    409: { description: "该渠道正在发行", content: { "application/json": { schema: ErrorSchema } } },
+    410: { description: "旧版直传协议已停用", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
@@ -479,18 +492,14 @@ const releaseWorkerCompleteRoute = createRoute({
   method: "post",
   path: "/api/release-worker/releases/{publishId}/complete",
   tags: ["Release Worker"],
-  summary: "校验并完成桌面端发行",
-  description: "HEAD 同时核对 Content-Length 与 x-cos-meta-sha256，随后将完整 receipt 与 latestRelease 原子回写到发行渠道。",
+  summary: "旧版桌面端直传完成（已停用）",
+  description: "此协议已永久停用，不再接受任何旧版直传发行的完成回执。",
+  deprecated: true,
   request: {
-    headers: z.object({ "x-release-worker-key": z.string().min(1) }),
     params: z.object({ publishId: z.string().min(1).max(100) }),
-    body: { content: { "application/json": { schema: z.object({ receipt: z.record(z.string(), z.unknown()) }) } } },
   },
   responses: {
-    200: { description: "发行已生效", content: { "application/json": { schema: z.object({ ok: z.literal(true), channelId: z.string(), downloadPath: z.string(), latestPath: z.string(), release: z.record(z.string(), z.unknown()) }) } } },
-    401: { description: "工作器认证失败", content: { "application/json": { schema: ErrorSchema } } },
-    404: { description: "发行尝试不存在", content: { "application/json": { schema: ErrorSchema } } },
-    409: { description: "COS 完整性或渠道状态不一致", content: { "application/json": { schema: ErrorSchema } } },
+    410: { description: "旧版直传协议已停用", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
@@ -498,16 +507,14 @@ const releaseWorkerFailRoute = createRoute({
   method: "post",
   path: "/api/release-worker/releases/{publishId}/fail",
   tags: ["Release Worker"],
-  summary: "标记桌面端发行失败",
+  summary: "旧版桌面端直传失败回执（已停用）",
+  description: "此协议已永久停用，不再接受任何旧版直传发行的失败回执。",
+  deprecated: true,
   request: {
-    headers: z.object({ "x-release-worker-key": z.string().min(1) }),
     params: z.object({ publishId: z.string().min(1).max(100) }),
-    body: { content: { "application/json": { schema: z.object({ error: z.string().min(1).max(4000) }) } } },
   },
   responses: {
-    200: { description: "失败状态已记录", content: { "application/json": { schema: z.object({ ok: z.literal(true) }) } } },
-    401: { description: "工作器认证失败", content: { "application/json": { schema: ErrorSchema } } },
-    404: { description: "发行尝试不存在", content: { "application/json": { schema: ErrorSchema } } },
+    410: { description: "旧版直传协议已停用", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
@@ -537,6 +544,29 @@ const getAccountProfileRoute = createRoute({
     200: { description: "当前用户资料", content: { "application/json": { schema: z.object({ id: z.string(), username: z.string().nullable(), displayName: z.string().nullable(), avatar: z.string().nullable(), edition: z.object({ key: z.string(), name: z.string() }), updatedAt: z.coerce.date() }) } } },
     401: { description: "未认证", content: { "application/json": { schema: ErrorSchema } } },
     403: { description: "必须使用带权限的 API Key", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const SubscriptionPricePointSchema = z.object({
+  cycle: z.enum(["month", "year"]),
+  amountFen: z.number().int(),
+  amountCny: z.number(),
+  currency: z.literal("CNY"),
+  source: z.enum(["website-admin", "default"]),
+  versionId: z.string().nullable(),
+  effectiveAt: z.coerce.date().nullable(),
+  updatedAt: z.coerce.date().nullable(),
+});
+
+const getSubscriptionPricingRoute = createRoute({
+  method: "get",
+  path: "/api/v1/pricing/subscriptions",
+  tags: ["Desktop Synchronization"],
+  summary: "桌面端实时同步订阅价格",
+  description: "公开返回古龙官网当前生效的月度与年度会员价格。管理员发布后立即更新；响应禁止缓存，桌面端应在打开订阅页时重新拉取。",
+  security: [],
+  responses: {
+    200: { description: "当前生效的订阅价格快照", content: { "application/json": { schema: z.object({ revision: z.string(), currency: z.literal("CNY"), monthly: SubscriptionPricePointSchema, yearly: SubscriptionPricePointSchema, updatedAt: z.coerce.date() }) } } },
   },
 });
 
@@ -611,9 +641,9 @@ const adminPublishChandlerPriceRoute = createRoute({
   method: "post",
   path: "/api/admin/chandler/prices",
   tags: ["Admin · Chandler"],
-  summary: "发布新的不可变订阅价格版本",
-  description: "金额由官网目标月价/年价自动推导，Chandler 会把旧价格版本标记为 superseded。",
-  request: { body: { content: { "application/json": { schema: z.object({ skuId: z.string().min(1).max(100), effectiveAt: z.string().datetime() }) } } } },
+  summary: "手动修改并立即发布订阅价格",
+  description: "管理员提交以分为单位的新金额后，官网立即创建不可变价格版本，并同步 Chandler；官网定价页、下单接口与桌面端价格 API 读取同一版本。",
+  request: { body: { content: { "application/json": { schema: z.object({ skuId: z.string().min(1).max(100), amountFen: z.number().int().min(SUBSCRIPTION_PRICE_MIN_FEN).max(SUBSCRIPTION_PRICE_MAX_FEN) }) } } } },
   responses: {
     201: { description: "新价格版本", content: { "application/json": { schema: z.record(z.string(), z.unknown()) } } },
     400: { description: "SKU 或生效时间无效", content: { "application/json": { schema: ErrorSchema } } },
@@ -1332,8 +1362,8 @@ app.openapi(adminChandlerUserSubscriptionsRoute, async (c) => {
 app.openapi(adminChandlerCatalogRoute, async (c) => {
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
   const plans = await listCatalogPlans();
-  const config = chandlerConfig();
   const now = new Date();
+  const pricing = await currentSubscriptionPricing(now);
   const skuIds = plans.map((plan) => plan.skuId).filter(Boolean);
   const localVersions = skuIds.length
     ? await (await getCollection("pricingVersions")).find({ skuId: { $in: skuIds }, status: { $ne: "superseded" } }).sort({ effectiveAt: -1, createdAt: -1 }).toArray()
@@ -1352,7 +1382,7 @@ app.openapi(adminChandlerCatalogRoute, async (c) => {
       scheduledEffectiveAt: scheduled?.effectiveAt || null,
     };
   });
-  return c.json({ plans: mergedPlans, targetPrices: { month: config.monthlyPriceFen, year: config.yearlyPriceFen }, pricingAuthority: "website-with-chandler-sync" });
+  return c.json({ plans: mergedPlans, targetPrices: { month: pricing.monthly.amountFen, year: pricing.yearly.amountFen }, pricingRevision: pricing.revision, desktopSyncEndpoint: "/api/v1/pricing/subscriptions", pricingAuthority: "website-with-chandler-sync" });
 });
 
 app.openapi(adminPublishChandlerPriceRoute, async (c) => {
@@ -1363,14 +1393,37 @@ app.openapi(adminPublishChandlerPriceRoute, async (c) => {
   const plan = plans.find((item) => item.skuId === input.skuId);
   if (!plan) return c.json({ code: "SKU_NOT_FOUND", message: "所选订阅套餐已下架，请刷新后重试" }, 404);
   const yearly = `${plan.skuType} ${plan.billingInterval}`.toLowerCase().includes("year");
-  const config = chandlerConfig();
-  const amountFen = yearly ? config.yearlyPriceFen : config.monthlyPriceFen;
+  const amountFen = input.amountFen;
   const billingInterval = yearly ? "year" : "month";
-  const effectiveAt = new Date(input.effectiveAt);
   const now = new Date();
+  const versions = await getCollection("pricingVersions");
+  const result = await versions.insertOne({
+    skuId: plan.skuId,
+    productId: plan.productId,
+    productName: plan.productName,
+    skuName: plan.skuName,
+    currency: plan.currency || "CNY",
+    amountFen,
+    billingInterval,
+    intervalCount: 1,
+    effectiveAt: now,
+    status: "active",
+    source: "website-admin",
+    chandlerSyncStatus: "syncing",
+    createdBy: new ObjectId(auth.user.id),
+    createdAt: now,
+    updatedAt: now,
+  });
+  await versions.updateMany(
+    { _id: { $ne: result.insertedId }, billingInterval, status: { $in: ["active", "scheduled"] } },
+    { $set: { status: "superseded", supersededAt: now, updatedAt: now } },
+  );
+  let chandlerPrice = null;
+  let chandlerSyncStatus = "synced";
+  let chandlerSyncError = null;
   try {
     const accessToken = await getChandlerAccessToken(auth.session);
-    const price = await chandlerRequest("/v1/admin/prices", {
+    chandlerPrice = await chandlerRequest("/v1/admin/prices", {
       method: "POST",
       accessToken,
       body: {
@@ -1379,37 +1432,32 @@ app.openapi(adminPublishChandlerPriceRoute, async (c) => {
         amount: amountFen,
         billing_interval: billingInterval,
         interval_count: 1,
-        effective_at: effectiveAt.toISOString(),
+        effective_at: now.toISOString(),
         expires_at: null,
       },
     });
-    return c.json({ ...price, source: "chandler", permissionFallback: false }, 201);
   } catch (error) {
-    if (!(error instanceof ChandlerError) || error.status !== 403) throw error;
-    const versions = await getCollection("pricingVersions");
-    await versions.updateMany(
-      { skuId: plan.skuId, status: { $in: ["active", "scheduled"] } },
-      { $set: { status: "superseded", supersededAt: now, updatedAt: now } },
-    );
-    const result = await versions.insertOne({
-      skuId: plan.skuId,
-      productId: plan.productId,
-      productName: plan.productName,
-      skuName: plan.skuName,
-      currency: plan.currency || "CNY",
-      amountFen,
-      billingInterval,
-      intervalCount: 1,
-      effectiveAt,
-      status: effectiveAt <= now ? "active" : "scheduled",
-      source: "website-local",
-      fallbackReason: "CHANDLER_PRICE_PERMISSION_DENIED",
-      createdBy: new ObjectId(auth.user.id),
-      createdAt: now,
-      updatedAt: now,
-    });
-    return c.json({ id: result.insertedId.toString(), source: "website-local", permissionFallback: true, amountFen, billingInterval, effectiveAt, status: effectiveAt <= now ? "active" : "scheduled", message: "Chandler 未授予价格管理权限，已由古龙官网价格覆盖层接管" }, 201);
+    chandlerSyncStatus = error instanceof ChandlerError && error.status === 403 ? "permission-denied" : "pending";
+    chandlerSyncError = error instanceof ChandlerError ? error.code : "CHANDLER_SYNC_FAILED";
   }
+  await versions.updateOne(
+    { _id: result.insertedId },
+    { $set: { chandlerSyncStatus, ...(chandlerPrice ? { chandlerPriceId: chandlerPrice.id || chandlerPrice.price_id || null } : {}), ...(chandlerSyncError ? { chandlerSyncError } : {}), updatedAt: new Date() } },
+  );
+  return c.json({
+    id: result.insertedId.toString(),
+    source: "website-admin",
+    permissionFallback: chandlerSyncStatus !== "synced",
+    chandlerSyncStatus,
+    amountFen,
+    billingInterval,
+    effectiveAt: now,
+    status: "active",
+    desktopSyncEndpoint: "/api/v1/pricing/subscriptions",
+    message: chandlerSyncStatus === "synced"
+      ? "新价格已立即发布，并同步到官网、Chandler 与桌面端价格接口"
+      : "新价格已立即发布到官网与桌面端价格接口；Chandler 同步将由官网价格覆盖层接管",
+  }, 201);
 });
 
 app.openapi(adminRequestChandlerEntitlementRoute, async (c) => {
@@ -1634,8 +1682,11 @@ app.post("/api/admin/release-jobs", async (c) => {
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
   const body = await c.req.json();
   if (!ObjectId.isValid(body.channelId)) return c.json({ code: "VALIDATION_ERROR", message: "发行渠道无效" }, 400);
-  const channel = await (await getCollection("releaseChannels")).findOne({ _id: new ObjectId(body.channelId), enabled: true });
+  let channel = await (await getCollection("releaseChannels")).findOne({ _id: new ObjectId(body.channelId), enabled: true });
   if (!channel) return c.json({ code: "CHANNEL_NOT_FOUND", message: "发行渠道不存在或已停用" }, 404);
+  const availability = await releaseChannelAvailability(channel);
+  if (availability.blocked) return c.json({ code: "RELEASE_IN_PROGRESS", message: "该渠道已有上传任务正在进行" }, 409);
+  channel = availability.channel;
   const active = await (await getCollection("releaseJobs")).findOne({ channelId: channel._id, status: { $in: ["queued", "building", "uploading"] } });
   if (active) return c.json({ code: "RELEASE_IN_PROGRESS", message: "该渠道已有发版任务正在执行" }, 409);
   const now = new Date();
@@ -1667,13 +1718,16 @@ app.openapi(adminManualReleaseUploadRoute, async (c) => {
   if (!extension || !Number.isSafeInteger(bytes) || bytes < 1024 || bytes > 5 * 1024 * 1024 * 1024 || !/^[0-9A-Za-z][0-9A-Za-z._+-]{0,39}$/.test(version)) {
     return c.json({ code: "VALIDATION_ERROR", message: "请提供有效版本号和不超过 5 GB 的 Windows 安装包" }, 400);
   }
-  const channel = await (await getCollection("releaseChannels")).findOne({ _id: new ObjectId(id), enabled: true });
+  let channel = await (await getCollection("releaseChannels")).findOne({ _id: new ObjectId(id), enabled: true });
   if (!channel) return c.json({ code: "CHANNEL_NOT_FOUND", message: "发行渠道不存在或已停用" }, 404);
+  const availability = await releaseChannelAvailability(channel);
+  if (availability.blocked) return c.json({ code: "RELEASE_IN_PROGRESS", message: "该渠道已有发版或上传任务正在进行" }, 409);
+  channel = availability.channel;
   const [activeJob, activeUpload] = await Promise.all([
     (await getCollection("releaseJobs")).findOne({ channelId: channel._id, status: { $in: ["queued", "building", "uploading"] } }),
     (await getCollection("releaseUploads")).findOne({ channelId: channel._id, status: { $in: ["prepared", "uploading"] }, expiresAt: { $gt: new Date() } }),
   ]);
-  if (activeJob || activeUpload || channel.distributionStatus === "uploading") return c.json({ code: "RELEASE_IN_PROGRESS", message: "该渠道已有发版或上传任务正在进行" }, 409);
+  if (activeJob || activeUpload) return c.json({ code: "RELEASE_IN_PROGRESS", message: "该渠道已有发版或上传任务正在进行" }, 409);
   const now = new Date();
   const expiresAt = new Date(now.getTime() + 60 * 60_000);
   const objectKey = `releases/${channel._id}/manual/${Date.now()}-${randomBytes(8).toString("hex")}-${filename}`;
@@ -1752,222 +1806,20 @@ app.openapi(adminCompleteManualReleaseUploadRoute, async (c) => {
   return c.json({ ok: true, channelId: channel._id.toString(), latestRelease, cleanupWarning });
 });
 
-app.openapi(releaseWorkerPrepareRoute, async (c) => {
-  if (!workerAuthorized(c)) return c.json({ code: "UNAUTHORIZED", message: "发行工作器凭据无效" }, 401);
-  const body = c.req.valid("json");
-  const groupId = String(body.groupId).trim();
-  const filename = sanitizeFilename(body.filename, "Gulong-Agent-Setup.exe");
-  const version = String(body.version).trim();
-  const sha256 = String(body.sha256).trim().toUpperCase();
-  const signatureStatus = String(body.signatureStatus).trim();
-  if (!filename.toLowerCase().endsWith(".exe") || !/^[0-9A-Za-z][0-9A-Za-z._+-]{0,39}$/.test(version) || !/^[0-9A-F]{64}$/.test(sha256) || !signatureStatus) {
-    return c.json({ code: "VALIDATION_ERROR", message: "请提供有效的 EXE 文件名、版本号、SHA-256 和签名状态" }, 400);
-  }
+app.openapi(releaseWorkerPrepareRoute, (c) => c.json({
+  code: "DIRECT_RELEASE_DISABLED",
+  message: "旧版直传发行协议已停用，请由管理员在版本管理中手动上传或创建手动打包发布任务",
+}, 410));
 
-  const channels = await getCollection("releaseChannels");
-  let channel = await channels.findOne({ groupId });
-  const now = new Date();
-  if (!channel) {
-    const defaultChannel = await channels.findOne({ isDefault: true, enabled: true });
-    const edition = productEditionFromChannel({ profileKey: body.profileKey, name: body.channelName || groupId });
-    const inserted = await channels.insertOne({
-      groupId,
-      name: String(body.channelName || groupId).trim().slice(0, 160),
-      profileKey: String(body.profileKey || edition?.key || "gulong").trim().slice(0, 80),
-      themeNames: (body.themeNames || []).map(String).filter(Boolean).slice(0, 20),
-      menuSelection: Number(body.menuSelection || 1),
-      enabled: true,
-      isDefault: !defaultChannel && edition?.key === "gulong",
-      sort: Number(body.menuSelection || 100),
-      source: "trusted-release-worker",
-      createdAt: now,
-      updatedAt: now,
-    });
-    channel = await channels.findOne({ _id: inserted.insertedId });
-  } else {
-    await channels.updateOne(
-      { _id: channel._id },
-      { $set: {
-        name: String(body.channelName || channel.name || groupId).trim().slice(0, 160),
-        profileKey: String(body.profileKey || channel.profileKey || "").trim().slice(0, 80),
-        themeNames: body.themeNames?.length ? body.themeNames.map(String).filter(Boolean).slice(0, 20) : (channel.themeNames || []),
-        menuSelection: Number(body.menuSelection || channel.menuSelection || 1),
-        enabled: true,
-        source: channel.source || "trusted-release-worker",
-        updatedAt: now,
-      } },
-    );
-    channel = await channels.findOne({ _id: channel._id });
-  }
+app.openapi(releaseWorkerCompleteRoute, (c) => c.json({
+  code: "DIRECT_RELEASE_DISABLED",
+  message: "旧版直传发行协议已停用，请由管理员在版本管理中手动上传或创建手动打包发布任务",
+}, 410));
 
-  const activeAttempt = await (await getCollection("releaseUploads")).findOne({
-    channelId: channel._id,
-    status: { $in: ["prepared", "uploading"] },
-    expiresAt: { $gt: now },
-  });
-  if (activeAttempt) {
-    return c.json({ code: "RELEASE_IN_PROGRESS", message: "该渠道已有版本正在直传" }, 409);
-  }
-  if (channel.distributionStatus === "uploading") {
-    const staleAttempt = channel.releasePublishId
-      ? await (await getCollection("releaseUploads")).findOne({ _id: channel.releasePublishId, protocol: "trusted-worker-v1", status: "prepared" })
-      : null;
-    if (staleAttempt?.expiresAt && new Date(staleAttempt.expiresAt) > now) {
-      return c.json({ code: "RELEASE_IN_PROGRESS", message: "该渠道已有版本正在直传" }, 409);
-    }
-    if (staleAttempt) {
-      await deleteObject(staleAttempt.objectKey).catch(() => {});
-      await (await getCollection("releaseUploads")).updateOne({ _id: staleAttempt._id }, { $set: { status: "expired", error: "上传凭据已过期", failedAt: now, updatedAt: now } });
-    }
-    await channels.updateOne(
-      { _id: channel._id, distributionStatus: "uploading" },
-      { $set: { distributionStatus: "failed", releaseError: "上一次上传已过期", releaseFailedAt: now, updatedAt: now }, $unset: { releasePublishId: "", releaseUpdatingAt: "" } },
-    );
-    channel = await channels.findOne({ _id: channel._id });
-  }
-
-  const publishId = new ObjectId();
-  const previousRelease = channel.latestRelease || null;
-  const marked = await channels.updateOne(
-    { _id: channel._id, distributionStatus: { $ne: "uploading" }, updatedAt: channel.updatedAt },
-    {
-      $set: {
-        latestRelease: null,
-        distributionStatus: "uploading",
-        releasePublishId: publishId,
-        releaseUpdatingAt: now,
-        updatedAt: now,
-      },
-      $unset: { releaseError: "", releaseFailedAt: "" },
-    },
-  );
-  if (!marked.modifiedCount) return c.json({ code: "RELEASE_IN_PROGRESS", message: "该渠道状态刚刚发生变化，请重试" }, 409);
-
-  try {
-    if (previousRelease?.objectKey) await deleteObject(previousRelease.objectKey);
-  } catch (error) {
-    await channels.updateOne(
-      { _id: channel._id, releasePublishId: publishId },
-      { $set: { latestRelease: previousRelease, distributionStatus: "ready", updatedAt: new Date() }, $unset: { releasePublishId: "", releaseUpdatingAt: "" } },
-    );
-    return c.json({ code: "COS_DELETE_FAILED", message: "旧版本清理失败，未开启新版本上传" }, 502);
-  }
-
-  const objectKey = `releases/${groupId}/direct/${Date.now()}-${randomBytes(8).toString("hex")}-${filename}`;
-  const expiresAt = new Date(now.getTime() + 60 * 60_000);
-  try {
-    await (await getCollection("releaseUploads")).insertOne({
-      _id: publishId,
-      protocol: "trusted-worker-v1",
-      channelId: channel._id,
-      channelName: channel.name,
-      groupId,
-      objectKey,
-      previousRelease,
-      filename,
-      version,
-      bytes: body.bytes,
-      sha256,
-      signatureStatus,
-      prepareReceipt: body.receipt || null,
-      status: "prepared",
-      createdAt: now,
-      updatedAt: now,
-      expiresAt,
-    });
-  } catch (error) {
-    await channels.updateOne(
-      { _id: channel._id, releasePublishId: publishId },
-      { $set: { distributionStatus: "failed", releaseError: "发行尝试记录创建失败", releaseFailedAt: new Date(), updatedAt: new Date() }, $unset: { releasePublishId: "" } },
-    );
-    throw error;
-  }
-
-  const requiredHeaders = {
-    "Content-Type": "application/vnd.microsoft.portable-executable",
-    "x-cos-meta-sha256": sha256,
-    "x-cos-meta-release-version": version,
-  };
-  return c.json({
-    publishId: publishId.toString(),
-    channelId: channel._id.toString(),
-    uploadUrl: createPresignedPutUrl(objectKey, { expires: 60 * 60, headers: requiredHeaders }),
-    objectKey,
-    expiresIn: 3600,
-    requiredHeaders,
-    downloadPath: `/api/releases/${channel._id}/download`,
-    storage: { provider: "腾讯云 COS", ...cosConfig() },
-  }, 201);
-});
-
-app.openapi(releaseWorkerCompleteRoute, async (c) => {
-  if (!workerAuthorized(c)) return c.json({ code: "UNAUTHORIZED", message: "发行工作器凭据无效" }, 401);
-  const publishId = c.req.valid("param").publishId;
-  if (!ObjectId.isValid(publishId)) return c.json({ code: "PUBLISH_NOT_FOUND", message: "发行尝试不存在" }, 404);
-  const uploads = await getCollection("releaseUploads");
-  const upload = await uploads.findOne({ _id: new ObjectId(publishId), protocol: "trusted-worker-v1", status: "prepared" });
-  if (!upload) return c.json({ code: "PUBLISH_NOT_FOUND", message: "发行尝试不存在或已经完成" }, 404);
-  let head;
-  try { head = await headObject(upload.objectKey); }
-  catch { return c.json({ code: "UPLOAD_NOT_FOUND", message: "COS 中尚未找到完整安装包" }, 409); }
-  const actualBytes = objectSize(head);
-  const actualSha256 = cosHeadMetadata(head, "x-cos-meta-sha256").trim().toUpperCase();
-  const actualVersion = cosHeadMetadata(head, "x-cos-meta-release-version").trim();
-  if (actualBytes !== upload.bytes || actualSha256 !== upload.sha256 || actualVersion !== upload.version) {
-    return c.json({ code: "UPLOAD_INTEGRITY_MISMATCH", message: "COS 安装包大小、SHA-256 或版本元数据与 prepare 声明不一致" }, 409);
-  }
-
-  const body = c.req.valid("json");
-  const now = new Date();
-  const latestRelease = {
-    objectKey: upload.objectKey,
-    filename: upload.filename,
-    version: upload.version,
-    bytes: upload.bytes,
-    sha256: upload.sha256,
-    signatureStatus: upload.signatureStatus,
-    receipt: body.receipt,
-    prepareReceipt: upload.prepareReceipt,
-    source: "trusted-release-worker",
-    publishedAt: now,
-  };
-  const channels = await getCollection("releaseChannels");
-  const published = await channels.updateOne(
-    { _id: upload.channelId, distributionStatus: "uploading", releasePublishId: upload._id },
-    {
-      $set: { latestRelease, distributionStatus: "ready", updatedAt: now },
-      $unset: { releasePublishId: "", releaseUpdatingAt: "", releaseError: "", releaseFailedAt: "" },
-    },
-  );
-  if (!published.modifiedCount) return c.json({ code: "RELEASE_CHANGED", message: "发行渠道状态已变化，拒绝覆盖" }, 409);
-  await uploads.updateOne({ _id: upload._id }, { $set: { status: "completed", receipt: body.receipt, completedAt: now, updatedAt: now } });
-  return c.json({
-    ok: true,
-    channelId: upload.channelId.toString(),
-    downloadPath: `/api/releases/${upload.channelId}/download`,
-    latestPath: "/api/releases/latest",
-    release: publicReleaseMetadata({ _id: upload.channelId, name: upload.channelName, latestRelease }),
-  });
-});
-
-app.openapi(releaseWorkerFailRoute, async (c) => {
-  if (!workerAuthorized(c)) return c.json({ code: "UNAUTHORIZED", message: "发行工作器凭据无效" }, 401);
-  const publishId = c.req.valid("param").publishId;
-  if (!ObjectId.isValid(publishId)) return c.json({ code: "PUBLISH_NOT_FOUND", message: "发行尝试不存在" }, 404);
-  const uploads = await getCollection("releaseUploads");
-  const upload = await uploads.findOne({ _id: new ObjectId(publishId), protocol: "trusted-worker-v1", status: "prepared" });
-  if (!upload) return c.json({ code: "PUBLISH_NOT_FOUND", message: "发行尝试不存在或已经结束" }, 404);
-  const body = c.req.valid("json");
-  const now = new Date();
-  await deleteObject(upload.objectKey).catch(() => {});
-  await uploads.updateOne({ _id: upload._id }, { $set: { status: "failed", error: body.error, failedAt: now, updatedAt: now } });
-  await (await getCollection("releaseChannels")).updateOne(
-    { _id: upload.channelId, releasePublishId: upload._id },
-    { $set: { distributionStatus: "failed", releaseError: body.error, releaseFailedAt: now, updatedAt: now }, $unset: { releasePublishId: "", releaseUpdatingAt: "" } },
-  );
-  return c.json({ ok: true });
-});
-
+app.openapi(releaseWorkerFailRoute, (c) => c.json({
+  code: "DIRECT_RELEASE_DISABLED",
+  message: "旧版直传发行协议已停用，请由管理员在版本管理中手动上传或创建手动打包发布任务",
+}, 410));
 app.post("/api/release-worker/channels/sync", async (c) => {
   if (!workerAuthorized(c)) return c.json({ code: "UNAUTHORIZED", message: "发行工作器凭据无效" }, 401);
   const body = await c.req.json();
@@ -2066,8 +1918,11 @@ app.post("/api/release-worker/jobs/:id/upload", async (c) => {
   const body = await c.req.json();
   const job = await (await getCollection("releaseJobs")).findOne({ _id: new ObjectId(c.req.param("id")), status: "building" });
   if (!job) return c.json({ code: "JOB_NOT_BUILDING", message: "发版任务不在可上传状态" }, 409);
-  const channel = await (await getCollection("releaseChannels")).findOne({ _id: job.channelId });
-  if (channel?.distributionStatus === "uploading") return c.json({ code: "RELEASE_IN_PROGRESS", message: "该渠道正在通过直传协议更新" }, 409);
+  let channel = await (await getCollection("releaseChannels")).findOne({ _id: job.channelId });
+  if (!channel) return c.json({ code: "CHANNEL_NOT_FOUND", message: "发行渠道不存在或已停用" }, 404);
+  const availability = await releaseChannelAvailability(channel);
+  if (availability.blocked) return c.json({ code: "RELEASE_IN_PROGRESS", message: "该渠道已有上传任务正在进行" }, 409);
+  channel = availability.channel;
   const filename = sanitizeFilename(body.filename, "Gulong-Agent-Setup.exe");
   const bytes = Number(body.bytes);
   if (!filename.toLowerCase().endsWith(".exe") || !Number.isSafeInteger(bytes) || bytes < 1024 || bytes > 5 * 1024 * 1024 * 1024) {
@@ -2428,16 +2283,19 @@ app.post("/api/feedback", async (c) => {
   return c.json({ id: result.insertedId.toString(), status: "open" }, 201);
 });
 
-app.get("/api/billing/plans", (c) =>
-  c.json({
+app.get("/api/billing/plans", async (c) => {
+  const pricing = await currentSubscriptionPricing();
+  c.header("Cache-Control", "no-store, max-age=0");
+  return c.json({
     plans: [
       { id: "free", name: "普通用户", monthlyFen: 0, yearlyFen: 0, autoRenew: false },
-      { id: "member", name: "会员用户", monthlyFen: chandlerConfig().monthlyPriceFen, yearlyFen: chandlerConfig().yearlyPriceFen, autoRenew: true },
+      { id: "member", name: "会员用户", monthlyFen: pricing.monthly.amountFen, yearlyFen: pricing.yearly.amountFen, autoRenew: true },
       { id: "custom", name: "深度定制", pricing: "结果式付费 · 利润五五分", autoRenew: false },
     ],
     providers: { mode: "chandler", alipay: true, wechat: true, offline: true, autoRenew: { alipay: true, wechat: true } },
-  }),
-);
+    pricingRevision: pricing.revision,
+  });
+});
 
 app.post("/api/billing/orders", async (c) => {
   if (!isTrustedBrowserRequest(c)) return c.json({ code: "ORIGIN_REJECTED", message: "请求来源不受信任" }, 403);
@@ -2447,7 +2305,9 @@ app.post("/api/billing/orders", async (c) => {
   const provider = ["wechat", "alipay", "offline"].includes(body.provider) ? body.provider : null;
   const cycle = body.cycle === "year" ? "year" : body.cycle === "month" ? "month" : null;
   const kind = body.kind === "recharge" ? "recharge" : "subscription";
-  let amountFen = kind === "recharge" ? Number(body.amountFen) : cycle === "year" ? chandlerConfig().yearlyPriceFen : chandlerConfig().monthlyPriceFen;
+  const now = new Date();
+  const pricing = kind === "subscription" ? await currentSubscriptionPricing(now) : null;
+  let amountFen = kind === "recharge" ? Number(body.amountFen) : cycle === "year" ? pricing.yearly.amountFen : pricing.monthly.amountFen;
   if (!provider || !Number.isInteger(amountFen) || amountFen < 100 || amountFen > 5_000_000) {
     return c.json({ code: "VALIDATION_ERROR", message: "支付方式、周期或金额不正确" }, 400);
   }
@@ -2455,17 +2315,16 @@ app.post("/api/billing/orders", async (c) => {
   if (provider === "offline" && kind !== "subscription") return c.json({ code: "VALIDATION_ERROR", message: "线下支付仅用于会员订阅审核" }, 400);
   const orderNo = `GL${Date.now()}${randomBytes(4).toString("hex").toUpperCase()}`;
   const autoRenewRequested = kind === "subscription" && Boolean(body.autoRenew);
-  const now = new Date();
   const ownerId = new ObjectId(auth.user.id);
   const activeSubscription = kind === "subscription" && cycle === "year"
     ? await (await getCollection("subscriptions")).findOne({ ownerId, status: "active", cycle: "month", currentPeriodEnd: { $gt: now } })
     : null;
   const isMonthlyUpgrade = Boolean(activeSubscription);
-  const upgradeCreditFen = isMonthlyUpgrade ? chandlerConfig().monthlyPriceFen : 0;
+  const upgradeCreditFen = isMonthlyUpgrade ? pricing.monthly.amountFen : 0;
   const upgradeBaseStart = isMonthlyUpgrade
     ? new Date(activeSubscription.currentPeriodStart || now)
     : null;
-  if (isMonthlyUpgrade) amountFen = Math.max(100, chandlerConfig().yearlyPriceFen - upgradeCreditFen);
+  if (isMonthlyUpgrade) amountFen = Math.max(100, pricing.yearly.amountFen - upgradeCreditFen);
   const localPriceVersion = kind === "subscription" && !isMonthlyUpgrade
     ? await effectiveLocalPrice({ cycle, at: now })
     : null;
@@ -2941,6 +2800,14 @@ app.openapi(getAccountProfileRoute, async (c) => {
   });
 });
 
+app.openapi(getSubscriptionPricingRoute, async (c) => {
+  const pricing = await currentSubscriptionPricing();
+  c.header("Cache-Control", "no-store, max-age=0");
+  c.header("Pragma", "no-cache");
+  c.header("Access-Control-Allow-Origin", "*");
+  return c.json(pricing);
+});
+
 app.openapi(getMiniMaxConfigurationRoute, async (c) => {
   const auth = await authenticate(c, { scopes: ["configuration:read"] });
   if (auth.error) return auth.error;
@@ -2964,7 +2831,7 @@ app.doc("/api/openapi.json", {
   openapi: "3.1.0",
   info: {
     title: "古龙 Gulong Agent Engine API",
-    version: "1.3.0",
+    version: "1.4.0",
     description: "面向开发者的任务执行、长期记忆、用户模型配置、第二大脑附件、发行版本、Chandler 统一账号、计费与管理员经营分析接口。API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
   },
   servers: [

@@ -12,6 +12,7 @@ import {
 } from "../../server/chandler.js";
 import { cosConfig, sanitizeFilename } from "../../server/cos.js";
 import { readExternalAuth, readUserSecret, sealExternalAuth, sealUserSecret } from "../../server/security.js";
+import { recoverExpiredDirectReleaseLock } from "../../server/release-lock.js";
 
 test("Chandler session tokens are encrypted and round-trip server-side", () => {
   const auth = externalAuthFromResponse({
@@ -84,6 +85,7 @@ test("OpenAPI document includes Chandler admin, offline credentials, dated attac
   assert.ok(document.paths["/api/releases/latest"]);
   assert.ok(document.paths["/api/v1/configuration/minimax"]);
   assert.ok(document.paths["/api/v1/account/profile"]);
+  assert.ok(document.paths["/api/v1/pricing/subscriptions"]);
   assert.ok(document.paths["/api/admin/chandler/users"]);
   assert.ok(document.paths["/api/admin/chandler/users/{id}/status"]);
   assert.ok(document.paths["/api/admin/chandler/users/{id}/subscriptions"]);
@@ -96,6 +98,110 @@ test("OpenAPI document includes Chandler admin, offline credentials, dated attac
   assert.ok(document.paths["/api/release-worker/releases/prepare"]);
   assert.ok(document.paths["/api/release-worker/releases/{publishId}/complete"]);
   assert.ok(document.paths["/api/release-worker/releases/{publishId}/fail"]);
+  for (const path of [
+    "/api/release-worker/releases/prepare",
+    "/api/release-worker/releases/{publishId}/complete",
+    "/api/release-worker/releases/{publishId}/fail",
+  ]) {
+    assert.equal(document.paths[path].post.deprecated, true);
+    assert.ok(document.paths[path].post.responses["410"]);
+  }
+});
+
+test("legacy direct release endpoints stay disabled even with an old worker key", async () => {
+  const requests = [
+    new Request("http://localhost/api/release-worker/releases/prepare", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-release-worker-key": "legacy-worker-key" },
+      body: JSON.stringify({ groupId: "legacy-channel", filename: "legacy.exe" }),
+    }),
+    new Request("http://localhost/api/release-worker/releases/507f1f77bcf86cd799439011/complete", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-release-worker-key": "legacy-worker-key" },
+      body: JSON.stringify({ receipt: { status: "released" } }),
+    }),
+    new Request("http://localhost/api/release-worker/releases/507f1f77bcf86cd799439011/fail", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-release-worker-key": "legacy-worker-key" },
+      body: JSON.stringify({ error: "legacy failure" }),
+    }),
+  ];
+  for (const request of requests) {
+    const response = await app.request(request);
+    assert.equal(response.status, 410);
+    assert.equal((await response.json()).code, "DIRECT_RELEASE_DISABLED");
+  }
+});
+
+test("expired legacy release locks are cleaned without removing the current latest release", async () => {
+  const now = new Date("2026-07-29T12:00:00.000Z");
+  const latestRelease = { objectKey: "releases/channel/current.exe", version: "3.0.0" };
+  const channel = {
+    _id: "channel-1",
+    distributionStatus: "uploading",
+    releasePublishId: "legacy-upload-1",
+    releaseUpdatingAt: new Date("2026-07-29T10:00:00.000Z"),
+    latestRelease,
+  };
+  const writes = [];
+  const deleted = [];
+  const result = await recoverExpiredDirectReleaseLock(channel, {
+    now,
+    deleteStoredObject: async (objectKey) => deleted.push(objectKey),
+    uploads: {
+      findOne: async () => ({
+        _id: "legacy-upload-1",
+        protocol: "trusted-worker-v1",
+        status: "prepared",
+        objectKey: "releases/channel/orphaned.exe",
+        expiresAt: new Date("2026-07-29T11:00:00.000Z"),
+      }),
+      updateOne: async (...args) => { writes.push(["upload", ...args]); return { modifiedCount: 1 }; },
+    },
+    channels: {
+      updateOne: async (...args) => { writes.push(["channel", ...args]); return { modifiedCount: 1 }; },
+      findOne: async () => null,
+    },
+  });
+  assert.equal(result.blocked, false);
+  assert.equal(result.cleaned, true);
+  assert.deepEqual(result.channel.latestRelease, latestRelease);
+  assert.deepEqual(deleted, ["releases/channel/orphaned.exe"]);
+  const channelUpdate = writes.find(([kind]) => kind === "channel")[2];
+  assert.equal(channelUpdate.$set.distributionStatus, "failed");
+  assert.equal(Object.hasOwn(channelUpdate.$set, "latestRelease"), false);
+  assert.deepEqual(channelUpdate.$unset, { releasePublishId: "", releaseUpdatingAt: "" });
+});
+
+test("fresh legacy locks remain blocked and both administrator release paths invoke stale cleanup", async () => {
+  let writeCount = 0;
+  const result = await recoverExpiredDirectReleaseLock({
+    _id: "channel-2",
+    distributionStatus: "uploading",
+    releasePublishId: "legacy-upload-2",
+  }, {
+    now: new Date("2026-07-29T12:00:00.000Z"),
+    deleteStoredObject: async () => { throw new Error("must not delete"); },
+    uploads: {
+      findOne: async () => ({ _id: "legacy-upload-2", protocol: "trusted-worker-v1", status: "prepared", expiresAt: new Date("2026-07-29T13:00:00.000Z") }),
+      updateOne: async () => { writeCount += 1; },
+    },
+    channels: {
+      updateOne: async () => { writeCount += 1; },
+      findOne: async () => null,
+    },
+  });
+  assert.equal(result.blocked, true);
+  assert.equal(result.cleaned, false);
+  assert.equal(writeCount, 0);
+
+  const serverSource = await readFile(new URL("../../server/app.js", import.meta.url), "utf8");
+  const adminJobStart = serverSource.indexOf('app.post("/api/admin/release-jobs"');
+  const manualStart = serverSource.indexOf("app.openapi(adminManualReleaseUploadRoute");
+  const workerUploadStart = serverSource.indexOf('app.post("/api/release-worker/jobs/:id/upload"');
+  assert.match(serverSource.slice(adminJobStart, manualStart), /releaseChannelAvailability\(channel\)/);
+  assert.match(serverSource.slice(manualStart, serverSource.indexOf("app.openapi(adminCompleteManualReleaseUploadRoute", manualStart)), /releaseChannelAvailability\(channel\)/);
+  assert.match(serverSource.slice(workerUploadStart, serverSource.indexOf('app.post("/api/release-worker/jobs/:id/complete"', workerUploadStart)), /releaseChannelAvailability\(channel\)/);
 });
 
 test("Vercel platform entry restores nested API paths", async () => {
@@ -110,6 +216,7 @@ test("Vercel consolidates nested account and configuration routes", async () => 
   assert.ok(sources.includes("/api/account/:path*"));
   assert.ok(sources.includes("/api/v1/configuration/:path*"));
   assert.ok(sources.includes("/api/v1/account/:path*"));
+  assert.ok(sources.includes("/api/v1/pricing/:path*"));
   assert.ok(sources.includes("/api/billing/:path*"));
   assert.ok(sources.includes("/api/users/:id/avatar"));
   assert.ok(sources.includes("/api/admin/analytics/:path*"));
@@ -146,10 +253,26 @@ test("price publishing uses an in-product confirmation and a Chandler permission
     readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
   ]);
   assert.match(adminSource, /price-publish-modal/);
+  assert.match(adminSource, /amountYuan/);
+  assert.match(adminSource, /保存并立即同步/);
+  assert.match(adminSource, /GET \/api\/v1\/pricing\/subscriptions/);
   assert.doesNotMatch(adminSource, /window\.confirm\(`发布目标价格/);
-  assert.match(serverSource, /CHANDLER_PRICE_PERMISSION_DENIED/);
-  assert.match(serverSource, /permissionFallback:\s*true/);
+  assert.match(serverSource, /amountFen:\s*z\.number\(\)\.int\(\)/);
+  assert.match(serverSource, /chandlerSyncStatus/);
   assert.match(serverSource, /price_source:\s*"website-local"/);
+});
+
+test("website pricing and desktop synchronization read the same MongoDB price version", async () => {
+  const [serverSource, pricingPage] = await Promise.all([
+    readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/PlatformPages.jsx", import.meta.url), "utf8"),
+  ]);
+  assert.match(serverSource, /async function currentSubscriptionPricing/);
+  assert.match(serverSource, /path:\s*"\/api\/v1\/pricing\/subscriptions"/);
+  assert.match(serverSource, /Cache-Control",\s*"no-store, max-age=0"/);
+  assert.match(serverSource, /monthlyFen:\s*pricing\.monthly\.amountFen/);
+  assert.match(serverSource, /yearlyFen:\s*pricing\.yearly\.amountFen/);
+  assert.match(pricingPage, /apiFetch\("\/api\/billing\/plans"\)/);
 });
 
 test("offline payment review separates pending work from reviewed history", async () => {
@@ -168,12 +291,15 @@ test("offline payment review separates pending work from reviewed history", asyn
   assert.match(css, /\.offline-review-tabs\s*\{/);
 });
 
-test("trusted release protocol enforces direct-COS integrity metadata", async () => {
-  const source = await readFile(new URL("../../server/app.js", import.meta.url), "utf8");
-  assert.match(source, /"Content-Type": "application\/vnd\.microsoft\.portable-executable"/);
-  assert.match(source, /"x-cos-meta-sha256": sha256/);
-  assert.match(source, /"x-cos-meta-release-version": version/);
-  assert.match(source, /createPresignedPutUrl\(objectKey, \{ expires: 60 \* 60, headers: requiredHeaders \}\)/);
-  assert.match(source, /actualBytes !== upload\.bytes \|\| actualSha256 !== upload\.sha256 \|\| actualVersion !== upload\.version/);
-  assert.match(source, /latestRelease: null,[\s\S]*?distributionStatus: "uploading"/);
+test("administrator release controls are explicit and legacy direct distribution stays unreachable", async () => {
+  const [source, adminSource] = await Promise.all([
+    readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
+  ]);
+  assert.equal((source.match(/code: "DIRECT_RELEASE_DISABLED"/g) || []).length, 3);
+  assert.match(source, /app\.post\("\/api\/admin\/release-jobs"/);
+  assert.match(source, /app\.post\("\/api\/release-worker\/jobs\/:id\/upload"/);
+  assert.match(adminSource, /手动上传/);
+  assert.match(adminSource, /手动打包发布/);
+  assert.match(adminSource, /本地构建不会自动上传腾讯云 COS/);
 });

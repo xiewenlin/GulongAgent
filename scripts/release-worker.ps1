@@ -87,6 +87,12 @@ function Complete-Job {
             Select-Object -First 1
         if (-not $receiptFile) { throw "version-release-receipt.json was not produced." }
         $receipt = Get-Content -Raw -Encoding UTF8 -LiteralPath $receiptFile.FullName | ConvertFrom-Json
+        if ([string]$receipt.status -ne "built" -or [string]$receipt.distributionStatus -ne "awaiting-admin") {
+            throw "Local release receipt is not awaiting an explicit administrator publication."
+        }
+        if ([string]$receipt.publicationMode -ne "manual-admin-only" -or $receipt.automaticCosUpload -ne $false) {
+            throw "Local release receipt does not enforce the manual-admin-only publication policy."
+        }
         $installerPath = [IO.Path]::GetFullPath([string]$receipt.filePath)
         if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) { throw "Installer from release receipt was not found: $installerPath" }
 
@@ -98,7 +104,23 @@ function Complete-Job {
             signatureStatus = [string]$receipt.authenticode
         }
         Invoke-WebRequest -UseBasicParsing -Method PUT -Uri $upload.uploadUrl -InFile $installerPath -ContentType "application/vnd.microsoft.portable-executable" -TimeoutSec 7200 | Out-Null
-        Invoke-PlatformJson -Method POST -Path "/api/release-worker/jobs/$jobId/complete" -Body @{ receipt = $receipt } | Out-Null
+        $completed = Invoke-PlatformJson -Method POST -Path "/api/release-worker/jobs/$jobId/complete" -Body @{ receipt = $receipt }
+        $receipt.status = "released"
+        $receipt.distributionStatus = "published"
+        $receipt.publicationMode = "admin-triggered-worker"
+        $receipt.websiteDistribution = [ordered]@{
+            status = "published"
+            trigger = "admin-release-job"
+            jobId = $jobId
+            channelId = [string]$Job.channelId
+            channelName = [string]$Job.channelName
+            objectKey = [string]$upload.objectKey
+            apiBase = $ApiBase
+            publishedAt = [string]$completed.publishedAt
+            bytes = [int64]$receipt.bytes
+            sha256 = [string]$receipt.sha256
+        }
+        $receipt | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $receiptFile.FullName -Encoding UTF8
         Write-Host ("Published {0} v{1}; SHA-256 {2}" -f $Job.channelName, $receipt.version, $receipt.sha256)
     }
     catch {

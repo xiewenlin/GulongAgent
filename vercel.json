@@ -105,6 +105,10 @@
       "destination": "/api/platform?_platform_path=v1/account/:path*"
     },
     {
+      "source": "/api/v1/pricing/:path*",
+      "destination": "/api/platform?_platform_path=v1/pricing/:path*"
+    },
+    {
       "source": "/((?!api/).*)",
       "destination": "/index.html"
     }

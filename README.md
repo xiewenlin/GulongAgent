@@ -83,6 +83,7 @@ npm run dev
 - 开放接口认证：`Authorization: Bearer gla_live_...`
 - 按日期下载附件：`GET /api/v1/brain/attachments/latest?date=YYYY-MM-DD`
 - 桌面端用户配置：`GET /api/v1/configuration/minimax`（需要 `configuration:read`）
+- 桌面端实时订阅价格：`GET /api/v1/pricing/subscriptions`（公开、禁止缓存，管理员修改后立即生效）
 - Chandler 管理接口：`/api/admin/chandler/users`、`/api/admin/chandler/catalog`、`/api/admin/chandler/prices`
 - 管理员经营分析：`GET /api/admin/analytics/dashboard?days=7|30|90`（管理员会话或管理员 API Key）
 

@@ -23,7 +23,7 @@ import {
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
 import { apiFetch, formatMoney, trackAnalyticsEvent } from "../api.js";
-import { plans } from "../data/site.js";
+import { plans as sitePlans } from "../data/site.js";
 
 function PageIntro({ eyebrow, title, description, actions }) {
   return (
@@ -249,6 +249,17 @@ export function PricingPage({ user, openAuth, navigate }) {
   const [error, setError] = useState("");
   const [payment, setPayment] = useState(null);
   const [membership, setMembership] = useState(null);
+  const [pricingPlans, setPricingPlans] = useState(sitePlans);
+
+  useEffect(() => {
+    apiFetch("/api/billing/plans")
+      .then((result) => {
+        const liveMember = (result.plans || []).find((item) => item.id === "member");
+        if (!liveMember) return;
+        setPricingPlans(sitePlans.map((item) => item.id === "member" ? { ...item, monthlyFen: liveMember.monthlyFen, yearlyFen: liveMember.yearlyFen } : item));
+      })
+      .catch(() => setPricingPlans(sitePlans));
+  }, []);
 
   useEffect(() => {
     if (!user) { setMembership(null); return; }
@@ -257,13 +268,14 @@ export function PricingPage({ user, openAuth, navigate }) {
       .catch(() => setMembership(null));
   }, [user?.id]);
 
-  const memberPlan = plans.find((item) => item.id === "member");
+  const memberPlan = pricingPlans.find((item) => item.id === "member");
   const monthlyUpgrade = cycle === "year"
     && membership?.status === "active"
     && membership?.cycle === "month"
     && new Date(membership.currentPeriodEnd).getTime() > Date.now();
   const upgradeCreditFen = monthlyUpgrade ? memberPlan.monthlyFen : 0;
-  const memberPayableFen = cycle === "year" ? memberPlan.yearlyFen - upgradeCreditFen : memberPlan.monthlyFen;
+  const memberPayableFen = cycle === "year" ? Math.max(monthlyUpgrade ? 100 : 0, memberPlan.yearlyFen - upgradeCreditFen) : memberPlan.monthlyFen;
+  const yearlySavingsFen = Math.max(0, memberPlan.monthlyFen * 12 - memberPlan.yearlyFen);
 
   async function startPayment(plan) {
     if (!user) return openAuth("login");
@@ -294,11 +306,11 @@ export function PricingPage({ user, openAuth, navigate }) {
     <main id="main-content">
       <PageIntro eyebrow="SIMPLE PRICING" title="把成本花在真正困难的任务上" description="普通能力永久免费；会员解锁第二大脑、多端消息、本地模型与完整创作流水线。" />
       <section className="pricing-controls section-shell">
-        <div className="cycle-switch"><button className={cycle === "month" ? "active" : ""} onClick={() => setCycle("month")}>按月订阅</button><button className={cycle === "year" ? "active" : ""} onClick={() => setCycle("year")}>按年订阅 <span>省 ¥596</span></button></div>
+        <div className="cycle-switch"><button className={cycle === "month" ? "active" : ""} onClick={() => setCycle("month")}>按月订阅</button><button className={cycle === "year" ? "active" : ""} onClick={() => setCycle("year")}>按年订阅 {yearlySavingsFen > 0 && <span>省 {formatMoney(yearlySavingsFen)}</span>}</button></div>
         <div className="payment-method-control"><div className="provider-switch"><button className={paymentMode === "online" ? "active" : ""} onClick={() => setPaymentMode("online")}>线上支付</button><button className={paymentMode === "offline" ? "active" : ""} onClick={() => { setPaymentMode("offline"); setAutoRenew(false); }}>线下支付</button></div>{paymentMode === "online" && <div className="online-channel-switch" aria-label="线上支付渠道"><span>选择渠道</span><button className={onlineProvider === "wechat" ? "active" : ""} onClick={() => setOnlineProvider("wechat")}>微信支付</button><button className={onlineProvider === "alipay" ? "active" : ""} onClick={() => setOnlineProvider("alipay")}>支付宝</button></div>}</div>
       </section>
       <section className="pricing-grid section-shell">
-        {plans.map((plan) => (
+        {pricingPlans.map((plan) => (
           <article key={plan.id} className={plan.featured ? "featured" : ""}>
             {plan.featured && <span className="plan-ribbon">推荐</span>}
             <small>{plan.eyebrow}</small><h2>{plan.name}</h2>
