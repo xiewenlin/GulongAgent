@@ -208,6 +208,7 @@ test("OpenAPI document includes Chandler admin, offline credentials, dated attac
   assert.ok(document.paths["/api/admin/chandler/entitlement-requests"]);
   assert.ok(document.paths["/api/admin/analytics/dashboard"]);
   assert.ok(document.paths["/api/admin/users/{id}/role"]);
+  assert.ok(document.paths["/api/admin/users/{id}/subscription-period"]);
   assert.ok(document.paths["/api/worker/tasks"]?.get);
   assert.ok(document.paths["/api/worker/tasks"]?.post);
   assert.ok(document.paths["/api/worker/tasks/{id}/payment-submit"]);
@@ -422,8 +423,25 @@ test("admin subscriptions localize review state and keep the three-column detail
   assert.match(adminSource, /label:\s*"订阅用户"/);
   assert.match(adminSource, /pending_review:\s*"待人工审核"/);
   assert.match(adminSource, /<h2>订阅用户<\/h2>/);
+  assert.match(adminSource, /修改有效期/);
+  assert.match(adminSource, /<span>生效时间<\/span>/);
+  assert.match(adminSource, /<span>到期时间<\/span>/);
   assert.match(css, /\.admin-detail-panel\s*>\s*article\s*\{[^}]*grid-template-columns:\s*minmax\(132px,[^;]+minmax\(180px,[^;]+minmax\(230px,\s*auto\)/s);
   assert.match(css, /\.subscription-state\s*\{[^}]*white-space:\s*nowrap/s);
+});
+
+test("administrator subscription periods are authoritative across website and desktop clients", async () => {
+  const [serverSource, dbSource] = await Promise.all([
+    readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../../server/db.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(serverSource, /manualPeriodOverride:\s*true/);
+  assert.match(serverSource, /subscriptionPeriodState\(subscription\.currentPeriodStart, subscription\.currentPeriodEnd, now\)/);
+  assert.match(serverSource, /subscription_source:\s*"website_admin_period"/);
+  assert.match(serverSource, /subscriptionPeriodAudits/);
+  assert.match(serverSource, /type:\s*"subscription_period_updated"|"subscription_period_updated"/);
+  assert.doesNotMatch(serverSource, /safeDate\(subscription\.currentPeriodEnd\)/);
+  assert.match(dbSource, /subscription_period_audits_by_user/);
 });
 
 test("Chandler v2.2 pricing uses application-level price versions before the local mirror", async () => {

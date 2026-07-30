@@ -225,6 +225,32 @@ function safeDate(value, endOfDay = false) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+function subscriptionPeriodState(currentPeriodStart, currentPeriodEnd, now = new Date()) {
+  const start = currentPeriodStart ? new Date(currentPeriodStart) : null;
+  const end = currentPeriodEnd ? new Date(currentPeriodEnd) : null;
+  if (!end || Number.isNaN(end.getTime())) return "inactive";
+  if (!start || Number.isNaN(start.getTime())) return now >= end ? "expired" : "active";
+  if (end <= start) return "inactive";
+  if (now < start) return "scheduled";
+  if (now >= end) return "expired";
+  return "active";
+}
+
+function adminSubscriptionJson(subscription) {
+  if (!subscription) return null;
+  const status = subscriptionPeriodState(subscription.currentPeriodStart, subscription.currentPeriodEnd);
+  return {
+    id: subscription._id.toString(),
+    status,
+    sku_name: subscription.cycle === "year" ? "古龙年度会员" : subscription.cycle === "month" ? "古龙月度会员" : "古龙会员",
+    current_period_start: subscription.currentPeriodStart || null,
+    current_period_end: subscription.currentPeriodEnd || null,
+    provider: subscription.provider || "admin",
+    source: "website",
+    authoritative: Boolean(subscription.manualPeriodOverride),
+  };
+}
+
 function objectSize(head) {
   return Number(head?.headers?.["content-length"] || head?.ContentLength || head?.contentLength || 0);
 }
@@ -784,6 +810,35 @@ const adminSetWebsiteRoleRoute = createRoute({
   description: "写入持久 roleOverride，后续 Chandler 登录不会覆盖管理员角色。",
   request: { params: z.object({ id: z.string() }), body: { content: { "application/json": { schema: z.object({ role: z.literal("admin") }) } } } },
   responses: { 200: { description: "角色已更新", content: { "application/json": { schema: z.object({ ok: z.literal(true), userId: z.string(), role: z.literal("admin"), message: z.string() }) } } }, 403: { description: "非管理员", content: { "application/json": { schema: ErrorSchema } } }, 404: { description: "用户不存在", content: { "application/json": { schema: ErrorSchema } } } },
+});
+
+const adminUpdateSubscriptionPeriodRoute = createRoute({
+  method: "put",
+  path: "/api/admin/users/{id}/subscription-period",
+  tags: ["Admin · Users"],
+  summary: "修改用户会员有效期",
+  description: "由管理员精确设置官网会员的生效时间和到期时间；官网与桌面端均以该时间段为准，并尽力同步 Chandler 用户属性。",
+  request: {
+    params: z.object({ id: z.string().min(1).max(100) }),
+    body: { content: { "application/json": { schema: z.object({
+      currentPeriodStart: z.string().datetime(),
+      currentPeriodEnd: z.string().datetime(),
+    }) } } },
+  },
+  responses: {
+    200: { description: "会员有效期已更新", content: { "application/json": { schema: z.object({
+      ok: z.literal(true),
+      userId: z.string(),
+      status: z.enum(["scheduled", "active", "expired"]),
+      currentPeriodStart: z.string().datetime(),
+      currentPeriodEnd: z.string().datetime(),
+      chandlerSynced: z.boolean(),
+      message: z.string(),
+    }) } } },
+    400: { description: "时间范围无效", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "非管理员", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "用户不存在", content: { "application/json": { schema: ErrorSchema } } },
+  },
 });
 
 const adminManualReleaseUploadRoute = createRoute({
@@ -1396,7 +1451,17 @@ app.get("/api/account/dashboard", async (c) => {
     chandlerSubscriptionsPromise,
   ]);
   const remoteSubscription = (chandlerSubscriptions?.subscriptions || []).find((item) => item.status === "active") || null;
-  const effectiveSubscription = subscription?.status === "active" ? subscription : remoteSubscription ? {
+  const localSubscriptionStatus = subscription
+    ? subscriptionPeriodState(subscription.currentPeriodStart, subscription.currentPeriodEnd)
+    : "inactive";
+  const localSubscription = subscription ? { ...subscription, status: localSubscriptionStatus } : null;
+  if (subscription && subscription.status !== localSubscriptionStatus) {
+    await (await getCollection("subscriptions")).updateOne(
+      { _id: subscription._id },
+      { $set: { status: localSubscriptionStatus, statusEvaluatedAt: new Date(), updatedAt: new Date() } },
+    );
+  }
+  const remoteSubscriptionView = remoteSubscription ? {
     plan: remoteSubscription.sku_name || remoteSubscription.product_name || "member",
     cycle: remoteSubscription.billing_interval || remoteSubscription.cycle || null,
     provider: remoteSubscription.channel || "chandler",
@@ -1406,6 +1471,11 @@ app.get("/api/account/dashboard", async (c) => {
     autoRenew: remoteSubscription.cancel_at_period_end !== true,
     cancelAtPeriodEnd: Boolean(remoteSubscription.cancel_at_period_end),
   } : null;
+  const effectiveSubscription = subscription?.manualPeriodOverride
+    ? localSubscription
+    : localSubscriptionStatus === "active"
+      ? localSubscription
+      : remoteSubscriptionView || localSubscription;
   return c.json({
     profile: {
       id: auth.user.id,
@@ -1864,6 +1934,116 @@ app.openapi(adminSetWebsiteRoleRoute, async (c) => {
   return c.json({ ok: true, userId: target._id.toString(), role: "admin", message: "用户已提升为管理员，下次登录仍会保留该角色。" });
 });
 
+app.openapi(adminUpdateSubscriptionPeriodRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  const targetId = String(c.req.valid("param").id || "").trim();
+  const body = c.req.valid("json");
+  const currentPeriodStart = new Date(body.currentPeriodStart);
+  const currentPeriodEnd = new Date(body.currentPeriodEnd);
+  const maximumPeriodMs = 10 * 366 * 86_400_000;
+  if (
+    Number.isNaN(currentPeriodStart.getTime())
+    || Number.isNaN(currentPeriodEnd.getTime())
+    || currentPeriodEnd <= currentPeriodStart
+    || currentPeriodEnd.getTime() - currentPeriodStart.getTime() > maximumPeriodMs
+  ) {
+    return c.json({ code: "INVALID_SUBSCRIPTION_PERIOD", message: "到期时间必须晚于生效时间，且单次设置最长不超过 10 年" }, 400);
+  }
+
+  const filters = [{ chandlerUserId: targetId }];
+  if (ObjectId.isValid(targetId)) filters.unshift({ _id: new ObjectId(targetId) });
+  const users = await getCollection("users");
+  const target = await users.findOne({ $or: filters });
+  if (!target) return c.json({ code: "USER_NOT_FOUND", message: "该用户尚未登录过古龙官网，暂时无法设置会员有效期" }, 404);
+
+  const now = new Date();
+  const status = subscriptionPeriodState(currentPeriodStart, currentPeriodEnd, now);
+  const subscriptions = await getCollection("subscriptions");
+  const previous = await subscriptions.findOne({ ownerId: target._id });
+  await subscriptions.updateOne(
+    { ownerId: target._id },
+    {
+      $set: {
+        plan: previous?.plan || "member",
+        cycle: previous?.cycle || "custom",
+        provider: previous?.provider || "admin",
+        status,
+        currentPeriodStart,
+        currentPeriodEnd,
+        autoRenew: Boolean(previous?.autoRenew),
+        manualPeriodOverride: true,
+        periodSource: "admin",
+        periodUpdatedAt: now,
+        periodUpdatedBy: new ObjectId(auth.user.id),
+        updatedAt: now,
+      },
+      $setOnInsert: { createdAt: now },
+    },
+    { upsert: true },
+  );
+  await (await getCollection("subscriptionPeriodAudits")).insertOne({
+    ownerId: target._id,
+    targetChandlerUserId: target.chandlerUserId || null,
+    previous: previous ? {
+      status: previous.status || null,
+      currentPeriodStart: previous.currentPeriodStart || null,
+      currentPeriodEnd: previous.currentPeriodEnd || null,
+      manualPeriodOverride: Boolean(previous.manualPeriodOverride),
+    } : null,
+    next: { status, currentPeriodStart, currentPeriodEnd, manualPeriodOverride: true },
+    actorId: new ObjectId(auth.user.id),
+    createdAt: now,
+  });
+
+  const displayStart = currentPeriodStart.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
+  const displayEnd = currentPeriodEnd.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
+  await notifyUser(
+    target._id,
+    "subscription_period_updated",
+    "会员有效期已调整",
+    `管理员已将你的会员有效期调整为 ${displayStart} 至 ${displayEnd}。`,
+    { currentPeriodStart, currentPeriodEnd, status, actorId: new ObjectId(auth.user.id) },
+  );
+
+  let chandlerSynced = false;
+  if (target.chandlerUserId) {
+    try {
+      const accessToken = await getChandlerAccessToken(auth.session);
+      const path = `/v1/me/oauth/clients/${encodeURIComponent(chandlerConfig().applicationId)}/users/${encodeURIComponent(target.chandlerUserId)}/attributes`;
+      const current = await chandlerRequest(path, { accessToken });
+      const attributes = current.attributes && typeof current.attributes === "object" ? current.attributes : {};
+      await chandlerRequest(path, {
+        method: "PUT",
+        accessToken,
+        body: { attributes: {
+          ...attributes,
+          subscription_status: status,
+          subscription_source: "website_admin_period",
+          subscription_valid_from: currentPeriodStart.toISOString(),
+          subscription_valid_until: currentPeriodEnd.toISOString(),
+          subscription_valid_from_unix_ms: currentPeriodStart.getTime(),
+          subscription_valid_until_unix_ms: currentPeriodEnd.getTime(),
+          subscription_period_updated_at_unix_ms: now.getTime(),
+        } },
+      });
+      chandlerSynced = true;
+    } catch {
+      // MongoDB remains authoritative; Chandler attributes can be synchronized later.
+    }
+  }
+
+  return c.json({
+    ok: true,
+    userId: target._id.toString(),
+    status,
+    currentPeriodStart: currentPeriodStart.toISOString(),
+    currentPeriodEnd: currentPeriodEnd.toISOString(),
+    chandlerSynced,
+    message: `会员有效期已保存，当前状态：${status === "active" ? "生效中" : status === "scheduled" ? "尚未生效" : "已到期"}。`,
+  });
+});
+
 app.openapi(adminSetChandlerUserStatusRoute, async (c) => {
   const rejected = requireTrustedMutation(c); if (rejected) return rejected;
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
@@ -1879,36 +2059,41 @@ app.openapi(adminSetChandlerUserStatusRoute, async (c) => {
 app.openapi(adminChandlerUserSubscriptionsRoute, async (c) => {
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
   const userId = c.req.valid("param").id;
+  const idFilter = ObjectId.isValid(userId) ? [{ _id: new ObjectId(userId) }, { chandlerUserId: userId }] : [{ chandlerUserId: userId }];
+  const user = await (await getCollection("users")).findOne({ $or: idFilter });
+  const [localSubscription, offlineOrders] = user ? await Promise.all([
+    (await getCollection("subscriptions")).findOne({ ownerId: user._id }),
+    (await getCollection("offlinePayments")).find({ ownerId: user._id }).sort({ createdAt: -1 }).limit(10).toArray(),
+  ]) : [null, []];
+  const local = [];
+  const localSubscriptionItem = adminSubscriptionJson(localSubscription);
+  if (localSubscriptionItem) local.push(localSubscriptionItem);
+  for (const order of offlineOrders) local.push({
+    id: order._id.toString(),
+    status: order.status === "pending" ? "pending_review" : order.status,
+    sku_name: order.cycle === "year" ? "线下年度会员" : "线下月度会员",
+    valid_from: order.validFrom || null,
+    valid_until: order.validUntil || null,
+    provider: "offline",
+    order_no: order.orderNo,
+    source: "website",
+  });
   try {
     const accessToken = await getChandlerAccessToken(auth.session);
-    const subscriptions = await chandlerRequest(`/v1/admin/users/${encodeURIComponent(userId)}/subscriptions`, { accessToken });
-    return c.json(subscriptions);
-  } catch (error) {
-    const idFilter = ObjectId.isValid(userId) ? [{ _id: new ObjectId(userId) }, { chandlerUserId: userId }] : [{ chandlerUserId: userId }];
-    const user = await (await getCollection("users")).findOne({ $or: idFilter });
-    if (!user) return c.json({ subscriptions: [], meta: { source: "website-shadow", permissionLimited: true, warning: error.message } });
-    const [subscription, offlineOrders] = await Promise.all([
-      (await getCollection("subscriptions")).findOne({ ownerId: user._id }),
-      (await getCollection("offlinePayments")).find({ ownerId: user._id }).sort({ createdAt: -1 }).limit(10).toArray(),
-    ]);
-    const local = subscription ? [{
-      id: subscription._id.toString(),
-      status: subscription.status,
-      sku_name: subscription.cycle === "year" ? "古龙年度会员" : "古龙月度会员",
-      current_period_end: subscription.currentPeriodEnd,
-      provider: subscription.provider,
-      source: "website",
-    }] : [];
-    for (const order of offlineOrders) local.push({
-      id: order._id.toString(),
-      status: order.status === "pending" ? "pending_review" : order.status,
-      sku_name: order.cycle === "year" ? "线下年度会员" : "线下月度会员",
-      valid_until: order.validUntil || null,
-      provider: "offline",
-      order_no: order.orderNo,
-      source: "website",
+    const remote = await chandlerRequest(`/v1/admin/users/${encodeURIComponent(userId)}/subscriptions`, { accessToken });
+    const remoteSubscriptions = Array.isArray(remote?.subscriptions) ? remote.subscriptions : [];
+    return c.json({
+      ...remote,
+      subscriptions: [...local, ...remoteSubscriptions],
+      meta: {
+        ...(remote?.meta || {}),
+        source: local.length ? "chandler+website" : "chandler",
+        websitePeriodOverride: Boolean(localSubscription?.manualPeriodOverride),
+      },
     });
-    return c.json({ subscriptions: local, meta: { source: "website-shadow", permissionLimited: true, warning: error.message } });
+  } catch (error) {
+    if (!user) return c.json({ subscriptions: [], meta: { source: "website-shadow", permissionLimited: true, warning: error.message } });
+    return c.json({ subscriptions: local, meta: { source: "website-shadow", permissionLimited: true, websitePeriodOverride: Boolean(localSubscription?.manualPeriodOverride), warning: error.message } });
   }
 });
 
@@ -3387,7 +3572,13 @@ app.post("/api/billing/orders", async (c) => {
   const autoRenewRequested = kind === "subscription" && Boolean(body.autoRenew);
   const ownerId = new ObjectId(auth.user.id);
   const activeSubscription = kind === "subscription" && cycle === "year"
-    ? await (await getCollection("subscriptions")).findOne({ ownerId, status: "active", cycle: "month", currentPeriodEnd: { $gt: now } })
+    ? await (await getCollection("subscriptions")).findOne({
+      ownerId,
+      cycle: "month",
+      status: { $nin: ["cancelled", "canceled"] },
+      currentPeriodStart: { $lte: now },
+      currentPeriodEnd: { $gt: now },
+    })
     : null;
   const isMonthlyUpgrade = Boolean(activeSubscription);
   const upgradeCreditFen = isMonthlyUpgrade ? pricing.monthly.amountFen : 0;
@@ -3627,8 +3818,11 @@ app.get("/api/billing/subscription", async (c) => {
   if (auth.error) return auth.error;
   const subscription = await (await getCollection("subscriptions")).findOne({ ownerId: new ObjectId(auth.user.id) });
   const wallet = await (await getCollection("wallets")).findOne({ ownerId: new ObjectId(auth.user.id) });
+  const subscriptionStatus = subscription
+    ? subscriptionPeriodState(subscription.currentPeriodStart, subscription.currentPeriodEnd)
+    : null;
   return c.json({
-    subscription: subscription ? { ...subscription, id: subscription._id.toString(), _id: undefined, ownerId: undefined } : null,
+    subscription: subscription ? { ...subscription, status: subscriptionStatus, id: subscription._id.toString(), _id: undefined, ownerId: undefined } : null,
     balanceFen: wallet?.balanceFen || 0,
   });
 });
@@ -3637,9 +3831,10 @@ app.post("/api/billing/subscription/cancel", async (c) => {
   if (!isTrustedBrowserRequest(c)) return c.json({ code: "ORIGIN_REJECTED", message: "请求来源不受信任" }, 403);
   const auth = await authenticate(c);
   if (auth.error) return auth.error;
+  const now = new Date();
   const result = await (await getCollection("subscriptions")).updateOne(
-    { ownerId: new ObjectId(auth.user.id), status: "active" },
-    { $set: { autoRenew: false, cancelAtPeriodEnd: true, updatedAt: new Date() } },
+    { ownerId: new ObjectId(auth.user.id), currentPeriodStart: { $lte: now }, currentPeriodEnd: { $gt: now } },
+    { $set: { autoRenew: false, cancelAtPeriodEnd: true, updatedAt: now } },
   );
   if (!result.matchedCount) return c.json({ code: "SUBSCRIPTION_NOT_FOUND", message: "当前没有生效中的订阅" }, 404);
   return c.json({ ok: true, cancelAtPeriodEnd: true });
@@ -3940,7 +4135,10 @@ app.openapi(desktopSubscriptionStatusRoute, async (c) => {
   if (auth.error) return auth.error;
   const now = new Date();
   const subscription = await (await getCollection("subscriptions")).findOne({ ownerId: auth.user._id });
-  const active = subscription?.status === "active" && safeDate(subscription.currentPeriodEnd)?.getTime() > now.getTime();
+  const status = subscription
+    ? subscriptionPeriodState(subscription.currentPeriodStart, subscription.currentPeriodEnd, now)
+    : "inactive";
+  const active = status === "active";
   c.header("Cache-Control", "private, no-store, max-age=0");
   c.header("Pragma", "no-cache");
   return c.json({
@@ -3949,7 +4147,7 @@ app.openapi(desktopSubscriptionStatusRoute, async (c) => {
       plan: subscription.plan || "member",
       cycle: subscription.cycle || null,
       provider: subscription.provider || null,
-      status: active ? "active" : subscription.status || "inactive",
+      status,
       currentPeriodStart: subscription.currentPeriodStart || null,
       currentPeriodEnd: subscription.currentPeriodEnd || null,
       autoRenew: Boolean(subscription.autoRenew),

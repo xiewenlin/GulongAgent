@@ -245,7 +245,11 @@ export async function buildAdminAnalyticsDashboard(requestedDays = 30) {
       users.countDocuments({}),
       users.countDocuments({ status: "active" }),
       users.countDocuments({ role: "admin" }),
-      subscriptions.countDocuments({ status: "active", currentPeriodEnd: { $gte: now } }),
+      subscriptions.countDocuments({
+        status: { $nin: ["cancelled", "canceled"] },
+        currentPeriodStart: { $lte: now },
+        currentPeriodEnd: { $gt: now },
+      }),
       apiKeys.distinct("ownerId", { revokedAt: null }),
       configurations.distinct("ownerId", { provider: "minimax" }),
       uploads.distinct("ownerId", { kind: "brain" }),

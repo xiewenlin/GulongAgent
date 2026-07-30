@@ -50,6 +50,8 @@ const subscriptionStatusLabels = {
   canceled: "已取消",
   cancelled: "已取消",
   expired: "已到期",
+  scheduled: "尚未生效",
+  inactive: "未生效",
   rejected: "已拒绝",
 };
 
@@ -69,6 +71,7 @@ function ChandlerUserManager() {
   const [subscriptions, setSubscriptions] = useState([]);
   const [subscriptionMeta, setSubscriptionMeta] = useState({});
   const [grant, setGrant] = useState(null);
+  const [periodEditor, setPeriodEditor] = useState(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState("");
 
@@ -131,13 +134,49 @@ function ChandlerUserManager() {
     finally { setBusy(""); }
   }
 
+  function openPeriodEditor() {
+    const subscription = subscriptions.find((item) => item.authoritative)
+      || subscriptions.find((item) => item.source === "website" && item.current_period_end)
+      || subscriptions.find((item) => item.current_period_end || item.valid_until);
+    const start = subscription?.current_period_start || subscription?.valid_from || new Date();
+    const end = subscription?.current_period_end || subscription?.valid_until || new Date(Date.now() + 365 * 86_400_000);
+    setPeriodEditor({
+      user: selected,
+      currentPeriodStart: localDateTimeValue(start),
+      currentPeriodEnd: localDateTimeValue(end),
+    });
+  }
+
+  async function saveSubscriptionPeriod(event) {
+    event.preventDefault();
+    const start = new Date(periodEditor.currentPeriodStart);
+    const end = new Date(periodEditor.currentPeriodEnd);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) {
+      setMessage("到期时间必须晚于生效时间。");
+      return;
+    }
+    setBusy("period"); setMessage("");
+    try {
+      const user = periodEditor.user;
+      const result = await apiFetch(`/api/admin/users/${encodeURIComponent(user.website_user_id || user.id)}/subscription-period`, {
+        method: "PUT",
+        body: JSON.stringify({ currentPeriodStart: start.toISOString(), currentPeriodEnd: end.toISOString() }),
+      });
+      setPeriodEditor(null);
+      await inspect(user);
+      setMessage(result.message || "会员有效期已保存并同步到用户端。");
+    } catch (error) { setMessage(error.message); }
+    finally { setBusy(""); }
+  }
+
   return <section className="admin-module">
     <header className="admin-module-head"><div><span>CHANDLER IDENTITY CONTROL</span><h2>订阅用户</h2><p>搜索 Chandler 真实用户、冻结或恢复账号、查看订阅，并发起权益双人审批。</p></div><div className="storage-badge"><ShieldCheck size={18} /><span>数据来源</span><strong>{meta.permissionLimited ? "官网同步用户" : "Chandler OpenAPI"}</strong></div></header>
     <form className="admin-filterbar" onSubmit={load}><label><MagnifyingGlass size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索邮箱、昵称、手机号" /></label><button className="button secondary" disabled={busy === "search"}><MagnifyingGlass size={16} /> {busy === "search" ? "搜索中" : "搜索"}</button><span>共 {meta.total ?? users.length} 个结果</span></form>
     {message && <AdminNotice tone={message.includes("已") ? "success" : "error"}>{message}</AdminNotice>}
     {meta.permissionLimited && <AdminNotice>Chandler 管理接口未向当前账号开放，已自动切换为官网同步用户与本地订阅视图；查看、搜索和线下审核可继续使用，全局冻结与权益审批需 Chandler 授权。</AdminNotice>}
     {users.length ? <div className="chandler-user-list">{users.map((user) => <article key={user.id}><div className="chandler-user-avatar">{(user.display_name || user.email || "U").slice(0, 1).toUpperCase()}</div><div><strong>{user.display_name || "未设置昵称"}</strong><span>{user.email || user.phone || user.id}</span><small>{user.edition_name ? `${user.edition_name} · ` : ""}{user.role === "admin" ? "管理员" : "普通用户"}</small></div><span className={`status-pill ${user.status || "active"}`}>{user.status === "disabled" ? "已冻结" : user.status === "deleted" ? "已删除" : "正常"}</span><div className="admin-row-actions"><button className="button small ghost" onClick={() => inspect(user)}>订阅详情</button>{user.role !== "admin" && <button className="button small primary" disabled={busy === `role-${user.id}`} onClick={() => promoteToAdmin(user)}><ShieldCheck size={16} />{busy === `role-${user.id}` ? "设置中" : "设为管理员"}</button>}{!meta.permissionLimited && user.status !== "deleted" && <button className="button small secondary" disabled={busy === user.id} onClick={() => changeStatus(user)}>{user.status === "disabled" ? "恢复" : "冻结"}</button>}{!meta.permissionLimited && <button className="button small primary" onClick={() => setGrant({ user, entitlementCode: "gulong.member", validUntil: new Date(Date.now() + 365 * 86400_000).toISOString().slice(0, 16), reason: "管理员根据线下合同申请开通古龙会员权益" })}>申请权益</button>}</div></article>)}</div> : <EmptyState icon={UsersThree} title="没有匹配用户" text="尝试使用邮箱、昵称或手机号的一部分重新搜索。" />}
-    {selected && <div className="admin-detail-panel"><header><div><span>SUBSCRIPTIONS</span><h3>{selected.display_name || selected.email || selected.id} 的订阅</h3></div><button className="icon-danger" onClick={() => setSelected(null)}><X size={17} /></button></header>{subscriptionMeta.permissionLimited && <AdminNotice>当前显示官网订阅与线下支付审核记录。</AdminNotice>}{subscriptions.length ? subscriptions.map((subscription, index) => <article key={subscription.id || index}><strong className={`subscription-state ${subscription.status || "unknown"}`}>{subscriptionStatusLabels[subscription.status] || subscription.status || "未知状态"}</strong><span>{subscription.sku_name || subscription.sku_id || subscription.product_name || "订阅套餐"}</span><time>有效至 {subscription.current_period_end ? new Date(subscription.current_period_end).toLocaleString("zh-CN") : subscription.valid_until ? new Date(subscription.valid_until).toLocaleString("zh-CN") : subscription.status === "pending_review" ? "等待审核" : "未返回"}</time></article>) : <p>该用户当前没有订阅记录。</p>}</div>}
+    {selected && <div className="admin-detail-panel"><header><div><span>SUBSCRIPTIONS</span><h3>{selected.display_name || selected.email || selected.id} 的订阅</h3></div><div className="admin-row-actions"><button className="button small primary" type="button" onClick={openPeriodEditor}><CalendarBlank size={17} />修改有效期</button><button className="icon-danger" type="button" onClick={() => setSelected(null)}><X size={17} /></button></div></header>{subscriptionMeta.permissionLimited && <AdminNotice>当前显示官网订阅与线下支付审核记录；管理员保存的有效期仍会立即同步到官网与桌面端。</AdminNotice>}{subscriptions.length ? subscriptions.map((subscription, index) => { const start = subscription.current_period_start || subscription.valid_from; const end = subscription.current_period_end || subscription.valid_until; return <article key={subscription.id || index}><strong className={`subscription-state ${subscription.status || "unknown"}`}>{subscriptionStatusLabels[subscription.status] || subscription.status || "未知状态"}</strong><span>{subscription.sku_name || subscription.sku_id || subscription.product_name || "订阅套餐"}{subscription.authoritative ? " · 官网权威有效期" : ""}</span><time>{start ? `生效 ${new Date(start).toLocaleString("zh-CN")}` : "生效时间未返回"} · {end ? `到期 ${new Date(end).toLocaleString("zh-CN")}` : subscription.status === "pending_review" ? "等待审核" : "到期时间未返回"}</time></article>; }) : <p>该用户当前没有订阅记录。可点击“修改有效期”直接开通并设置时间。</p>}</div>}
+    {periodEditor && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setPeriodEditor(null)}><form className="admin-form-modal subscription-period-modal" onSubmit={saveSubscriptionPeriod}><button className="modal-close" type="button" onClick={() => setPeriodEditor(null)}><X size={18} /></button><span>MEMBERSHIP PERIOD</span><h2>修改会员有效期</h2><p>目标用户：{periodEditor.user.display_name || periodEditor.user.email || periodEditor.user.id}</p><div className="admin-form-grid"><label><span>生效时间</span><input required type="datetime-local" value={periodEditor.currentPeriodStart} onChange={(event) => setPeriodEditor({ ...periodEditor, currentPeriodStart: event.target.value })} /></label><label><span>到期时间</span><input required type="datetime-local" value={periodEditor.currentPeriodEnd} onChange={(event) => setPeriodEditor({ ...periodEditor, currentPeriodEnd: event.target.value })} /></label></div><AdminNotice>保存后，官网和桌面端会立即按这段时间判断会员状态；未来时间显示“尚未生效”，超过到期时间自动显示“已到期”。</AdminNotice><button className="button primary full" disabled={busy === "period"}><CalendarBlank size={18} />{busy === "period" ? "保存中" : "保存会员有效期"}</button></form></div>}
     {grant && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setGrant(null)}><form className="admin-form-modal" onSubmit={requestGrant}><button className="modal-close" type="button" onClick={() => setGrant(null)}><X size={18} /></button><span>DUAL APPROVAL</span><h2>申请订阅权益</h2><p>目标用户：{grant.user.email || grant.user.id}</p><div className="admin-form-grid"><label><span>权益代码</span><input required value={grant.entitlementCode} onChange={(event) => setGrant({ ...grant, entitlementCode: event.target.value })} /></label><label><span>有效期至</span><input required type="datetime-local" value={grant.validUntil} onChange={(event) => setGrant({ ...grant, validUntil: event.target.value })} /></label><label className="span-2"><span>申请原因</span><textarea required minLength={2} maxLength={1024} value={grant.reason} onChange={(event) => setGrant({ ...grant, reason: event.target.value })} /></label></div><AdminNotice>申请将进入 Chandler 双人审批，申请人不能审批自己的请求。</AdminNotice><button className="button primary full" disabled={busy === "grant"}>{busy === "grant" ? "提交中" : "提交审批"}</button></form></div>}
   </section>;
 }

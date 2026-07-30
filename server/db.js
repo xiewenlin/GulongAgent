@@ -237,6 +237,10 @@ export async function ensureIndexes() {
           { status: 1, currentPeriodEnd: 1 },
           { name: "subscriptions_active" },
         ),
+        db.collection("subscriptionPeriodAudits").createIndex(
+          { ownerId: 1, createdAt: -1 },
+          { name: "subscription_period_audits_by_user" },
+        ),
         db.collection("analyticsEvents").createIndex(
           { eventType: 1, createdAt: -1 },
           { name: "analytics_events_by_type" },
