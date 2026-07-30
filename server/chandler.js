@@ -51,6 +51,9 @@ export function chandlerConfig() {
 function friendlyMessage(status, payload) {
   const code = payload?.error?.code || payload?.code || "";
   const raw = payload?.error?.message || payload?.message || "";
+  if (code === "catalog.sku_inactive") return "该订阅套餐已经停售，请刷新套餐列表后重试";
+  if (code === "catalog.price_not_found") return "该订阅套餐当前没有生效中的价格版本";
+  if (code === "catalog.sku_exists") return "当前应用中已经存在相同编码的 SKU";
   if (status === 401) return "登录已失效，请重新登录";
   if (status === 403) return "当前账号没有执行该操作的 Chandler 权限";
   if (status === 409) return "该账号、订单或操作已存在，请刷新后查看";
@@ -370,48 +373,136 @@ export async function listCatalogPlans() {
   return plans.sort((a, b) => a.amountFen - b.amountFen);
 }
 
-export async function createSubscriptionCheckout(accessToken, { cycle, channel, source = "gulong-web" }) {
-  const config = chandlerConfig();
-  const plans = await listCatalogPlans();
-  const marker = cycle === "year" ? "year" : "month";
-  const expected = cycle === "year" ? config.yearlyPriceFen : config.monthlyPriceFen;
-  const plan = plans.find((item) => `${item.skuType} ${item.billingInterval}`.toLowerCase().includes(marker));
-  if (!plan) throw new ChandlerError("Chandler 当前没有可用的对应订阅套餐", { status: 503, code: "PLAN_NOT_CONFIGURED" });
-  if (plan.amountFen !== expected) {
-    throw new ChandlerError(`Chandler 当前价格为 ¥${(plan.amountFen / 100).toFixed(2)}，尚未更新到官网目标价格 ¥${(expected / 100).toFixed(2)}`, { status: 409, code: "PRICE_VERSION_MISMATCH" });
-  }
-  const checkout = await chandlerRequest("/v1/checkout/subscriptions", {
+function partnerSkus(payload) {
+  if (Array.isArray(payload)) return payload;
+  return Array.isArray(payload?.skus) ? payload.skus : [];
+}
+
+function partnerPrices(payload) {
+  if (Array.isArray(payload)) return payload;
+  return Array.isArray(payload?.prices) ? payload.prices : [];
+}
+
+export async function listPartnerSkus(accessToken, applicationId = chandlerConfig().applicationId) {
+  return partnerSkus(await chandlerRequest(
+    `/v1/me/oauth/clients/${encodeURIComponent(applicationId)}/skus`,
+    { accessToken },
+  ));
+}
+
+export async function listPartnerSubscriptionPlans(accessToken, applicationId = chandlerConfig().applicationId) {
+  const skus = await listPartnerSkus(accessToken, applicationId);
+  return skus
+    .map((sku) => {
+      const marker = `${sku.code || ""} ${sku.name || ""} ${sku.active_price?.billing_interval || ""}`.toLowerCase();
+      const billingInterval = marker.includes("year") || marker.includes("annual") || marker.includes("年度") ? "year"
+        : marker.includes("month") || marker.includes("月度") || marker.includes("月卡") ? "month"
+          : null;
+      if (!billingInterval) return null;
+      const price = sku.active_price || null;
+      return {
+        productId: applicationId,
+        productName: "古龙智能引擎会员",
+        skuId: sku.id,
+        skuCode: sku.code,
+        skuName: sku.name || sku.code,
+        skuType: sku.code,
+        skuStatus: sku.status || "active",
+        amountFen: price ? Number(price.amount) : null,
+        currency: price?.currency || "CNY",
+        billingInterval,
+        intervalCount: Number(price?.interval_count || 1),
+        priceId: price?.id || null,
+        priceStatus: price?.status || null,
+        priceEffectiveAt: price?.effective_at || null,
+        priceExpiresAt: price?.expires_at || null,
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => (left.amountFen ?? Number.MAX_SAFE_INTEGER) - (right.amountFen ?? Number.MAX_SAFE_INTEGER));
+}
+
+export function createPartnerSku(accessToken, { code, name, applicationId = chandlerConfig().applicationId }) {
+  return chandlerRequest(`/v1/me/oauth/clients/${encodeURIComponent(applicationId)}/skus`, {
+    method: "POST",
+    accessToken,
+    body: { code, name },
+  });
+}
+
+export function setPartnerSkuStatus(accessToken, skuId, status, applicationId = chandlerConfig().applicationId) {
+  return chandlerRequest(`/v1/me/oauth/clients/${encodeURIComponent(applicationId)}/skus/${encodeURIComponent(skuId)}/status`, {
+    method: "POST",
+    accessToken,
+    body: { status },
+  });
+}
+
+export async function listPartnerPriceVersions(accessToken, skuId, applicationId = chandlerConfig().applicationId) {
+  return partnerPrices(await chandlerRequest(
+    `/v1/me/oauth/clients/${encodeURIComponent(applicationId)}/skus/${encodeURIComponent(skuId)}/prices`,
+    { accessToken },
+  ));
+}
+
+export function createPartnerPriceVersion(accessToken, {
+  skuId,
+  amountFen,
+  currency = "CNY",
+  billingInterval,
+  intervalCount = 1,
+  effectiveAt,
+  expiresAt = null,
+  applicationId = chandlerConfig().applicationId,
+}) {
+  return chandlerRequest(`/v1/me/oauth/clients/${encodeURIComponent(applicationId)}/skus/${encodeURIComponent(skuId)}/prices`, {
     method: "POST",
     accessToken,
     body: {
-      sku_id: plan.skuId,
-      quantity: 1,
-      channel,
-      application_id: config.applicationId,
-      source,
-      partner_data: {
-        schema_version: 1,
-        application_key: "gulong-web",
-        product_id: plan.productId,
-        product_name: plan.productName,
-        sku_id: plan.skuId,
-        sku_name: plan.skuName,
-      },
+      amount: amountFen,
+      currency,
+      billing_interval: billingInterval,
+      interval_count: intervalCount,
+      effective_at: effectiveAt,
+      expires_at: expiresAt,
     },
   });
-  const orderNo = checkout.order_no || checkout.platform_order_no;
-  const prepay = await chandlerRequest(`/v1/pay/orders/${encodeURIComponent(orderNo)}/prepay`, {
-    method: "POST",
-    accessToken,
-    body: {},
+}
+
+export async function createSubscriptionCheckout(accessToken, { cycle, channel, merchantOrderNo, expectedAmountFen, source = "gulong-web" }) {
+  const config = chandlerConfig();
+  const plans = await listPartnerSubscriptionPlans(accessToken, config.applicationId);
+  const marker = cycle === "year" ? "year" : "month";
+  const plan = plans.find((item) => `${item.skuType} ${item.billingInterval}`.toLowerCase().includes(marker));
+  if (!plan?.priceId || !Number.isSafeInteger(plan.amountFen)) throw new ChandlerError("Chandler 当前没有可用的对应订阅套餐或生效价格", { status: 503, code: "PLAN_NOT_CONFIGURED" });
+  if (Number.isSafeInteger(expectedAmountFen) && plan.amountFen !== expectedAmountFen) {
+    throw new ChandlerError(`Chandler 当前价格为 ¥${(plan.amountFen / 100).toFixed(2)}，官网价格为 ¥${(expectedAmountFen / 100).toFixed(2)}，请刷新价格后重试`, { status: 409, code: "PRICE_VERSION_MISMATCH" });
+  }
+  const direct = await createDirectPaymentOrder(accessToken, {
+    merchantOrderNo,
+    channel,
+    skuId: plan.skuId,
+    subject: plan.skuName,
+    source,
+    partnerData: {
+      schema_version: 2,
+      application_key: "gulong-web",
+      product_id: plan.productId,
+      product_name: plan.productName,
+      sku_id: plan.skuId,
+      sku_name: plan.skuName,
+      price_id: plan.priceId,
+      price_source: "chandler-partner-sku",
+    },
   });
-  return { checkout, prepay, plan, orderNo };
+  return { checkout: direct.order, prepay: direct.payment, plan, orderNo: direct.orderNo };
 }
 
 export async function createDirectPaymentOrder(accessToken, {
   merchantOrderNo,
   channel,
   amountFen,
+  skuId,
   subject,
   source,
   partnerData,
@@ -425,8 +516,7 @@ export async function createDirectPaymentOrder(accessToken, {
       application_id: config.applicationId,
       merchant_order_no: merchantOrderNo,
       channel,
-      amount: amountFen,
-      currency: "CNY",
+      ...(skuId ? { sku_id: skuId } : { amount: amountFen, currency: "CNY" }),
       subject,
       source,
       partner_data: partnerData,

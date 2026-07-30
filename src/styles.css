@@ -3587,6 +3587,7 @@ textarea:focus {
 .admin-content { min-width: 0; padding: 38px; background: var(--surface-strong); }
 .admin-module { display: grid; gap: 22px; }
 .admin-module-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 25px; }
+.admin-module-head > .button { flex: 0 0 auto; white-space: nowrap; }
 .admin-module-head h2 { margin: 7px 0 8px; font-size: 32px; letter-spacing: -.03em; }
 .admin-module-head p { max-width: 760px; margin: 0; color: var(--muted); font-size: 18px; line-height: 1.7; }
 .admin-notice { min-height: 44px; padding: 11px 14px; display: flex; align-items: center; gap: 9px; color: var(--jade); border: 1px solid color-mix(in srgb, var(--jade) 25%, var(--line)); border-radius: 11px; background: var(--jade-soft); font-size: 18px; line-height: 1.5; }
@@ -3751,6 +3752,17 @@ textarea:focus {
 .price-publish-impact p { margin: 5px 0 0; color: var(--muted); font-size: 18px; line-height: 1.65; }
 .price-publish-actions { margin-top: 25px; padding: 19px 32px 24px; display: flex; justify-content: flex-end; gap: 11px; border-top: 1px solid var(--line); background: var(--bg-soft); }
 .price-publish-actions .button { min-width: 126px; }
+.price-admin-grid > article > .price-admin-actions { padding: 0; display: grid; grid-template-columns: minmax(0, .82fr) minmax(0, 1.18fr); align-items: stretch; gap: 9px; background: transparent; }
+.price-admin-actions .button { min-width: 0; width: 100%; }
+.price-history-modal { width: min(760px, 100%); max-height: min(780px, 90vh); overflow: auto; }
+.price-history-modal > p { margin: 0 0 20px; color: var(--muted); font-size: 18px; line-height: 1.65; }
+.price-history-list { display: grid; gap: 10px; }
+.price-history-list article { padding: 16px 18px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 16px; border: 1px solid var(--line); border-radius: 13px; background: var(--bg-soft); }
+.price-history-list article > div { display: flex; align-items: center; gap: 10px; }
+.price-history-list strong { color: var(--ink-strong); font-size: 23px; }
+.price-history-list p, .price-history-list time, .price-history-list code { margin: 0; color: var(--muted); font-size: 18px; }
+.price-history-list time { grid-column: 2; grid-row: 1; align-self: center; text-align: right; }
+.price-history-list code { grid-column: 1 / -1; overflow: hidden; color: var(--jade); text-overflow: ellipsis; white-space: nowrap; }
 
 .release-picker { position: relative; }
 .release-picker-trigger { width: 100%; min-height: 70px; padding: 13px 17px; display: flex; align-items: center; justify-content: space-between; color: var(--ink); border: 1px solid var(--line-strong); border-radius: 13px; background: var(--surface); cursor: pointer; text-align: left; }
@@ -3889,6 +3901,8 @@ textarea:focus {
   .price-publish-actions .button { min-width: 0; flex: 1; }
   .price-live-api { grid-template-columns: auto minmax(0, 1fr); }
   .price-live-api > span { grid-column: 1 / -1; }
+  .price-history-list article { grid-template-columns: 1fr; }
+  .price-history-list time, .price-history-list code { grid-column: 1; grid-row: auto; text-align: left; }
   .offline-review-tabs { width: 100%; }
   .offline-review-tabs button { min-width: 0; flex: 1; }
 }

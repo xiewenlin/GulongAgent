@@ -129,11 +129,17 @@ function ChandlerUserManager() {
   </section>;
 }
 
+function localDateTimeValue(value = new Date()) {
+  const date = new Date(value);
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+}
+
 function ChandlerPriceManager() {
   const [plans, setPlans] = useState([]);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState("");
   const [publishing, setPublishing] = useState(null);
+  const [history, setHistory] = useState(null);
   async function load() {
     setMessage("");
     try { const result = await apiFetch("/api/admin/chandler/catalog"); setPlans(result.plans || []); }
@@ -142,33 +148,43 @@ function ChandlerPriceManager() {
   useEffect(() => { load(); }, []);
   function openPublish(plan) {
     const yearly = `${plan.skuType} ${plan.billingInterval}`.toLowerCase().includes("year");
-    setPublishing({ plan, yearly, amountYuan: (plan.amountFen / 100).toFixed(2) });
+    setPublishing({ plan, yearly, amountYuan: ((plan.amountFen ?? 0) / 100).toFixed(2), effectiveAt: localDateTimeValue() });
+  }
+  async function loadHistory(plan) {
+    setHistory({ plan, prices: [], loading: true, error: "" });
+    try {
+      const result = await apiFetch(`/api/admin/chandler/skus/${encodeURIComponent(plan.skuId)}/prices`);
+      setHistory({ plan, prices: result.prices || [], loading: false, error: "" });
+    } catch (error) { setHistory({ plan, prices: [], loading: false, error: error.message }); }
   }
   async function publish(event) {
     event.preventDefault();
-    const { plan, amountYuan } = publishing;
+    const { plan, amountYuan, effectiveAt } = publishing;
     if (!/^\d+(?:\.\d{1,2})?$/.test(amountYuan.trim())) { setMessage("请输入正确的价格，最多保留两位小数。"); return; }
     const amountFen = Math.round(Number(amountYuan) * 100);
     if (amountFen < 100 || amountFen > 5_000_000) { setMessage("订阅价格必须在 ¥1–¥50,000 之间。"); return; }
+    const effectiveDate = new Date(effectiveAt);
+    if (Number.isNaN(effectiveDate.getTime())) { setMessage("请选择正确的价格生效时间。"); return; }
     setBusy(plan.skuId); setMessage("");
     try {
-      const result = await apiFetch("/api/admin/chandler/prices", { method: "POST", body: JSON.stringify({ skuId: plan.skuId, amountFen }) });
+      const result = await apiFetch("/api/admin/chandler/prices", { method: "POST", body: JSON.stringify({ skuId: plan.skuId, amountFen, effectiveAt: effectiveDate.toISOString() }) });
       setPublishing(null);
       await load();
-      setMessage(result.message || "新价格已立即发布，官网与桌面端将实时读取新金额。");
+      setMessage(result.message || "Chandler 远程价格版本已创建，官网与桌面端已完成同步。");
     } catch (error) { setMessage(error.message); }
     finally { setBusy(""); }
   }
   return <section className="admin-module">
-    <header className="admin-module-head"><div><span>REAL-TIME PRICE CONTROL</span><h2>订阅价格</h2><p>手动修改当前价格；保存后官网定价、下单金额和桌面端同步接口立即使用新版本。</p></div><button className="button secondary" onClick={load}><ArrowClockwise size={17} /> 刷新实时价格</button></header>
-    {message && <AdminNotice tone={message.includes("已") || message.includes("立即") ? "success" : "error"}>{message}</AdminNotice>}
-    <div className="price-live-api"><CloudArrowDown size={21} weight="duotone" /><div><strong>桌面端实时同步接口</strong><code>GET /api/v1/pricing/subscriptions</code></div><span>禁止缓存 · 打开订阅页自动刷新</span></div>
+    <header className="admin-module-head"><div><span>CHANDLER PRODUCT PRICING V2.2</span><h2>订阅价格</h2><p>直接在 Chandler 远程服务器创建应用级价格版本；远程成功后，官网、下单与桌面端同步接口使用同一价格。</p></div><button className="button secondary" onClick={load}><ArrowClockwise size={17} /> 刷新远程价格</button></header>
+    {message && <AdminNotice tone={message.includes("已") || message.includes("成功") ? "success" : "error"}>{message}</AdminNotice>}
+    <div className="price-live-api"><CloudArrowDown size={21} weight="duotone" /><div><strong>Chandler 权威定价 · 桌面端实时同步</strong><code>GET /api/v1/pricing/subscriptions</code></div><span>价格下单时由 SKU 校验 · 禁止客户端改价</span></div>
     <div className="price-admin-grid">{plans.map((plan) => {
       const yearly = `${plan.skuType} ${plan.billingInterval}`.toLowerCase().includes("year");
-      return <article key={plan.skuId}><span>{yearly ? "YEARLY" : "MONTHLY"}</span><h3>{plan.productName}</h3><p>{plan.skuName}</p><div><strong>{formatMoney(plan.amountFen)}</strong><small>{plan.priceSource === "website-local" ? "官网实时价格" : "Chandler 当前价格"}</small></div><div><strong>实时</strong><small>官网、下单与桌面端同源</small></div><span className="price-sync-state ready">同步接口已连接</span><button className="button primary full" disabled={busy === plan.skuId} onClick={() => openPublish(plan)}>{busy === plan.skuId ? "发布中" : "修改价格"}</button></article>;
+      return <article key={plan.skuId}><span>{yearly ? "YEARLY" : "MONTHLY"}</span><h3>{plan.productName}</h3><p>{plan.skuName}</p><div><strong>{plan.amountFen == null ? "尚未定价" : formatMoney(plan.amountFen)}</strong><small>Chandler 远程生效价</small></div><div><strong>{plan.skuStatus === "inactive" ? "已停售" : "在售"}</strong><small>{plan.remotePriceEffectiveAt ? `生效于 ${new Date(plan.remotePriceEffectiveAt).toLocaleString("zh-CN")}` : "等待首个价格版本"}</small></div><span className={`price-sync-state ${plan.skuStatus === "inactive" || !plan.remotePriceId ? "pending" : "ready"}`}>{plan.remotePriceId ? `远程版本 ${String(plan.remotePriceId).slice(0, 8)}…` : "尚无远程版本"}</span><div className="price-admin-actions"><button className="button secondary" type="button" onClick={() => loadHistory(plan)}>版本记录</button><button className="button primary" disabled={busy === plan.skuId} onClick={() => openPublish(plan)}>{busy === plan.skuId ? "发布中" : plan.remotePriceId ? "修改远程价格" : "创建首个价格"}</button></div></article>;
     })}</div>
-    {!plans.length && <EmptyState title="没有可用订阅套餐" text="请先在 Chandler 建立并上架月度、年度订阅 SKU。" />}
-    {publishing && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && setPublishing(null)}><form className="admin-form-modal price-publish-modal" onSubmit={publish}><button className="modal-close" type="button" disabled={Boolean(busy)} onClick={() => setPublishing(null)}><X size={18} /></button><header className="price-publish-head"><div className="price-publish-icon"><CurrencyCny size={30} weight="duotone" /></div><div><span>REAL-TIME PRICE VERSION</span><h2>修改订阅价格</h2><p>{publishing.plan.productName} · {publishing.plan.skuName}</p></div></header><div className="price-compare"><article><span>当前价格</span><strong>{formatMoney(publishing.plan.amountFen)}</strong><small>{publishing.plan.priceSource === "website-local" ? "古龙官网价格版本" : "Chandler 当前版本"}</small></article><ArrowRight size={25} /><article className="target price-edit-target"><span>修改后价格</span><label><em>¥</em><input required autoFocus inputMode="decimal" value={publishing.amountYuan} onChange={(event) => setPublishing({ ...publishing, amountYuan: event.target.value })} aria-label="新的订阅价格" /></label><small>{publishing.yearly ? "按年订阅" : "按月订阅"} · 最多两位小数</small></article></div><div className="price-publish-impact"><ShieldCheck size={23} weight="duotone" /><div><strong>保存后立即同步</strong><p>新金额会写入 MongoDB 不可变价格版本，并同步官网定价、订单结算、Chandler 以及桌面端公开价格接口；历史订单金额不会改变。</p></div></div><div className="price-publish-actions"><button className="button secondary" type="button" disabled={Boolean(busy)} onClick={() => setPublishing(null)}>取消</button><button className="button primary" disabled={Boolean(busy)}><RocketLaunch size={18} /> {busy ? "正在同步" : "保存并立即同步"}</button></div></form></div>}
+    {!plans.length && <EmptyState title="没有可用订阅套餐" text="请先在 Chandler 合作伙伴后台为古龙应用创建月度、年度 SKU 与有效价格。" />}
+    {publishing && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && setPublishing(null)}><form className="admin-form-modal price-publish-modal" onSubmit={publish}><button className="modal-close" type="button" disabled={Boolean(busy)} onClick={() => setPublishing(null)}><X size={18} /></button><header className="price-publish-head"><div className="price-publish-icon"><CurrencyCny size={30} weight="duotone" /></div><div><span>CHANDLER REMOTE PRICE VERSION</span><h2>{publishing.plan.remotePriceId ? "修改远程订阅价格" : "创建首个远程价格"}</h2><p>{publishing.plan.productName} · {publishing.plan.skuName}</p></div></header><div className="price-compare"><article><span>当前远程价格</span><strong>{publishing.plan.amountFen == null ? "尚未定价" : formatMoney(publishing.plan.amountFen)}</strong><small>版本 {String(publishing.plan.remotePriceId || "尚未创建").slice(0, 12)}</small></article><ArrowRight size={25} /><article className="target price-edit-target"><span>新价格版本</span><label><em>¥</em><input required autoFocus inputMode="decimal" value={publishing.amountYuan} onChange={(event) => setPublishing({ ...publishing, amountYuan: event.target.value })} aria-label="新的订阅价格" /></label><small>{publishing.yearly ? "按年订阅" : "按月订阅"} · 金额单位自动换算为分</small></article></div><label className="price-effective-field"><span><CalendarBlank size={18} /> 价格生效时间</span><input required type="datetime-local" value={publishing.effectiveAt} onChange={(event) => setPublishing({ ...publishing, effectiveAt: event.target.value })} /><small>立即生效或预约未来时间。新版本会替代重叠的旧版本，历史订单金额保持不变。</small></label><div className="price-publish-impact"><ShieldCheck size={23} weight="duotone" /><div><strong>先写入 Chandler，再同步官网</strong><p>系统调用应用级 SKU 价格版本接口。只有 Chandler 远程创建成功后，才会镜像到 MongoDB 和桌面端公开价格接口，不再使用旧的全局管理员价格接口或权限降级覆盖。</p></div></div><div className="price-publish-actions"><button className="button secondary" type="button" disabled={Boolean(busy)} onClick={() => setPublishing(null)}>取消</button><button className="button primary" disabled={Boolean(busy)}><RocketLaunch size={18} /> {busy ? "正在创建远程版本" : "发布远程价格版本"}</button></div></form></div>}
+    {history && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setHistory(null)}><section className="admin-form-modal price-history-modal" role="dialog" aria-modal="true" aria-label={`${history.plan.skuName} 价格版本记录`}><button className="modal-close" type="button" onClick={() => setHistory(null)}><X size={18} /></button><span>CHANDLER VERSION HISTORY</span><h2>{history.plan.skuName} · 价格版本</h2><p>以下数据实时读取自 Chandler 应用级 SKU 价格历史。</p>{history.loading ? <AdminNotice>正在读取远程价格版本…</AdminNotice> : history.error ? <AdminNotice tone="error">{history.error}</AdminNotice> : history.prices.length ? <div className="price-history-list">{history.prices.map((price) => <article key={price.id}><div><strong>{formatMoney(Number(price.amount || 0))}</strong><span className={`status-pill ${price.status}`}>{price.status === "active" ? "生效中" : price.status === "superseded" ? "已被替换" : price.status === "archived" ? "已归档" : "草稿"}</span></div><p>{price.billing_interval === "year" ? "按年" : price.billing_interval === "month" ? "按月" : "单次"} · 每 {price.interval_count || 1} 个周期</p><time>生效：{new Date(price.effective_at).toLocaleString("zh-CN")}</time><code>{price.id}</code></article>)}</div> : <EmptyState title="暂无价格版本" text="请先创建第一个 Chandler 远程价格版本。" />}</section></div>}
   </section>;
 }
 

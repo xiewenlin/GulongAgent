@@ -44,18 +44,22 @@ import {
   chandlerConfig,
   chandlerRequest,
   createDirectPaymentOrder,
+  createPartnerPriceVersion,
+  createPartnerSku,
   createSubscriptionCheckout,
   externalAuthFromResponse,
   getChandlerAccessToken,
   issueOfflineCredential,
   isChandlerBootstrapAdmin,
-  listCatalogPlans,
+  listPartnerPriceVersions,
+  listPartnerSubscriptionPlans,
   loginWithChandler,
   logoutFromChandler,
   markChandlerProductEdition,
   productEditionFromChannel,
   registerWithChandler,
   resolveChandlerIdentity,
+  setPartnerSkuStatus,
   upsertChandlerUser,
 } from "./chandler.js";
 import {
@@ -225,11 +229,73 @@ function brainProgress(item) {
 async function effectiveLocalPrice({ skuId, cycle, at = new Date() } = {}) {
   const filter = {
     effectiveAt: { $lte: at },
-    status: { $ne: "superseded" },
+    status: { $in: ["active", "scheduled"] },
+    $or: [{ expiresAt: { $exists: false } }, { expiresAt: null }, { expiresAt: { $gt: at } }],
     ...(skuId ? { skuId } : {}),
     ...(cycle ? { billingInterval: cycle } : {}),
   };
   return (await getCollection("pricingVersions")).findOne(filter, { sort: { effectiveAt: -1, createdAt: -1 } });
+}
+
+async function persistChandlerPriceVersion({ plan, price, createdBy, source = "chandler-remote" }) {
+  const amountFen = Number(price?.amount);
+  const billingInterval = price?.billing_interval || plan.billingInterval;
+  const effectiveAt = new Date(price?.effective_at || new Date());
+  const expiresAt = price?.expires_at ? new Date(price.expires_at) : null;
+  if (!price?.id || !Number.isSafeInteger(amountFen) || !["month", "year"].includes(billingInterval) || Number.isNaN(effectiveAt.getTime())) {
+    throw new ChandlerError("Chandler 返回的价格版本数据不完整", { status: 502, code: "CHANDLER_PRICE_INVALID" });
+  }
+  const versions = await getCollection("pricingVersions");
+  const now = new Date();
+  const status = effectiveAt <= now ? "active" : "scheduled";
+  const record = {
+    skuId: plan.skuId,
+    productId: plan.productId,
+    productName: plan.productName,
+    skuName: plan.skuName,
+    currency: price.currency || plan.currency || "CNY",
+    amountFen,
+    billingInterval,
+    intervalCount: Number(price.interval_count || plan.intervalCount || 1),
+    effectiveAt,
+    expiresAt,
+    status,
+    source,
+    chandlerPriceId: price.id,
+    chandlerSyncStatus: "synced",
+    ...(createdBy ? { createdBy: new ObjectId(createdBy) } : {}),
+    updatedAt: now,
+  };
+  const saved = await versions.findOneAndUpdate(
+    { chandlerPriceId: price.id },
+    { $set: record, $setOnInsert: { createdAt: now } },
+    { upsert: true, returnDocument: "after" },
+  );
+  if (status === "active") {
+    await versions.updateMany(
+      { _id: { $ne: saved._id }, billingInterval, effectiveAt: { $lte: effectiveAt }, status: "active" },
+      { $set: { status: "superseded", supersededAt: effectiveAt, updatedAt: now } },
+    );
+  }
+  return saved;
+}
+
+async function synchronizeActiveChandlerPrices(plans, createdBy) {
+  return Promise.all(plans
+    .filter((plan) => plan.priceId)
+    .map((plan) => persistChandlerPriceVersion({
+      plan,
+      price: {
+        id: plan.priceId,
+        amount: plan.amountFen,
+        currency: plan.currency,
+        billing_interval: plan.billingInterval,
+        interval_count: plan.intervalCount,
+        effective_at: plan.priceEffectiveAt || new Date(0).toISOString(),
+        expires_at: plan.priceExpiresAt,
+      },
+      createdBy,
+    })));
 }
 
 async function currentSubscriptionPricing(at = new Date()) {
@@ -245,7 +311,7 @@ async function currentSubscriptionPricing(at = new Date()) {
     amountFen: version?.amountFen ?? fallbackAmountFen,
     amountCny: (version?.amountFen ?? fallbackAmountFen) / 100,
     currency: version?.currency || "CNY",
-    source: version ? "website-admin" : "default",
+    source: version?.source === "chandler-remote" ? "chandler" : version ? "website-admin" : "default",
     versionId: version?._id?.toString() || null,
     effectiveAt: version?.effectiveAt || null,
     updatedAt: version?.updatedAt || version?.createdAt || null,
@@ -703,7 +769,7 @@ const SubscriptionPricePointSchema = z.object({
   amountFen: z.number().int(),
   amountCny: z.number(),
   currency: z.literal("CNY"),
-  source: z.enum(["website-admin", "default"]),
+  source: z.enum(["chandler", "website-admin", "default"]),
   versionId: z.string().nullable(),
   effectiveAt: z.coerce.date().nullable(),
   updatedAt: z.coerce.date().nullable(),
@@ -863,13 +929,58 @@ const adminPublishChandlerPriceRoute = createRoute({
   path: "/api/admin/chandler/prices",
   tags: ["Admin · Chandler"],
   summary: "手动修改并立即发布订阅价格",
-  description: "管理员提交以分为单位的新金额后，官网立即创建不可变价格版本，并同步 Chandler；官网定价页、下单接口与桌面端价格 API 读取同一版本。",
-  request: { body: { content: { "application/json": { schema: z.object({ skuId: z.string().min(1).max(100), amountFen: z.number().int().min(SUBSCRIPTION_PRICE_MIN_FEN).max(SUBSCRIPTION_PRICE_MAX_FEN) }) } } } },
+  description: "通过 Chandler v2.2 应用级价格版本接口在远程服务器创建不可变价格版本；远程成功后再镜像到官网 MongoDB，官网定价页、下单接口与桌面端价格 API 读取同一版本。",
+  request: { body: { content: { "application/json": { schema: z.object({ skuId: z.string().min(1).max(100), amountFen: z.number().int().min(SUBSCRIPTION_PRICE_MIN_FEN).max(SUBSCRIPTION_PRICE_MAX_FEN), effectiveAt: z.string().datetime().optional(), expiresAt: z.string().datetime().nullable().optional() }) } } } },
   responses: {
     201: { description: "新价格版本", content: { "application/json": { schema: z.record(z.string(), z.unknown()) } } },
     400: { description: "SKU 或生效时间无效", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } },
     403: { description: "非管理员", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const adminCreateChandlerSkuRoute = createRoute({
+  method: "post",
+  path: "/api/admin/chandler/skus",
+  tags: ["Admin · Chandler"],
+  summary: "在古龙应用中创建 Chandler SKU",
+  description: "对应 Chandler v2.2 POST /v1/me/oauth/clients/{client_id}/skus，仅应用 owner/admin 可执行。",
+  request: { body: { content: { "application/json": { schema: z.object({ code: z.string().min(1).max(100), name: z.string().min(1).max(160) }) } } } },
+  responses: {
+    201: { description: "新 SKU", content: { "application/json": { schema: z.record(z.string(), z.unknown()) } } },
+    400: { description: "参数无效", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "不是应用 owner/admin", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "SKU 编码重复", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const adminListChandlerPriceVersionsRoute = createRoute({
+  method: "get",
+  path: "/api/admin/chandler/skus/{skuId}/prices",
+  tags: ["Admin · Chandler"],
+  summary: "读取 Chandler SKU 价格版本历史",
+  request: { params: z.object({ skuId: z.string().min(1).max(100) }) },
+  responses: {
+    200: { description: "远程价格版本，按时间倒序", content: { "application/json": { schema: z.object({ prices: z.array(z.record(z.string(), z.unknown())) }) } } },
+    401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "没有应用查看权限", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const adminSetChandlerSkuStatusRoute = createRoute({
+  method: "post",
+  path: "/api/admin/chandler/skus/{skuId}/status",
+  tags: ["Admin · Chandler"],
+  summary: "停售或恢复 Chandler SKU",
+  request: {
+    params: z.object({ skuId: z.string().min(1).max(100) }),
+    body: { content: { "application/json": { schema: z.object({ status: z.enum(["active", "inactive"]) }) } } },
+  },
+  responses: {
+    200: { description: "状态已更新", content: { "application/json": { schema: z.record(z.string(), z.unknown()) } } },
+    401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "不是应用 owner/admin", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
@@ -1587,7 +1698,9 @@ app.openapi(adminChandlerUserSubscriptionsRoute, async (c) => {
 
 app.openapi(adminChandlerCatalogRoute, async (c) => {
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
-  const plans = await listCatalogPlans();
+  const accessToken = await getChandlerAccessToken(auth.session);
+  const plans = await listPartnerSubscriptionPlans(accessToken);
+  await synchronizeActiveChandlerPrices(plans, auth.user.id);
   const now = new Date();
   const pricing = await currentSubscriptionPricing(now);
   const skuIds = plans.map((plan) => plan.skuId).filter(Boolean);
@@ -1601,89 +1714,83 @@ app.openapi(adminChandlerCatalogRoute, async (c) => {
     return {
       ...plan,
       catalogAmountFen: plan.amountFen,
-      amountFen: effective?.amountFen ?? plan.amountFen,
-      priceSource: effective ? "website-local" : "chandler",
+      amountFen: plan.amountFen,
+      priceSource: "chandler-remote",
+      remotePriceId: plan.priceId || null,
+      remotePriceEffectiveAt: plan.priceEffectiveAt || null,
       localVersionId: effective?._id?.toString() || null,
       scheduledPriceFen: scheduled?.amountFen ?? null,
       scheduledEffectiveAt: scheduled?.effectiveAt || null,
     };
   });
-  return c.json({ plans: mergedPlans, targetPrices: { month: pricing.monthly.amountFen, year: pricing.yearly.amountFen }, pricingRevision: pricing.revision, desktopSyncEndpoint: "/api/v1/pricing/subscriptions", pricingAuthority: "website-with-chandler-sync" });
+  return c.json({ plans: mergedPlans, targetPrices: { month: pricing.monthly.amountFen, year: pricing.yearly.amountFen }, pricingRevision: pricing.revision, desktopSyncEndpoint: "/api/v1/pricing/subscriptions", pricingAuthority: "chandler-partner-sku-v2.2", applicationId: chandlerConfig().applicationId });
 });
 
 app.openapi(adminPublishChandlerPriceRoute, async (c) => {
   const rejected = requireTrustedMutation(c); if (rejected) return rejected;
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
   const input = c.req.valid("json");
-  const plans = await listCatalogPlans();
+  const accessToken = await getChandlerAccessToken(auth.session);
+  const plans = await listPartnerSubscriptionPlans(accessToken);
   const plan = plans.find((item) => item.skuId === input.skuId);
   if (!plan) return c.json({ code: "SKU_NOT_FOUND", message: "所选订阅套餐已下架，请刷新后重试" }, 404);
-  const yearly = `${plan.skuType} ${plan.billingInterval}`.toLowerCase().includes("year");
   const amountFen = input.amountFen;
-  const billingInterval = yearly ? "year" : "month";
   const now = new Date();
-  const versions = await getCollection("pricingVersions");
-  const result = await versions.insertOne({
-    skuId: plan.skuId,
-    productId: plan.productId,
-    productName: plan.productName,
-    skuName: plan.skuName,
-    currency: plan.currency || "CNY",
-    amountFen,
-    billingInterval,
-    intervalCount: 1,
-    effectiveAt: now,
-    status: "active",
-    source: "website-admin",
-    chandlerSyncStatus: "syncing",
-    createdBy: new ObjectId(auth.user.id),
-    createdAt: now,
-    updatedAt: now,
-  });
-  await versions.updateMany(
-    { _id: { $ne: result.insertedId }, billingInterval, status: { $in: ["active", "scheduled"] } },
-    { $set: { status: "superseded", supersededAt: now, updatedAt: now } },
-  );
-  let chandlerPrice = null;
-  let chandlerSyncStatus = "synced";
-  let chandlerSyncError = null;
-  try {
-    const accessToken = await getChandlerAccessToken(auth.session);
-    chandlerPrice = await chandlerRequest("/v1/admin/prices", {
-      method: "POST",
-      accessToken,
-      body: {
-        sku_id: plan.skuId,
-        currency: plan.currency || "CNY",
-        amount: amountFen,
-        billing_interval: billingInterval,
-        interval_count: 1,
-        effective_at: now.toISOString(),
-        expires_at: null,
-      },
-    });
-  } catch (error) {
-    chandlerSyncStatus = error instanceof ChandlerError && error.status === 403 ? "permission-denied" : "pending";
-    chandlerSyncError = error instanceof ChandlerError ? error.code : "CHANDLER_SYNC_FAILED";
+  const effectiveAt = input.effectiveAt ? new Date(input.effectiveAt) : now;
+  const expiresAt = input.expiresAt ? new Date(input.expiresAt) : null;
+  if (Number.isNaN(effectiveAt.getTime()) || (expiresAt && (Number.isNaN(expiresAt.getTime()) || expiresAt <= effectiveAt))) {
+    return c.json({ code: "VALIDATION_ERROR", message: "价格生效时间或过期时间不正确" }, 400);
   }
-  await versions.updateOne(
-    { _id: result.insertedId },
-    { $set: { chandlerSyncStatus, ...(chandlerPrice ? { chandlerPriceId: chandlerPrice.id || chandlerPrice.price_id || null } : {}), ...(chandlerSyncError ? { chandlerSyncError } : {}), updatedAt: new Date() } },
-  );
-  return c.json({
-    id: result.insertedId.toString(),
-    source: "website-admin",
-    permissionFallback: chandlerSyncStatus !== "synced",
-    chandlerSyncStatus,
+  const chandlerPrice = await createPartnerPriceVersion(accessToken, {
+    skuId: plan.skuId,
     amountFen,
-    billingInterval,
-    effectiveAt: now,
-    status: "active",
+    currency: plan.currency || "CNY",
+    billingInterval: plan.billingInterval,
+    intervalCount: plan.intervalCount || 1,
+    effectiveAt: effectiveAt.toISOString(),
+    expiresAt: expiresAt?.toISOString() || null,
+  });
+  const saved = await persistChandlerPriceVersion({ plan, price: chandlerPrice, createdBy: auth.user.id, source: "website-admin" });
+  return c.json({
+    id: saved._id.toString(),
+    chandlerPriceId: chandlerPrice.id,
+    source: "website-admin",
+    remoteAuthority: "chandler-partner-sku-v2.2",
+    chandlerSyncStatus: "synced",
+    amountFen,
+    billingInterval: plan.billingInterval,
+    effectiveAt,
+    expiresAt,
+    status: saved.status,
     desktopSyncEndpoint: "/api/v1/pricing/subscriptions",
-    message: chandlerSyncStatus === "synced"
-      ? "新价格已立即发布，并同步到官网、Chandler 与桌面端价格接口"
-      : "新价格已立即发布到官网与桌面端价格接口；Chandler 同步将由官网价格覆盖层接管",
+    message: effectiveAt <= now
+      ? "Chandler 远程价格版本已生效，并同步到官网、下单与桌面端价格接口"
+      : "Chandler 远程价格版本已创建，将在指定时间自动生效",
   }, 201);
+});
+
+app.openapi(adminCreateChandlerSkuRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  const accessToken = await getChandlerAccessToken(auth.session);
+  return c.json(await createPartnerSku(accessToken, c.req.valid("json")), 201);
+});
+
+app.openapi(adminListChandlerPriceVersionsRoute, async (c) => {
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  const accessToken = await getChandlerAccessToken(auth.session);
+  const prices = await listPartnerPriceVersions(accessToken, c.req.valid("param").skuId);
+  return c.json({ prices });
+});
+
+app.openapi(adminSetChandlerSkuStatusRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  const accessToken = await getChandlerAccessToken(auth.session);
+  const { skuId } = c.req.valid("param");
+  const { status } = c.req.valid("json");
+  const result = await setPartnerSkuStatus(accessToken, skuId, status);
+  return c.json({ ...(result && typeof result === "object" ? result : {}), skuId, status });
 });
 
 app.openapi(adminRequestChandlerEntitlementRoute, async (c) => {
@@ -2614,11 +2721,15 @@ app.post("/api/billing/orders", async (c) => {
     ? await effectiveLocalPrice({ cycle, at: now })
     : null;
   if (localPriceVersion) amountFen = localPriceVersion.amountFen;
-  const autoRenew = autoRenewRequested && !localPriceVersion && !isMonthlyUpgrade;
+  const autoRenew = autoRenewRequested && !isMonthlyUpgrade;
 
   if (provider === "offline") {
     let plans = [];
-    try { plans = await listCatalogPlans(); }
+    let offlineAccessToken = null;
+    try {
+      offlineAccessToken = await getChandlerAccessToken(auth.session);
+      plans = await listPartnerSubscriptionPlans(offlineAccessToken);
+    }
     catch { /* The website keeps accepting offline review orders while Chandler catalog access is unavailable. */ }
     const marker = cycle === "year" ? "year" : "month";
     const plan = plans.find((item) => `${item.skuType} ${item.billingInterval}`.toLowerCase().includes(marker)) || {
@@ -2653,11 +2764,11 @@ app.post("/api/billing/orders", async (c) => {
     };
     let chandlerOrderNo = null;
     try {
-      const accessToken = await getChandlerAccessToken(auth.session);
-      const mirrored = await createDirectPaymentOrder(accessToken, {
+      const mirrored = await createDirectPaymentOrder(offlineAccessToken || await getChandlerAccessToken(auth.session), {
         merchantOrderNo: orderNo,
         channel: "wechat",
         amountFen,
+        ...(plan.priceId && !isMonthlyUpgrade ? { skuId: plan.skuId } : {}),
         subject: cycle === "year" ? "年度订阅会员（线下审核）" : "月度订阅会员（线下审核）",
         source: "gulong-web-offline-review",
         partnerData,
@@ -2690,18 +2801,16 @@ app.post("/api/billing/orders", async (c) => {
 
   const accessToken = await getChandlerAccessToken(auth.session);
   let result;
-  if (kind === "subscription" && !isMonthlyUpgrade && !localPriceVersion) {
-    result = await createSubscriptionCheckout(accessToken, { cycle, channel: provider });
+  if (kind === "subscription" && !isMonthlyUpgrade) {
+    result = await createSubscriptionCheckout(accessToken, { cycle, channel: provider, merchantOrderNo: orderNo, expectedAmountFen: amountFen });
   } else if (kind === "subscription") {
     result = await createDirectPaymentOrder(accessToken, {
       merchantOrderNo: orderNo,
       channel: provider,
       amountFen,
       subject: isMonthlyUpgrade ? "月度会员升级年度会员" : cycle === "year" ? "古龙年度会员" : "古龙月度会员",
-      source: isMonthlyUpgrade ? "gulong-web-subscription-upgrade" : "gulong-web-local-price",
-      partnerData: isMonthlyUpgrade
-        ? { schema_version: 2, kind: "subscription_upgrade", cycle: "year", upgrade_from: "month", upgrade_credit_fen: upgradeCreditFen, upgrade_base_start: upgradeBaseStart.toISOString(), amount_fen: amountFen }
-        : { schema_version: 2, kind: "subscription", cycle, price_source: "website-local", price_version_id: localPriceVersion._id.toString(), amount_fen: amountFen },
+      source: "gulong-web-subscription-upgrade",
+      partnerData: { schema_version: 2, kind: "subscription_upgrade", cycle: "year", upgrade_from: "month", upgrade_credit_fen: upgradeCreditFen, upgrade_base_start: upgradeBaseStart.toISOString(), amount_fen: amountFen },
     });
   } else {
     result = await createDirectPaymentOrder(accessToken, {
@@ -2713,6 +2822,8 @@ app.post("/api/billing/orders", async (c) => {
       partnerData: { schema_version: 1, kind: "wallet_topup", amount_fen: amountFen },
     });
   }
+  const chandlerAmountFen = Number(result.checkout?.amount ?? result.order?.amount);
+  if (Number.isSafeInteger(chandlerAmountFen) && chandlerAmountFen >= 0) amountFen = chandlerAmountFen;
   const actualOrderNo = result.orderNo || orderNo;
   const prepay = result.prepay || result.payment || {};
   const paymentUrl = prepay.pay_url || prepay.h5_url || prepay.code_url;
@@ -2743,8 +2854,8 @@ app.post("/api/billing/orders", async (c) => {
     amountFen,
     upgradeCreditFen,
     autoRenewRequested,
-    autoRenewAvailable: !localPriceVersion && !isMonthlyUpgrade,
-    priceSource: localPriceVersion ? "website-local" : "chandler",
+    autoRenewAvailable: !isMonthlyUpgrade,
+    priceSource: kind === "subscription" && !isMonthlyUpgrade ? "chandler-partner-sku" : localPriceVersion ? "website-local" : "chandler",
   }, 201);
 });
 
@@ -3298,8 +3409,8 @@ app.doc("/api/openapi.json", {
   openapi: "3.1.0",
   info: {
     title: "古龙 Gulong Agent Engine API",
-    version: "1.5.0",
-    description: "面向开发者的任务执行、长期记忆、用户模型配置、第二大脑附件、发行版本、Chandler 统一账号、计费、管理员经营分析与桌面端个人微信订单审核接口。API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
+    version: "1.6.0",
+    description: "面向开发者的任务执行、长期记忆、用户模型配置、第二大脑附件、发行版本、Chandler 统一账号、应用级 SKU 价格版本、计费、管理员经营分析与桌面端个人微信订单审核接口。API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
   },
   servers: [
     { url: "/", description: "当前环境" },

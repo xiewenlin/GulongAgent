@@ -5,8 +5,11 @@ import app from "../../server/app.js";
 import platform from "../../api/platform.js";
 import {
   chandlerConfig,
+  createDirectPaymentOrder,
+  createPartnerPriceVersion,
   externalAuthFromResponse,
   isChandlerBootstrapAdmin,
+  listPartnerSubscriptionPlans,
   productEdition,
   productEditionFromChannel,
 } from "../../server/chandler.js";
@@ -50,6 +53,40 @@ test("official Chandler and Chengdu COS defaults stay pinned", () => {
   assert.equal(cos.region, "ap-chengdu");
   assert.equal(cos.domain, "gulong-1259744534.cos.ap-chengdu.myqcloud.com");
   assert.equal(typeof cos.configured, "boolean");
+});
+
+test("Chandler v2.2 wrappers use application SKU prices and authoritative sku_id orders", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const body = options.body ? JSON.parse(options.body) : null;
+    calls.push({ url: String(url), method: options.method || "GET", body });
+    if (String(url).endsWith("/skus") && (options.method || "GET") === "GET") {
+      return new Response(JSON.stringify({ data: { skus: [{ id: "sku-month", code: "vip_month", name: "VIP 月卡", status: "active", active_price: { id: "price-1", amount: 3000, currency: "CNY", billing_interval: "month", interval_count: 1, status: "active", effective_at: "2026-07-30T00:00:00Z", expires_at: null } }] } }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (String(url).endsWith("/skus/sku-month/prices")) {
+      return new Response(JSON.stringify({ data: { id: "price-2", sku_id: "sku-month", ...body, effective_at: body.effective_at } }), { status: 201, headers: { "content-type": "application/json" } });
+    }
+    if (String(url).endsWith("/v1/pay/orders")) {
+      return new Response(JSON.stringify({ data: { platform_order_no: "ord-1", amount: 3000 } }), { status: 201, headers: { "content-type": "application/json" } });
+    }
+    throw new Error(`Unexpected Chandler request: ${url}`);
+  };
+  try {
+    const plans = await listPartnerSubscriptionPlans("access-token");
+    assert.equal(plans[0].priceId, "price-1");
+    await createPartnerPriceVersion("access-token", { skuId: "sku-month", amountFen: 3600, billingInterval: "month", effectiveAt: "2026-08-01T00:00:00Z" });
+    await createDirectPaymentOrder("access-token", { merchantOrderNo: "merchant-1", channel: "wechat", skuId: "sku-month", subject: "VIP 月卡", source: "test", partnerData: {}, prepay: false });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  const priceCall = calls.find((call) => call.url.endsWith("/skus/sku-month/prices"));
+  assert.equal(priceCall.method, "POST");
+  assert.equal(priceCall.body.amount, 3600);
+  const orderCall = calls.find((call) => call.url.endsWith("/v1/pay/orders"));
+  assert.equal(orderCall.body.sku_id, "sku-month");
+  assert.equal("amount" in orderCall.body, false);
+  assert.equal("currency" in orderCall.body, false);
 });
 
 test("desktop product editions and bootstrap administrator map to website identities", () => {
@@ -133,6 +170,9 @@ test("OpenAPI document includes Chandler admin, offline credentials, dated attac
   assert.ok(document.paths["/api/admin/chandler/users/{id}/subscriptions"]);
   assert.ok(document.paths["/api/admin/chandler/catalog"]);
   assert.ok(document.paths["/api/admin/chandler/prices"]);
+  assert.ok(document.paths["/api/admin/chandler/skus"]);
+  assert.ok(document.paths["/api/admin/chandler/skus/{skuId}/prices"]);
+  assert.ok(document.paths["/api/admin/chandler/skus/{skuId}/status"]);
   assert.ok(document.paths["/api/admin/chandler/entitlement-requests"]);
   assert.ok(document.paths["/api/admin/analytics/dashboard"]);
   assert.ok(document.paths["/api/v1/admin/wechat-review/bind"]);
@@ -341,19 +381,24 @@ test("admin subscriptions localize review state and keep the three-column detail
   assert.match(css, /\.subscription-state\s*\{[^}]*white-space:\s*nowrap/s);
 });
 
-test("price publishing uses an in-product confirmation and a Chandler permission fallback", async () => {
-  const [adminSource, serverSource] = await Promise.all([
+test("Chandler v2.2 pricing uses application-level price versions before the local mirror", async () => {
+  const [adminSource, serverSource, chandlerSource] = await Promise.all([
     readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../../server/chandler.js", import.meta.url), "utf8"),
   ]);
   assert.match(adminSource, /price-publish-modal/);
   assert.match(adminSource, /amountYuan/);
-  assert.match(adminSource, /保存并立即同步/);
+  assert.match(adminSource, /发布远程价格版本/);
+  assert.match(adminSource, /价格生效时间/);
+  assert.match(adminSource, /版本记录/);
   assert.match(adminSource, /GET \/api\/v1\/pricing\/subscriptions/);
-  assert.doesNotMatch(adminSource, /window\.confirm\(`发布目标价格/);
   assert.match(serverSource, /amountFen:\s*z\.number\(\)\.int\(\)/);
-  assert.match(serverSource, /chandlerSyncStatus/);
-  assert.match(serverSource, /price_source:\s*"website-local"/);
+  assert.match(serverSource, /createPartnerPriceVersion\(accessToken/);
+  assert.match(serverSource, /persistChandlerPriceVersion\(\{ plan, price: chandlerPrice/);
+  assert.doesNotMatch(serverSource, /chandlerRequest\("\/v1\/admin\/prices"/);
+  assert.match(chandlerSource, /\/v1\/me\/oauth\/clients\/\$\{encodeURIComponent\(applicationId\)\}\/skus\/\$\{encodeURIComponent\(skuId\)\}\/prices/);
+  assert.match(chandlerSource, /\.\.\.\(skuId \? \{ sku_id: skuId \} : \{ amount: amountFen, currency: "CNY" \}\)/);
 });
 
 test("website pricing and desktop synchronization read the same MongoDB price version", async () => {

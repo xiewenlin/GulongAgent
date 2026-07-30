@@ -181,6 +181,10 @@ export async function ensureIndexes() {
           { billingInterval: 1, effectiveAt: -1, status: 1 },
           { name: "pricing_versions_by_cycle" },
         ),
+        db.collection("pricingVersions").createIndex(
+          { chandlerPriceId: 1 },
+          { unique: true, sparse: true, name: "uniq_chandler_price_version" },
+        ),
         db.collection("subscriptions").createIndex(
           { status: 1, currentPeriodEnd: 1 },
           { name: "subscriptions_active" },
