@@ -93,6 +93,33 @@
 .worker-publish-form textarea { min-height: 150px; resize: vertical; line-height: 1.65; }
 .worker-publish-form label:nth-of-type(3) textarea { min-height: 105px; }
 .worker-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.worker-assignment-selector { margin: 10px 0; padding: 22px; border: 1px solid var(--line); border-radius: 16px; background: var(--bg-soft); }
+.worker-assignment-selector legend { padding: 0 8px; color: var(--ink); font-size: 22px; font-weight: 850; }
+.worker-assignment-selector > p { margin: 0 0 16px; color: var(--muted); line-height: 1.6; }
+.worker-assignment-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.worker-assignment-options > button { min-width: 0; min-height: 132px; padding: 16px; display: grid; align-content: center; gap: 7px; color: var(--muted); border: 1px solid var(--line); border-radius: 14px; background: var(--surface); cursor: pointer; text-align: left; font: inherit; }
+.worker-assignment-options > button svg { color: var(--jade); }
+.worker-assignment-options > button strong { color: var(--ink); font-size: 20px; }
+.worker-assignment-options > button span { line-height: 1.45; }
+.worker-assignment-options > button.active { border-color: color-mix(in srgb, var(--jade) 60%, var(--line)); background: var(--jade-soft); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--jade) 20%, transparent); }
+.worker-assignee-search { margin-top: 16px; display: grid; gap: 12px; }
+.worker-assignee-search label > div { position: relative; }
+.worker-assignee-search label > div svg { position: absolute; top: 50%; left: 15px; color: var(--muted); transform: translateY(-50%); pointer-events: none; }
+.worker-assignee-search label > div input { padding-left: 46px; }
+.worker-assignee-results { max-height: 330px; display: grid; gap: 8px; overflow: auto; }
+.worker-assignee-results > button, .worker-selected-assignee { padding: 12px 14px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: center; color: var(--muted); border: 1px solid var(--line); border-radius: 12px; background: var(--surface); text-align: left; font: inherit; }
+.worker-assignee-results > button { cursor: pointer; }
+.worker-assignee-results > button:hover, .worker-assignee-results > button.selected { border-color: color-mix(in srgb, var(--jade) 55%, var(--line)); background: var(--jade-soft); }
+.worker-assignee-results strong, .worker-selected-assignee strong { display: block; color: var(--ink); }
+.worker-assignee-results span, .worker-selected-assignee span { display: block; margin-top: 3px; line-height: 1.45; overflow-wrap: anywhere; }
+.worker-assignee-avatar { width: 46px; height: 46px; display: grid !important; place-items: center; overflow: hidden; color: #fff; border-radius: 50%; background: var(--jade); font-weight: 850; }
+.worker-assignee-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.worker-selected-assignee { border-color: color-mix(in srgb, var(--jade) 45%, var(--line)); background: var(--jade-soft); }
+.worker-selected-assignee > svg { color: var(--jade); }
+.worker-selected-assignee button { color: var(--jade); border: 0; background: transparent; cursor: pointer; font: inherit; font-weight: 800; }
+.worker-assignee-hint { margin: 0; color: var(--muted); }
+.worker-platform-team-note { margin-top: 16px; padding: 15px; display: flex; gap: 11px; color: var(--jade); border: 1px solid color-mix(in srgb, var(--jade) 32%, var(--line)); border-radius: 12px; background: var(--jade-soft); }
+.worker-platform-team-note p { margin: 0; color: var(--ink); line-height: 1.6; }
 .worker-file-picker { position: relative; min-height: 92px; padding: 16px; align-content: center; border: 1px dashed color-mix(in srgb, var(--jade) 42%, var(--line)); border-radius: 14px; background: var(--jade-soft); cursor: pointer; }
 .worker-file-picker > span { display: flex; align-items: center; gap: 8px; color: var(--jade); }
 .worker-file-picker input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
@@ -114,6 +141,8 @@
 .worker-task-card.payment_rejected .worker-task-status { color: var(--danger); background: #fff0ed; }
 .worker-task-meta { margin: 18px 0; display: flex; flex-wrap: wrap; gap: 10px 24px; color: var(--muted); }
 .worker-task-meta span { display: flex; align-items: center; gap: 7px; }
+.worker-assignment-badge { padding: 5px 10px; color: var(--jade); border-radius: 999px; background: var(--jade-soft); font-weight: 750; }
+.worker-assignment-badge.platform_team { color: var(--gold); background: color-mix(in srgb, var(--gold) 12%, var(--surface)); }
 .worker-task-brief { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .worker-task-brief section, .worker-delivery { padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--bg-soft); }
 .worker-task-brief section > span { color: var(--gold); font-weight: 850; }
@@ -187,6 +216,7 @@
   .worker-hero aside small { grid-column: auto; }
   .worker-secondary-nav { display: grid; }
   .worker-form-row { grid-template-columns: 1fr; }
+  .worker-assignment-options { grid-template-columns: 1fr; }
   .worker-task-card > header { display: grid; }
   .worker-progress-form label:first-child { grid-template-columns: 1fr; }
   .worker-login-callout { grid-template-columns: 1fr; text-align: center; }

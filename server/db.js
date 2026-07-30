@@ -182,6 +182,10 @@ export async function ensureIndexes() {
           { name: "worker_tasks_by_contractor" },
         ),
         db.collection("workerTasks").createIndex(
+          { assignmentType: 1, designatedAssigneeId: 1, status: 1, createdAt: -1 },
+          { name: "worker_tasks_by_assignment" },
+        ),
+        db.collection("workerTasks").createIndex(
           { paymentStatus: 1, paymentSubmittedAt: 1 },
           { name: "worker_task_payment_review" },
         ),

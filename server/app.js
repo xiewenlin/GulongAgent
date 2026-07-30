@@ -77,6 +77,8 @@ import { OFFLINE_REVIEW_REJECTION_REASON, offlineReviewWechatMessage } from "./o
 import {
   WORKER_MAX_ASSETS_PER_SECTION,
   canBypassWorkerContactPayment,
+  canClaimWorkerTask,
+  workerAssignmentInput,
   workerAssetInput,
   workerTaskFinancials,
   workerTaskFingerprint,
@@ -277,8 +279,10 @@ function workerAssetJson(asset) {
   };
 }
 
-function workerTaskJson(task, { publisher, contractor, assets = [] } = {}) {
+function workerTaskJson(task, { publisher, contractor, designatedAssignee, assets = [] } = {}) {
   const financials = workerTaskFinancials(task.budgetFen);
+  const assignmentType = task.assignmentType || "open";
+  const designatedUser = workerPerson(designatedAssignee);
   return {
     id: task._id.toString(),
     title: task.title,
@@ -298,6 +302,15 @@ function workerTaskJson(task, { publisher, contractor, assets = [] } = {}) {
     deliveryNote: task.deliveryNote || "",
     publisher: workerPerson(publisher),
     contractor: workerPerson(contractor),
+    assignment: {
+      type: assignmentType,
+      label: assignmentType === "platform_team"
+        ? "平台团队"
+        : assignmentType === "user"
+          ? `指定用户 · ${designatedUser?.displayName || "待接单用户"}`
+          : "公开接单",
+      designatedUser,
+    },
     assets: assets.map(workerAssetJson),
     workflowId: task.workflowId?.toString?.() || null,
     createdAt: task.createdAt,
@@ -334,7 +347,7 @@ async function notifyUserOnce(ownerId, type, title, message, details = {}) {
 
 async function workerTaskDetails(task) {
   if (!task) return null;
-  const peopleIds = [task.publisherId, task.contractorId].filter(Boolean);
+  const peopleIds = [task.publisherId, task.contractorId, task.designatedAssigneeId].filter(Boolean);
   const [people, assets] = await Promise.all([
     peopleIds.length ? (await getCollection("users")).find({ _id: { $in: peopleIds } }, { projection: { displayName: 1, username: 1, avatar: 1 } }).toArray() : [],
     (await getCollection("workerTaskUploads")).find({ taskId: task._id, status: "ready" }).sort({ createdAt: 1 }).toArray(),
@@ -343,6 +356,7 @@ async function workerTaskDetails(task) {
   return workerTaskJson(task, {
     publisher: peopleMap.get(task.publisherId?.toString()),
     contractor: peopleMap.get(task.contractorId?.toString()),
+    designatedAssignee: peopleMap.get(task.designatedAssigneeId?.toString()),
     assets,
   });
 }
@@ -789,9 +803,18 @@ const latestReleaseRoute = createRoute({
 const WorkerTaskResponseSchema = z.object({ task: z.record(z.string(), z.unknown()) }).passthrough();
 const workerCreateTaskRoute = createRoute({
   method: "post", path: "/api/worker/tasks", tags: ["Worker Market"], summary: "发布威客需求并创建预算托管单",
-  description: "发布者必须先填写微信号。任务内容创建后锁定，附件通过腾讯云 COS 直传。",
-  request: { body: { content: { "application/json": { schema: z.object({ inputDescription: z.string().min(10).max(10000), outputDescription: z.string().min(10).max(10000), exampleDescription: z.string().max(5000).optional(), deadline: z.string(), budgetFen: z.number().int().min(100).max(5000000) }) } } } },
+  description: "发布者必须先填写微信号。支持公开接单、指定用户或平台团队；任务内容创建后锁定，附件通过腾讯云 COS 直传。",
+  request: { body: { content: { "application/json": { schema: z.object({ inputDescription: z.string().min(10).max(10000), outputDescription: z.string().min(10).max(10000), exampleDescription: z.string().max(5000).optional(), deadline: z.string(), budgetFen: z.number().int().min(100).max(5000000), assignmentType: z.enum(["open", "user", "platform_team"]).optional(), assigneeUserId: z.string().optional() }) } } } },
   responses: { 201: { description: "待付款任务", content: { "application/json": { schema: WorkerTaskResponseSchema } } }, 400: { description: "参数不正确", content: { "application/json": { schema: ErrorSchema } } }, 401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } } },
+});
+const workerSearchAssigneesRoute = createRoute({
+  method: "get", path: "/api/worker/assignees", tags: ["Worker Market"], summary: "搜索可指定的接单用户",
+  description: "登录用户可按昵称或邮箱关键词模糊搜索；返回结果不包含当前发单人。",
+  request: { query: z.object({ q: z.string().min(2).max(100) }) },
+  responses: {
+    200: { description: "候选接单用户", content: { "application/json": { schema: z.object({ users: z.array(z.object({ id: z.string(), displayName: z.string(), email: z.string().nullable(), avatar: z.string().nullable(), role: z.string() })) }) } } },
+    401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } },
+  },
 });
 const workerListTasksRoute = createRoute({
   method: "get", path: "/api/worker/tasks", tags: ["Worker Market"], summary: "读取接单大厅或我的威客任务",
@@ -3077,6 +3100,28 @@ app.post("/api/feedback", async (c) => {
   return c.json({ id: result.insertedId.toString(), status: "open" }, 201);
 });
 
+app.openapi(workerSearchAssigneesRoute, async (c) => {
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  const query = c.req.valid("query").q.trim();
+  const rate = await enforceRateLimit(`worker-assignees:${auth.user.id}`, { limit: 60, windowMs: 60 * 60_000 });
+  if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "搜索过于频繁，请稍后再试" }, 429);
+  const keyword = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const ownerId = new ObjectId(auth.user.id);
+  const users = await (await getCollection("users")).find({
+    _id: { $ne: ownerId },
+    status: { $nin: ["disabled", "deleted"] },
+    $or: ["displayName", "username", "email", "emailNormalized"].map((field) => ({ [field]: { $regex: keyword, $options: "i" } })),
+  }, { projection: { displayName: 1, username: 1, email: 1, avatar: 1, role: 1 } }).sort({ displayName: 1, createdAt: -1 }).limit(20).toArray();
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  return c.json({ users: users.map((user) => ({
+    id: user._id.toString(),
+    displayName: user.displayName || user.username || user.email || "古龙用户",
+    email: user.email || null,
+    avatar: user.avatar || null,
+    role: user.role || "user",
+  })) });
+});
+
 app.openapi(workerCreateTaskRoute, async (c) => {
   const rejected = requireTrustedMutation(c); if (rejected) return rejected;
   const auth = await authenticate(c); if (auth.error) return auth.error;
@@ -3088,6 +3133,7 @@ app.openapi(workerCreateTaskRoute, async (c) => {
   const exampleDescription = String(body.exampleDescription || "").trim();
   const deadline = new Date(body.deadline);
   const budgetFen = Math.round(Number(body.budgetFen));
+  const assignment = workerAssignmentInput(body);
   if (inputDescription.length < 10 || inputDescription.length > 10_000 || outputDescription.length < 10 || outputDescription.length > 10_000 || exampleDescription.length > 5_000) {
     return c.json({ code: "VALIDATION_ERROR", message: "任务说明和预期结果至少 10 字，单项最多 10,000 字" }, 400);
   }
@@ -3096,6 +3142,18 @@ app.openapi(workerCreateTaskRoute, async (c) => {
   }
   if (!Number.isSafeInteger(budgetFen) || budgetFen < 100 || budgetFen > 5_000_000) {
     return c.json({ code: "VALIDATION_ERROR", message: "任务预算需在 ¥1–¥50,000 之间" }, 400);
+  }
+  if (!assignment) return c.json({ code: "INVALID_ASSIGNMENT", message: "请选择公开接单、指定用户或平台团队" }, 400);
+  let designatedAssignee = null;
+  if (assignment.type === "user") {
+    if (!ObjectId.isValid(assignment.assigneeUserId) || assignment.assigneeUserId === auth.user.id) {
+      return c.json({ code: "INVALID_ASSIGNEE", message: "指定接单用户无效，且不能指定自己接单" }, 400);
+    }
+    designatedAssignee = await (await getCollection("users")).findOne({
+      _id: new ObjectId(assignment.assigneeUserId),
+      status: { $nin: ["disabled", "deleted"] },
+    }, { projection: { _id: 1 } });
+    if (!designatedAssignee) return c.json({ code: "ASSIGNEE_NOT_FOUND", message: "指定用户不存在或当前不可接单" }, 400);
   }
   const now = new Date();
   const financials = workerTaskFinancials(budgetFen);
@@ -3107,6 +3165,8 @@ app.openapi(workerCreateTaskRoute, async (c) => {
     exampleDescription,
     deadline,
     ...financials,
+    assignmentType: assignment.type,
+    designatedAssigneeId: designatedAssignee?._id || null,
     status: "awaiting_payment",
     paymentStatus: "awaiting_payment",
     progress: 0,
@@ -3122,11 +3182,17 @@ app.openapi(workerListTasksRoute, async (c) => {
   const auth = await authenticate(c); if (auth.error) return auth.error;
   const ownerId = new ObjectId(auth.user.id);
   const view = ["market", "published", "claimed"].includes(c.req.query("view")) ? c.req.query("view") : "market";
+  const assignmentVisibility = [
+    { assignmentType: { $exists: false } },
+    { assignmentType: "open" },
+    { assignmentType: "user", designatedAssigneeId: ownerId },
+    ...(auth.user.role === "admin" ? [{ assignmentType: "platform_team" }] : []),
+  ];
   const filter = view === "published"
     ? { publisherId: ownerId }
     : view === "claimed"
       ? { contractorId: ownerId }
-      : { status: { $in: ["open", "in_progress", "submitted", "accepted"] } };
+      : { status: { $in: ["open", "in_progress", "submitted", "accepted"] }, $or: assignmentVisibility };
   const tasks = await (await getCollection("workerTasks")).find(filter).sort({ status: 1, createdAt: -1 }).limit(100).toArray();
   const items = await Promise.all(tasks.map(workerTaskDetails));
   c.header("Cache-Control", "private, no-store, max-age=0");
@@ -3140,7 +3206,8 @@ app.get("/api/worker/tasks/:id", async (c) => {
   if (!task) return c.json({ code: "TASK_NOT_FOUND", message: "威客任务不存在" }, 404);
   const ownerId = new ObjectId(auth.user.id);
   const isRelated = task.publisherId.equals(ownerId) || task.contractorId?.equals?.(ownerId) || auth.user.role === "admin";
-  if (!isRelated && !["open", "in_progress", "submitted", "accepted"].includes(task.status)) return c.json({ code: "FORBIDDEN", message: "该任务暂不可查看" }, 403);
+  const assignmentVisible = canClaimWorkerTask(task, { id: auth.user.id, role: auth.user.role });
+  if (!isRelated && (!assignmentVisible || !["open", "in_progress", "submitted", "accepted"].includes(task.status))) return c.json({ code: "FORBIDDEN", message: "该任务未向当前账号开放" }, 403);
   return c.json({ task: await workerTaskDetails(task) });
 });
 
@@ -3216,7 +3283,9 @@ app.get("/api/worker/tasks/:id/assets/:assetId/download", async (c) => {
   if (!task || !asset) return c.json({ code: "ASSET_NOT_FOUND", message: "附件不存在" }, 404);
   const ownerId = new ObjectId(auth.user.id);
   const related = task.publisherId.equals(ownerId) || task.contractorId?.equals?.(ownerId) || auth.user.role === "admin";
-  const marketplaceBrief = ["input", "output"].includes(asset.section) && ["open", "in_progress", "submitted", "accepted"].includes(task.status);
+  const marketplaceBrief = canClaimWorkerTask(task, { id: auth.user.id, role: auth.user.role })
+    && ["input", "output"].includes(asset.section)
+    && ["open", "in_progress", "submitted", "accepted"].includes(task.status);
   if (!related && !marketplaceBrief) return c.json({ code: "FORBIDDEN", message: "你没有权限下载该附件" }, 403);
   return c.redirect(createPresignedDownloadUrl(asset.objectKey, { filename: asset.filename }), 302);
 });
@@ -3333,8 +3402,15 @@ app.openapi(workerClaimTaskRoute, async (c) => {
   const contractorId = new ObjectId(auth.user.id);
   const contractor = await (await getCollection("users")).findOne({ _id: contractorId }, { projection: { wechatId: 1 } });
   if (!contractor?.wechatId) return c.json({ code: "WECHAT_REQUIRED", message: "接单前请先在个人资料中填写微信号" }, 409);
+  const tasks = await getCollection("workerTasks");
+  const candidate = await tasks.findOne({ _id: new ObjectId(c.req.param("id")), status: "open", publisherId: { $ne: contractorId }, contractorId: { $exists: false } });
+  if (!candidate) return c.json({ code: "TASK_ALREADY_CLAIMED", message: "任务已被接单、状态已变化，或不能承接自己发布的任务" }, 409);
+  if (!canClaimWorkerTask(candidate, { id: auth.user.id, role: auth.user.role })) {
+    const message = candidate.assignmentType === "platform_team" ? "该任务指定由平台团队处理，只有管理员可以接单" : "该任务已指定其他用户接单";
+    return c.json({ code: "ASSIGNMENT_FORBIDDEN", message }, 403);
+  }
   const now = new Date();
-  const task = await (await getCollection("workerTasks")).findOneAndUpdate(
+  const task = await tasks.findOneAndUpdate(
     { _id: new ObjectId(c.req.param("id")), status: "open", publisherId: { $ne: contractorId }, contractorId: { $exists: false } },
     { $set: { status: "in_progress", contractorId, claimedAt: now, progress: 5, progressNote: "已接单，正在梳理任务与交付计划。", updatedAt: now } },
     { returnDocument: "after" },
@@ -3459,7 +3535,24 @@ app.post("/api/admin/worker-payments/:id/approve", async (c) => {
     { returnDocument: "after" },
   );
   if (!task) return c.json({ code: "TASK_STATE_CHANGED", message: "该任务付款已处理或状态已变化" }, 409);
-  await notifyUser(task.publisherId, "worker_payment_approved", "威客任务付款审核已通过", `“${task.title}”已进入接单大厅，任何用户现在都可以接单。`, { taskId: task._id, orderNo: task.paymentOrderNo });
+  const assignmentType = task.assignmentType || "open";
+  const publisherMessage = assignmentType === "platform_team"
+    ? `“${task.title}”已进入平台团队任务池，管理员现在可以接单处理。`
+    : assignmentType === "user"
+      ? `“${task.title}”已通知你指定的用户接单。`
+      : `“${task.title}”已进入接单大厅，任何用户现在都可以接单。`;
+  const assignmentNotifications = [];
+  if (assignmentType === "user" && task.designatedAssigneeId) {
+    assignmentNotifications.push(notifyUser(task.designatedAssigneeId, "worker_task_designated", "你收到一项指定威客任务", `“${task.title}”已通过付款审核，发单人指定由你接单处理。`, { taskId: task._id }));
+  }
+  if (assignmentType === "platform_team") {
+    const administrators = await (await getCollection("users")).find({ role: "admin", status: { $nin: ["disabled", "deleted"] } }, { projection: { _id: 1 } }).toArray();
+    assignmentNotifications.push(...administrators.map((administrator) => notifyUserOnce(administrator._id, "worker_platform_task_ready", "平台团队收到新任务", `“${task.title}”已通过付款审核，请管理员统一接单处理。`, { taskId: task._id })));
+  }
+  await Promise.all([
+    notifyUser(task.publisherId, "worker_payment_approved", "威客任务付款审核已通过", publisherMessage, { taskId: task._id, orderNo: task.paymentOrderNo }),
+    ...assignmentNotifications,
+  ]);
   return c.json({ task: await workerTaskDetails(task) });
 });
 

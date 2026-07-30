@@ -21,7 +21,14 @@ import {
   offlineReviewWechatMessage,
   parseOfflineReviewWechatAction,
 } from "../../server/offline-review.js";
-import { canBypassWorkerContactPayment, workerTaskFinancials, workerTaskFingerprint, workerWorkflowRevenue } from "../../server/worker-market.js";
+import {
+  canBypassWorkerContactPayment,
+  canClaimWorkerTask,
+  workerAssignmentInput,
+  workerTaskFinancials,
+  workerTaskFingerprint,
+  workerWorkflowRevenue,
+} from "../../server/worker-market.js";
 
 test("Chandler session tokens are encrypted and round-trip server-side", () => {
   const auth = externalAuthFromResponse({
@@ -141,6 +148,39 @@ test("only an administrator acting as the contractor bypasses the WeChat contact
   assert.equal(canBypassWorkerContactPayment({ role: "user", isContractor: true }), false);
 });
 
+test("worker task assignment validates each mode and enforces its claim boundary", () => {
+  assert.deepEqual(workerAssignmentInput({}), { type: "open", assigneeUserId: null });
+  assert.equal(workerAssignmentInput({ assignmentType: "user" }), null);
+  assert.deepEqual(workerAssignmentInput({ assignmentType: "user", assigneeUserId: "user-2" }), { type: "user", assigneeUserId: "user-2" });
+  assert.deepEqual(workerAssignmentInput({ assignmentType: "platform_team", assigneeUserId: "ignored" }), { type: "platform_team", assigneeUserId: null });
+  assert.equal(workerAssignmentInput({ assignmentType: "unknown" }), null);
+
+  assert.equal(canClaimWorkerTask({ assignmentType: "open" }, { id: "user-1", role: "user" }), true);
+  assert.equal(canClaimWorkerTask({ assignmentType: "user", designatedAssigneeId: "user-2" }, { id: "user-2", role: "user" }), true);
+  assert.equal(canClaimWorkerTask({ assignmentType: "user", designatedAssigneeId: "user-2" }, { id: "user-3", role: "admin" }), false);
+  assert.equal(canClaimWorkerTask({ assignmentType: "platform_team" }, { id: "user-2", role: "user" }), false);
+  assert.equal(canClaimWorkerTask({ assignmentType: "platform_team" }, { id: "admin-1", role: "admin" }), true);
+});
+
+test("worker assignment search, visibility, notifications and publishing controls stay wired together", async () => {
+  const [appSource, workerPageSource, adminPageSource] = await Promise.all([
+    readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/WorkerPages.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
+  ]);
+  assert.match(appSource, /path: "\/api\/worker\/assignees"/);
+  assert.match(appSource, /\["displayName", "username", "email", "emailNormalized"\]/);
+  assert.match(appSource, /assignmentType: "user", designatedAssigneeId: ownerId/);
+  assert.match(appSource, /auth\.user\.role === "admin" \? \[\{ assignmentType: "platform_team" \}\]/);
+  assert.match(appSource, /worker_task_designated/);
+  assert.match(appSource, /worker_platform_task_ready/);
+  assert.match(workerPageSource, /指定用户/);
+  assert.match(workerPageSource, /平台团队/);
+  assert.match(workerPageSource, /\/api\/worker\/assignees\?q=/);
+  assert.match(workerPageSource, /assigneeUserId/);
+  assert.match(adminPageSource, /item\.assignment\?\.label/);
+});
+
 test("worker market protects WeChat contacts and preserves promoted administrator roles", async () => {
   const [appSource, workerPageSource] = await Promise.all([
     readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
@@ -222,6 +262,7 @@ test("OpenAPI document includes Chandler admin, offline credentials, dated attac
   assert.ok(document.paths["/api/admin/analytics/dashboard"]);
   assert.ok(document.paths["/api/admin/users/{id}/role"]);
   assert.ok(document.paths["/api/admin/users/{id}/subscription-period"]);
+  assert.ok(document.paths["/api/worker/assignees"]?.get);
   assert.ok(document.paths["/api/worker/tasks"]?.get);
   assert.ok(document.paths["/api/worker/tasks"]?.post);
   assert.ok(document.paths["/api/worker/tasks/{id}/payment-submit"]);

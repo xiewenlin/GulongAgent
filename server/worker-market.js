@@ -37,6 +37,22 @@ export const WORKER_ASSET_CONTENT_TYPES = new Set([
 
 export const WORKER_MAX_ASSET_BYTES = 200 * 1024 * 1024;
 export const WORKER_MAX_ASSETS_PER_SECTION = 10;
+export const WORKER_ASSIGNMENT_TYPES = ["open", "user", "platform_team"];
+
+export function workerAssignmentInput({ assignmentType = "open", assigneeUserId = null } = {}) {
+  const type = WORKER_ASSIGNMENT_TYPES.includes(assignmentType) ? assignmentType : null;
+  if (!type) return null;
+  const normalizedAssigneeUserId = String(assigneeUserId || "").trim() || null;
+  if (type === "user" && !normalizedAssigneeUserId) return null;
+  return { type, assigneeUserId: type === "user" ? normalizedAssigneeUserId : null };
+}
+
+export function canClaimWorkerTask(task = {}, user = {}) {
+  const assignmentType = task.assignmentType || "open";
+  if (assignmentType === "platform_team") return user.role === "admin";
+  if (assignmentType === "user") return String(task.designatedAssigneeId || "") === String(user.id || "");
+  return assignmentType === "open";
+}
 
 export function canBypassWorkerContactPayment({ role, isContractor } = {}) {
   return role === "admin" && isContractor === true;
