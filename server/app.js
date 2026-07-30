@@ -51,6 +51,8 @@ import {
   getChandlerAccessToken,
   issueOfflineCredential,
   isChandlerBootstrapAdmin,
+  getPartnerClientUserAttributes,
+  listAllPartnerClientUsers,
   listPartnerPriceVersions,
   listPartnerSubscriptionPlans,
   loginWithChandler,
@@ -251,6 +253,187 @@ function adminSubscriptionJson(subscription) {
     provider: subscription.provider || "admin",
     source: "website",
     authoritative: Boolean(subscription.manualPeriodOverride),
+  };
+}
+
+function chandlerApplicationTargets() {
+  const config = chandlerConfig();
+  return [
+    { id: config.applicationId, editionKey: "gulong", editionName: "古龙版" },
+    { id: config.airosApplicationId, editionKey: "yongshenghua", editionName: "永生花版" },
+  ].filter((target, index, targets) => target.id && targets.findIndex((item) => item.id === target.id) === index);
+}
+
+function chandlerAttributePeriod(attributes = {}) {
+  if (!attributes || typeof attributes !== "object" || Array.isArray(attributes)) return null;
+  const startValue = attributes.subscription_valid_from || attributes.valid_from || attributes.current_period_start || attributes.subscription_valid_from_unix_ms || null;
+  const endValue = attributes.subscription_valid_until || attributes.valid_until || attributes.current_period_end || attributes.subscription_valid_until_unix_ms || null;
+  const start = startValue ? new Date(startValue) : null;
+  const end = endValue ? new Date(endValue) : null;
+  if (!end || Number.isNaN(end.getTime()) || (start && Number.isNaN(start.getTime()))) return null;
+  const marker = `${attributes.plan_kind || ""} ${attributes.billing_interval || ""} ${attributes.product_id || ""} ${attributes.sku_id || ""}`.toLowerCase();
+  const cycle = marker.includes("year") || marker.includes("annual") ? "year" : marker.includes("month") ? "month" : "custom";
+  return {
+    plan: attributes.product_id || attributes.plan || "member",
+    cycle,
+    status: subscriptionPeriodState(start, end),
+    currentPeriodStart: start,
+    currentPeriodEnd: end,
+    autoRenew: Boolean(attributes.auto_renew),
+    provider: "chandler",
+  };
+}
+
+async function synchronizeChandlerAttributeSubscription(ownerId, attributes, applicationId) {
+  const period = chandlerAttributePeriod(attributes);
+  if (!period) return false;
+  const subscriptions = await getCollection("subscriptions");
+  const existing = await subscriptions.findOne({ ownerId });
+  if (existing?.manualPeriodOverride) return false;
+  const now = new Date();
+  await subscriptions.updateOne(
+    { ownerId },
+    {
+      $set: {
+        ...period,
+        chandlerApplicationId: applicationId,
+        chandlerAttributes: attributes,
+        chandlerSynchronizedAt: now,
+        updatedAt: now,
+      },
+      $setOnInsert: { createdAt: now },
+    },
+    { upsert: true },
+  );
+  return true;
+}
+
+async function mapWithConcurrency(items, concurrency, iteratee) {
+  const output = new Array(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      output[index] = await iteratee(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+  return output;
+}
+
+async function synchronizeChandlerApplicationUsers(accessToken) {
+  const targets = chandlerApplicationTargets();
+  const results = await Promise.allSettled(targets.map(async (target) => ({
+    target,
+    result: await listAllPartnerClientUsers(accessToken, target.id, { limit: 100, maxPages: 50 }),
+  })));
+  const successful = results.filter((result) => result.status === "fulfilled").map((result) => result.value);
+  if (!successful.length) throw results.find((result) => result.status === "rejected")?.reason || new ChandlerError("Chandler 应用用户同步失败");
+
+  const merged = new Map();
+  for (const { target, result } of successful) {
+    for (const remote of result.items) {
+      const userId = String(remote.user_id || remote.id || "").trim();
+      const email = String(remote.email || "").trim().toLowerCase();
+      if (!userId || !email) continue;
+      const key = userId || email;
+      const current = merged.get(key) || { remote, targets: [], attributes: null, attributesTarget: null, attributeUpdatedAt: 0 };
+      current.remote = { ...current.remote, ...remote, id: userId };
+      current.targets.push(target);
+      const attributes = remote.attributes && typeof remote.attributes === "object" && !Array.isArray(remote.attributes) ? remote.attributes : null;
+      const updatedAt = Number(attributes?.subscription_period_updated_at_unix_ms || attributes?.subscription_reviewed_at_unix_ms || Date.parse(remote.updated_at || remote.granted_at || "") || 0);
+      if (attributes && (!current.attributes || updatedAt >= current.attributeUpdatedAt)) {
+        current.attributes = attributes;
+        current.attributesTarget = target;
+        current.attributeUpdatedAt = updatedAt;
+      }
+      merged.set(key, current);
+    }
+  }
+
+  const users = await getCollection("users");
+  const synchronized = await mapWithConcurrency([...merged.values()], 8, async (entry) => {
+    const defaultTarget = entry.targets.length === 1 ? entry.targets[0] : entry.targets.find((target) => target.editionKey === "gulong") || entry.targets[0];
+    try {
+      const local = await upsertChandlerUser({
+        id: entry.remote.id,
+        email: entry.remote.email,
+        display_name: entry.remote.display_name,
+        status: entry.remote.status,
+      }, {
+        identity: { role: "user", editionKey: defaultTarget.editionKey, editionName: defaultTarget.editionName, editionSource: "default" },
+        defaultEdition: defaultTarget.editionKey,
+      });
+      const now = new Date();
+      await users.updateOne({ _id: local._id }, { $set: {
+        chandlerGrantScopes: entry.remote.scopes || null,
+        chandlerGrantUpdatedAt: entry.remote.updated_at ? new Date(entry.remote.updated_at) : now,
+        chandlerAuthorizedApplications: entry.targets.map((target) => target.id),
+        chandlerAttributes: entry.attributes,
+        chandlerSynchronizedAt: now,
+        updatedAt: now,
+      } });
+      if (entry.attributes && entry.attributesTarget) await synchronizeChandlerAttributeSubscription(local._id, entry.attributes, entry.attributesTarget.id);
+      return local._id;
+    } catch {
+      return null;
+    }
+  });
+
+  return {
+    remoteTotal: successful.reduce((total, item) => total + Number(item.result.meta.total || item.result.items.length), 0),
+    synchronizedCount: synchronized.filter(Boolean).length,
+    applicationCount: successful.length,
+    partial: successful.length !== targets.length,
+    synchronizedAt: new Date(),
+  };
+}
+
+function adminUserDirectoryFilter(query = {}) {
+  const clauses = [];
+  if (query.status === "active") clauses.push({ $or: [{ status: "active" }, { status: { $exists: false } }] });
+  else if (query.status) clauses.push({ status: query.status });
+  if (query.q?.trim()) {
+    const keyword = query.q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    clauses.push({ $or: ["email", "username", "displayName", "chandlerUserId"].map((field) => ({ [field]: { $regex: keyword, $options: "i" } })) });
+  }
+  return clauses.length ? { $and: clauses } : {};
+}
+
+function adminUserDirectoryItem(user) {
+  return {
+    id: user.chandlerUserId || user._id.toString(),
+    website_user_id: user._id.toString(),
+    email: user.email || null,
+    display_name: user.displayName || user.username || null,
+    status: user.status || "active",
+    role: user.role || "user",
+    edition_name: user.editionName || "古龙版",
+    created_at: new Date(user.createdAt || 0).toISOString(),
+  };
+}
+
+async function websiteAdminUserDirectory(query = {}) {
+  const page = query.page || 1;
+  const limit = query.limit || 30;
+  const filter = adminUserDirectoryFilter(query);
+  const usersCollection = await getCollection("users");
+  const [users, total] = await Promise.all([
+    usersCollection.find(filter, { projection: { passwordHash: 0 } }).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).toArray(),
+    usersCollection.countDocuments(filter),
+  ]);
+  return { users: users.map(adminUserDirectoryItem), total, page, limit, pages: Math.ceil(total / limit) };
+}
+
+function subscriptionDirectoryCapabilities({ synchronized = false } = {}) {
+  return {
+    applicationUserSync: synchronized,
+    applicationSubscriptionSync: synchronized,
+    websiteRoleManagement: true,
+    websiteSubscriptionPeriod: true,
+    globalUserStatus: false,
+    globalEntitlementApproval: false,
   };
 }
 
@@ -1076,8 +1259,8 @@ const adminListChandlerUsersRoute = createRoute({
   method: "get",
   path: "/api/admin/chandler/users",
   tags: ["Admin · Chandler"],
-  summary: "搜索 Chandler 平台用户",
-  description: "优先读取 Chandler 公共 OpenAPI；当当前管理员未获 Chandler 全局用户权限时，自动返回官网已同步的用户影子与本地订阅视图。",
+  summary: "搜索官网与 Chandler 应用订阅用户",
+  description: "通过 Chandler 应用级接口同步古龙版、永生花版授权用户及订阅属性，再与官网 MongoDB 用户合并。此接口不要求 Chandler 平台运营管理员权限。",
   request: { query: z.object({ q: z.string().max(160).optional(), status: z.enum(["active", "disabled", "deleted"]).optional(), page: z.coerce.number().int().min(1).optional(), limit: z.coerce.number().int().min(1).max(100).optional() }) },
   responses: {
     200: { description: "Chandler 用户列表", content: { "application/json": { schema: z.object({ users: z.array(ChandlerAdminUserSchema), meta: z.record(z.string(), z.unknown()).optional() }).passthrough() } } },
@@ -1108,7 +1291,8 @@ const adminChandlerUserSubscriptionsRoute = createRoute({
   method: "get",
   path: "/api/admin/chandler/users/{id}/subscriptions",
   tags: ["Admin · Chandler"],
-  summary: "读取 Chandler 用户订阅",
+  summary: "读取统一用户订阅",
+  description: "从 Chandler 古龙版、永生花版应用属性同步订阅有效期，并与官网权威有效期及线下支付审核记录合并；管理员手动设置的官网有效期不会被远程同步覆盖。",
   request: { params: z.object({ id: z.string().min(1).max(100) }) },
   responses: {
     200: { description: "订阅列表", content: { "application/json": { schema: z.object({ subscriptions: z.array(z.record(z.string(), z.unknown())) }).passthrough() } } },
@@ -1871,61 +2055,45 @@ app.delete("/api/developer/keys/:id", async (c) => {
 
 app.openapi(adminListChandlerUsersRoute, async (c) => {
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  c.header("Cache-Control", "private, no-store, max-age=0");
   const query = c.req.valid("query");
-  const params = new URLSearchParams({
-    page: String(query.page || 1),
-    limit: String(query.limit || 30),
-  });
-  if (query.q) params.set("q", query.q.trim());
-  if (query.status) params.set("status", query.status);
   try {
     const accessToken = await getChandlerAccessToken(auth.session);
-    const result = await chandlerRequest(`/v1/admin/users?${params}`, { accessToken });
-    const remoteUsers = Array.isArray(result?.users) ? result.users : [];
-    if (!remoteUsers.length) return c.json(result);
-    const chandlerIds = remoteUsers.map((user) => String(user.id || "")).filter(Boolean);
-    const emails = remoteUsers.map((user) => String(user.email || "").trim().toLowerCase()).filter(Boolean);
-    const localUsers = await (await getCollection("users")).find({
-      $or: [
-        ...(chandlerIds.length ? [{ chandlerUserId: { $in: chandlerIds } }] : []),
-        ...(emails.length ? [{ emailNormalized: { $in: emails } }] : []),
-      ],
-    }, { projection: { chandlerUserId: 1, emailNormalized: 1, role: 1, editionName: 1 } }).toArray();
-    const byChandler = new Map(localUsers.filter((user) => user.chandlerUserId).map((user) => [String(user.chandlerUserId), user]));
-    const byEmail = new Map(localUsers.filter((user) => user.emailNormalized).map((user) => [user.emailNormalized, user]));
+    const synchronized = await synchronizeChandlerApplicationUsers(accessToken);
+    const directory = await websiteAdminUserDirectory(query);
     return c.json({
-      ...result,
-      users: remoteUsers.map((user) => {
-        const local = byChandler.get(String(user.id || "")) || byEmail.get(String(user.email || "").trim().toLowerCase());
-        return { ...user, website_user_id: local?._id?.toString() || null, role: local?.role || user.role || "user", edition_name: local?.editionName || user.edition_name || "古龙版" };
-      }),
+      users: directory.users,
+      meta: {
+        total: directory.total,
+        page: directory.page,
+        limit: directory.limit,
+        pages: directory.pages,
+        source: "chandler-applications+website",
+        permissionLimited: false,
+        synchronized: true,
+        remoteTotal: synchronized.remoteTotal,
+        synchronizedCount: synchronized.synchronizedCount,
+        applicationCount: synchronized.applicationCount,
+        partial: synchronized.partial,
+        synchronizedAt: synchronized.synchronizedAt,
+        capabilities: subscriptionDirectoryCapabilities({ synchronized: true }),
+      },
     });
   } catch (error) {
-    const page = query.page || 1;
-    const limit = query.limit || 30;
-    const filter = {};
-    if (query.status) filter.status = query.status;
-    if (query.q?.trim()) {
-      const keyword = query.q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      filter.$or = ["email", "username", "displayName", "chandlerUserId"].map((field) => ({ [field]: { $regex: keyword, $options: "i" } }));
-    }
-    const usersCollection = await getCollection("users");
-    const [users, total] = await Promise.all([
-      usersCollection.find(filter, { projection: { passwordHash: 0 } }).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).toArray(),
-      usersCollection.countDocuments(filter),
-    ]);
+    const directory = await websiteAdminUserDirectory(query);
     return c.json({
-      users: users.map((user) => ({
-        id: user.chandlerUserId || user._id.toString(),
-        website_user_id: user._id.toString(),
-        email: user.email || null,
-        display_name: user.displayName || user.username || null,
-        status: user.status || "active",
-        role: user.role || "user",
-        edition_name: user.editionName || "古龙版",
-        created_at: user.createdAt?.toISOString?.() || new Date(user.createdAt || 0).toISOString(),
-      })),
-      meta: { total, page, limit, pages: Math.ceil(total / limit), source: "website-shadow", permissionLimited: true, warning: error.message },
+      users: directory.users,
+      meta: {
+        total: directory.total,
+        page: directory.page,
+        limit: directory.limit,
+        pages: directory.pages,
+        source: "website-snapshot",
+        permissionLimited: true,
+        synchronized: false,
+        warning: error.message,
+        capabilities: subscriptionDirectoryCapabilities(),
+      },
     });
   }
 });
@@ -2082,9 +2250,38 @@ app.openapi(adminSetChandlerUserStatusRoute, async (c) => {
 
 app.openapi(adminChandlerUserSubscriptionsRoute, async (c) => {
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  c.header("Cache-Control", "private, no-store, max-age=0");
   const userId = c.req.valid("param").id;
   const idFilter = ObjectId.isValid(userId) ? [{ _id: new ObjectId(userId) }, { chandlerUserId: userId }] : [{ chandlerUserId: userId }];
   const user = await (await getCollection("users")).findOne({ $or: idFilter });
+  let remoteApplicationCount = 0;
+  let remoteWarning = null;
+  let partial = false;
+
+  if (user?.chandlerUserId) {
+    try {
+      const accessToken = await getChandlerAccessToken(auth.session);
+      const authorizedIds = Array.isArray(user.chandlerAuthorizedApplications) ? new Set(user.chandlerAuthorizedApplications) : null;
+      const targets = chandlerApplicationTargets().filter((target) => !authorizedIds?.size || authorizedIds.has(target.id));
+      const results = await Promise.allSettled(targets.map(async (target) => {
+        const payload = await getPartnerClientUserAttributes(accessToken, user.chandlerUserId, target.id);
+        const attributes = payload?.attributes && typeof payload.attributes === "object" ? payload.attributes : payload;
+        return { target, attributes: attributes && typeof attributes === "object" && !Array.isArray(attributes) ? attributes : {} };
+      }));
+      const successful = results.filter((result) => result.status === "fulfilled").map((result) => result.value);
+      const actionableFailures = results.filter((result) => result.status === "rejected" && result.reason?.status !== 404);
+      remoteApplicationCount = successful.length;
+      partial = successful.length > 0 && actionableFailures.length > 0;
+      remoteWarning = actionableFailures[0]?.reason?.message || null;
+      const subscriptionAttributes = successful
+        .filter((item) => chandlerAttributePeriod(item.attributes))
+        .sort((left, right) => Number(right.attributes.subscription_period_updated_at_unix_ms || right.attributes.subscription_reviewed_at_unix_ms || 0) - Number(left.attributes.subscription_period_updated_at_unix_ms || left.attributes.subscription_reviewed_at_unix_ms || 0))[0];
+      if (subscriptionAttributes) await synchronizeChandlerAttributeSubscription(user._id, subscriptionAttributes.attributes, subscriptionAttributes.target.id);
+    } catch (error) {
+      remoteWarning = error.message;
+    }
+  }
+
   const [localSubscription, offlineOrders] = user ? await Promise.all([
     (await getCollection("subscriptions")).findOne({ ownerId: user._id }),
     (await getCollection("offlinePayments")).find({ ownerId: user._id }).sort({ createdAt: -1 }).limit(10).toArray(),
@@ -2102,23 +2299,20 @@ app.openapi(adminChandlerUserSubscriptionsRoute, async (c) => {
     order_no: order.orderNo,
     source: "website",
   });
-  try {
-    const accessToken = await getChandlerAccessToken(auth.session);
-    const remote = await chandlerRequest(`/v1/admin/users/${encodeURIComponent(userId)}/subscriptions`, { accessToken });
-    const remoteSubscriptions = Array.isArray(remote?.subscriptions) ? remote.subscriptions : [];
-    return c.json({
-      ...remote,
-      subscriptions: [...local, ...remoteSubscriptions],
-      meta: {
-        ...(remote?.meta || {}),
-        source: local.length ? "chandler+website" : "chandler",
-        websitePeriodOverride: Boolean(localSubscription?.manualPeriodOverride),
-      },
-    });
-  } catch (error) {
-    if (!user) return c.json({ subscriptions: [], meta: { source: "website-shadow", permissionLimited: true, warning: error.message } });
-    return c.json({ subscriptions: local, meta: { source: "website-shadow", permissionLimited: true, websitePeriodOverride: Boolean(localSubscription?.manualPeriodOverride), warning: error.message } });
-  }
+  const synchronized = remoteApplicationCount > 0;
+  return c.json({
+    subscriptions: local,
+    meta: {
+      source: synchronized ? "chandler-applications+website" : "website",
+      permissionLimited: Boolean(user?.chandlerUserId && remoteWarning && !synchronized),
+      synchronized,
+      partial,
+      remoteApplicationCount,
+      websitePeriodOverride: Boolean(localSubscription?.manualPeriodOverride),
+      ...(remoteWarning ? { warning: remoteWarning } : {}),
+      capabilities: subscriptionDirectoryCapabilities({ synchronized }),
+    },
+  });
 });
 
 app.openapi(adminChandlerCatalogRoute, async (c) => {

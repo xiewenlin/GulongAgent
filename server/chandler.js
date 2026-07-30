@@ -283,16 +283,16 @@ export async function upsertChandlerUser(chandlerUser, { username, identity, def
     chandlerUserId: chandlerUser.id,
     email,
     emailNormalized,
-    displayName: canonical?.displayNameUserManaged ? canonical.displayName : chandlerUser.display_name || null,
-    avatar: canonical?.avatarUserManaged ? canonical.avatar : chandlerUser.avatar || null,
+    displayName: canonical?.displayNameUserManaged ? canonical.displayName : chandlerUser.display_name || canonical?.displayName || null,
+    avatar: canonical?.avatarUserManaged ? canonical.avatar : chandlerUser.avatar || canonical?.avatar || null,
     ...(canonical?.avatarUserManaged ? { avatarUserManaged: true, avatarObjectKey: canonical.avatarObjectKey, avatarUpdatedAt: canonical.avatarUpdatedAt } : {}),
-    emailVerified: Boolean(chandlerUser.email_verified),
+    emailVerified: chandlerUser.email_verified === undefined ? Boolean(canonical?.emailVerified) : Boolean(chandlerUser.email_verified),
     role: canonical?.roleOverride || identity?.role || (chandlerUser.is_admin || isChandlerBootstrapAdmin(chandlerUser) ? "admin" : "user"),
     ...(canonical?.roleOverride ? { roleOverride: canonical.roleOverride } : {}),
     editionKey: edition.key,
     editionName: edition.name,
     editionSource,
-    status: "active",
+    status: ["active", "disabled", "deleted"].includes(chandlerUser.status) ? chandlerUser.status : canonical?.status || "active",
     authProvider: "chandler",
     ...(releaseAssignment?.channelId ? { releaseChannelId: releaseAssignment.channelId, releaseChannelGroupId: releaseAssignment.groupId } : {}),
     updatedAt: now,
@@ -391,6 +391,49 @@ function partnerSkus(payload) {
 function partnerPrices(payload) {
   if (Array.isArray(payload)) return payload;
   return Array.isArray(payload?.prices) ? payload.prices : [];
+}
+
+function partnerClientUsers(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.items)) return payload.items;
+  return Array.isArray(payload?.users) ? payload.users : [];
+}
+
+export async function listPartnerClientUsers(accessToken, applicationId = chandlerConfig().applicationId, { page = 1, limit = 100 } = {}) {
+  const result = await chandlerRequest(
+    `/v1/me/oauth/clients/${encodeURIComponent(applicationId)}/users?page=${Math.max(1, Math.trunc(page))}&limit=${Math.min(100, Math.max(1, Math.trunc(limit)))}`,
+    { accessToken },
+  );
+  const items = partnerClientUsers(result);
+  return {
+    items,
+    meta: {
+      ...(result?.meta || {}),
+      total: Number(result?.meta?.total ?? items.length),
+      page: Number(result?.meta?.page ?? page),
+      limit: Number(result?.meta?.limit ?? limit),
+    },
+  };
+}
+
+export async function listAllPartnerClientUsers(accessToken, applicationId = chandlerConfig().applicationId, { limit = 100, maxPages = 50 } = {}) {
+  const pageSize = Math.min(100, Math.max(1, Math.trunc(limit)));
+  const first = await listPartnerClientUsers(accessToken, applicationId, { page: 1, limit: pageSize });
+  const totalPages = Math.min(maxPages, Math.max(1, Math.ceil(first.meta.total / pageSize)));
+  const remaining = totalPages > 1
+    ? await Promise.all(Array.from({ length: totalPages - 1 }, (_, index) => listPartnerClientUsers(accessToken, applicationId, { page: index + 2, limit: pageSize })))
+    : [];
+  return {
+    items: [first, ...remaining].flatMap((page) => page.items),
+    meta: { ...first.meta, page: 1, limit: pageSize, pages: totalPages },
+  };
+}
+
+export function getPartnerClientUserAttributes(accessToken, userId, applicationId = chandlerConfig().applicationId) {
+  return chandlerRequest(
+    `/v1/me/oauth/clients/${encodeURIComponent(applicationId)}/users/${encodeURIComponent(userId)}/attributes`,
+    { accessToken },
+  );
 }
 
 export async function listPartnerSkus(accessToken, applicationId = chandlerConfig().applicationId) {

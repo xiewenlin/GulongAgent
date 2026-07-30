@@ -9,6 +9,7 @@ import {
   createPartnerPriceVersion,
   externalAuthFromResponse,
   isChandlerBootstrapAdmin,
+  listAllPartnerClientUsers,
   listPartnerSubscriptionPlans,
   productEdition,
   productEditionFromChannel,
@@ -95,6 +96,40 @@ test("Chandler v2.2 wrappers use application SKU prices and authoritative sku_id
   assert.equal(orderCall.body.sku_id, "sku-month");
   assert.equal("amount" in orderCall.body, false);
   assert.equal("currency" in orderCall.body, false);
+});
+
+test("Chandler application user synchronization follows the partner-scoped paginated API", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    const requestUrl = new URL(url);
+    calls.push(requestUrl);
+    const page = Number(requestUrl.searchParams.get("page"));
+    return new Response(JSON.stringify({
+      data: {
+        items: [{
+          user_id: `user-${page}`,
+          email: `member-${page}@example.com`,
+          display_name: `用户 ${page}`,
+          status: "active",
+          attributes: { subscription_valid_until: `2027-0${page}-01T00:00:00.000Z` },
+        }],
+        meta: { total: 2, page, limit: 1 },
+      },
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const result = await listAllPartnerClientUsers("access-token", "cm-partner-app", { limit: 1 });
+    assert.equal(result.items.length, 2);
+    assert.deepEqual(result.items.map((item) => item.user_id), ["user-1", "user-2"]);
+    assert.equal(result.meta.pages, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].pathname, "/v1/me/oauth/clients/cm-partner-app/users");
+  assert.equal(calls[0].searchParams.get("page"), "1");
+  assert.equal(calls[1].searchParams.get("page"), "2");
 });
 
 test("desktop product editions and bootstrap administrator map to website identities", () => {
@@ -503,6 +538,32 @@ test("admin subscriptions localize review state and keep the three-column detail
   assert.match(adminSource, /<span>到期时间<\/span>/);
   assert.match(css, /\.admin-detail-panel\s*>\s*article\s*\{[^}]*grid-template-columns:\s*minmax\(132px,[^;]+minmax\(180px,[^;]+minmax\(230px,\s*auto\)/s);
   assert.match(css, /\.subscription-state\s*\{[^}]*white-space:\s*nowrap/s);
+});
+
+test("admin subscription directory uses Chandler application scope and explicit capabilities", async () => {
+  const [serverSource, adminSource, chandlerSource] = await Promise.all([
+    readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../server/chandler.js", import.meta.url), "utf8"),
+  ]);
+  const listStart = serverSource.indexOf("app.openapi(adminListChandlerUsersRoute");
+  const listEnd = serverSource.indexOf("app.openapi(adminSetWebsiteRoleRoute", listStart);
+  const subscriptionsStart = serverSource.indexOf("app.openapi(adminChandlerUserSubscriptionsRoute");
+  const subscriptionsEnd = serverSource.indexOf("app.openapi(adminChandlerCatalogRoute", subscriptionsStart);
+  const listHandler = serverSource.slice(listStart, listEnd);
+  const subscriptionsHandler = serverSource.slice(subscriptionsStart, subscriptionsEnd);
+  assert.match(chandlerSource, /\/v1\/me\/oauth\/clients\/\$\{encodeURIComponent\(applicationId\)\}\/users\?page=/);
+  assert.match(listHandler, /synchronizeChandlerApplicationUsers/);
+  assert.doesNotMatch(listHandler, /\/v1\/admin\/users\?/);
+  assert.match(subscriptionsHandler, /getPartnerClientUserAttributes/);
+  assert.doesNotMatch(subscriptionsHandler, /\/v1\/admin\/users\/.*\/subscriptions/);
+  assert.match(serverSource, /existing\?\.manualPeriodOverride/);
+  assert.match(serverSource, /globalUserStatus:\s*false/);
+  assert.match(serverSource, /globalEntitlementApproval:\s*false/);
+  assert.match(adminSource, /官网 \+ Chandler 应用/);
+  assert.match(adminSource, /meta\.capabilities\?\.globalUserStatus === true/);
+  assert.match(adminSource, /meta\.capabilities\?\.globalEntitlementApproval === true/);
+  assert.doesNotMatch(adminSource, /Chandler 管理接口未向当前账号开放/);
 });
 
 test("administrator subscription periods are authoritative across website and desktop clients", async () => {
