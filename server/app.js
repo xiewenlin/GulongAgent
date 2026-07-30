@@ -390,12 +390,24 @@ async function synchronizeChandlerApplicationUsers(accessToken) {
   };
 }
 
-function adminUserDirectoryFilter(query = {}) {
+async function releaseChannelUserFilter(channelId) {
+  if (channelId === "unassigned") return { $or: [{ releaseChannelId: { $exists: false } }, { releaseChannelId: null }] };
+  if (!ObjectId.isValid(channelId)) return null;
+  const releaseChannelId = new ObjectId(channelId);
+  const channel = await (await getCollection("releaseChannels")).findOne({ _id: releaseChannelId }, { projection: { isDefault: 1 } });
+  return channel?.isDefault
+    ? { $or: [{ releaseChannelId }, { releaseChannelId: { $exists: false } }, { releaseChannelId: null }] }
+    : { releaseChannelId };
+}
+
+async function adminUserDirectoryFilter(query = {}) {
   const clauses = [];
   if (query.status === "active") clauses.push({ $or: [{ status: "active" }, { status: { $exists: false } }] });
   else if (query.status) clauses.push({ status: query.status });
-  if (query.channelId === "unassigned") clauses.push({ $or: [{ releaseChannelId: { $exists: false } }, { releaseChannelId: null }] });
-  else if (ObjectId.isValid(query.channelId)) clauses.push({ releaseChannelId: new ObjectId(query.channelId) });
+  if (query.channelId) {
+    const channelFilter = await releaseChannelUserFilter(query.channelId);
+    if (channelFilter) clauses.push(channelFilter);
+  }
   if (query.q?.trim()) {
     const keyword = query.q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     clauses.push({ $or: ["email", "username", "displayName", "chandlerUserId"].map((field) => ({ [field]: { $regex: keyword, $options: "i" } })) });
@@ -419,7 +431,7 @@ function adminUserDirectoryItem(user) {
 async function websiteAdminUserDirectory(query = {}) {
   const page = query.page || 1;
   const limit = query.limit || 30;
-  const filter = adminUserDirectoryFilter(query);
+  const filter = await adminUserDirectoryFilter(query);
   const usersCollection = await getCollection("users");
   const [users, total] = await Promise.all([
     usersCollection.find(filter, { projection: { passwordHash: 0 } }).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).toArray(),
@@ -460,11 +472,7 @@ async function adminOrderBaseFilter(query = {}) {
 
   const users = await getCollection("users");
   if (query.channelId) {
-    const userFilter = query.channelId === "unassigned"
-      ? { $or: [{ releaseChannelId: { $exists: false } }, { releaseChannelId: null }] }
-      : ObjectId.isValid(query.channelId)
-        ? { releaseChannelId: new ObjectId(query.channelId) }
-        : null;
+    const userFilter = await releaseChannelUserFilter(query.channelId);
     if (!userFilter) return { error: "发行渠道筛选值无效" };
     const ownerIds = await users.distinct("_id", userFilter);
     clauses.push({ ownerId: { $in: ownerIds } });
@@ -502,7 +510,7 @@ async function adminOrderRows(orders) {
     : [];
   const channelIds = [...new Map(users.filter((user) => user.releaseChannelId).map((user) => [String(user.releaseChannelId), user.releaseChannelId])).values()];
   const channels = channelIds.length
-    ? await (await getCollection("releaseChannels")).find({ _id: { $in: channelIds } }, { projection: { name: 1, groupId: 1 } }).toArray()
+    ? await (await getCollection("releaseChannels")).find({ _id: { $in: channelIds } }, { projection: { name: 1, groupId: 1, isDefault: 1 } }).toArray()
     : [];
   const userMap = new Map(users.map((user) => [String(user._id), user]));
   const channelMap = new Map(channels.map((channel) => [String(channel._id), channel]));
@@ -515,7 +523,9 @@ async function adminOrderRows(orders) {
       ownerId: order.ownerId?.toString?.() || null,
       _id: undefined,
       user: user ? { id: user._id.toString(), email: user.email || null, displayName: user.displayName || user.username || null } : null,
-      releaseChannel: channel ? { id: channel._id.toString(), name: channel.name, groupId: channel.groupId || null } : null,
+      releaseChannel: channel
+        ? { id: channel._id.toString(), name: channel.name, groupId: channel.groupId || null, isDefault: Boolean(channel.isDefault) }
+        : { id: null, name: "古龙版", groupId: null, isDefault: true },
     };
   });
 }

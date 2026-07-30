@@ -565,7 +565,8 @@ test("admin subscription directory uses Chandler application scope and explicit 
   assert.match(adminSource, /meta\.capabilities\?\.globalEntitlementApproval === true/);
   assert.match(adminSource, /选择用户分组或发行渠道/);
   assert.match(adminSource, /params\.set\("channelId", channelId\)/);
-  assert.match(serverSource, /releaseChannelId: new ObjectId\(query\.channelId\)/);
+  assert.match(serverSource, /async function releaseChannelUserFilter/);
+  assert.match(serverSource, /channel\?\.isDefault/);
   assert.doesNotMatch(adminSource, /Chandler 管理接口未向当前账号开放/);
 });
 
@@ -632,12 +633,15 @@ test("order management separates online and offline orders with multidimensional
   assert.match(adminSource, /<span>已审核<\/span>/);
   assert.match(adminSource, /关键词模糊搜索/);
   assert.match(adminSource, /用户分组 \/ 发行渠道/);
+  assert.match(adminSource, /古龙版（默认）/);
+  assert.doesNotMatch(adminSource, /未分配发行渠道|"未分配"/);
   assert.match(adminSource, /type="date"/);
   assert.match(adminSource, /nextMode === "online" \? "payments" : "offline-payments"/);
   assert.match(serverSource, /app\.get\("\/api\/admin\/payments"/);
   assert.match(serverSource, /async function adminOrderBaseFilter/);
   assert.match(serverSource, /"providerTransactionId"/);
-  assert.match(serverSource, /releaseChannel:\s*channel \?/);
+  assert.match(serverSource, /isDefault:\s*Boolean\(channel\.isDefault\)/);
+  assert.match(serverSource, /name:\s*"古龙版",\s*groupId:\s*null,\s*isDefault:\s*true/);
   assert.match(serverSource, /requestedStatus === "reviewed"/);
   assert.match(serverSource, /summary:\s*\{\s*pending:\s*pendingCount,\s*reviewed:\s*approvedCount \+ rejectedCount/);
   assert.match(css, /\.offline-review-tabs\s*\{/);
