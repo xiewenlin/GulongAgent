@@ -181,6 +181,13 @@ test("worker assignment search, visibility, notifications and publishing control
   assert.match(adminPageSource, /item\.assignment\?\.label/);
 });
 
+test("the primary Worker navigation is a direct link without a dropdown", async () => {
+  const source = await readFile(new URL("../../src/App.jsx", import.meta.url), "utf8");
+  const workerEntry = source.match(/\{ label: "威客"[^\n]+/u)?.[0] || "";
+  assert.match(workerEntry, /href: "\/worker\?tab=publish"/);
+  assert.doesNotMatch(workerEntry, /children/);
+});
+
 test("worker market protects WeChat contacts and preserves promoted administrator roles", async () => {
   const [appSource, workerPageSource] = await Promise.all([
     readFile(new URL("../../server/app.js", import.meta.url), "utf8"),

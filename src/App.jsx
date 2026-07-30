@@ -37,7 +37,7 @@ import { themes } from "./data/site.js";
 const primaryNav = [
   { label: "产品能力", href: "/manual" },
   { label: "第二大脑", href: "/brain" },
-  { label: "威客", href: "/worker?tab=publish", children: [{ label: "发布需求", href: "/worker?tab=publish" }, { label: "接单赚钱", href: "/worker?tab=earn" }] },
+  { label: "威客", href: "/worker?tab=publish" },
   { label: "开发者", href: "/developer" },
   { label: "定价", href: "/pricing" },
   { label: "下载", href: "/download" },
