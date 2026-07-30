@@ -1,5 +1,6 @@
 import {
   ArrowRight,
+  Bell,
   CaretDown,
   ChatCircleText,
   CheckCircle,
@@ -22,6 +23,7 @@ import { AdminPage } from "./components/AdminPage.jsx";
 import { HomePage } from "./components/HomePage.jsx";
 import { ProductManualPage } from "./components/ProductManualPage.jsx";
 import { SecondBrainPage } from "./components/SecondBrainPage.jsx";
+import { WorkerPage } from "./components/WorkerPages.jsx";
 import {
   BrainUploadPage,
   DeveloperPage,
@@ -33,11 +35,12 @@ import {
 import { themes } from "./data/site.js";
 
 const primaryNav = [
-  ["产品能力", "/manual"],
-  ["第二大脑", "/brain"],
-  ["开发者", "/developer"],
-  ["定价", "/pricing"],
-  ["下载", "/download"],
+  { label: "产品能力", href: "/manual" },
+  { label: "第二大脑", href: "/brain" },
+  { label: "威客", href: "/worker?tab=publish", children: [{ label: "发布需求", href: "/worker?tab=publish" }, { label: "接单赚钱", href: "/worker?tab=earn" }] },
+  { label: "开发者", href: "/developer" },
+  { label: "定价", href: "/pricing" },
+  { label: "下载", href: "/download" },
 ];
 
 const THEME_ICON_VERSION = "20260728-3d-favicon-1";
@@ -58,6 +61,7 @@ export function App() {
   const [themeOpen, setThemeOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
+  const [notificationCount, setNotificationCount] = useState(0);
   const [theme, setTheme] = useState(() => window.localStorage.getItem("gulong-web-theme") || "porcelain");
   const activeTheme = themes.find((item) => item.id === theme) || themes[0];
   const themeIcon = themeIconUrl(activeTheme);
@@ -147,6 +151,15 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!user) { setNotificationCount(0); return undefined; }
+    let cancelled = false;
+    const refresh = () => apiFetch("/api/account/notifications").then((result) => { if (!cancelled) setNotificationCount(result.unread || 0); }).catch(() => {});
+    refresh();
+    const timer = window.setInterval(refresh, 45_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [user?.id, route]);
+
+  useEffect(() => {
     setMobileOpen(false);
     setAccountOpen(false);
     window.scrollTo({ top: 0, behavior: "instant" });
@@ -193,6 +206,7 @@ export function App() {
   else if (pathname === "/account") page = <AccountDashboard user={user} openAuth={openAuth} navigate={navigate} onUser={setUser} />;
   else if (pathname === "/manual") page = <ProductManualPage navigate={navigate} />;
   else if (pathname === "/brain") page = <SecondBrainPage user={user} openAuth={openAuth} navigate={navigate} />;
+  else if (pathname === "/worker") page = <WorkerPage key={route} user={user} openAuth={openAuth} navigate={navigate} />;
   else if (pathname === "/download") page = <DownloadPage />;
   else if (pathname === "/developer") page = <DeveloperPage user={user} openAuth={openAuth} />;
   else if (pathname === "/pricing") page = <PricingPage user={user} openAuth={openAuth} navigate={navigate} />;
@@ -211,13 +225,14 @@ export function App() {
             <span><strong>古龙</strong><small>Gulong Agent Engine</small></span>
           </button>
           <nav className={mobileOpen ? "primary-nav open" : "primary-nav"} aria-label="主要导航">
-            {primaryNav.map(([label, href]) => <button className={pathname === href.split("#")[0] && (!href.includes("#") || window.location.hash === `#${href.split("#")[1]}`) ? "active" : ""} type="button" key={href} onClick={() => navigate(href)}>{label}</button>)}
+            {primaryNav.map((item) => <div className={`primary-nav-item ${pathname === item.href.split("?")[0] ? "active" : ""}`} key={item.href}><button type="button" onClick={() => navigate(item.href)}>{item.label}{item.children && <CaretDown size={15} />}</button>{item.children && <div className="primary-submenu">{item.children.map((child) => <button type="button" key={child.href} onClick={() => navigate(child.href)}>{child.label}<ArrowRight size={16} /></button>)}</div>}</div>)}
             <button className="mobile-feedback" type="button" onClick={() => navigate("/feedback")}>问题反馈</button>
           </nav>
           <div className="header-actions">
             <button className="theme-button" type="button" aria-label="自定义主题" onClick={() => setThemeOpen(true)}><Palette size={18} /></button>
             {user ? (
               <div className="account-menu-wrap">
+                <button className="header-notification" type="button" aria-label={`${notificationCount} 条未读消息`} onClick={() => navigate("/account")}><Bell size={21} weight={notificationCount ? "fill" : "regular"} />{notificationCount > 0 && <span>{notificationCount > 99 ? "99+" : notificationCount}</span>}</button>
                 <button className="account-trigger" type="button" onClick={() => setAccountOpen(!accountOpen)}><UserCircle size={21} /><span>{user.displayName || user.username || "古龙用户"}</span><CaretDown size={14} /></button>
                 {accountOpen && <div className="account-menu"><button onClick={() => navigate("/account")}><UserCircle size={17} /> 用户后台</button>{user.role === "admin" && <button onClick={() => navigate("/admin")}><GearSix size={17} /> 管理员后台</button>}<button onClick={() => navigate("/developer")}><Key size={17} /> API Key</button><button onClick={() => navigate("/upload")}><UploadSimple size={17} /> 第二大脑上传</button><button onClick={() => navigate("/feedback")}><ChatCircleText size={17} /> 问题反馈</button><button className="danger" onClick={logout}><SignOut size={17} /> 退出登录</button></div>}
               </div>
@@ -233,7 +248,7 @@ export function App() {
       <footer className="site-footer">
         <div className="footer-main section-shell">
           <div className="footer-brand"><img src={themeIcon} alt="" /><div><strong>古龙</strong><span>Gulong Agent Engine</span></div><p>不是又一个聊天机器人，而是一套会持续成长的 AI 操作系统。</p></div>
-          <div><h3>产品</h3><button onClick={() => navigate("/manual")}>产品手册</button><button onClick={() => navigate("/brain")}>第二大脑</button><button onClick={() => navigate("/pricing")}>订阅与定价</button></div>
+          <div><h3>产品</h3><button onClick={() => navigate("/manual")}>产品手册</button><button onClick={() => navigate("/brain")}>第二大脑</button><button onClick={() => navigate("/worker?tab=publish")}>威客市场</button><button onClick={() => navigate("/pricing")}>订阅与定价</button></div>
           <div><h3>开发者</h3><button onClick={() => navigate("/developer")}>开放平台</button><a href="/api/docs" target="_blank" rel="noreferrer">API 文档</a><a href="/api/openapi.json" target="_blank" rel="noreferrer">OpenAPI JSON</a></div>
           <div><h3>支持</h3><button onClick={() => navigate("/download")}>软件下载</button><button onClick={() => navigate("/feedback")}>问题反馈</button><button onClick={() => setThemeOpen(true)}>自定义主题</button></div>
         </div>

@@ -97,6 +97,26 @@
       "destination": "/api/platform?_platform_path=admin/offline-payments/:id/:action"
     },
     {
+      "source": "/api/worker/:path*",
+      "destination": "/api/platform?_platform_path=worker/:path*"
+    },
+    {
+      "source": "/api/admin/users/:path*",
+      "destination": "/api/platform?_platform_path=admin/users/:path*"
+    },
+    {
+      "source": "/api/admin/worker-payments/:path*",
+      "destination": "/api/platform?_platform_path=admin/worker-payments/:path*"
+    },
+    {
+      "source": "/api/admin/worker-contact-payments/:path*",
+      "destination": "/api/platform?_platform_path=admin/worker-contact-payments/:path*"
+    },
+    {
+      "source": "/api/admin/worker-workflows/:path*",
+      "destination": "/api/platform?_platform_path=admin/worker-workflows/:path*"
+    },
+    {
       "source": "/api/release-worker/:path*",
       "destination": "/api/platform?_platform_path=release-worker/:path*"
     },

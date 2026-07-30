@@ -169,6 +169,54 @@ export async function ensureIndexes() {
           { ownerId: 1, readAt: 1, createdAt: -1 },
           { name: "notifications_unread" },
         ),
+        db.collection("workerTasks").createIndex(
+          { status: 1, createdAt: -1 },
+          { name: "worker_tasks_market" },
+        ),
+        db.collection("workerTasks").createIndex(
+          { publisherId: 1, createdAt: -1 },
+          { name: "worker_tasks_by_publisher" },
+        ),
+        db.collection("workerTasks").createIndex(
+          { contractorId: 1, updatedAt: -1 },
+          { name: "worker_tasks_by_contractor" },
+        ),
+        db.collection("workerTasks").createIndex(
+          { paymentStatus: 1, paymentSubmittedAt: 1 },
+          { name: "worker_task_payment_review" },
+        ),
+        db.collection("workerTaskUploads").createIndex(
+          { taskId: 1, section: 1, status: 1, createdAt: 1 },
+          { name: "worker_task_assets" },
+        ),
+        db.collection("workerTaskUploads").createIndex(
+          { expiresAt: 1 },
+          { expireAfterSeconds: 0, name: "ttl_worker_task_uploads" },
+        ),
+        db.collection("workerEarnings").createIndex(
+          { taskId: 1, kind: 1 },
+          { unique: true, name: "uniq_worker_task_earning" },
+        ),
+        db.collection("workerEarnings").createIndex(
+          { ownerId: 1, availableAt: -1 },
+          { name: "worker_earnings_by_owner" },
+        ),
+        db.collection("workerWorkflows").createIndex(
+          { fingerprint: 1 },
+          { unique: true, name: "uniq_worker_workflow_fingerprint" },
+        ),
+        db.collection("workerWorkflowRevenueLedger").createIndex(
+          { workflowId: 1, reference: 1 },
+          { unique: true, name: "uniq_worker_workflow_revenue" },
+        ),
+        db.collection("workerContactPayments").createIndex(
+          { taskId: 1, requesterId: 1, targetId: 1 },
+          { unique: true, name: "uniq_worker_contact_unlock" },
+        ),
+        db.collection("workerContactPayments").createIndex(
+          { status: 1, submittedAt: 1, reviewedAt: -1 },
+          { name: "worker_contact_payment_review" },
+        ),
         db.collection("avatarUploads").createIndex(
           { expiresAt: 1 },
           { expireAfterSeconds: 0, name: "ttl_avatar_uploads" },

@@ -244,8 +244,17 @@ export async function upsertChandlerUser(chandlerUser, { username, identity, def
     const canonicalId = emailMatch._id;
     const duplicateId = chandlerMatch._id;
     await Promise.all([
-      ...["apiKeys", "tasks", "memories", "feedback", "payments", "subscriptions", "wallets", "uploads", "offlinePayments", "userConfigurations", "notifications", "avatarUploads", "offlinePaymentReviewWorkers"]
+      ...["apiKeys", "tasks", "memories", "feedback", "payments", "subscriptions", "wallets", "uploads", "offlinePayments", "userConfigurations", "notifications", "avatarUploads", "offlinePaymentReviewWorkers", "workerTasks", "workerTaskUploads", "workerEarnings", "workerWorkflows", "workerWorkflowRevenueLedger"]
         .map(async (name) => (await getCollection(name)).updateMany({ ownerId: duplicateId }, { $set: { ownerId: canonicalId } })),
+      (await getCollection("workerTasks")).updateMany({ publisherId: duplicateId }, { $set: { publisherId: canonicalId } }),
+      (await getCollection("workerTasks")).updateMany({ contractorId: duplicateId }, { $set: { contractorId: canonicalId } }),
+      (await getCollection("workerEarnings")).updateMany({ publisherId: duplicateId }, { $set: { publisherId: canonicalId } }),
+      (await getCollection("workerWorkflows")).updateMany({ publisherId: duplicateId }, { $set: { publisherId: canonicalId } }),
+      (await getCollection("workerWorkflows")).updateMany({ contractorId: duplicateId }, { $set: { contractorId: canonicalId } }),
+      (await getCollection("workerWorkflowRevenueLedger")).updateMany({ publisherId: duplicateId }, { $set: { publisherId: canonicalId } }),
+      (await getCollection("workerWorkflowRevenueLedger")).updateMany({ contractorId: duplicateId }, { $set: { contractorId: canonicalId } }),
+      (await getCollection("workerContactPayments")).updateMany({ requesterId: duplicateId }, { $set: { requesterId: canonicalId } }),
+      (await getCollection("workerContactPayments")).updateMany({ targetId: duplicateId }, { $set: { targetId: canonicalId } }),
       (await getCollection("sessions")).updateMany({ userId: duplicateId }, { $set: { userId: canonicalId } }),
     ]);
     await users.deleteOne({ _id: duplicateId });
@@ -278,7 +287,8 @@ export async function upsertChandlerUser(chandlerUser, { username, identity, def
     avatar: canonical?.avatarUserManaged ? canonical.avatar : chandlerUser.avatar || null,
     ...(canonical?.avatarUserManaged ? { avatarUserManaged: true, avatarObjectKey: canonical.avatarObjectKey, avatarUpdatedAt: canonical.avatarUpdatedAt } : {}),
     emailVerified: Boolean(chandlerUser.email_verified),
-    role: identity?.role || (chandlerUser.is_admin || isChandlerBootstrapAdmin(chandlerUser) ? "admin" : "user"),
+    role: canonical?.roleOverride || identity?.role || (chandlerUser.is_admin || isChandlerBootstrapAdmin(chandlerUser) ? "admin" : "user"),
+    ...(canonical?.roleOverride ? { roleOverride: canonical.roleOverride } : {}),
     editionKey: edition.key,
     editionName: edition.name,
     editionSource,

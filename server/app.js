@@ -74,6 +74,14 @@ import {
 import { buildAdminAnalyticsDashboard, recordAnalyticsEvent } from "./analytics.js";
 import { recoverExpiredDirectReleaseLock } from "./release-lock.js";
 import { OFFLINE_REVIEW_REJECTION_REASON, offlineReviewWechatMessage } from "./offline-review.js";
+import {
+  WORKER_MAX_ASSETS_PER_SECTION,
+  workerAssetInput,
+  workerTaskFinancials,
+  workerTaskFingerprint,
+  workerTaskTitle,
+  workerWorkflowRevenue,
+} from "./worker-market.js";
 
 const app = new OpenAPIHono();
 
@@ -219,6 +227,97 @@ function safeDate(value, endOfDay = false) {
 
 function objectSize(head) {
   return Number(head?.headers?.["content-length"] || head?.ContentLength || head?.contentLength || 0);
+}
+
+function workerPerson(user) {
+  if (!user) return null;
+  return {
+    id: user._id?.toString?.() || String(user.id || ""),
+    displayName: user.displayName || user.username || "古龙用户",
+    avatar: user.avatar || null,
+  };
+}
+
+function workerAssetJson(asset) {
+  return {
+    id: asset._id.toString(),
+    section: asset.section,
+    filename: asset.filename,
+    contentType: asset.contentType,
+    bytes: asset.bytes,
+    status: asset.status,
+    downloadPath: asset.status === "ready" ? `/api/worker/tasks/${asset.taskId}/assets/${asset._id}/download` : null,
+  };
+}
+
+function workerTaskJson(task, { publisher, contractor, assets = [] } = {}) {
+  const financials = workerTaskFinancials(task.budgetFen);
+  return {
+    id: task._id.toString(),
+    title: task.title,
+    inputDescription: task.inputDescription,
+    outputDescription: task.outputDescription,
+    exampleDescription: task.exampleDescription || "",
+    deadline: task.deadline,
+    budgetFen: task.budgetFen,
+    contractorIncomeFen: task.contractorIncomeFen ?? financials.contractorIncomeFen,
+    platformServiceFeeFen: task.platformServiceFeeFen ?? financials.platformServiceFeeFen,
+    status: task.status,
+    paymentStatus: task.paymentStatus,
+    paymentOrderNo: task.paymentOrderNo || null,
+    paymentReviewReason: task.paymentReviewReason || null,
+    progress: Number(task.progress || 0),
+    progressNote: task.progressNote || "",
+    deliveryNote: task.deliveryNote || "",
+    publisher: workerPerson(publisher),
+    contractor: workerPerson(contractor),
+    assets: assets.map(workerAssetJson),
+    workflowId: task.workflowId?.toString?.() || null,
+    createdAt: task.createdAt,
+    claimedAt: task.claimedAt || null,
+    submittedAt: task.submittedAt || null,
+    acceptedAt: task.acceptedAt || null,
+    updatedAt: task.updatedAt,
+  };
+}
+
+async function notifyUser(ownerId, type, title, message, details = {}) {
+  const now = new Date();
+  return (await getCollection("notifications")).insertOne({
+    ownerId,
+    type,
+    title,
+    message,
+    readAt: null,
+    ...details,
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
+async function notifyUserOnce(ownerId, type, title, message, details = {}) {
+  const now = new Date();
+  const dedupe = { ownerId, type, ...(details.taskId ? { taskId: details.taskId } : {}), ...(details.workflowId ? { workflowId: details.workflowId } : {}) };
+  return (await getCollection("notifications")).updateOne(
+    dedupe,
+    { $set: { title, message, readAt: null, ...details, updatedAt: now }, $setOnInsert: { createdAt: now } },
+    { upsert: true },
+  );
+}
+
+async function workerTaskDetails(task) {
+  if (!task) return null;
+  const peopleIds = [task.publisherId, task.contractorId].filter(Boolean);
+  const [people, assets] = await Promise.all([
+    peopleIds.length ? (await getCollection("users")).find({ _id: { $in: peopleIds } }, { projection: { displayName: 1, username: 1, avatar: 1 } }).toArray() : [],
+    (await getCollection("workerTaskUploads")).find({ taskId: task._id, status: "ready" }).sort({ createdAt: 1 }).toArray(),
+  ]);
+  const peopleMap = new Map(people.map((person) => [person._id.toString(), person]));
+  return workerTaskJson(task, {
+    publisher: peopleMap.get(task.publisherId?.toString()),
+    contractor: peopleMap.get(task.contractorId?.toString()),
+    assets,
+  });
 }
 
 function brainProgress(item) {
@@ -658,6 +757,33 @@ const latestReleaseRoute = createRoute({
   tags: ["Releases"],
   summary: "读取当前账号可用的最新 Windows 版本",
   responses: { 200: { description: "最新发行元数据", content: { "application/json": { schema: z.object({ release: z.object({ channelId: z.string(), channelName: z.string(), version: z.string(), filename: z.string(), bytes: z.number(), sha256: z.string(), signatureStatus: z.string(), publishedAt: z.coerce.date() }).nullable() }) } } } },
+});
+
+const WorkerTaskResponseSchema = z.object({ task: z.record(z.string(), z.unknown()) }).passthrough();
+const workerCreateTaskRoute = createRoute({
+  method: "post", path: "/api/worker/tasks", tags: ["Worker Market"], summary: "发布威客需求并创建预算托管单",
+  description: "发布者必须先填写微信号。任务内容创建后锁定，附件通过腾讯云 COS 直传。",
+  request: { body: { content: { "application/json": { schema: z.object({ inputDescription: z.string().min(10).max(10000), outputDescription: z.string().min(10).max(10000), exampleDescription: z.string().max(5000).optional(), deadline: z.string(), budgetFen: z.number().int().min(100).max(5000000) }) } } } },
+  responses: { 201: { description: "待付款任务", content: { "application/json": { schema: WorkerTaskResponseSchema } } }, 400: { description: "参数不正确", content: { "application/json": { schema: ErrorSchema } } }, 401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } } },
+});
+const workerListTasksRoute = createRoute({
+  method: "get", path: "/api/worker/tasks", tags: ["Worker Market"], summary: "读取接单大厅或我的威客任务",
+  request: { query: z.object({ view: z.enum(["market", "published", "claimed"]).optional() }) },
+  responses: { 200: { description: "真实任务列表", content: { "application/json": { schema: z.object({ tasks: z.array(z.record(z.string(), z.unknown())), view: z.string() }) } } }, 401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } } },
+});
+function workerActionRoute(method, path, summary, requestBody) {
+  return createRoute({ method, path, tags: ["Worker Market"], summary, ...(requestBody ? { request: { params: z.object({ id: z.string() }), body: { content: { "application/json": { schema: requestBody } } } } } : { request: { params: z.object({ id: z.string() }) } }), responses: { 200: { description: "任务状态已更新", content: { "application/json": { schema: WorkerTaskResponseSchema } } }, 400: { description: "参数不正确", content: { "application/json": { schema: ErrorSchema } } }, 401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } }, 409: { description: "任务状态冲突", content: { "application/json": { schema: ErrorSchema } } } } });
+}
+const workerSubmitPaymentRoute = workerActionRoute("post", "/api/worker/tasks/{id}/payment-submit", "提交威客预算线下付款审核");
+const workerClaimTaskRoute = workerActionRoute("post", "/api/worker/tasks/{id}/claim", "接单并原子锁定任务");
+const workerUpdateProgressRoute = workerActionRoute("patch", "/api/worker/tasks/{id}/progress", "接单者更新任务进度与文字说明", z.object({ progress: z.number().int().min(5).max(99), note: z.string().min(2).max(1000) }));
+const workerSubmitTaskRoute = workerActionRoute("post", "/api/worker/tasks/{id}/submit", "接单者提交最终交付", z.object({ deliveryNote: z.string().min(10).max(10000) }));
+const workerAcceptTaskRoute = workerActionRoute("post", "/api/worker/tasks/{id}/accept", "发布者验收并按 80/20 结算");
+const adminSetWebsiteRoleRoute = createRoute({
+  method: "put", path: "/api/admin/users/{id}/role", tags: ["Admin · Users"], summary: "将官网用户提升为管理员",
+  description: "写入持久 roleOverride，后续 Chandler 登录不会覆盖管理员角色。",
+  request: { params: z.object({ id: z.string() }), body: { content: { "application/json": { schema: z.object({ role: z.literal("admin") }) } } } },
+  responses: { 200: { description: "角色已更新", content: { "application/json": { schema: z.object({ ok: z.literal(true), userId: z.string(), role: z.literal("admin"), message: z.string() }) } } }, 403: { description: "非管理员", content: { "application/json": { schema: ErrorSchema } } }, 404: { description: "用户不存在", content: { "application/json": { schema: ErrorSchema } } } },
 });
 
 const adminManualReleaseUploadRoute = createRoute({
@@ -1288,6 +1414,7 @@ app.get("/api/account/dashboard", async (c) => {
       displayName: user?.displayName || null,
       avatar: user?.avatar || null,
       bio: user?.bio || "",
+      wechatId: user?.wechatId || "",
       role: user?.role || auth.user.role,
       edition: {
         key: user?.editionKey || auth.user.edition?.key || "gulong",
@@ -1372,10 +1499,11 @@ app.put("/api/account/profile", async (c) => {
   const displayName = String(body.displayName || "").trim();
   const username = String(body.username || "").trim();
   const bio = String(body.bio || "").trim();
-  if (displayName.length < 1 || displayName.length > 64 || bio.length > 240 || (username && (username.length < 3 || username.length > 32 || !/^[\p{L}\p{N}_-]+$/u.test(username)))) {
-    return c.json({ code: "VALIDATION_ERROR", message: "昵称、用户名或个人简介格式不正确" }, 400);
+  const wechatId = String(body.wechatId || "").trim();
+  if (displayName.length < 1 || displayName.length > 64 || bio.length > 240 || (username && (username.length < 3 || username.length > 32 || !/^[\p{L}\p{N}_-]+$/u.test(username))) || (wechatId && (wechatId.length < 5 || wechatId.length > 64 || !/^[A-Za-z0-9_+.-]+$/.test(wechatId)))) {
+    return c.json({ code: "VALIDATION_ERROR", message: "昵称、用户名、微信号或个人简介格式不正确" }, 400);
   }
-  const update = { displayName, displayNameUserManaged: true, bio, updatedAt: new Date() };
+  const update = { displayName, displayNameUserManaged: true, bio, wechatId, updatedAt: new Date() };
   if (username) {
     update.username = username;
     update.usernameNormalized = normalizeUsername(username);
@@ -1385,7 +1513,24 @@ app.put("/api/account/profile", async (c) => {
     { $set: update },
     { returnDocument: "after" },
   );
-  return c.json({ user: { id: user._id.toString(), username: user.username || null, email: user.email || null, displayName: user.displayName || null, avatar: user.avatar || null, bio: user.bio || "", role: user.role || "user" } });
+  return c.json({ user: { id: user._id.toString(), username: user.username || null, email: user.email || null, displayName: user.displayName || null, avatar: user.avatar || null, bio: user.bio || "", wechatId: user.wechatId || "", role: user.role || "user" } });
+});
+
+app.get("/api/account/worker-profile", async (c) => {
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  const user = await (await getCollection("users")).findOne({ _id: new ObjectId(auth.user.id) }, { projection: { wechatId: 1 } });
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  return c.json({ wechatId: user?.wechatId || "", ready: Boolean(user?.wechatId) });
+});
+
+app.put("/api/account/wechat", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  const body = await c.req.json().catch(() => ({}));
+  const wechatId = String(body.wechatId || "").trim();
+  if (wechatId.length < 5 || wechatId.length > 64 || !/^[A-Za-z0-9_+.-]+$/.test(wechatId)) return c.json({ code: "VALIDATION_ERROR", message: "请输入 5–64 位正确微信号" }, 400);
+  await (await getCollection("users")).updateOne({ _id: new ObjectId(auth.user.id) }, { $set: { wechatId, updatedAt: new Date() } });
+  return c.json({ ok: true, wechatId, ready: true });
 });
 
 app.get("/api/users/:id/avatar", async (c) => {
@@ -1473,6 +1618,30 @@ app.post("/api/account/notifications/:id/read", async (c) => {
   return c.json({ ok: true });
 });
 
+app.get("/api/account/notifications", async (c) => {
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  const ownerId = new ObjectId(auth.user.id);
+  const notifications = await getCollection("notifications");
+  const [items, unread] = await Promise.all([
+    notifications.find({ ownerId }).sort({ createdAt: -1 }).limit(8).toArray(),
+    notifications.countDocuments({ ownerId, readAt: null }),
+  ]);
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  return c.json({
+    unread,
+    notifications: items.map((item) => ({
+      id: item._id.toString(),
+      type: item.type,
+      title: item.title,
+      message: item.message,
+      reason: item.reason || null,
+      taskId: item.taskId?.toString?.() || null,
+      readAt: item.readAt || null,
+      createdAt: item.createdAt,
+    })),
+  });
+});
+
 app.put("/api/account/integrations/minimax", async (c) => {
   const rejected = requireTrustedMutation(c); if (rejected) return rejected;
   const auth = await authenticate(c); if (auth.error) return auth.error;
@@ -1555,7 +1724,7 @@ app.delete("/api/auth/account", async (c) => {
   await Promise.all([
     (await getCollection("sessions")).deleteMany({ userId: ownerId }),
     (await getCollection("offlinePaymentReviewEvents")).deleteMany({ orderId: { $in: offlineOrderIds.map((order) => order._id) } }),
-    ...["apiKeys", "tasks", "memories", "feedback", "payments", "subscriptions", "wallets", "uploads", "offlinePayments", "userConfigurations", "notifications", "avatarUploads", "offlinePaymentReviewWorkers"]
+    ...["apiKeys", "tasks", "memories", "feedback", "payments", "subscriptions", "wallets", "uploads", "offlinePayments", "userConfigurations", "notifications", "avatarUploads", "offlinePaymentReviewWorkers", "workerTasks", "workerTaskUploads", "workerEarnings", "workerWorkflows", "workerWorkflowRevenueLedger", "workerContactPayments"]
       .map((name) => getCollection(name).then((collection) => collection.deleteMany({ ownerId }))),
   ]);
   await (await getCollection("users")).deleteOne({ _id: ownerId });
@@ -1617,7 +1786,26 @@ app.openapi(adminListChandlerUsersRoute, async (c) => {
   if (query.status) params.set("status", query.status);
   try {
     const accessToken = await getChandlerAccessToken(auth.session);
-    return c.json(await chandlerRequest(`/v1/admin/users?${params}`, { accessToken }));
+    const result = await chandlerRequest(`/v1/admin/users?${params}`, { accessToken });
+    const remoteUsers = Array.isArray(result?.users) ? result.users : [];
+    if (!remoteUsers.length) return c.json(result);
+    const chandlerIds = remoteUsers.map((user) => String(user.id || "")).filter(Boolean);
+    const emails = remoteUsers.map((user) => String(user.email || "").trim().toLowerCase()).filter(Boolean);
+    const localUsers = await (await getCollection("users")).find({
+      $or: [
+        ...(chandlerIds.length ? [{ chandlerUserId: { $in: chandlerIds } }] : []),
+        ...(emails.length ? [{ emailNormalized: { $in: emails } }] : []),
+      ],
+    }, { projection: { chandlerUserId: 1, emailNormalized: 1, role: 1, editionName: 1 } }).toArray();
+    const byChandler = new Map(localUsers.filter((user) => user.chandlerUserId).map((user) => [String(user.chandlerUserId), user]));
+    const byEmail = new Map(localUsers.filter((user) => user.emailNormalized).map((user) => [user.emailNormalized, user]));
+    return c.json({
+      ...result,
+      users: remoteUsers.map((user) => {
+        const local = byChandler.get(String(user.id || "")) || byEmail.get(String(user.email || "").trim().toLowerCase());
+        return { ...user, website_user_id: local?._id?.toString() || null, role: local?.role || user.role || "user", edition_name: local?.editionName || user.edition_name || "古龙版" };
+      }),
+    });
   } catch (error) {
     const page = query.page || 1;
     const limit = query.limit || 30;
@@ -1646,6 +1834,34 @@ app.openapi(adminListChandlerUsersRoute, async (c) => {
       meta: { total, page, limit, pages: Math.ceil(total / limit), source: "website-shadow", permissionLimited: true, warning: error.message },
     });
   }
+});
+
+app.openapi(adminSetWebsiteRoleRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  const body = await c.req.json().catch(() => ({}));
+  if (body.role !== "admin") return c.json({ code: "VALIDATION_ERROR", message: "当前仅支持将普通用户提升为管理员" }, 400);
+  const targetId = String(c.req.param("id") || "").trim();
+  const filters = [{ chandlerUserId: targetId }];
+  if (ObjectId.isValid(targetId)) filters.unshift({ _id: new ObjectId(targetId) });
+  const users = await getCollection("users");
+  let target = await users.findOne({ $or: filters });
+  if (!target) {
+    try {
+      const accessToken = await getChandlerAccessToken(auth.session);
+      const remote = await chandlerRequest(`/v1/admin/users/${encodeURIComponent(targetId)}`, { accessToken });
+      target = await upsertChandlerUser(remote, { identity: { role: "admin", editionKey: "gulong", editionName: "古龙版", editionSource: "admin-promotion" } });
+    } catch {
+      return c.json({ code: "USER_NOT_FOUND", message: "该用户尚未登录过古龙官网，暂时无法设置官网管理员角色" }, 404);
+    }
+  }
+  const now = new Date();
+  await users.updateOne(
+    { _id: target._id },
+    { $set: { role: "admin", roleOverride: "admin", roleUpdatedAt: now, roleUpdatedBy: new ObjectId(auth.user.id), updatedAt: now } },
+  );
+  await notifyUser(target._id, "administrator_role_granted", "你已成为古龙管理员", "管理员权限已经生效，可从网站右上角进入管理员后台。", { actorId: new ObjectId(auth.user.id) });
+  return c.json({ ok: true, userId: target._id.toString(), role: "admin", message: "用户已提升为管理员，下次登录仍会保留该角色。" });
 });
 
 app.openapi(adminSetChandlerUserStatusRoute, async (c) => {
@@ -2673,6 +2889,468 @@ app.post("/api/feedback", async (c) => {
     ipFingerprint: ipKey,
   });
   return c.json({ id: result.insertedId.toString(), status: "open" }, 201);
+});
+
+app.openapi(workerCreateTaskRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  const publisher = await (await getCollection("users")).findOne({ _id: new ObjectId(auth.user.id) }, { projection: { wechatId: 1 } });
+  if (!publisher?.wechatId) return c.json({ code: "WECHAT_REQUIRED", message: "发布需求前请先在个人资料中填写微信号" }, 409);
+  const body = await c.req.json().catch(() => ({}));
+  const inputDescription = String(body.inputDescription || "").trim();
+  const outputDescription = String(body.outputDescription || "").trim();
+  const exampleDescription = String(body.exampleDescription || "").trim();
+  const deadline = new Date(body.deadline);
+  const budgetFen = Math.round(Number(body.budgetFen));
+  if (inputDescription.length < 10 || inputDescription.length > 10_000 || outputDescription.length < 10 || outputDescription.length > 10_000 || exampleDescription.length > 5_000) {
+    return c.json({ code: "VALIDATION_ERROR", message: "任务说明和预期结果至少 10 字，单项最多 10,000 字" }, 400);
+  }
+  if (Number.isNaN(deadline.getTime()) || deadline.getTime() < Date.now() + 60 * 60_000 || deadline.getTime() > Date.now() + 366 * 86400_000) {
+    return c.json({ code: "VALIDATION_ERROR", message: "截止时间需在 1 小时至 1 年以内" }, 400);
+  }
+  if (!Number.isSafeInteger(budgetFen) || budgetFen < 100 || budgetFen > 5_000_000) {
+    return c.json({ code: "VALIDATION_ERROR", message: "任务预算需在 ¥1–¥50,000 之间" }, 400);
+  }
+  const now = new Date();
+  const financials = workerTaskFinancials(budgetFen);
+  const result = await (await getCollection("workerTasks")).insertOne({
+    publisherId: new ObjectId(auth.user.id),
+    title: workerTaskTitle(inputDescription),
+    inputDescription,
+    outputDescription,
+    exampleDescription,
+    deadline,
+    ...financials,
+    status: "awaiting_payment",
+    paymentStatus: "awaiting_payment",
+    progress: 0,
+    workflowFingerprint: workerTaskFingerprint(inputDescription, outputDescription, exampleDescription),
+    createdAt: now,
+    updatedAt: now,
+  });
+  const task = await (await getCollection("workerTasks")).findOne({ _id: result.insertedId });
+  return c.json({ task: await workerTaskDetails(task) }, 201);
+});
+
+app.openapi(workerListTasksRoute, async (c) => {
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  const ownerId = new ObjectId(auth.user.id);
+  const view = ["market", "published", "claimed"].includes(c.req.query("view")) ? c.req.query("view") : "market";
+  const filter = view === "published"
+    ? { publisherId: ownerId }
+    : view === "claimed"
+      ? { contractorId: ownerId }
+      : { status: { $in: ["open", "in_progress", "submitted", "accepted"] } };
+  const tasks = await (await getCollection("workerTasks")).find(filter).sort({ status: 1, createdAt: -1 }).limit(100).toArray();
+  const items = await Promise.all(tasks.map(workerTaskDetails));
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  return c.json({ tasks: items, view });
+});
+
+app.get("/api/worker/tasks/:id", async (c) => {
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "TASK_NOT_FOUND", message: "威客任务不存在" }, 404);
+  const task = await (await getCollection("workerTasks")).findOne({ _id: new ObjectId(c.req.param("id")) });
+  if (!task) return c.json({ code: "TASK_NOT_FOUND", message: "威客任务不存在" }, 404);
+  const ownerId = new ObjectId(auth.user.id);
+  const isRelated = task.publisherId.equals(ownerId) || task.contractorId?.equals?.(ownerId) || auth.user.role === "admin";
+  if (!isRelated && !["open", "in_progress", "submitted", "accepted"].includes(task.status)) return c.json({ code: "FORBIDDEN", message: "该任务暂不可查看" }, 403);
+  return c.json({ task: await workerTaskDetails(task) });
+});
+
+app.delete("/api/worker/tasks/:id/draft", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "TASK_NOT_FOUND", message: "威客任务不存在" }, 404);
+  const taskId = new ObjectId(c.req.param("id"));
+  const ownerId = new ObjectId(auth.user.id);
+  const tasks = await getCollection("workerTasks");
+  const task = await tasks.findOne({ _id: taskId, publisherId: ownerId, status: "awaiting_payment" });
+  if (!task) return c.json({ code: "TASK_STATE_CHANGED", message: "只有尚未提交付款的任务可以撤销" }, 409);
+  const uploads = await getCollection("workerTaskUploads");
+  const assets = await uploads.find({ taskId, ownerId }).toArray();
+  await Promise.allSettled(assets.map((asset) => deleteObject(asset.objectKey)));
+  await Promise.all([uploads.deleteMany({ taskId, ownerId }), tasks.deleteOne({ _id: taskId, publisherId: ownerId, status: "awaiting_payment" })]);
+  return c.json({ ok: true });
+});
+
+app.post("/api/worker/tasks/:id/assets/presign", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "TASK_NOT_FOUND", message: "威客任务不存在" }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const input = workerAssetInput(body);
+  const filename = sanitizeFilename(body.filename, "attachment.bin");
+  if (!input) return c.json({ code: "VALIDATION_ERROR", message: "附件类型不支持、为空或超过 200 MB" }, 400);
+  const ownerId = new ObjectId(auth.user.id);
+  const taskId = new ObjectId(c.req.param("id"));
+  const task = await (await getCollection("workerTasks")).findOne({ _id: taskId });
+  if (!task) return c.json({ code: "TASK_NOT_FOUND", message: "威客任务不存在" }, 404);
+  const mayUploadBrief = task.publisherId.equals(ownerId) && ["awaiting_payment", "payment_rejected"].includes(task.status) && ["input", "output"].includes(input.section);
+  const mayUploadDelivery = task.contractorId?.equals?.(ownerId) && task.status === "in_progress" && input.section === "delivery";
+  if (!mayUploadBrief && !mayUploadDelivery) return c.json({ code: "FORBIDDEN", message: "当前任务状态不允许上传该附件" }, 403);
+  const uploads = await getCollection("workerTaskUploads");
+  const count = await uploads.countDocuments({ taskId, section: input.section, status: { $in: ["uploading", "ready"] } });
+  if (count >= WORKER_MAX_ASSETS_PER_SECTION) return c.json({ code: "ASSET_LIMIT", message: "每个区域最多上传 10 个附件" }, 409);
+  await ensureBrowserUploadCors();
+  const uploadId = new ObjectId();
+  const objectKey = `worker/tasks/${taskId}/${input.section}/${uploadId}-${filename}`;
+  const now = new Date();
+  await uploads.insertOne({ _id: uploadId, taskId, ownerId, objectKey, filename, ...input, status: "uploading", createdAt: now, updatedAt: now, expiresAt: new Date(now.getTime() + 60 * 60_000) });
+  const requiredHeaders = { "Content-Type": input.contentType };
+  return c.json({ uploadId: uploadId.toString(), uploadUrl: createPresignedPutUrl(objectKey, { expires: 60 * 60, headers: requiredHeaders }), objectKey, requiredHeaders, expiresIn: 3600 }, 201);
+});
+
+app.post("/api/worker/tasks/:id/assets/:uploadId/complete", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id")) || !ObjectId.isValid(c.req.param("uploadId"))) return c.json({ code: "UPLOAD_NOT_FOUND", message: "附件上传记录不存在" }, 404);
+  const uploads = await getCollection("workerTaskUploads");
+  const upload = await uploads.findOne({ _id: new ObjectId(c.req.param("uploadId")), taskId: new ObjectId(c.req.param("id")), ownerId: new ObjectId(auth.user.id), status: "uploading", expiresAt: { $gt: new Date() } });
+  if (!upload) return c.json({ code: "UPLOAD_NOT_FOUND", message: "附件上传记录不存在或已失效" }, 404);
+  const head = await headObject(upload.objectKey);
+  if (objectSize(head) !== upload.bytes) {
+    await deleteObject(upload.objectKey).catch(() => {});
+    await uploads.updateOne({ _id: upload._id }, { $set: { status: "failed", error: "COS_OBJECT_MISMATCH", updatedAt: new Date() } });
+    return c.json({ code: "UPLOAD_MISMATCH", message: "附件文件大小校验失败，请重新上传" }, 409);
+  }
+  const now = new Date();
+  await uploads.updateOne({ _id: upload._id, status: "uploading" }, { $set: { status: "ready", completedAt: now, updatedAt: now }, $unset: { expiresAt: "" } });
+  return c.json({ asset: workerAssetJson({ ...upload, status: "ready" }) });
+});
+
+app.get("/api/worker/tasks/:id/assets/:assetId/download", async (c) => {
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id")) || !ObjectId.isValid(c.req.param("assetId"))) return c.json({ code: "ASSET_NOT_FOUND", message: "附件不存在" }, 404);
+  const taskId = new ObjectId(c.req.param("id"));
+  const [task, asset] = await Promise.all([
+    (await getCollection("workerTasks")).findOne({ _id: taskId }),
+    (await getCollection("workerTaskUploads")).findOne({ _id: new ObjectId(c.req.param("assetId")), taskId, status: "ready" }),
+  ]);
+  if (!task || !asset) return c.json({ code: "ASSET_NOT_FOUND", message: "附件不存在" }, 404);
+  const ownerId = new ObjectId(auth.user.id);
+  const related = task.publisherId.equals(ownerId) || task.contractorId?.equals?.(ownerId) || auth.user.role === "admin";
+  const marketplaceBrief = ["input", "output"].includes(asset.section) && ["open", "in_progress", "submitted", "accepted"].includes(task.status);
+  if (!related && !marketplaceBrief) return c.json({ code: "FORBIDDEN", message: "你没有权限下载该附件" }, 403);
+  return c.redirect(createPresignedDownloadUrl(asset.objectKey, { filename: asset.filename }), 302);
+});
+
+app.openapi(workerSubmitPaymentRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "TASK_NOT_FOUND", message: "威客任务不存在" }, 404);
+  const taskId = new ObjectId(c.req.param("id"));
+  const ownerId = new ObjectId(auth.user.id);
+  const now = new Date();
+  const paymentOrderNo = `WK${Date.now()}${randomBytes(4).toString("hex").toUpperCase()}`;
+  const task = await (await getCollection("workerTasks")).findOneAndUpdate(
+    { _id: taskId, publisherId: ownerId, status: { $in: ["awaiting_payment", "payment_rejected"] } },
+    { $set: { status: "pending_payment_review", paymentStatus: "pending", paymentOrderNo, paymentSubmittedAt: now, updatedAt: now }, $unset: { paymentReviewReason: "", paymentReviewedAt: "", paymentReviewedBy: "" }, $inc: { paymentSubmissionCount: 1 } },
+    { returnDocument: "after" },
+  );
+  if (!task) return c.json({ code: "TASK_STATE_CHANGED", message: "任务不存在、付款已提交或不属于当前账号" }, 409);
+  return c.json({ task: await workerTaskDetails(task), orderNo: paymentOrderNo, status: "pending_payment_review" });
+});
+
+app.get("/api/worker/tasks/:id/contact", async (c) => {
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "TASK_NOT_FOUND", message: "威客任务不存在" }, 404);
+  const task = await (await getCollection("workerTasks")).findOne({ _id: new ObjectId(c.req.param("id")) });
+  if (!task?.contractorId) return c.json({ code: "CONTACT_NOT_READY", message: "任务尚未被接单，暂时没有可查看的联系人" }, 409);
+  const requesterId = new ObjectId(auth.user.id);
+  const isPublisher = task.publisherId.equals(requesterId);
+  const isContractor = task.contractorId.equals(requesterId);
+  if (!isPublisher && !isContractor) return c.json({ code: "FORBIDDEN", message: "只有任务双方可以申请查看联系方式" }, 403);
+  const targetId = isPublisher ? task.contractorId : task.publisherId;
+  const order = await (await getCollection("workerContactPayments")).findOne({ taskId: task._id, requesterId, targetId }, { sort: { createdAt: -1 } });
+  const target = order?.status === "approved" ? await (await getCollection("users")).findOne({ _id: targetId }, { projection: { wechatId: 1, displayName: 1, username: 1 } }) : null;
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  return c.json({
+    status: order?.status || "not_requested",
+    order: order ? { id: order._id.toString(), orderNo: order.orderNo, amountFen: order.amountFen, status: order.status, reviewReason: order.reviewReason || null, createdAt: order.createdAt } : null,
+    contact: target?.wechatId ? { displayName: target.displayName || target.username || "任务联系人", wechatId: target.wechatId } : null,
+  });
+});
+
+app.post("/api/worker/tasks/:id/contact-orders", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "TASK_NOT_FOUND", message: "威客任务不存在" }, 404);
+  const task = await (await getCollection("workerTasks")).findOne({ _id: new ObjectId(c.req.param("id")) });
+  if (!task?.contractorId) return c.json({ code: "CONTACT_NOT_READY", message: "任务尚未被接单，暂时不能申请联系方式" }, 409);
+  const requesterId = new ObjectId(auth.user.id);
+  const isPublisher = task.publisherId.equals(requesterId);
+  const isContractor = task.contractorId.equals(requesterId);
+  if (!isPublisher && !isContractor) return c.json({ code: "FORBIDDEN", message: "只有任务双方可以申请查看联系方式" }, 403);
+  const targetId = isPublisher ? task.contractorId : task.publisherId;
+  const contacts = await getCollection("workerContactPayments");
+  let order = await contacts.findOne({ taskId: task._id, requesterId, targetId }, { sort: { createdAt: -1 } });
+  if (!order) {
+    const now = new Date();
+    const result = await contacts.insertOne({ taskId: task._id, requesterId, targetId, requesterRole: isPublisher ? "publisher" : "contractor", orderNo: `WC${Date.now()}${randomBytes(4).toString("hex").toUpperCase()}`, amountFen: 200, status: "awaiting_payment", createdAt: now, updatedAt: now });
+    order = await contacts.findOne({ _id: result.insertedId });
+  }
+  return c.json({ order: { id: order._id.toString(), orderNo: order.orderNo, amountFen: 200, status: order.status, reviewReason: order.reviewReason || null } }, order.status === "awaiting_payment" ? 201 : 200);
+});
+
+app.post("/api/worker/contact-orders/:id/payment-submit", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "ORDER_NOT_FOUND", message: "联系方式订单不存在" }, 404);
+  const now = new Date();
+  const order = await (await getCollection("workerContactPayments")).findOneAndUpdate(
+    { _id: new ObjectId(c.req.param("id")), requesterId: new ObjectId(auth.user.id), status: { $in: ["awaiting_payment", "rejected"] } },
+    { $set: { status: "pending", submittedAt: now, updatedAt: now }, $unset: { reviewReason: "", reviewedAt: "", reviewedBy: "" }, $inc: { submissionCount: 1 } },
+    { returnDocument: "after" },
+  );
+  if (!order) return c.json({ code: "ORDER_STATE_CHANGED", message: "订单已提交、已审核或不属于当前账号" }, 409);
+  return c.json({ order: { id: order._id.toString(), orderNo: order.orderNo, amountFen: order.amountFen, status: order.status } });
+});
+
+app.openapi(workerClaimTaskRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "TASK_NOT_FOUND", message: "威客任务不存在" }, 404);
+  const contractorId = new ObjectId(auth.user.id);
+  const contractor = await (await getCollection("users")).findOne({ _id: contractorId }, { projection: { wechatId: 1 } });
+  if (!contractor?.wechatId) return c.json({ code: "WECHAT_REQUIRED", message: "接单前请先在个人资料中填写微信号" }, 409);
+  const now = new Date();
+  const task = await (await getCollection("workerTasks")).findOneAndUpdate(
+    { _id: new ObjectId(c.req.param("id")), status: "open", publisherId: { $ne: contractorId }, contractorId: { $exists: false } },
+    { $set: { status: "in_progress", contractorId, claimedAt: now, progress: 5, progressNote: "已接单，正在梳理任务与交付计划。", updatedAt: now } },
+    { returnDocument: "after" },
+  );
+  if (!task) return c.json({ code: "TASK_ALREADY_CLAIMED", message: "任务已被接单、状态已变化，或不能承接自己发布的任务" }, 409);
+  await notifyUser(task.publisherId, "worker_task_claimed", "你的威客任务已被接单", `“${task.title}”已进入处理中，接单者会持续更新进度。`, { taskId: task._id });
+  return c.json({ task: await workerTaskDetails(task) });
+});
+
+app.openapi(workerUpdateProgressRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "TASK_NOT_FOUND", message: "威客任务不存在" }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const progress = Math.trunc(Number(body.progress));
+  const progressNote = String(body.note || "").trim();
+  if (!Number.isInteger(progress) || progress < 5 || progress > 99 || progressNote.length < 2 || progressNote.length > 1000) return c.json({ code: "VALIDATION_ERROR", message: "进度需为 5–99，进度说明需为 2–1000 字" }, 400);
+  const now = new Date();
+  const task = await (await getCollection("workerTasks")).findOneAndUpdate(
+    { _id: new ObjectId(c.req.param("id")), contractorId: new ObjectId(auth.user.id), status: "in_progress" },
+    { $set: { progress, progressNote, progressUpdatedAt: now, updatedAt: now } },
+    { returnDocument: "after" },
+  );
+  if (!task) return c.json({ code: "FORBIDDEN", message: "只有当前接单者可更新处理中的任务进度" }, 403);
+  await notifyUser(task.publisherId, "worker_task_progress", "威客任务进度已更新", `“${task.title}”当前进度 ${progress}%：${progressNote}`, { taskId: task._id });
+  return c.json({ task: await workerTaskDetails(task) });
+});
+
+app.openapi(workerSubmitTaskRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "TASK_NOT_FOUND", message: "威客任务不存在" }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const deliveryNote = String(body.deliveryNote || "").trim();
+  if (deliveryNote.length < 10 || deliveryNote.length > 10_000) return c.json({ code: "VALIDATION_ERROR", message: "交付说明需为 10–10,000 字" }, 400);
+  const now = new Date();
+  const task = await (await getCollection("workerTasks")).findOneAndUpdate(
+    { _id: new ObjectId(c.req.param("id")), contractorId: new ObjectId(auth.user.id), status: "in_progress" },
+    { $set: { status: "submitted", progress: 100, progressNote: "任务已完成并提交验收。", deliveryNote, submittedAt: now, updatedAt: now } },
+    { returnDocument: "after" },
+  );
+  if (!task) return c.json({ code: "FORBIDDEN", message: "只有当前接单者可提交处理中的任务" }, 403);
+  await notifyUser(task.publisherId, "worker_task_submitted", "威客任务等待你的验收", `“${task.title}”已完成交付，请检查结果与附件后确认验收。`, { taskId: task._id });
+  return c.json({ task: await workerTaskDetails(task) });
+});
+
+app.openapi(workerAcceptTaskRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "TASK_NOT_FOUND", message: "威客任务不存在" }, 404);
+  const now = new Date();
+  const tasks = await getCollection("workerTasks");
+  const taskId = new ObjectId(c.req.param("id"));
+  const publisherId = new ObjectId(auth.user.id);
+  let task = await tasks.findOne({ _id: taskId, publisherId, status: { $in: ["submitted", "accepted"] }, contractorId: { $exists: true } });
+  if (!task) return c.json({ code: "TASK_STATE_CHANGED", message: "只有发布者可验收已提交的任务" }, 409);
+  if (task.status === "submitted") {
+    task = await tasks.findOneAndUpdate(
+      { _id: taskId, publisherId, status: "submitted", contractorId: task.contractorId },
+      { $set: { status: "accepted", acceptedAt: now, updatedAt: now } },
+      { returnDocument: "after" },
+    );
+    if (!task) task = await tasks.findOne({ _id: taskId, publisherId, status: "accepted" });
+  }
+  if (!task) return c.json({ code: "TASK_STATE_CHANGED", message: "任务状态已变化，请刷新后查看" }, 409);
+  const financials = workerTaskFinancials(task.budgetFen);
+  const workflows = await getCollection("workerWorkflows");
+  let workflow = task.workflowId ? await workflows.findOne({ _id: task.workflowId }) : null;
+  if (!workflow) workflow = await workflows.findOneAndUpdate(
+    { fingerprint: task.workflowFingerprint },
+    {
+      $set: { updatedAt: now, revenueRule: workerWorkflowRevenue({ grossFen: 0 }).rule },
+      $setOnInsert: { sourceTaskId: task._id, publisherId: task.publisherId, contractorId: task.contractorId, name: task.title, status: "ready", reuseCount: 0, createdAt: now },
+      $addToSet: { acceptedTaskIds: task._id },
+    },
+    { upsert: true, returnDocument: "after" },
+  );
+  await tasks.updateOne({ _id: task._id }, { $set: { workflowId: workflow._id, workflowRevenueRule: workflow.revenueRule, updatedAt: now } });
+  const earnings = await getCollection("workerEarnings");
+  const earning = await earnings.updateOne(
+    { taskId: task._id, kind: "task_acceptance" },
+    { $setOnInsert: { ownerId: task.contractorId, publisherId: task.publisherId, amountFen: financials.contractorIncomeFen, platformAmountFen: financials.platformServiceFeeFen, status: "available", createdAt: now, availableAt: now } },
+    { upsert: true },
+  );
+  if (earning.upsertedCount) {
+    await (await getCollection("wallets")).updateOne(
+      { ownerId: task.contractorId },
+      { $inc: { balanceFen: financials.contractorIncomeFen }, $set: { updatedAt: now }, $setOnInsert: { createdAt: now } },
+      { upsert: true },
+    );
+  }
+  await Promise.all([
+    notifyUserOnce(task.contractorId, "worker_task_accepted", "任务已验收，收入已到账", `“${task.title}”已通过验收，${(financials.contractorIncomeFen / 100).toFixed(2)} 元已计入账户余额。`, { taskId: task._id, amountFen: financials.contractorIncomeFen }),
+    notifyUserOnce(task.publisherId, "worker_task_accepted", "威客任务已完成", `“${task.title}”已完成结算，并沉淀为可复用工作流。`, { taskId: task._id, workflowId: workflow._id }),
+  ]);
+  const accepted = await tasks.findOne({ _id: task._id });
+  return c.json({ task: await workerTaskDetails(accepted), settlement: financials, workflow: { id: workflow._id.toString(), revenueRule: workflow.revenueRule } });
+});
+
+app.get("/api/admin/worker-payments", async (c) => {
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  const requested = c.req.query("status");
+  const filter = requested === "reviewed" ? { paymentStatus: { $in: ["approved", "rejected"] } } : { paymentStatus: "pending" };
+  const tasks = await getCollection("workerTasks");
+  const [items, pending, approved, rejectedCount] = await Promise.all([
+    tasks.find(filter).sort(requested === "reviewed" ? { paymentReviewedAt: -1 } : { paymentSubmittedAt: 1 }).limit(100).toArray(),
+    tasks.countDocuments({ paymentStatus: "pending" }),
+    tasks.countDocuments({ paymentStatus: "approved" }),
+    tasks.countDocuments({ paymentStatus: "rejected" }),
+  ]);
+  return c.json({ tasks: await Promise.all(items.map(workerTaskDetails)), summary: { pending, reviewed: approved + rejectedCount, approved, rejected: rejectedCount } });
+});
+
+app.post("/api/admin/worker-payments/:id/approve", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "TASK_NOT_FOUND", message: "威客任务不存在" }, 404);
+  const now = new Date();
+  const task = await (await getCollection("workerTasks")).findOneAndUpdate(
+    { _id: new ObjectId(c.req.param("id")), status: "pending_payment_review", paymentStatus: "pending" },
+    { $set: { status: "open", paymentStatus: "approved", paymentReviewedAt: now, paymentReviewedBy: new ObjectId(auth.user.id), escrowStatus: "locked", updatedAt: now } },
+    { returnDocument: "after" },
+  );
+  if (!task) return c.json({ code: "TASK_STATE_CHANGED", message: "该任务付款已处理或状态已变化" }, 409);
+  await notifyUser(task.publisherId, "worker_payment_approved", "威客任务付款审核已通过", `“${task.title}”已进入接单大厅，任何用户现在都可以接单。`, { taskId: task._id, orderNo: task.paymentOrderNo });
+  return c.json({ task: await workerTaskDetails(task) });
+});
+
+app.post("/api/admin/worker-payments/:id/reject", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "TASK_NOT_FOUND", message: "威客任务不存在" }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const reason = String(body.reason || "").trim();
+  if (reason.length < 2 || reason.length > 500) return c.json({ code: "VALIDATION_ERROR", message: "请填写 2–500 字的拒绝原因" }, 400);
+  const now = new Date();
+  const task = await (await getCollection("workerTasks")).findOneAndUpdate(
+    { _id: new ObjectId(c.req.param("id")), status: "pending_payment_review", paymentStatus: "pending" },
+    { $set: { status: "payment_rejected", paymentStatus: "rejected", paymentReviewReason: reason, paymentReviewedAt: now, paymentReviewedBy: new ObjectId(auth.user.id), updatedAt: now } },
+    { returnDocument: "after" },
+  );
+  if (!task) return c.json({ code: "TASK_STATE_CHANGED", message: "该任务付款已处理或状态已变化" }, 409);
+  await notifyUser(task.publisherId, "worker_payment_rejected", "威客任务付款审核未通过", `“${task.title}”暂未通过付款审核，请调整后重新提交。`, { taskId: task._id, orderNo: task.paymentOrderNo, reason });
+  return c.json({ task: await workerTaskDetails(task) });
+});
+
+app.get("/api/admin/worker-contact-payments", async (c) => {
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  const requested = c.req.query("status");
+  const filter = requested === "reviewed" ? { status: { $in: ["approved", "rejected"] } } : { status: "pending" };
+  const contacts = await getCollection("workerContactPayments");
+  const [orders, pending, approved, rejectedCount] = await Promise.all([
+    contacts.find(filter).sort(requested === "reviewed" ? { reviewedAt: -1 } : { submittedAt: 1 }).limit(100).toArray(),
+    contacts.countDocuments({ status: "pending" }),
+    contacts.countDocuments({ status: "approved" }),
+    contacts.countDocuments({ status: "rejected" }),
+  ]);
+  const taskIds = orders.map((order) => order.taskId);
+  const userIds = orders.flatMap((order) => [order.requesterId, order.targetId]);
+  const [tasks, users] = await Promise.all([
+    taskIds.length ? (await getCollection("workerTasks")).find({ _id: { $in: taskIds } }, { projection: { title: 1 } }).toArray() : [],
+    userIds.length ? (await getCollection("users")).find({ _id: { $in: userIds } }, { projection: { displayName: 1, username: 1, email: 1 } }).toArray() : [],
+  ]);
+  const taskMap = new Map(tasks.map((task) => [task._id.toString(), task]));
+  const userMap = new Map(users.map((user) => [user._id.toString(), user]));
+  return c.json({
+    orders: orders.map((order) => ({
+      id: order._id.toString(), orderNo: order.orderNo, amountFen: order.amountFen, status: order.status, requesterRole: order.requesterRole,
+      taskId: order.taskId.toString(), taskTitle: taskMap.get(order.taskId.toString())?.title || "威客任务",
+      requester: workerPerson(userMap.get(order.requesterId.toString())), target: workerPerson(userMap.get(order.targetId.toString())),
+      reviewReason: order.reviewReason || null, createdAt: order.createdAt, submittedAt: order.submittedAt || null,
+    })),
+    summary: { pending, reviewed: approved + rejectedCount, approved, rejected: rejectedCount },
+  });
+});
+
+app.post("/api/admin/worker-contact-payments/:id/approve", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "ORDER_NOT_FOUND", message: "联系方式订单不存在" }, 404);
+  const now = new Date();
+  const order = await (await getCollection("workerContactPayments")).findOneAndUpdate(
+    { _id: new ObjectId(c.req.param("id")), status: "pending" },
+    { $set: { status: "approved", reviewedAt: now, reviewedBy: new ObjectId(auth.user.id), updatedAt: now } },
+    { returnDocument: "after" },
+  );
+  if (!order) return c.json({ code: "ORDER_STATE_CHANGED", message: "订单已审核或状态已变化" }, 409);
+  await notifyUser(order.requesterId, "worker_contact_approved", "任务联系人已解锁", "2 元线下支付已审核通过，现在可以在威客管理中查看对方微信号。", { taskId: order.taskId, orderNo: order.orderNo });
+  return c.json({ ok: true, status: "approved" });
+});
+
+app.post("/api/admin/worker-contact-payments/:id/reject", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "ORDER_NOT_FOUND", message: "联系方式订单不存在" }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const reason = String(body.reason || "").trim();
+  if (reason.length < 2 || reason.length > 500) return c.json({ code: "VALIDATION_ERROR", message: "请填写 2–500 字的拒绝原因" }, 400);
+  const now = new Date();
+  const order = await (await getCollection("workerContactPayments")).findOneAndUpdate(
+    { _id: new ObjectId(c.req.param("id")), status: "pending" },
+    { $set: { status: "rejected", reviewReason: reason, reviewedAt: now, reviewedBy: new ObjectId(auth.user.id), updatedAt: now } },
+    { returnDocument: "after" },
+  );
+  if (!order) return c.json({ code: "ORDER_STATE_CHANGED", message: "订单已审核或状态已变化" }, 409);
+  await notifyUser(order.requesterId, "worker_contact_rejected", "联系方式支付审核未通过", "请查看原因并调整后重新提交。", { taskId: order.taskId, orderNo: order.orderNo, reason });
+  return c.json({ ok: true, status: "rejected", reason });
+});
+
+app.post("/api/admin/worker-workflows/:id/revenue", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "WORKFLOW_NOT_FOUND", message: "工作流不存在" }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const reference = String(body.reference || "").trim();
+  if (reference.length < 3 || reference.length > 120) return c.json({ code: "VALIDATION_ERROR", message: "请输入 3–120 字的复用收入业务编号" }, 400);
+  const revenue = workerWorkflowRevenue(body);
+  if (revenue.grossFen < 1) return c.json({ code: "VALIDATION_ERROR", message: "复用收入必须大于 0" }, 400);
+  const workflow = await (await getCollection("workerWorkflows")).findOne({ _id: new ObjectId(c.req.param("id")), status: "ready" });
+  if (!workflow) return c.json({ code: "WORKFLOW_NOT_FOUND", message: "工作流不存在" }, 404);
+  const now = new Date();
+  const ledger = await (await getCollection("workerWorkflowRevenueLedger")).updateOne(
+    { workflowId: workflow._id, reference },
+    { $setOnInsert: { ...revenue, publisherId: workflow.publisherId, contractorId: workflow.contractorId, status: "settled", reviewedBy: new ObjectId(auth.user.id), createdAt: now } },
+    { upsert: true },
+  );
+  if (!ledger.upsertedCount) return c.json({ code: "REVENUE_ALREADY_RECORDED", message: "该业务编号的分佣已经结算" }, 409);
+  await Promise.all([
+    (await getCollection("wallets")).updateOne({ ownerId: workflow.publisherId }, { $inc: { balanceFen: revenue.publisherShareFen }, $set: { updatedAt: now }, $setOnInsert: { createdAt: now } }, { upsert: true }),
+    (await getCollection("wallets")).updateOne({ ownerId: workflow.contractorId }, { $inc: { balanceFen: revenue.contractorShareFen }, $set: { updatedAt: now }, $setOnInsert: { createdAt: now } }, { upsert: true }),
+    (await getCollection("workerWorkflows")).updateOne({ _id: workflow._id }, { $inc: { reuseCount: 1, totalNetProfitFen: revenue.netProfitFen }, $set: { updatedAt: now } }),
+    notifyUser(workflow.publisherId, "worker_workflow_revenue", "工作流复用分佣已到账", `${(revenue.publisherShareFen / 100).toFixed(2)} 元已计入账户余额。`, { workflowId: workflow._id, amountFen: revenue.publisherShareFen }),
+    notifyUser(workflow.contractorId, "worker_workflow_revenue", "工作流复用分佣已到账", `${(revenue.contractorShareFen / 100).toFixed(2)} 元已计入账户余额。`, { workflowId: workflow._id, amountFen: revenue.contractorShareFen }),
+  ]);
+  return c.json({ ok: true, revenue });
 });
 
 app.get("/api/billing/plans", async (c) => {

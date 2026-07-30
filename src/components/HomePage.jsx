@@ -6,6 +6,8 @@ import {
   Database,
   Devices,
   FlowArrow,
+  HandCoins,
+  PaperPlaneRight,
   Palette,
   PuzzlePiece,
   ShieldCheck,
@@ -90,6 +92,11 @@ export function HomePage({ navigate, openTheme, themeIcon, downloadLatest }) {
               </article>
             );
           })}
+        </section>
+
+        <section className="home-worker section-shell">
+          <div className="home-worker-copy"><span>GULONG WORKER MARKET</span><h2>系统自动接单，<br /><em>AI 攻城狮军团</em>帮你快速搞定</h2><p>难题不用独自硬扛。发布需求、托管预算、跟进进度、验收交付；也可以把你的能力变成收入，接单赚钱。</p><div><button className="button primary" onClick={() => navigate("/worker?tab=publish")}><PaperPlaneRight size={20} />发布任务</button><button className="button secondary" onClick={() => navigate("/worker?tab=earn")}><HandCoins size={20} />接单赚钱</button></div></div>
+          <div className="home-worker-engine"><div className="home-worker-orbit"><span>需求</span><span>接单</span><strong>古龙<br />威客</strong><span>交付</span><span>结算</span></div><div className="home-worker-rules"><article><strong>80%</strong><span>接单者任务收入</span></article><article><strong>60%</strong><span>工作流复用双方分佣</span></article><article><strong>40%</strong><span>平台复用收益</span></article></div><p><ShieldCheck size={19} />预算审核后开放接单 · 验收后自动结算 · 每一步可追踪</p></div>
         </section>
 
         {partners.length > 0 && <PartnerNetwork partners={partners} />}

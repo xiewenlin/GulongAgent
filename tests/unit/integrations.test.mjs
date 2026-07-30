@@ -21,6 +21,7 @@ import {
   offlineReviewWechatMessage,
   parseOfflineReviewWechatAction,
 } from "../../server/offline-review.js";
+import { workerTaskFinancials, workerTaskFingerprint, workerWorkflowRevenue } from "../../server/worker-market.js";
 
 test("Chandler session tokens are encrypted and round-trip server-side", () => {
   const auth = externalAuthFromResponse({
@@ -113,6 +114,37 @@ test("website body typography stays at 18px while the restored scaled product pr
   assert.match(css, /\.account-sidebar\s+nav\s+button[\s\S]*?font-size:\s*18px/);
 });
 
+test("worker market settlement and reusable workflow revenue rules are deterministic", () => {
+  assert.deepEqual(workerTaskFinancials(1001), {
+    budgetFen: 1001,
+    contractorIncomeFen: 800,
+    platformServiceFeeFen: 201,
+    contractorShareBps: 8000,
+    platformShareBps: 2000,
+  });
+  assert.deepEqual(workerWorkflowRevenue({ grossFen: 10000, costFen: 1500, taxFen: 500 }), {
+    grossFen: 10000,
+    costFen: 1500,
+    taxFen: 500,
+    netProfitFen: 8000,
+    publisherShareFen: 2400,
+    contractorShareFen: 2400,
+    platformShareFen: 3200,
+    rule: { base: "net_after_cost_and_tax", publisherShareBps: 3000, contractorShareBps: 3000, platformShareBps: 4000 },
+  });
+  assert.equal(workerTaskFingerprint("  分析客服对话  ", "交付 报告"), workerTaskFingerprint("分析客服对话", "交付   报告"));
+});
+
+test("worker market protects WeChat contacts and preserves promoted administrator roles", async () => {
+  const appSource = await readFile(new URL("../../server/app.js", import.meta.url), "utf8");
+  const chandlerSource = await readFile(new URL("../../server/chandler.js", import.meta.url), "utf8");
+  assert.match(appSource, /WECHAT_REQUIRED/);
+  assert.match(appSource, /amountFen:\s*200/);
+  assert.match(appSource, /order\?\.status === "approved"/);
+  assert.match(appSource, /roleOverride:\s*"admin"/);
+  assert.match(chandlerSource, /canonical\?\.roleOverride \|\| identity\?\.role/);
+});
+
 test("COS object filenames cannot escape their assigned prefix", () => {
   assert.equal(sanitizeFilename("../第二大脑:2026?.zip"), "..-第二大脑-2026-.zip");
   assert.equal(sanitizeFilename("  "), "file.bin");
@@ -175,6 +207,14 @@ test("OpenAPI document includes Chandler admin, offline credentials, dated attac
   assert.ok(document.paths["/api/admin/chandler/skus/{skuId}/status"]);
   assert.ok(document.paths["/api/admin/chandler/entitlement-requests"]);
   assert.ok(document.paths["/api/admin/analytics/dashboard"]);
+  assert.ok(document.paths["/api/admin/users/{id}/role"]);
+  assert.ok(document.paths["/api/worker/tasks"]?.get);
+  assert.ok(document.paths["/api/worker/tasks"]?.post);
+  assert.ok(document.paths["/api/worker/tasks/{id}/payment-submit"]);
+  assert.ok(document.paths["/api/worker/tasks/{id}/claim"]);
+  assert.ok(document.paths["/api/worker/tasks/{id}/progress"]);
+  assert.ok(document.paths["/api/worker/tasks/{id}/submit"]);
+  assert.ok(document.paths["/api/worker/tasks/{id}/accept"]);
   assert.ok(document.paths["/api/v1/admin/wechat-review/bind"]);
   assert.ok(document.paths["/api/v1/admin/wechat-review/claim"]);
   assert.ok(document.paths["/api/v1/admin/wechat-review/{eventId}/notified"]);
@@ -316,6 +356,11 @@ test("Vercel consolidates nested account and configuration routes", async () => 
   assert.ok(sources.includes("/api/admin/release-channels/:id/manual-upload"));
   assert.ok(sources.includes("/api/admin/release-uploads/:id/complete"));
   assert.ok(sources.includes("/api/release-worker/:path*"));
+  assert.ok(sources.includes("/api/worker/:path*"));
+  assert.ok(sources.includes("/api/admin/users/:path*"));
+  assert.ok(sources.includes("/api/admin/worker-payments/:path*"));
+  assert.ok(sources.includes("/api/admin/worker-contact-payments/:path*"));
+  assert.ok(sources.includes("/api/admin/worker-workflows/:path*"));
 });
 
 test("administrator WeChat review menu accepts only explicit numeric actions", () => {

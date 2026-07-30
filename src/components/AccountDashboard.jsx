@@ -2,6 +2,7 @@ import {
   ArrowRight,
   Bell,
   Brain,
+  Briefcase,
   Camera,
   ChatCircleText,
   CheckCircle,
@@ -22,10 +23,12 @@ import {
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
 import { apiFetch, formatMoney } from "../api.js";
+import { WorkerManagementPanel } from "./WorkerPages.jsx";
 
 const dashboardMenu = [
   { id: "overview", label: "账户总览", icon: Gauge },
   { id: "brain", label: "第二大脑", icon: Brain },
+  { id: "worker", label: "威客管理", icon: Briefcase },
   { id: "billing", label: "会员与充值", icon: CreditCard },
   { id: "profile", label: "个人资料", icon: UserCircle },
   { id: "minimax", label: "MiniMax 配置", icon: Key },
@@ -63,11 +66,11 @@ function BrainCard({ item }) {
 }
 
 export function AccountDashboard({ user, openAuth, navigate, onUser }) {
-  const [active, setActive] = useState("overview");
+  const [active, setActive] = useState(() => new URLSearchParams(window.location.search).get("section") === "worker" ? "worker" : "overview");
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
-  const [profile, setProfile] = useState({ displayName: "", username: "", bio: "" });
+  const [profile, setProfile] = useState({ displayName: "", username: "", bio: "", wechatId: "" });
   const [minimax, setMinimax] = useState({ apiKey: "" });
   const [busy, setBusy] = useState("");
   const [resubmission, setResubmission] = useState(null);
@@ -81,7 +84,7 @@ export function AccountDashboard({ user, openAuth, navigate, onUser }) {
       if (result.profile.role !== user.role || result.profile.edition?.key !== user.edition?.key) {
         onUser?.({ ...user, role: result.profile.role, edition: result.profile.edition });
       }
-      setProfile({ displayName: result.profile.displayName || "", username: result.profile.username || "", bio: result.profile.bio || "" });
+      setProfile({ displayName: result.profile.displayName || "", username: result.profile.username || "", bio: result.profile.bio || "", wechatId: result.profile.wechatId || "" });
       setMinimax({ apiKey: "" });
     } catch (error) { setMessage(error.message); }
     finally { setLoading(false); }
@@ -139,7 +142,7 @@ export function AccountDashboard({ user, openAuth, navigate, onUser }) {
   }
 
   async function openNotification(notification) {
-    setActive("billing");
+    setActive(notification.type?.startsWith("worker_") ? "worker" : notification.type === "administrator_role_granted" ? "overview" : "billing");
     if (!notification.readAt) {
       await apiFetch(`/api/account/notifications/${notification.id}/read`, { method: "POST", body: "{}" }).catch(() => {});
       setData((current) => ({ ...current, notifications: current.notifications.map((item) => item.id === notification.id ? { ...item, readAt: new Date().toISOString() } : item) }));
@@ -194,13 +197,15 @@ export function AccountDashboard({ user, openAuth, navigate, onUser }) {
 
       {active === "brain" && <section className="account-module"><header><div><span>KNOWLEDGE RETURN</span><h2>“把你的知识带回古龙”处理记录</h2><p>从上传、排队、分析到完成，全流程状态与反馈都在这里。</p></div><button className="button primary" onClick={() => navigate("/upload")}><UploadSimple size={17} /> 上传新知识</button></header>{data?.brainUploads?.length ? <div className="account-brain-list">{data.brainUploads.map((item) => <BrainCard item={item} key={item.id} />)}</div> : <EmptyPanel icon={Brain} title="等待你的第一份知识" text="将第二大脑存储目录压缩为 ZIP，上传后我们会持续更新处理状态。" />}</section>}
 
+      {active === "worker" && <WorkerManagementPanel user={user} navigate={navigate} />}
+
       {active === "billing" && <section className="account-module">
         <header><div><span>MEMBERSHIP & WALLET</span><h2>会员、余额与订单</h2><p>支持微信、支付宝充值，以及按月或按年自动续订。</p></div></header>
         <div className="account-billing-grid"><article className={isMember || isAdmin ? "member active" : "member"}><ShieldCheck size={27} weight="duotone" /><span>当前身份 · {editionName}</span><h3>{identityLabel}</h3><p>{isAdmin ? "管理员拥有古龙官网全部后台权限，会员订阅状态不会覆盖管理员身份。" : isMember ? `会员权益有效至 ${new Date(subscription.currentPeriodEnd).toLocaleString("zh-CN")}` : "升级后解锁第二大脑、完整工作流和本地模型能力。"}</p><button className="button primary full" onClick={() => isAdmin ? navigate("/admin") : navigate("/pricing")}>{isAdmin ? "进入管理员后台" : isMember ? "查看会员方案" : "立即订阅会员"}</button>{!isAdmin && isMember && subscription.autoRenew && !subscription.cancelAtPeriodEnd && <button className="text-button" onClick={cancelSubscription}>关闭到期自动续订</button>}</article><article className="wallet"><Wallet size={27} weight="duotone" /><span>可用余额</span><h3>{formatMoney(data?.balanceFen || 0)}</h3><p>余额可用于后续按量调用模型、技能和工作流。</p><button className="button secondary full" onClick={() => navigate("/pricing#recharge")}><CreditCard size={17} /> 单次充值</button></article></div>
         <div className="account-order-list"><h3><Receipt size={20} /> 最近订单</h3>{data?.orders?.length ? data.orders.map((order) => <article className={order.status === "rejected" ? "rejected" : ""} key={`${order.provider}-${order.id}`}><div className="account-order-main"><div><strong>{order.kind === "recharge" ? "账户充值" : order.cycle === "year" ? "年度会员" : "月度会员"}<small>{order.orderNo}</small></strong></div><span>{order.provider === "wechat" ? "微信" : order.provider === "alipay" ? "支付宝" : "线下支付"}</span><strong>{formatMoney(order.amountFen)}</strong><em>{order.provider === "offline" && order.status === "pending" ? "待审核" : statusText[order.status] || order.status}</em><time>{new Date(order.createdAt).toLocaleDateString("zh-CN")}</time></div>{order.status === "rejected" && <div className="account-order-rejection"><WarningCircle size={22} weight="fill" /><div><strong>审核未通过</strong><p>{order.reviewReason || "管理员暂未填写原因，请联系客服确认。"}</p></div><button className="button small primary" onClick={() => setResubmission({ order, note: "" })}>调整后重新申请</button></div>}{order.status === "pending" && order.resubmissionNote && <div className="account-order-resubmitted"><CheckCircle size={18} /> 已重新提交：{order.resubmissionNote}</div>}</article>) : <EmptyPanel icon={Receipt} title="还没有订单" text="订阅或充值完成后，交易记录会显示在这里。" />}</div>
       </section>}
 
-      {active === "profile" && <section className="account-module"><header><div><span>PROFILE</span><h2>个人基本信息</h2><p>昵称会显示在网站右上角；头像保存到腾讯云 COS，并可同步到古龙桌面端。</p></div></header><form className="account-form" onSubmit={saveProfile}><label className="account-avatar-uploader"><div className="account-avatar-preview">{avatar ? <img src={avatar} alt="个人头像预览" /> : (profile.displayName || profile.username || "古").slice(0, 1).toUpperCase()}<span><Camera size={20} /></span></div><strong>{busy === "avatar" ? "正在上传" : "更换头像"}</strong><small>JPG / PNG / WebP / GIF，最大 10MB</small><input type="file" accept="image/jpeg,image/png,image/webp,image/gif" disabled={busy === "avatar"} onChange={uploadAvatar} /></label><div className="account-form-fields"><label><span>昵称</span><input required maxLength={64} value={profile.displayName} onChange={(event) => setProfile({ ...profile, displayName: event.target.value })} placeholder="你希望大家如何称呼你" /></label><label><span>用户名</span><input minLength={3} maxLength={32} value={profile.username} onChange={(event) => setProfile({ ...profile, username: event.target.value })} placeholder="用于账户识别" /></label><label><span>邮箱</span><input value={data?.profile.email || ""} disabled /><small>邮箱由 Chandler 账号中心维护，官网不会绕过统一身份修改。</small></label><label><span>个人简介</span><textarea maxLength={240} value={profile.bio} onChange={(event) => setProfile({ ...profile, bio: event.target.value })} placeholder="简单介绍你的工作与希望古龙帮助你的方向" /></label><button className="button primary" disabled={busy === "profile"}><FloppyDisk size={17} /> {busy === "profile" ? "正在保存" : "保存个人资料"}</button></div></form></section>}
+      {active === "profile" && <section className="account-module"><header><div><span>PROFILE</span><h2>个人基本信息</h2><p>昵称会显示在网站右上角；头像保存到腾讯云 COS，并可同步到古龙桌面端。</p></div></header><form className="account-form" onSubmit={saveProfile}><label className="account-avatar-uploader"><div className="account-avatar-preview">{avatar ? <img src={avatar} alt="个人头像预览" /> : (profile.displayName || profile.username || "古").slice(0, 1).toUpperCase()}<span><Camera size={20} /></span></div><strong>{busy === "avatar" ? "正在上传" : "更换头像"}</strong><small>JPG / PNG / WebP / GIF，最大 10MB</small><input type="file" accept="image/jpeg,image/png,image/webp,image/gif" disabled={busy === "avatar"} onChange={uploadAvatar} /></label><div className="account-form-fields"><label><span>昵称</span><input required maxLength={64} value={profile.displayName} onChange={(event) => setProfile({ ...profile, displayName: event.target.value })} placeholder="你希望大家如何称呼你" /></label><label><span>用户名</span><input minLength={3} maxLength={32} value={profile.username} onChange={(event) => setProfile({ ...profile, username: event.target.value })} placeholder="用于账户识别" /></label><label><span>邮箱</span><input value={data?.profile.email || ""} disabled /><small>邮箱由 Chandler 账号中心维护，官网不会绕过统一身份修改。</small></label><label><span>微信号</span><input minLength={5} maxLength={64} value={profile.wechatId} onChange={(event) => setProfile({ ...profile, wechatId: event.target.value })} placeholder="发单或接单前必须填写" /><small>默认保密；任务另一方需支付 2 元并审核通过后才能查看。</small></label><label><span>个人简介</span><textarea maxLength={240} value={profile.bio} onChange={(event) => setProfile({ ...profile, bio: event.target.value })} placeholder="简单介绍你的工作与希望古龙帮助你的方向" /></label><button className="button primary" disabled={busy === "profile"}><FloppyDisk size={17} /> {busy === "profile" ? "正在保存" : "保存个人资料"}</button></div></form></section>}
 
       {active === "minimax" && <section className="account-module"><header><div><span>PRIVATE MODEL CREDENTIAL</span><h2>MiniMax 配置</h2><p>界面与桌面端保持一致；密钥经 AES-256-GCM 加密保存，网页永不回显明文。</p></div><span className={`integration-state ${data?.minimax.configured ? "ready" : ""}`}>{data?.minimax.configured ? <><CheckCircle size={16} weight="fill" /> 已配置</> : <><WarningCircle size={16} /> 未配置</>}</span></header><div className="minimax-layout"><form className="account-form compact minimax-key-card" onSubmit={saveMiniMax}><div className="minimax-card-title"><div><h3>MiniMax 订阅 Key</h3><p>配置自己的订阅 Key，保存后自动连接官方最新 MiniMax-M3。</p></div><span>MiniMax-M3</span></div><label><span>订阅 Key</span><input type="password" minLength={data?.minimax.configured ? 0 : 8} value={minimax.apiKey} onChange={(event) => setMinimax({ apiKey: event.target.value })} placeholder={data?.minimax.configured ? `${data.minimax.maskedKey}（留空表示不修改）` : "sk-cp..."} /></label><div className="account-form-actions"><button className="button primary" disabled={busy === "minimax"}><FloppyDisk size={17} /> {busy === "minimax" ? "加密保存中" : "保存并应用"}</button>{data?.minimax.configured && <button type="button" className="button ghost" onClick={removeMiniMax}>删除配置</button>}</div></form><aside className="desktop-config-card"><div><LockKey size={25} /><span>DESKTOP API</span></div><h3>让桌面端安全拉取</h3><p>在“开发者”页面创建 API Key，再使用 Bearer 认证请求下面的接口。接口只返回该 Key 所属用户自己的配置。</p><code>GET /api/v1/configuration/minimax</code><ul><li><CheckCircle size={15} /> 权限：configuration:read</li><li><CheckCircle size={15} /> 固定模型：MiniMax-M3</li><li><CheckCircle size={15} /> 响应：Cache-Control no-store</li></ul><button className="button secondary full" onClick={() => navigate("/developer")}><Key size={17} /> 创建桌面端 API Key</button></aside></div></section>}
     </section>
