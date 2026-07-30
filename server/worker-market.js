@@ -38,6 +38,10 @@ export const WORKER_ASSET_CONTENT_TYPES = new Set([
 export const WORKER_MAX_ASSET_BYTES = 200 * 1024 * 1024;
 export const WORKER_MAX_ASSETS_PER_SECTION = 10;
 
+export function canBypassWorkerContactPayment({ role, isContractor } = {}) {
+  return role === "admin" && isContractor === true;
+}
+
 export function workerTaskFinancials(budgetFen) {
   const budget = Math.max(0, Math.trunc(Number(budgetFen) || 0));
   const contractorIncomeFen = Math.floor(budget * 0.8);

@@ -21,7 +21,7 @@ import {
   offlineReviewWechatMessage,
   parseOfflineReviewWechatAction,
 } from "../../server/offline-review.js";
-import { workerTaskFinancials, workerTaskFingerprint, workerWorkflowRevenue } from "../../server/worker-market.js";
+import { canBypassWorkerContactPayment, workerTaskFinancials, workerTaskFingerprint, workerWorkflowRevenue } from "../../server/worker-market.js";
 
 test("Chandler session tokens are encrypted and round-trip server-side", () => {
   const auth = externalAuthFromResponse({
@@ -135,13 +135,26 @@ test("worker market settlement and reusable workflow revenue rules are determini
   assert.equal(workerTaskFingerprint("  分析客服对话  ", "交付 报告"), workerTaskFingerprint("分析客服对话", "交付   报告"));
 });
 
+test("only an administrator acting as the contractor bypasses the WeChat contact payment", () => {
+  assert.equal(canBypassWorkerContactPayment({ role: "admin", isContractor: true }), true);
+  assert.equal(canBypassWorkerContactPayment({ role: "admin", isContractor: false }), false);
+  assert.equal(canBypassWorkerContactPayment({ role: "user", isContractor: true }), false);
+});
+
 test("worker market protects WeChat contacts and preserves promoted administrator roles", async () => {
-  const appSource = await readFile(new URL("../../server/app.js", import.meta.url), "utf8");
+  const [appSource, workerPageSource] = await Promise.all([
+    readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/WorkerPages.jsx", import.meta.url), "utf8"),
+  ]);
   const chandlerSource = await readFile(new URL("../../server/chandler.js", import.meta.url), "utf8");
   assert.match(appSource, /WECHAT_REQUIRED/);
   assert.match(appSource, /amountFen:\s*200/);
   assert.match(appSource, /order\?\.status === "approved"/);
   assert.match(appSource, /roleOverride:\s*"admin"/);
+  assert.match(appSource, /accessType:\s*"administrator_contractor_bypass"/);
+  assert.match(appSource, /paymentRequired:\s*!administratorBypass/);
+  assert.match(workerPageSource, /直接查看发单人微信/);
+  assert.match(workerPageSource, /if \(administratorContractor\) load\(\)/);
   assert.match(chandlerSource, /canonical\?\.roleOverride \|\| identity\?\.role/);
 });
 

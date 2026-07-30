@@ -217,6 +217,10 @@ export async function ensureIndexes() {
           { status: 1, submittedAt: 1, reviewedAt: -1 },
           { name: "worker_contact_payment_review" },
         ),
+        db.collection("workerContactAccessAudits").createIndex(
+          { requesterId: 1, createdAt: -1 },
+          { name: "worker_contact_access_audits_by_requester" },
+        ),
         db.collection("avatarUploads").createIndex(
           { expiresAt: 1 },
           { expireAfterSeconds: 0, name: "ttl_avatar_uploads" },

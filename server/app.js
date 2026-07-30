@@ -76,6 +76,7 @@ import { recoverExpiredDirectReleaseLock } from "./release-lock.js";
 import { OFFLINE_REVIEW_REJECTION_REASON, offlineReviewWechatMessage } from "./offline-review.js";
 import {
   WORKER_MAX_ASSETS_PER_SECTION,
+  canBypassWorkerContactPayment,
   workerAssetInput,
   workerTaskFinancials,
   workerTaskFingerprint,
@@ -3247,11 +3248,26 @@ app.get("/api/worker/tasks/:id/contact", async (c) => {
   const isContractor = task.contractorId.equals(requesterId);
   if (!isPublisher && !isContractor) return c.json({ code: "FORBIDDEN", message: "只有任务双方可以申请查看联系方式" }, 403);
   const targetId = isPublisher ? task.contractorId : task.publisherId;
-  const order = await (await getCollection("workerContactPayments")).findOne({ taskId: task._id, requesterId, targetId }, { sort: { createdAt: -1 } });
-  const target = order?.status === "approved" ? await (await getCollection("users")).findOne({ _id: targetId }, { projection: { wechatId: 1, displayName: 1, username: 1 } }) : null;
+  const administratorBypass = canBypassWorkerContactPayment({ role: auth.user.role, isContractor });
+  const order = administratorBypass
+    ? null
+    : await (await getCollection("workerContactPayments")).findOne({ taskId: task._id, requesterId, targetId }, { sort: { createdAt: -1 } });
+  const target = administratorBypass || order?.status === "approved"
+    ? await (await getCollection("users")).findOne({ _id: targetId }, { projection: { wechatId: 1, displayName: 1, username: 1 } })
+    : null;
+  if (administratorBypass) {
+    await (await getCollection("workerContactAccessAudits")).insertOne({
+      taskId: task._id,
+      requesterId,
+      targetId,
+      accessType: "administrator_contractor_bypass",
+      createdAt: new Date(),
+    });
+  }
   c.header("Cache-Control", "private, no-store, max-age=0");
   return c.json({
-    status: order?.status || "not_requested",
+    status: administratorBypass ? "admin_access" : order?.status || "not_requested",
+    paymentRequired: !administratorBypass,
     order: order ? { id: order._id.toString(), orderNo: order.orderNo, amountFen: order.amountFen, status: order.status, reviewReason: order.reviewReason || null, createdAt: order.createdAt } : null,
     contact: target?.wechatId ? { displayName: target.displayName || target.username || "任务联系人", wechatId: target.wechatId } : null,
   });
@@ -3268,6 +3284,24 @@ app.post("/api/worker/tasks/:id/contact-orders", async (c) => {
   const isContractor = task.contractorId.equals(requesterId);
   if (!isPublisher && !isContractor) return c.json({ code: "FORBIDDEN", message: "只有任务双方可以申请查看联系方式" }, 403);
   const targetId = isPublisher ? task.contractorId : task.publisherId;
+  if (canBypassWorkerContactPayment({ role: auth.user.role, isContractor })) {
+    const target = await (await getCollection("users")).findOne({ _id: targetId }, { projection: { wechatId: 1, displayName: 1, username: 1 } });
+    await (await getCollection("workerContactAccessAudits")).insertOne({
+      taskId: task._id,
+      requesterId,
+      targetId,
+      accessType: "administrator_contractor_bypass",
+      legacyContactOrderRequest: true,
+      createdAt: new Date(),
+    });
+    c.header("Cache-Control", "private, no-store, max-age=0");
+    return c.json({
+      status: "admin_access",
+      paymentRequired: false,
+      order: null,
+      contact: target?.wechatId ? { displayName: target.displayName || target.username || "发单人", wechatId: target.wechatId } : null,
+    });
+  }
   const contacts = await getCollection("workerContactPayments");
   let order = await contacts.findOne({ taskId: task._id, requesterId, targetId }, { sort: { createdAt: -1 } });
   if (!order) {
