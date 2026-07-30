@@ -38,6 +38,35 @@ function EmptyConfig({ children }) {
   return <div className="empty-config"><ShieldCheck size={22} /><span>{children}</span></div>;
 }
 
+function CustomizationContactDialog({ onClose }) {
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    const closeOnEscape = (event) => { if (event.key === "Escape") onClose(); };
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [onClose]);
+
+  return (
+    <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="custom-contact-modal" role="dialog" aria-modal="true" aria-labelledby="custom-contact-title">
+        <button className="modal-close" type="button" aria-label="关闭联系定制窗口" autoFocus onClick={onClose}><X size={20} /></button>
+        <span className="custom-contact-kicker">DEEP CUSTOMIZATION</span>
+        <h2 id="custom-contact-title">微信沟通深度定制</h2>
+        <p>扫描二维码添加施富，发送你的业务目标与期望结果，我们会一起梳理适合的智能体与自动化方案。</p>
+        <figure className="custom-contact-qr-shell">
+          <img src="/assets/deep-customization-wechat.jpg" alt="深度定制联系人施富的微信二维码" />
+          <figcaption>打开微信扫一扫，添加好友后备注“古龙深度定制”</figcaption>
+        </figure>
+        <button className="button primary full" type="button" onClick={onClose}>我已保存二维码</button>
+      </section>
+    </div>
+  );
+}
+
 export function DownloadPage() {
   const [links, setLinks] = useState([]);
   const [releases, setReleases] = useState({});
@@ -250,6 +279,7 @@ export function PricingPage({ user, openAuth, navigate }) {
   const [payment, setPayment] = useState(null);
   const [membership, setMembership] = useState(null);
   const [pricingPlans, setPricingPlans] = useState(sitePlans);
+  const [customContactOpen, setCustomContactOpen] = useState(false);
 
   useEffect(() => {
     apiFetch("/api/billing/plans")
@@ -278,9 +308,9 @@ export function PricingPage({ user, openAuth, navigate }) {
   const yearlySavingsFen = Math.max(0, memberPlan.monthlyFen * 12 - memberPlan.yearlyFen);
 
   async function startPayment(plan) {
+    if (plan.id === "custom") { setCustomContactOpen(true); return; }
     if (!user) return openAuth("login");
     if (plan.id === "free") return navigate("/download");
-    if (plan.id === "custom") return navigate("/feedback");
     trackAnalyticsEvent("CHECKOUT_START", { path: "/pricing" });
     if (paymentMode === "offline") {
       setPayment({ mode: "offline-cashier", cycle, amountFen: plan.id === "member" ? memberPayableFen : cycle === "year" ? plan.yearlyFen : plan.monthlyFen, upgradeCreditFen, planName: plan.name });
@@ -325,6 +355,7 @@ export function PricingPage({ user, openAuth, navigate }) {
       </section>
       {error && <div className="page-error section-shell">{error}</div>}
       <section className="recharge-callout section-shell" id="recharge"><div className="wallet-orb"><Wallet size={28} /></div><div><h3>单次充值</h3><p>不订阅也可以按需充值余额，后续用于按量调用模型与工作流。</p></div><button className="button secondary" onClick={() => user ? setPayment({ recharge: true }) : openAuth("login")}><CreditCard size={18} /> 充值余额</button></section>
+      {customContactOpen && <CustomizationContactDialog onClose={() => setCustomContactOpen(false)} />}
       {payment && !payment.recharge && <PaymentDialog payment={payment} provider={onlineProvider} onPayment={setPayment} onClose={() => setPayment(null)} />}
       {payment?.recharge && <RechargeDialog provider={onlineProvider} onClose={() => setPayment(null)} navigate={navigate} />}
     </main>

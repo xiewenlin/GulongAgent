@@ -2695,6 +2695,27 @@ textarea:focus {
 .offline-payment-urgent { margin: 18px auto 2px; padding: 12px 14px; color: #b42318; border: 1px solid #f0b7b1; border-radius: 11px; background: #fff2f0; font-size: 18px; font-weight: 850; line-height: 1.65; }
 .offline-upgrade-note { margin: 10px 0 0; color: var(--jade); font-size: 18px; font-weight: 750; }
 
+.custom-contact-modal {
+  position: relative;
+  width: min(540px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding: 38px;
+  border: 1px solid color-mix(in srgb, var(--gold) 45%, var(--line));
+  border-radius: 24px;
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-float);
+  text-align: center;
+}
+
+.custom-contact-kicker { display: block; color: var(--gold); font-size: 18px; font-weight: 900; letter-spacing: .12em; }
+.custom-contact-modal h2 { margin: 10px 0 8px; color: var(--ink-strong); font-size: 31px; }
+.custom-contact-modal > p { max-width: 450px; margin: 0 auto; color: var(--muted); font-size: 18px; line-height: 1.7; }
+.custom-contact-qr-shell { margin: 22px 0 0; padding: 14px 14px 16px; border: 1px solid var(--line); border-radius: 18px; background: #fff; box-shadow: inset 0 0 0 1px rgba(20, 50, 46, .025); }
+.custom-contact-qr-shell img { width: min(390px, 100%); height: auto; display: block; margin: 0 auto; border-radius: 10px; }
+.custom-contact-qr-shell figcaption { margin-top: 12px; color: #49625e; font-size: 18px; font-weight: 750; line-height: 1.55; }
+.custom-contact-modal > .button { margin-top: 18px; }
+
 .theme-drawer-backdrop {
   justify-items: end;
   padding: 0;
@@ -3317,7 +3338,8 @@ textarea:focus {
 
   .account-modal,
   .secret-modal,
-  .payment-modal {
+  .payment-modal,
+  .custom-contact-modal {
     padding: 30px 22px 22px;
   }
 }

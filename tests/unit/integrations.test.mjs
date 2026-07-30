@@ -188,6 +188,20 @@ test("the primary Worker navigation is a direct link without a dropdown", async 
   assert.doesNotMatch(workerEntry, /children/);
 });
 
+test("deep customization opens the supplied WeChat QR dialog without requiring login", async () => {
+  const [source, qrImage] = await Promise.all([
+    readFile(new URL("../../src/components/PlatformPages.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../public/assets/deep-customization-wechat.jpg", import.meta.url)),
+  ]);
+  assert.ok(qrImage.byteLength > 10_000);
+  assert.match(source, /function CustomizationContactDialog/);
+  assert.match(source, /deep-customization-wechat\.jpg/);
+  assert.match(source, /event\.key === "Escape"/);
+  assert.match(source, /event\.target === event\.currentTarget && onClose\(\)/);
+  const startPaymentSource = source.slice(source.indexOf("async function startPayment"), source.indexOf("trackAnalyticsEvent", source.indexOf("async function startPayment")));
+  assert.ok(startPaymentSource.indexOf('if (plan.id === "custom")') < startPaymentSource.indexOf('if (!user) return openAuth("login")'));
+});
+
 test("worker market protects WeChat contacts and preserves promoted administrator roles", async () => {
   const [appSource, workerPageSource] = await Promise.all([
     readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
