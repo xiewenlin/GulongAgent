@@ -64,8 +64,7 @@ function EmptyState({ icon: Icon = Cube, title, text }) {
 }
 
 function ReleaseChannelOptions({ channels }) {
-  const defaultChannel = channels.find((channel) => channel.isDefault);
-  return <><option value="">全部发行渠道</option><option value={defaultChannel?.id || "unassigned"}>古龙版（默认）</option>{channels.filter((channel) => channel.id !== defaultChannel?.id).map((channel) => <option key={channel.id} value={channel.id}>{channel.name}</option>)}</>;
+  return <><option value="">全部发行渠道</option>{channels.map((channel) => <option key={channel.id} value={channel.id}>{channel.isDefault ? "古龙版（默认）" : channel.name}</option>)}</>;
 }
 
 function ChandlerUserManager() {

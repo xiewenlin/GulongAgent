@@ -635,6 +635,7 @@ test("order management separates online and offline orders with multidimensional
   assert.match(adminSource, /用户分组 \/ 发行渠道/);
   assert.match(adminSource, /古龙版（默认）/);
   assert.doesNotMatch(adminSource, /未分配发行渠道|"未分配"/);
+  assert.doesNotMatch(adminSource, /<option value="unassigned"/);
   assert.match(adminSource, /type="date"/);
   assert.match(adminSource, /nextMode === "online" \? "payments" : "offline-payments"/);
   assert.match(serverSource, /app\.get\("\/api\/admin\/payments"/);
@@ -647,6 +648,7 @@ test("order management separates online and offline orders with multidimensional
   assert.match(css, /\.offline-review-tabs\s*\{/);
   assert.match(css, /\.payment-mode-tabs\s*\{/);
   assert.match(css, /\.order-filter-panel\s*\{/);
+  assert.match(css, /grid-template-areas:\s*"keyword keyword channel channel"\s*"from to actions actions"/);
   assert.match(dbSource, /payments_by_owner_and_date/);
   assert.match(dbSource, /offline_payments_by_owner_and_date/);
 });

@@ -4026,13 +4026,17 @@ textarea:focus {
 .payment-mode-tabs button { min-height: 54px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; color: var(--muted); border: 0; border-radius: 11px; background: transparent; font: inherit; font-size: 18px; font-weight: 850; cursor: pointer; transition: color .2s ease, background .2s ease, box-shadow .2s ease; }
 .payment-mode-tabs button:hover { color: var(--ink); }
 .payment-mode-tabs button.active { color: var(--jade); background: var(--surface); box-shadow: 0 6px 20px rgba(24, 57, 52, .09); }
-.order-filter-panel { padding: 15px; display: grid; grid-template-columns: minmax(260px, 1.35fr) minmax(150px, .62fr) minmax(150px, .62fr) minmax(230px, 1fr) auto; align-items: end; gap: 11px; border: 1px solid var(--line); border-radius: 15px; background: var(--bg-soft); }
+.order-filter-panel { padding: 15px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-template-areas: "keyword keyword channel channel" "from to actions actions"; align-items: end; gap: 13px 15px; border: 1px solid var(--line); border-radius: 15px; background: var(--bg-soft); }
 .order-filter-panel label { min-width: 0; display: grid; gap: 7px; }
+.order-filter-panel > label:nth-of-type(2) { grid-area: from; }
+.order-filter-panel > label:nth-of-type(3) { grid-area: to; }
 .order-filter-panel label > span { color: var(--muted); font-size: 18px; font-weight: 800; }
 .order-filter-panel input, .order-filter-panel select { width: 100%; height: 46px; padding: 0 11px; color: var(--ink); border: 1px solid var(--line-strong); border-radius: 10px; background-color: var(--surface); font: inherit; font-size: 18px; outline: 0; }
 .order-keyword > div { height: 46px; padding: 0 11px; display: flex; align-items: center; gap: 8px; color: var(--muted); border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface); }
+.order-keyword { grid-area: keyword; }
+.order-channel { grid-area: channel; }
 .order-keyword > div input { height: auto; min-width: 0; padding: 0; border: 0; background: transparent; }
-.order-filter-actions { display: flex; align-items: center; gap: 8px; }
+.order-filter-actions { grid-area: actions; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .order-filter-actions .button { min-height: 46px; white-space: nowrap; }
 .offline-review-tabs { width: fit-content; margin-bottom: 16px; padding: 5px; display: flex; align-items: center; gap: 5px; border: 1px solid var(--line); border-radius: 14px; background: var(--bg-soft); }
 .offline-review-tabs button { min-width: 150px; min-height: 48px; padding: 7px 10px 7px 16px; display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--muted); border: 0; border-radius: 10px; background: transparent; font: inherit; font-size: 18px; font-weight: 850; cursor: pointer; transition: color .2s ease, background .2s ease, box-shadow .2s ease; }
@@ -4078,9 +4082,7 @@ textarea:focus {
   .admin-page { grid-template-columns: 190px minmax(0, 1fr); }
   .admin-content { padding: 28px 22px; }
   .admin-partner-grid, .offline-order-grid, .price-admin-grid { grid-template-columns: 1fr; }
-  .order-filter-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .order-keyword, .order-channel { grid-column: span 2; }
-  .order-filter-actions { justify-content: flex-end; grid-column: span 2; }
+  .order-filter-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-areas: "keyword keyword" "channel channel" "from to" "actions actions"; }
   .admin-table { overflow-x: auto; }
   .admin-table-head, .admin-table article { min-width: 860px; }
   .brain-attachment-table .admin-table-head,
@@ -4121,8 +4123,7 @@ textarea:focus {
   .admin-filterbar label { width: 100%; }
   .admin-filterbar select { width: 100%; min-width: 0; }
   .admin-filterbar > span { display: none; }
-  .order-filter-panel { grid-template-columns: 1fr; }
-  .order-keyword, .order-channel, .order-filter-actions { grid-column: auto; }
+  .order-filter-panel { grid-template-columns: 1fr; grid-template-areas: "keyword" "channel" "from" "to" "actions"; }
   .order-filter-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .admin-module-footer { align-items: stretch; flex-direction: column; }
   .chandler-user-list { overflow-x: auto; }
