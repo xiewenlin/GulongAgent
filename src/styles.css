@@ -3857,6 +3857,7 @@ textarea:focus {
 .admin-filterbar label { height: 40px; padding: 0 11px; display: flex; align-items: center; gap: 7px; color: var(--muted); border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
 .admin-filterbar label:first-child { flex: 1; }
 .admin-filterbar input { min-width: 0; color: var(--ink); border: 0; background: transparent; outline: 0; }
+.admin-filterbar select { min-width: 235px; height: 42px; padding: 0 36px 0 12px; color: var(--ink); border: 1px solid var(--line); border-radius: 9px; background-color: var(--surface); font: inherit; font-size: 18px; outline: 0; }
 .admin-filterbar > span { color: var(--muted); font-size: 18px; }
 
 .admin-table { overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
@@ -3894,9 +3895,9 @@ textarea:focus {
   justify-content: flex-end;
 }
 .status-pill { width: fit-content; padding: 5px 8px; display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: var(--bg-soft); font-size: 18px; font-weight: 800; }
-.status-pill.ready, .status-pill.approved { color: #2f7659; border-color: #c4dfcd; background: #f2faf5; }
+.status-pill.ready, .status-pill.approved, .status-pill.paid { color: #2f7659; border-color: #c4dfcd; background: #f2faf5; }
 .status-pill.pending { color: #9a6a28; border-color: #e8d5b4; background: #fffaf0; }
-.status-pill.rejected { color: #9a4c42; border-color: #efc7c0; background: #fff0ed; }
+.status-pill.rejected, .status-pill.failed, .status-pill.refunded, .status-pill.cancelled, .status-pill.canceled { color: #9a4c42; border-color: #efc7c0; background: #fff0ed; }
 .admin-module-footer { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 18px; }
 .admin-module-footer code { flex: 1; padding: 8px 10px; overflow: hidden; color: var(--jade); border: 1px solid var(--line); border-radius: 8px; background: var(--bg-soft); text-overflow: ellipsis; white-space: nowrap; }
 
@@ -4021,6 +4022,18 @@ textarea:focus {
 .job-status strong { font-size: 18px; }
 
 .offline-order-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.payment-mode-tabs { padding: 6px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; border: 1px solid var(--line); border-radius: 15px; background: var(--bg-soft); }
+.payment-mode-tabs button { min-height: 54px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; color: var(--muted); border: 0; border-radius: 11px; background: transparent; font: inherit; font-size: 18px; font-weight: 850; cursor: pointer; transition: color .2s ease, background .2s ease, box-shadow .2s ease; }
+.payment-mode-tabs button:hover { color: var(--ink); }
+.payment-mode-tabs button.active { color: var(--jade); background: var(--surface); box-shadow: 0 6px 20px rgba(24, 57, 52, .09); }
+.order-filter-panel { padding: 15px; display: grid; grid-template-columns: minmax(260px, 1.35fr) minmax(150px, .62fr) minmax(150px, .62fr) minmax(230px, 1fr) auto; align-items: end; gap: 11px; border: 1px solid var(--line); border-radius: 15px; background: var(--bg-soft); }
+.order-filter-panel label { min-width: 0; display: grid; gap: 7px; }
+.order-filter-panel label > span { color: var(--muted); font-size: 18px; font-weight: 800; }
+.order-filter-panel input, .order-filter-panel select { width: 100%; height: 46px; padding: 0 11px; color: var(--ink); border: 1px solid var(--line-strong); border-radius: 10px; background-color: var(--surface); font: inherit; font-size: 18px; outline: 0; }
+.order-keyword > div { height: 46px; padding: 0 11px; display: flex; align-items: center; gap: 8px; color: var(--muted); border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface); }
+.order-keyword > div input { height: auto; min-width: 0; padding: 0; border: 0; background: transparent; }
+.order-filter-actions { display: flex; align-items: center; gap: 8px; }
+.order-filter-actions .button { min-height: 46px; white-space: nowrap; }
 .offline-review-tabs { width: fit-content; margin-bottom: 16px; padding: 5px; display: flex; align-items: center; gap: 5px; border: 1px solid var(--line); border-radius: 14px; background: var(--bg-soft); }
 .offline-review-tabs button { min-width: 150px; min-height: 48px; padding: 7px 10px 7px 16px; display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--muted); border: 0; border-radius: 10px; background: transparent; font: inherit; font-size: 18px; font-weight: 850; cursor: pointer; transition: color .2s ease, background .2s ease, box-shadow .2s ease; }
 .offline-review-tabs button strong { min-width: 30px; height: 30px; padding: 0 8px; display: inline-flex; align-items: center; justify-content: center; color: inherit; border: 1px solid color-mix(in srgb, currentColor 24%, transparent); border-radius: 999px; font-size: 18px; }
@@ -4033,7 +4046,7 @@ textarea:focus {
 .offline-order-grid header > div > span { color: var(--muted); font-size: 18px; }
 .offline-order-grid header > div > strong { margin-top: 5px; font-size: 24px; }
 .offline-order-grid dl { margin: 17px 0; padding: 12px 0; display: grid; gap: 8px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-.offline-order-grid dl div { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 10px; }
+.offline-order-grid dl div { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 10px; }
 .offline-order-grid dt { color: var(--muted); font-size: 18px; }
 .offline-order-grid dd { margin: 0; overflow: hidden; font-size: 18px; text-overflow: ellipsis; white-space: nowrap; }
 .offline-review-actions { display: grid; grid-template-columns: 1fr auto; gap: 9px; }
@@ -4065,6 +4078,9 @@ textarea:focus {
   .admin-page { grid-template-columns: 190px minmax(0, 1fr); }
   .admin-content { padding: 28px 22px; }
   .admin-partner-grid, .offline-order-grid, .price-admin-grid { grid-template-columns: 1fr; }
+  .order-filter-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .order-keyword, .order-channel { grid-column: span 2; }
+  .order-filter-actions { justify-content: flex-end; grid-column: span 2; }
   .admin-table { overflow-x: auto; }
   .admin-table-head, .admin-table article { min-width: 860px; }
   .brain-attachment-table .admin-table-head,
@@ -4103,7 +4119,11 @@ textarea:focus {
   .partner-existing-assets p { grid-column: 1 / -1; }
   .admin-filterbar { align-items: stretch; flex-direction: column; }
   .admin-filterbar label { width: 100%; }
+  .admin-filterbar select { width: 100%; min-width: 0; }
   .admin-filterbar > span { display: none; }
+  .order-filter-panel { grid-template-columns: 1fr; }
+  .order-keyword, .order-channel, .order-filter-actions { grid-column: auto; }
+  .order-filter-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .admin-module-footer { align-items: stretch; flex-direction: column; }
   .chandler-user-list { overflow-x: auto; }
   .chandler-user-list > article { min-width: 720px; }

@@ -61,6 +61,10 @@ export async function ensureIndexes() {
           { chandlerUserId: 1 },
           { unique: true, sparse: true, name: "uniq_chandler_user" },
         ),
+        db.collection("users").createIndex(
+          { releaseChannelId: 1, createdAt: -1 },
+          { name: "users_by_release_channel" },
+        ),
         db.collection("sessions").createIndex(
           { tokenHash: 1 },
           { unique: true, name: "uniq_session_token" },
@@ -88,6 +92,10 @@ export async function ensureIndexes() {
         db.collection("payments").createIndex(
           { status: 1, paidAt: -1, updatedAt: -1 },
           { name: "payments_analytics" },
+        ),
+        db.collection("payments").createIndex(
+          { ownerId: 1, createdAt: -1 },
+          { name: "payments_by_owner_and_date" },
         ),
         db.collection("tasks").createIndex(
           { ownerId: 1, createdAt: -1 },
@@ -144,6 +152,10 @@ export async function ensureIndexes() {
         db.collection("offlinePayments").createIndex(
           { status: 1, reviewedAt: -1, updatedAt: -1 },
           { name: "offline_payments_analytics" },
+        ),
+        db.collection("offlinePayments").createIndex(
+          { ownerId: 1, createdAt: -1 },
+          { name: "offline_payments_by_owner_and_date" },
         ),
         db.collection("offlinePaymentReviewEvents").createIndex(
           { orderId: 1 },

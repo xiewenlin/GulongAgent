@@ -563,6 +563,9 @@ test("admin subscription directory uses Chandler application scope and explicit 
   assert.match(adminSource, /官网 \+ Chandler 应用/);
   assert.match(adminSource, /meta\.capabilities\?\.globalUserStatus === true/);
   assert.match(adminSource, /meta\.capabilities\?\.globalEntitlementApproval === true/);
+  assert.match(adminSource, /选择用户分组或发行渠道/);
+  assert.match(adminSource, /params\.set\("channelId", channelId\)/);
+  assert.match(serverSource, /releaseChannelId: new ObjectId\(query\.channelId\)/);
   assert.doesNotMatch(adminSource, /Chandler 管理接口未向当前账号开放/);
 });
 
@@ -613,20 +616,35 @@ test("website pricing and desktop synchronization read the same MongoDB price ve
   assert.match(pricingPage, /apiFetch\("\/api\/billing\/plans"\)/);
 });
 
-test("offline payment review separates pending work from reviewed history", async () => {
-  const [adminSource, serverSource, css] = await Promise.all([
+test("order management separates online and offline orders with multidimensional filters", async () => {
+  const [adminSource, serverSource, css, dbSource] = await Promise.all([
     readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
     readFile(new URL("../../src/styles.css", import.meta.url), "utf8"),
+    readFile(new URL("../../server/db.js", import.meta.url), "utf8"),
   ]);
+  assert.match(adminSource, /label:\s*"订单管理"/);
+  assert.match(adminSource, /<h2>订单管理<\/h2>/);
+  assert.match(adminSource, /线上支付/);
+  assert.match(adminSource, /线下支付/);
   assert.match(adminSource, /className="offline-review-tabs"/);
-  assert.match(adminSource, /label:\s*"订单处理"/);
   assert.match(adminSource, /<span>待审核<\/span>/);
   assert.match(adminSource, /<span>已审核<\/span>/);
-  assert.match(adminSource, /status=\$\{tab\}/);
+  assert.match(adminSource, /关键词模糊搜索/);
+  assert.match(adminSource, /用户分组 \/ 发行渠道/);
+  assert.match(adminSource, /type="date"/);
+  assert.match(adminSource, /nextMode === "online" \? "payments" : "offline-payments"/);
+  assert.match(serverSource, /app\.get\("\/api\/admin\/payments"/);
+  assert.match(serverSource, /async function adminOrderBaseFilter/);
+  assert.match(serverSource, /"providerTransactionId"/);
+  assert.match(serverSource, /releaseChannel:\s*channel \?/);
   assert.match(serverSource, /requestedStatus === "reviewed"/);
   assert.match(serverSource, /summary:\s*\{\s*pending:\s*pendingCount,\s*reviewed:\s*approvedCount \+ rejectedCount/);
   assert.match(css, /\.offline-review-tabs\s*\{/);
+  assert.match(css, /\.payment-mode-tabs\s*\{/);
+  assert.match(css, /\.order-filter-panel\s*\{/);
+  assert.match(dbSource, /payments_by_owner_and_date/);
+  assert.match(dbSource, /offline_payments_by_owner_and_date/);
 });
 
 test("administrator release controls are explicit and legacy direct distribution stays unreachable", async () => {

@@ -38,7 +38,7 @@ const menu = [
   { id: "partners", label: "合作伙伴", icon: Handshake },
   { id: "brain", label: "第二大脑", icon: FileZip },
   { id: "versions", label: "版本管理", icon: Package },
-  { id: "payments", label: "订单处理", icon: ShieldCheck },
+  { id: "payments", label: "订单管理", icon: ShieldCheck },
   { id: "worker", label: "威客审核", icon: Briefcase },
 ];
 
@@ -65,6 +65,8 @@ function EmptyState({ icon: Icon = Cube, title, text }) {
 
 function ChandlerUserManager() {
   const [query, setQuery] = useState("");
+  const [channelId, setChannelId] = useState("");
+  const [channels, setChannels] = useState([]);
   const [users, setUsers] = useState([]);
   const [meta, setMeta] = useState({});
   const [selected, setSelected] = useState(null);
@@ -79,12 +81,17 @@ function ChandlerUserManager() {
     event?.preventDefault();
     setBusy("search"); setMessage("");
     try {
-      const result = await apiFetch(`/api/admin/chandler/users?q=${encodeURIComponent(query)}&limit=50`);
+      const params = new URLSearchParams({ q: query, limit: "50" });
+      if (channelId) params.set("channelId", channelId);
+      const result = await apiFetch(`/api/admin/chandler/users?${params}`);
       setUsers(result.users || []); setMeta(result.meta || {});
     } catch (error) { setMessage(error.message); }
     finally { setBusy(""); }
   }
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    apiFetch("/api/admin/release-channels").then((result) => setChannels(result.channels || [])).catch(() => setChannels([]));
+  }, []);
 
   async function inspect(user) {
     setSelected(user); setSubscriptions([]); setSubscriptionMeta({}); setMessage("");
@@ -171,7 +178,7 @@ function ChandlerUserManager() {
 
   return <section className="admin-module">
     <header className="admin-module-head"><div><span>UNIFIED SUBSCRIPTION DIRECTORY</span><h2>订阅用户</h2><p>统一查看官网用户、古龙版与永生花版 Chandler 应用授权用户，以及实时会员有效期和线下审核记录。</p></div><div className="storage-badge"><ShieldCheck size={18} /><span>数据来源</span><strong>{busy === "search" && !users.length ? "同步中" : meta.synchronized ? "官网 + Chandler 应用" : "官网同步快照"}</strong></div></header>
-    <form className="admin-filterbar" onSubmit={load}><label><MagnifyingGlass size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索邮箱、昵称或用户 ID" /></label><button className="button secondary" disabled={busy === "search"}><MagnifyingGlass size={16} /> {busy === "search" ? "搜索中" : "搜索"}</button><span>共 {meta.total ?? users.length} 个结果</span></form>
+    <form className="admin-filterbar" onSubmit={load}><label><MagnifyingGlass size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索邮箱、昵称或用户 ID" /></label><select aria-label="选择用户分组或发行渠道" value={channelId} onChange={(event) => setChannelId(event.target.value)}><option value="">全部用户分组 / 发行渠道</option><option value="unassigned">未分配发行渠道</option>{channels.map((channel) => <option key={channel.id} value={channel.id}>{channel.name}</option>)}</select><button className="button secondary" disabled={busy === "search"}><MagnifyingGlass size={16} /> {busy === "search" ? "搜索中" : "搜索"}</button><span>共 {meta.total ?? users.length} 个结果</span></form>
     {message && <AdminNotice tone={message.includes("已") ? "success" : "error"}>{message}</AdminNotice>}
     {meta.permissionLimited && <AdminNotice>Chandler 应用用户同步暂不可用，当前显示最近一次官网同步快照；请重新登录，或确认当前 Chandler 账号已加入古龙应用团队。</AdminNotice>}
     {!meta.permissionLimited && meta.partial && <AdminNotice>古龙版与永生花版中有一个应用暂未完成同步；当前已合并展示成功同步的应用与官网用户。</AdminNotice>}
@@ -497,43 +504,80 @@ function WorkerReviewManager() {
   return <section className="admin-module"><header className="admin-module-head"><div><span>WORKER ESCROW REVIEW</span><h2>威客审核</h2><p>审核任务预算与双方查看微信号的 2 元线下订单；只有审核通过才开放对应能力。</p></div><button className="button secondary" onClick={load}><ArrowClockwise size={17} />刷新</button></header>{message && <AdminNotice tone={message.startsWith("已") ? "success" : "error"}>{message}</AdminNotice>}<div className="worker-admin-kind-tabs"><button className={kind === "task" ? "active" : ""} onClick={() => setKind("task")}><CurrencyCny size={19} />任务预算审核</button><button className={kind === "contact" ? "active" : ""} onClick={() => setKind("contact")}><UsersThree size={19} />联系方式订单</button></div><div className="offline-review-tabs"><button className={tab === "pending" ? "active" : ""} onClick={() => setTab("pending")}><span>待审核</span><strong>{summary.pending || 0}</strong></button><button className={tab === "reviewed" ? "active" : ""} onClick={() => setTab("reviewed")}><span>已审核</span><strong>{summary.reviewed || 0}</strong></button></div>{items.length ? <div className="worker-admin-review-list">{items.map((item) => <article key={item.id}><div><span>{kind === "task" ? "任务预算" : "联系方式查看"}</span><h3>{kind === "task" ? item.title : item.taskTitle}</h3><p>{kind === "task" ? `${item.publisher?.displayName || "发单用户"} · ${item.assignment?.label || "公开接单"}` : `${item.requester?.displayName || "用户"} 申请查看 ${item.target?.displayName || "任务另一方"}`}</p><small>{kind === "task" ? item.paymentOrderNo : item.orderNo}</small></div><strong>{formatMoney(kind === "task" ? item.budgetFen : item.amountFen)}</strong><em className={`status-pill ${kind === "task" ? item.paymentStatus : item.status}`}>{(kind === "task" ? item.paymentStatus : item.status) === "pending" ? "待审核" : (kind === "task" ? item.paymentStatus : item.status) === "approved" ? "已通过" : "已拒绝"}</em>{tab === "pending" && <div className="admin-row-actions"><button className="button small primary" disabled={busy === item.id} onClick={() => approve(item)}>确认到账并通过</button><button className="button small secondary" disabled={busy === item.id} onClick={() => setRejecting({ item, reason: "" })}>拒绝通过</button></div>}</article>)}</div> : <EmptyState icon={Briefcase} title={tab === "pending" ? "没有待审核威客订单" : "还没有已审核记录"} text="新订单提交后会自动显示在这里。" />}{rejecting && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setRejecting(null)}><form className="admin-form-modal" onSubmit={reject}><button className="modal-close" type="button" onClick={() => setRejecting(null)}><X size={18} /></button><span>REJECT WORKER PAYMENT</span><h2>填写拒绝原因</h2><p>原因会原样发送给申请用户，并允许用户调整后重新提交。</p><label><span>拒绝原因</span><textarea autoFocus required minLength={2} maxLength={500} value={rejecting.reason} onChange={(event) => setRejecting({ ...rejecting, reason: event.target.value })} /></label><button className="button primary full" disabled={busy === rejecting.item.id}>保存并通知用户</button></form></div>}</section>;
 }
 
-function OfflinePaymentManager() {
+const paymentStatusText = { pending: "待支付", paid: "已支付", approved: "已通过", rejected: "已拒绝", failed: "支付失败", refunded: "已退款", cancelled: "已取消", canceled: "已取消" };
+
+function PaymentManager() {
+  const [mode, setMode] = useState("online");
+  const [reviewTab, setReviewTab] = useState("pending");
+  const [filters, setFilters] = useState({ q: "", from: "", to: "", channelId: "" });
+  const [channels, setChannels] = useState([]);
   const [orders, setOrders] = useState([]);
-  const [activeTab, setActiveTab] = useState("pending");
-  const [summary, setSummary] = useState({ pending: 0, reviewed: 0, approved: 0, rejected: 0 });
+  const [summary, setSummary] = useState({ total: 0, pending: 0, reviewed: 0, approved: 0, rejected: 0 });
   const [message, setMessage] = useState("");
   const [rejecting, setRejecting] = useState(null);
   const [busy, setBusy] = useState("");
-  async function load(tab = activeTab) {
+
+  async function load(event, nextMode = mode, nextReviewTab = reviewTab, nextFilters = filters) {
+    event?.preventDefault();
+    setBusy("orders"); setMessage("");
+    const params = new URLSearchParams({ limit: "100" });
+    if (nextMode === "offline") params.set("status", nextReviewTab);
+    for (const [key, value] of Object.entries(nextFilters)) if (value) params.set(key, value);
     try {
-      const result = await apiFetch(`/api/admin/offline-payments?status=${tab}`);
+      const result = await apiFetch(`/api/admin/${nextMode === "online" ? "payments" : "offline-payments"}?${params}`);
       setOrders(result.orders || []);
-      setSummary(result.summary || { pending: 0, reviewed: 0, approved: 0, rejected: 0 });
+      setSummary(result.summary || { total: 0, pending: 0, reviewed: 0, approved: 0, rejected: 0 });
     } catch (error) { setMessage(error.message); }
+    finally { setBusy(""); }
   }
-  useEffect(() => { load(activeTab); }, [activeTab]);
+
+  useEffect(() => {
+    apiFetch("/api/admin/release-channels").then((result) => setChannels(result.channels || [])).catch(() => setChannels([]));
+  }, []);
+  useEffect(() => { load(null, mode, reviewTab); }, [mode, reviewTab]);
+
+  function switchMode(nextMode) {
+    setOrders([]); setMessage(""); setMode(nextMode);
+  }
+
+  function resetFilters() {
+    const empty = { q: "", from: "", to: "", channelId: "" };
+    setFilters(empty);
+    load(null, mode, reviewTab, empty);
+  }
+
   async function approve(order) {
-    if (!window.confirm(`确认 ${order.userEmail || order.orderNo} 已到账并开通会员吗？`)) return;
+    if (!window.confirm(`确认 ${order.user?.email || order.userEmail || order.orderNo} 已到账并开通会员吗？`)) return;
     setBusy(order.id);
-    try { await apiFetch(`/api/admin/offline-payments/${order.id}/approve`, { method: "POST", body: "{}" }); setMessage("已确认到账，权益已写入官网并尝试同步 Chandler。"); await load("pending"); }
+    try { await apiFetch(`/api/admin/offline-payments/${order.id}/approve`, { method: "POST", body: "{}" }); await load(null, "offline", "pending"); setMessage("已确认到账，权益已写入官网并尝试同步 Chandler。"); }
     catch (error) { setMessage(error.message); }
     finally { setBusy(""); }
   }
+
   async function reject(event) {
     event.preventDefault();
     setBusy(rejecting.order.id); setMessage("");
     try {
       await apiFetch(`/api/admin/offline-payments/${rejecting.order.id}/reject`, { method: "POST", body: JSON.stringify({ reason: rejecting.reason }) });
-      setRejecting(null); setMessage("已拒绝该申请，用户后台已收到原因与重新申请入口。"); await load("pending");
+      setRejecting(null); await load(null, "offline", "pending"); setMessage("已拒绝该申请，用户后台已收到原因与重新申请入口。");
     } catch (error) { setMessage(error.message); }
     finally { setBusy(""); }
   }
-  return <section className="admin-module"><header className="admin-module-head"><div><span>CHANDLER OFFLINE REVIEW</span><h2>线下支付审核</h2><p>订单先持久化到 MongoDB，再镜像到 Chandler；通过或拒绝都会给用户发送站内消息。</p></div><button className="button secondary" onClick={() => load(activeTab)}><ArrowClockwise size={17} /> 刷新</button></header>{message && <AdminNotice tone={message.startsWith("已") ? "success" : "error"}>{message}</AdminNotice>}<div className="offline-review-tabs" role="tablist" aria-label="线下支付审核状态"><button type="button" role="tab" aria-selected={activeTab === "pending"} className={activeTab === "pending" ? "active" : ""} onClick={() => { setMessage(""); setActiveTab("pending"); }}><span>待审核</span><strong>{summary.pending}</strong></button><button type="button" role="tab" aria-selected={activeTab === "reviewed"} className={activeTab === "reviewed" ? "active" : ""} onClick={() => { setMessage(""); setActiveTab("reviewed"); }}><span>已审核</span><strong>{summary.reviewed}</strong></button></div>{orders.length ? <div className="offline-order-grid">{orders.map((order) => <article key={order.id}><header><div><span>{order.cycle === "year" ? "年度会员" : "月度会员"}</span><strong>{formatMoney(order.amountFen)}</strong></div><span className={`status-pill ${order.status}`}>{order.status === "pending" ? "待审核" : order.status === "approved" ? "已通过" : "已拒绝"}</span></header><dl><div><dt>订单号</dt><dd>{order.orderNo}</dd></div><div><dt>用户</dt><dd>{order.userEmail || order.ownerId}</dd></div><div><dt>{activeTab === "reviewed" ? "审核时间" : "提交时间"}</dt><dd>{new Date(activeTab === "reviewed" ? order.reviewedAt || order.updatedAt || order.createdAt : order.createdAt).toLocaleString("zh-CN")}</dd></div><div><dt>Chandler</dt><dd>{order.chandlerOrderNo || "等待镜像"}</dd></div></dl>{order.previousReviewReason && <div className="offline-review-history"><strong>上次拒绝：</strong>{order.previousReviewReason}<br /><strong>用户调整：</strong>{order.resubmissionNote || "未填写"}</div>}{order.reviewReason && <div className="offline-review-history rejected"><strong>拒绝原因：</strong>{order.reviewReason}</div>}{order.status === "pending" && <div className="offline-review-actions"><button className="button primary" disabled={busy === order.id} onClick={() => approve(order)}><CheckCircle size={17} /> 确认到账并通过</button><button className="button danger" disabled={busy === order.id} onClick={() => setRejecting({ order, reason: "" })}><X size={17} /> 拒绝通过</button></div>}</article>)}</div> : <EmptyState icon={ShieldCheck} title={activeTab === "pending" ? "当前没有待审核申请" : "还没有已审核记录"} text={activeTab === "pending" ? "新的线下支付申请会优先显示在这里。" : "已通过和已拒绝的申请会统一保留在这里。"} />}{rejecting && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && setRejecting(null)}><form className="admin-form-modal offline-reject-modal" onSubmit={reject}><button className="modal-close" type="button" disabled={Boolean(busy)} onClick={() => setRejecting(null)}><X size={18} /></button><span>REJECT OFFLINE PAYMENT</span><h2>拒绝通过</h2><p>订单：<strong>{rejecting.order.orderNo}</strong></p><label><span>拒绝原因</span><textarea required minLength={2} maxLength={500} autoFocus value={rejecting.reason} onChange={(event) => setRejecting({ ...rejecting, reason: event.target.value })} placeholder="请清楚说明金额、付款截图或订单信息中需要用户调整的内容。" /></label><div className="offline-reject-actions"><button type="button" className="button secondary" disabled={Boolean(busy)} onClick={() => setRejecting(null)}>取消</button><button className="button danger" disabled={Boolean(busy)}><FloppyDisk size={17} /> {busy ? "正在保存" : "保存拒绝原因"}</button></div></form></div>}</section>;
+
+  return <section className="admin-module payment-manager">
+    <header className="admin-module-head"><div><span>UNIFIED ORDER CENTER</span><h2>订单管理</h2><p>集中查看线上支付订单与线下审核订单，并按用户、订单、时间和发行渠道快速定位。</p></div><button className="button secondary" disabled={busy === "orders"} onClick={() => load()}><ArrowClockwise size={17} /> {busy === "orders" ? "加载中" : "刷新"}</button></header>
+    <div className="payment-mode-tabs" role="tablist" aria-label="订单支付方式"><button type="button" role="tab" aria-selected={mode === "online"} className={mode === "online" ? "active" : ""} onClick={() => switchMode("online")}><CurrencyCny size={20} />线上支付</button><button type="button" role="tab" aria-selected={mode === "offline"} className={mode === "offline" ? "active" : ""} onClick={() => switchMode("offline")}><ShieldCheck size={20} />线下支付</button></div>
+    <form className="order-filter-panel" onSubmit={load}><label className="order-keyword"><span>关键词模糊搜索</span><div><MagnifyingGlass size={18} /><input value={filters.q} onChange={(event) => setFilters({ ...filters, q: event.target.value })} placeholder="订单号、邮箱、昵称、支付渠道或状态" /></div></label><label><span>开始日期</span><input type="date" value={filters.from} onChange={(event) => setFilters({ ...filters, from: event.target.value })} /></label><label><span>结束日期</span><input type="date" value={filters.to} onChange={(event) => setFilters({ ...filters, to: event.target.value })} /></label><label className="order-channel"><span>用户分组 / 发行渠道</span><select value={filters.channelId} onChange={(event) => setFilters({ ...filters, channelId: event.target.value })}><option value="">全部发行渠道</option><option value="unassigned">未分配发行渠道</option>{channels.map((channel) => <option key={channel.id} value={channel.id}>{channel.name}</option>)}</select></label><div className="order-filter-actions"><button type="button" className="button ghost" onClick={resetFilters}>清空</button><button className="button secondary" disabled={busy === "orders"}><MagnifyingGlass size={17} />查询订单</button></div></form>
+    {message && <AdminNotice tone={message.startsWith("已") ? "success" : "error"}>{message}</AdminNotice>}
+    {mode === "offline" && <div className="offline-review-tabs" role="tablist" aria-label="线下支付审核状态"><button type="button" role="tab" aria-selected={reviewTab === "pending"} className={reviewTab === "pending" ? "active" : ""} onClick={() => setReviewTab("pending")}><span>待审核</span><strong>{summary.pending || 0}</strong></button><button type="button" role="tab" aria-selected={reviewTab === "reviewed"} className={reviewTab === "reviewed" ? "active" : ""} onClick={() => setReviewTab("reviewed")}><span>已审核</span><strong>{summary.reviewed || 0}</strong></button></div>}
+    {orders.length ? <div className="offline-order-grid">{orders.map((order) => <article key={order.id}><header><div><span>{mode === "online" ? order.kind === "recharge" ? "账户充值" : order.cycle === "year" ? "线上年度会员" : "线上月度会员" : order.cycle === "year" ? "线下年度会员" : "线下月度会员"}</span><strong>{formatMoney(order.amountFen)}</strong></div><span className={`status-pill ${order.status}`}>{mode === "offline" && order.status === "pending" ? "待审核" : paymentStatusText[order.status] || order.status || "未知"}</span></header><dl><div><dt>订单号</dt><dd>{order.orderNo}</dd></div><div><dt>用户</dt><dd>{order.user?.displayName || order.user?.email || order.userEmail || order.ownerId}</dd></div><div><dt>{mode === "offline" && reviewTab === "reviewed" ? "审核时间" : "下单时间"}</dt><dd>{new Date(mode === "offline" && reviewTab === "reviewed" ? order.reviewedAt || order.updatedAt || order.createdAt : order.createdAt).toLocaleString("zh-CN")}</dd></div><div><dt>发行渠道</dt><dd>{order.releaseChannel?.name || "未分配"}</dd></div><div><dt>{mode === "online" ? "支付渠道" : "Chandler"}</dt><dd>{mode === "online" ? order.provider === "wechat" ? "微信支付" : order.provider === "alipay" ? "支付宝" : order.provider || "未返回" : order.chandlerOrderNo || "等待镜像"}</dd></div>{mode === "online" && <div><dt>交易号</dt><dd>{order.providerTransactionId || "尚未完成支付"}</dd></div>}</dl>{mode === "offline" && order.previousReviewReason && <div className="offline-review-history"><strong>上次拒绝：</strong>{order.previousReviewReason}<br /><strong>用户调整：</strong>{order.resubmissionNote || "未填写"}</div>}{mode === "offline" && order.reviewReason && <div className="offline-review-history rejected"><strong>拒绝原因：</strong>{order.reviewReason}</div>}{mode === "offline" && order.status === "pending" && <div className="offline-review-actions"><button className="button primary" disabled={busy === order.id} onClick={() => approve(order)}><CheckCircle size={17} /> 确认到账并通过</button><button className="button danger" disabled={busy === order.id} onClick={() => setRejecting({ order, reason: "" })}><X size={17} /> 拒绝通过</button></div>}</article>)}</div> : <EmptyState icon={mode === "online" ? CurrencyCny : ShieldCheck} title={busy === "orders" ? "正在读取订单" : mode === "online" ? "没有匹配的线上订单" : reviewTab === "pending" ? "当前没有待审核申请" : "没有匹配的已审核记录"} text={mode === "online" ? "可调整关键词、日期或发行渠道后重新查询。" : reviewTab === "pending" ? "新的线下支付申请会优先显示在这里。" : "已通过和已拒绝的申请会统一保留在这里。"} />}
+    {rejecting && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && setRejecting(null)}><form className="admin-form-modal offline-reject-modal" onSubmit={reject}><button className="modal-close" type="button" disabled={Boolean(busy)} onClick={() => setRejecting(null)}><X size={18} /></button><span>REJECT OFFLINE PAYMENT</span><h2>拒绝通过</h2><p>订单：<strong>{rejecting.order.orderNo}</strong></p><label><span>拒绝原因</span><textarea required minLength={2} maxLength={500} autoFocus value={rejecting.reason} onChange={(event) => setRejecting({ ...rejecting, reason: event.target.value })} placeholder="请清楚说明金额、付款截图或订单信息中需要用户调整的内容。" /></label><div className="offline-reject-actions"><button type="button" className="button secondary" disabled={Boolean(busy)} onClick={() => setRejecting(null)}>取消</button><button className="button danger" disabled={Boolean(busy)}><FloppyDisk size={17} /> {busy ? "正在保存" : "保存拒绝原因"}</button></div></form></div>}
+  </section>;
 }
 
 export function AdminPage({ user, openAuth }) {
   const [active, setActive] = useState("dashboard");
   if (!user) return <main id="main-content" className="admin-gate section-shell"><LockKey size={38} /><h1>登录管理员账号</h1><p>管理员后台已接入 Chandler 统一身份，只接受 Chandler 返回的管理员角色。</p><button className="button primary" onClick={() => openAuth("login")}>登录继续</button></main>;
   if (user.role !== "admin") return <main id="main-content" className="admin-gate section-shell"><ShieldCheck size={38} /><h1>当前账号没有后台权限</h1><p>请让 Chandler 平台管理员授予此账号管理员角色后重新登录。</p></main>;
-  return <main id="main-content" className="admin-page"><aside className="admin-sidebar"><div><span>GULONG CONSOLE</span><h1>管理员后台</h1><p>{user.displayName || user.username || user.email}</p></div><nav>{menu.map((item) => { const Icon = item.icon; return <button key={item.id} className={active === item.id ? "active" : ""} onClick={() => setActive(item.id)}><Icon size={19} weight={active === item.id ? "fill" : "regular"} /> {item.label}</button>; })}</nav><footer><UsersThree size={18} /><span>Chandler 统一账号</span></footer></aside><div className="admin-content">{active === "dashboard" && <AdminDashboard />}{active === "users" && <ChandlerUserManager />}{active === "prices" && <ChandlerPriceManager />}{active === "partners" && <PartnerManager />}{active === "brain" && <BrainAttachmentManager />}{active === "versions" && <VersionManager />}{active === "payments" && <OfflinePaymentManager />}{active === "worker" && <WorkerReviewManager />}</div></main>;
+  return <main id="main-content" className="admin-page"><aside className="admin-sidebar"><div><span>GULONG CONSOLE</span><h1>管理员后台</h1><p>{user.displayName || user.username || user.email}</p></div><nav>{menu.map((item) => { const Icon = item.icon; return <button key={item.id} className={active === item.id ? "active" : ""} onClick={() => setActive(item.id)}><Icon size={19} weight={active === item.id ? "fill" : "regular"} /> {item.label}</button>; })}</nav><footer><UsersThree size={18} /><span>Chandler 统一账号</span></footer></aside><div className="admin-content">{active === "dashboard" && <AdminDashboard />}{active === "users" && <ChandlerUserManager />}{active === "prices" && <ChandlerPriceManager />}{active === "partners" && <PartnerManager />}{active === "brain" && <BrainAttachmentManager />}{active === "versions" && <VersionManager />}{active === "payments" && <PaymentManager />}{active === "worker" && <WorkerReviewManager />}</div></main>;
 }

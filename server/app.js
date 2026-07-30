@@ -394,6 +394,8 @@ function adminUserDirectoryFilter(query = {}) {
   const clauses = [];
   if (query.status === "active") clauses.push({ $or: [{ status: "active" }, { status: { $exists: false } }] });
   else if (query.status) clauses.push({ status: query.status });
+  if (query.channelId === "unassigned") clauses.push({ $or: [{ releaseChannelId: { $exists: false } }, { releaseChannelId: null }] });
+  else if (ObjectId.isValid(query.channelId)) clauses.push({ releaseChannelId: new ObjectId(query.channelId) });
   if (query.q?.trim()) {
     const keyword = query.q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     clauses.push({ $or: ["email", "username", "displayName", "chandlerUserId"].map((field) => ({ [field]: { $regex: keyword, $options: "i" } })) });
@@ -435,6 +437,87 @@ function subscriptionDirectoryCapabilities({ synchronized = false } = {}) {
     globalUserStatus: false,
     globalEntitlementApproval: false,
   };
+}
+
+function combineMongoFilters(...filters) {
+  const active = filters.filter((filter) => filter && Object.keys(filter).length);
+  if (!active.length) return {};
+  return active.length === 1 ? active[0] : { $and: active };
+}
+
+function adminOrderDateFilter(fromValue, toValue) {
+  const from = fromValue ? safeDate(fromValue) : null;
+  const to = toValue ? safeDate(toValue, true) : null;
+  if ((fromValue && !from) || (toValue && !to) || (from && to && from > to)) return null;
+  return from || to ? { createdAt: { ...(from ? { $gte: from } : {}), ...(to ? { $lte: to } : {}) } } : {};
+}
+
+async function adminOrderBaseFilter(query = {}) {
+  const clauses = [];
+  const dateFilter = adminOrderDateFilter(query.from, query.to);
+  if (dateFilter === null) return { error: "请选择正确的订单起止日期" };
+  if (Object.keys(dateFilter).length) clauses.push(dateFilter);
+
+  const users = await getCollection("users");
+  if (query.channelId) {
+    const userFilter = query.channelId === "unassigned"
+      ? { $or: [{ releaseChannelId: { $exists: false } }, { releaseChannelId: null }] }
+      : ObjectId.isValid(query.channelId)
+        ? { releaseChannelId: new ObjectId(query.channelId) }
+        : null;
+    if (!userFilter) return { error: "发行渠道筛选值无效" };
+    const ownerIds = await users.distinct("_id", userFilter);
+    clauses.push({ ownerId: { $in: ownerIds } });
+  }
+
+  if (query.q?.trim()) {
+    const keyword = query.q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = { $regex: keyword, $options: "i" };
+    const matchedUsers = await users.find({
+      $or: ["email", "emailNormalized", "username", "displayName", "chandlerUserId"].map((field) => ({ [field]: regex })),
+    }, { projection: { _id: 1 } }).limit(5000).toArray();
+    clauses.push({
+      $or: [
+        "orderNo",
+        "merchantOrderNo",
+        "chandlerOrderNo",
+        "providerTransactionId",
+        "userEmail",
+        "provider",
+        "kind",
+        "cycle",
+        "status",
+        "plan.productName",
+        "plan.skuName",
+      ].map((field) => ({ [field]: regex })).concat({ ownerId: { $in: matchedUsers.map((user) => user._id) } }),
+    });
+  }
+  return { filter: clauses.length ? { $and: clauses } : {} };
+}
+
+async function adminOrderRows(orders) {
+  const ownerIds = [...new Map(orders.filter((order) => order.ownerId).map((order) => [String(order.ownerId), order.ownerId])).values()];
+  const users = ownerIds.length
+    ? await (await getCollection("users")).find({ _id: { $in: ownerIds } }, { projection: { email: 1, username: 1, displayName: 1, releaseChannelId: 1 } }).toArray()
+    : [];
+  const channelIds = [...new Map(users.filter((user) => user.releaseChannelId).map((user) => [String(user.releaseChannelId), user.releaseChannelId])).values()];
+  const channels = channelIds.length
+    ? await (await getCollection("releaseChannels")).find({ _id: { $in: channelIds } }, { projection: { name: 1, groupId: 1 } }).toArray()
+    : [];
+  const userMap = new Map(users.map((user) => [String(user._id), user]));
+  const channelMap = new Map(channels.map((channel) => [String(channel._id), channel]));
+  return orders.map((order) => {
+    const user = userMap.get(String(order.ownerId));
+    const channel = user?.releaseChannelId ? channelMap.get(String(user.releaseChannelId)) : null;
+    return {
+      ...order,
+      id: order._id.toString(),
+      ownerId: order.ownerId?.toString?.() || null,
+      _id: undefined,
+      user: user ? { id: user._id.toString(), email: user.email || null, displayName: user.displayName || user.username || null } : null,
+      releaseChannel: channel ? { id: channel._id.toString(), name: channel.name, groupId: channel.groupId || null } : null,
+    };
+  });
 }
 
 function objectSize(head) {
@@ -1261,7 +1344,7 @@ const adminListChandlerUsersRoute = createRoute({
   tags: ["Admin · Chandler"],
   summary: "搜索官网与 Chandler 应用订阅用户",
   description: "通过 Chandler 应用级接口同步古龙版、永生花版授权用户及订阅属性，再与官网 MongoDB 用户合并。此接口不要求 Chandler 平台运营管理员权限。",
-  request: { query: z.object({ q: z.string().max(160).optional(), status: z.enum(["active", "disabled", "deleted"]).optional(), page: z.coerce.number().int().min(1).optional(), limit: z.coerce.number().int().min(1).max(100).optional() }) },
+  request: { query: z.object({ q: z.string().max(160).optional(), channelId: z.string().max(100).optional(), status: z.enum(["active", "disabled", "deleted"]).optional(), page: z.coerce.number().int().min(1).optional(), limit: z.coerce.number().int().min(1).max(100).optional() }) },
   responses: {
     200: { description: "Chandler 用户列表", content: { "application/json": { schema: z.object({ users: z.array(ChandlerAdminUserSchema), meta: z.record(z.string(), z.unknown()).optional() }).passthrough() } } },
     401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } },
@@ -2057,6 +2140,7 @@ app.openapi(adminListChandlerUsersRoute, async (c) => {
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
   c.header("Cache-Control", "private, no-store, max-age=0");
   const query = c.req.valid("query");
+  if (query.channelId && query.channelId !== "unassigned" && !ObjectId.isValid(query.channelId)) return c.json({ code: "VALIDATION_ERROR", message: "发行渠道筛选值无效" }, 400);
   try {
     const accessToken = await getChandlerAccessToken(auth.session);
     const synchronized = await synchronizeChandlerApplicationUsers(accessToken);
@@ -4171,25 +4255,65 @@ app.get("/api/billing/offline-orders", async (c) => {
   return c.json({ orders: orders.map((order) => ({ id: order._id.toString(), orderNo: order.orderNo, cycle: order.cycle, amountFen: order.amountFen, status: order.status, reviewReason: order.reviewReason || null, previousReviewReason: order.previousReviewReason || null, resubmissionNote: order.resubmissionNote || null, createdAt: order.createdAt, validUntil: order.validUntil })) });
 });
 
+app.get("/api/admin/payments", async (c) => {
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  const page = Math.max(1, Number.parseInt(c.req.query("page") || "1", 10) || 1);
+  const limit = Math.min(100, Math.max(1, Number.parseInt(c.req.query("limit") || "100", 10) || 100));
+  const query = {
+    q: String(c.req.query("q") || "").slice(0, 160),
+    from: c.req.query("from"),
+    to: c.req.query("to"),
+    channelId: c.req.query("channelId"),
+  };
+  const base = await adminOrderBaseFilter(query);
+  if (base.error) return c.json({ code: "VALIDATION_ERROR", message: base.error }, 400);
+  const payments = await getCollection("payments");
+  const [orders, total, groupedStatuses] = await Promise.all([
+    payments.find(base.filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).toArray(),
+    payments.countDocuments(base.filter),
+    payments.aggregate([{ $match: base.filter }, { $group: { _id: "$status", count: { $sum: 1 } } }]).toArray(),
+  ]);
+  const summary = Object.fromEntries(groupedStatuses.map((item) => [item._id || "unknown", item.count]));
+  return c.json({
+    orders: await adminOrderRows(orders),
+    summary: { total, ...summary },
+    meta: { total, page, limit, pages: Math.ceil(total / limit) },
+  });
+});
+
 app.get("/api/admin/offline-payments", async (c) => {
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  c.header("Cache-Control", "private, no-store, max-age=0");
   const requestedStatus = c.req.query("status");
-  const filter = requestedStatus === "reviewed"
+  const page = Math.max(1, Number.parseInt(c.req.query("page") || "1", 10) || 1);
+  const limit = Math.min(100, Math.max(1, Number.parseInt(c.req.query("limit") || "100", 10) || 100));
+  const base = await adminOrderBaseFilter({
+    q: String(c.req.query("q") || "").slice(0, 160),
+    from: c.req.query("from"),
+    to: c.req.query("to"),
+    channelId: c.req.query("channelId"),
+  });
+  if (base.error) return c.json({ code: "VALIDATION_ERROR", message: base.error }, 400);
+  const statusFilter = requestedStatus === "reviewed"
     ? { status: { $in: ["approved", "rejected"] } }
     : ["pending", "approved", "rejected"].includes(requestedStatus)
       ? { status: requestedStatus }
       : {};
+  const filter = combineMongoFilters(base.filter, statusFilter);
   const sort = requestedStatus === "reviewed" ? { reviewedAt: -1, updatedAt: -1 } : { createdAt: -1 };
   const offlinePayments = await getCollection("offlinePayments");
-  const [orders, pendingCount, approvedCount, rejectedCount] = await Promise.all([
-    offlinePayments.find(filter).sort(sort).limit(100).toArray(),
-    offlinePayments.countDocuments({ status: "pending" }),
-    offlinePayments.countDocuments({ status: "approved" }),
-    offlinePayments.countDocuments({ status: "rejected" }),
+  const [orders, total, pendingCount, approvedCount, rejectedCount] = await Promise.all([
+    offlinePayments.find(filter).sort(sort).skip((page - 1) * limit).limit(limit).toArray(),
+    offlinePayments.countDocuments(filter),
+    offlinePayments.countDocuments(combineMongoFilters(base.filter, { status: "pending" })),
+    offlinePayments.countDocuments(combineMongoFilters(base.filter, { status: "approved" })),
+    offlinePayments.countDocuments(combineMongoFilters(base.filter, { status: "rejected" })),
   ]);
   return c.json({
-    orders: orders.map((order) => ({ ...order, id: order._id.toString(), ownerId: order.ownerId.toString(), _id: undefined })),
+    orders: await adminOrderRows(orders),
     summary: { pending: pendingCount, reviewed: approvedCount + rejectedCount, approved: approvedCount, rejected: rejectedCount },
+    meta: { total, page, limit, pages: Math.ceil(total / limit) },
   });
 });
 
