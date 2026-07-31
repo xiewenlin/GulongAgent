@@ -74,6 +74,7 @@ export function DownloadPage() {
 
   useEffect(() => {
     apiFetch("/api/downloads")
+      .catch(() => apiFetch("/api/platform?_platform_path=downloads"))
       .then((result) => {
         setReleases(Object.fromEntries((result.editions || []).map((item) => [item.editionKey, item])));
       })

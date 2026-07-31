@@ -3088,6 +3088,7 @@ app.post("/api/release-worker/jobs/:id/fail", async (c) => {
 });
 
 app.get("/api/downloads", async (c) => {
+  c.header("Cache-Control", "no-store, max-age=0");
   const defaults = [
     { id: "feishu", label: "飞书下载", url: process.env.DOWNLOAD_FEISHU_URL || null, code: null },
     { id: "quark", label: "夸克网盘", url: process.env.DOWNLOAD_QUARK_URL || null, code: null },
@@ -3116,6 +3117,7 @@ app.get("/api/downloads", async (c) => {
 });
 
 app.get("/api/downloads/:edition/download", async (c) => {
+  c.header("Cache-Control", "private, no-store, max-age=0");
   const editionKey = String(c.req.param("edition") || "").trim().toLowerCase();
   if (!["gulong", "yongshenghua"].includes(editionKey)) return c.json({ code: "RELEASE_NOT_FOUND", message: "桌面版本类型不存在" }, 404);
   const channels = await publicEditionChannels();

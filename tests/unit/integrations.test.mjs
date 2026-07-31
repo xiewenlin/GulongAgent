@@ -446,6 +446,11 @@ test("Vercel platform entry restores nested API paths", async () => {
   const response = await platform.fetch(new Request("https://example.test/api/platform?_platform_path=releases/latest"));
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { release: null });
+
+  const downloadsResponse = await platform.fetch(new Request("https://example.test/api/platform?_platform_path=downloads"));
+  assert.equal(downloadsResponse.status, 200);
+  assert.equal(downloadsResponse.headers.get("Cache-Control"), "no-store, max-age=0");
+  assert.deepEqual((await downloadsResponse.json()).editions, []);
 });
 
 test("Vercel consolidates nested account and configuration routes", async () => {
@@ -472,6 +477,7 @@ test("Vercel consolidates nested account and configuration routes", async () => 
   assert.ok(sources.includes("/api/admin/worker-payments/:path*"));
   assert.ok(sources.includes("/api/admin/worker-contact-payments/:path*"));
   assert.ok(sources.includes("/api/admin/worker-workflows/:path*"));
+  assert.ok(sources.includes("/api/downloads"));
   assert.ok(sources.includes("/api/downloads/:path*"));
 });
 
@@ -524,6 +530,7 @@ test("download page explains both desktop editions", async () => {
   assert.match(source, /gulong-edition-icon\.png/);
   assert.match(source, /yongshenghua-edition-icon\.png/);
   assert.match(source, /\/api\/downloads\/\$\{editionKey\}\/download/);
+  assert.match(source, /\/api\/platform\?_platform_path=downloads/);
   assert.match(source, /\/api\/releases\/\$\{encodeURIComponent\(channelId\)\}\/download/);
   assert.doesNotMatch(source, /备用下载通道|ALTERNATIVE DOWNLOAD|飞书下载|夸克网盘|百度网盘/);
   assert.doesNotMatch(source, /download-providers|download-provider/);

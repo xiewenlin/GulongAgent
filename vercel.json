@@ -21,6 +21,10 @@
   ],
   "rewrites": [
     {
+      "source": "/api/downloads",
+      "destination": "/api/platform?_platform_path=downloads"
+    },
+    {
       "source": "/api/releases/:path*",
       "destination": "/api/platform?_platform_path=releases/:path*"
     },
