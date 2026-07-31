@@ -523,6 +523,8 @@ test("download page explains both desktop editions", async () => {
   assert.match(source, /gulong-edition-icon\.png/);
   assert.match(source, /yongshenghua-edition-icon\.png/);
   assert.match(source, /\/api\/downloads\/\$\{editionKey\}\/download/);
+  assert.doesNotMatch(source, /备用下载通道|ALTERNATIVE DOWNLOAD|飞书下载|夸克网盘|百度网盘/);
+  assert.doesNotMatch(source, /download-providers|download-provider/);
 });
 
 test("admin subscriptions localize review state and keep the three-column detail layout readable", async () => {

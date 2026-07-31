@@ -3,7 +3,6 @@ import {
   BookOpen,
   Check,
   CheckCircle,
-  CloudArrowDown,
   CloudArrowUp,
   Code,
   Copy,
@@ -68,7 +67,6 @@ function CustomizationContactDialog({ onClose }) {
 }
 
 export function DownloadPage() {
-  const [links, setLinks] = useState([]);
   const [releases, setReleases] = useState({});
   const [loading, setLoading] = useState(true);
   const [downloadError, setDownloadError] = useState("");
@@ -77,18 +75,11 @@ export function DownloadPage() {
   useEffect(() => {
     apiFetch("/api/downloads")
       .then((result) => {
-        setLinks(result.links || []);
         setReleases(Object.fromEntries((result.editions || []).map((item) => [item.editionKey, item])));
       })
-      .catch(() => setLinks([]))
+      .catch(() => setReleases({}))
       .finally(() => setLoading(false));
   }, []);
-
-  const providers = [
-    { id: "feishu", name: "飞书下载", text: "适合企业团队与国内高速下载", accent: "jade" },
-    { id: "quark", name: "夸克网盘", text: "移动端与桌面端均可便捷保存", accent: "gold" },
-    { id: "baidu", name: "百度网盘", text: "覆盖广泛，支持提取码与断点续传", accent: "blue" },
-  ];
 
   const editions = [
     {
@@ -155,19 +146,6 @@ export function DownloadPage() {
         </div>
         <div className="edition-decision-guide"><div><span>01</span><p><strong>个人首次使用</strong>选择古龙基础版，配置更直接，官方默认能力完整。</p></div><div><span>02</span><p><strong>已有永生花账号</strong>选择永生花定制版，登录后匹配对应品牌与权限。</p></div><div><span>03</span><p><strong>团队品牌化部署</strong>选择永生花定制版，使用独立发行节奏与定制配置。</p></div></div>
         {downloadError && <div className="form-error">{downloadError}</div>}
-        <div className="download-subheading"><span>ALTERNATIVE DOWNLOAD</span><h2>备用下载通道</h2><p>如果直接下载速度不理想，可以使用下方网盘链接。网盘内容由管理员统一维护。</p></div>
-        <div className="download-providers">
-          {providers.map((provider) => {
-            const link = links.find((item) => item.id === provider.id);
-            return (
-              <article key={provider.id} className={`download-provider ${provider.accent}`}>
-                <div className="provider-icon"><CloudArrowDown size={25} /></div>
-                <div><h3>{provider.name}</h3><p>{provider.text}</p>{link?.code && <small>提取码：{link.code}</small>}</div>
-                {link?.url ? <a className="button small secondary" href={link.url} target="_blank" rel="noreferrer">开始下载 <ArrowRight size={15} /></a> : <button className="button small ghost" disabled>{loading ? "正在读取" : "链接准备中"}</button>}
-              </article>
-            );
-          })}
-        </div>
         <div className="download-note"><ShieldCheck size={22} /><div><strong>安装包安全说明</strong><p>两个版本分别读取所属发行渠道的唯一最新版。直接下载链接为腾讯云 COS 的 15 分钟限时签名地址；下载后可核对页面公布的版本号、文件大小与 SHA-256。</p></div></div>
       </section>
     </main>

@@ -1611,7 +1611,6 @@ textarea:focus-visible {
 }
 
 .download-primary p,
-.download-provider p,
 .download-note p {
   margin: 0;
   color: var(--muted);
@@ -1643,32 +1642,6 @@ textarea:focus-visible {
   font-size: 26px;
 }
 
-.download-providers {
-  margin-top: 22px;
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 16px;
-}
-
-.download-provider {
-  min-height: 218px;
-  padding: 26px;
-  display: grid;
-  grid-template-columns: 46px 1fr;
-  align-content: start;
-  gap: 14px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: var(--surface);
-}
-
-.download-provider .button {
-  grid-column: 1 / -1;
-  align-self: end;
-  margin-top: 12px;
-}
-
-.provider-icon,
 .wallet-orb {
   width: 46px;
   height: 46px;
@@ -1677,27 +1650,6 @@ textarea:focus-visible {
   border-radius: 12px;
   color: var(--jade);
   background: var(--jade-soft);
-}
-
-.download-provider.gold .provider-icon {
-  color: #8a6729;
-  background: var(--gold-soft);
-}
-
-.download-provider.blue .provider-icon {
-  color: #3b6490;
-  background: #e9f1f8;
-}
-
-.download-provider h3 {
-  margin: 0 0 8px;
-}
-
-.download-provider small {
-  display: inline-block;
-  margin-top: 7px;
-  color: var(--jade);
-  font-weight: 700;
 }
 
 .download-note {
@@ -3071,7 +3023,6 @@ textarea:focus {
   }
 
   .capability-strip,
-  .download-providers,
   .pricing-grid,
   .developer-hero,
   .upload-grid,
@@ -3230,7 +3181,6 @@ textarea:focus {
   }
 
   .download-primary,
-  .download-provider,
   .upload-card,
   .upload-explainer,
   .feedback-form,
@@ -3751,10 +3701,6 @@ textarea:focus {
 .edition-decision-guide span { width: 38px; height: 38px; display: grid; place-items: center; color: var(--jade); border: 1px solid var(--line-strong); border-radius: 50%; font-size: 18px; font-weight: 900; }
 .edition-decision-guide p { margin: 0; color: var(--muted); font-size: 18px; line-height: 1.65; }
 .edition-decision-guide strong { display: block; color: var(--ink); }
-.download-subheading { margin-top: 52px; }
-.download-subheading > span { color: var(--gold); font-size: 18px; font-weight: 900; letter-spacing: .1em; }
-.download-subheading h2 { margin: 6px 0; font-size: 32px; }
-.download-subheading p { margin: 0; color: var(--muted); font-size: 18px; line-height: 1.7; }
 .payment-qr { width: 230px; height: 230px; margin: 4px auto 18px; padding: 8px; display: block; border: 1px solid var(--line); border-radius: 14px; background: #fff; }
 
 .admin-page {
