@@ -25,6 +25,10 @@
       "destination": "/api/platform?_platform_path=releases/:path*"
     },
     {
+      "source": "/api/downloads/:path*",
+      "destination": "/api/platform?_platform_path=downloads/:path*"
+    },
+    {
       "source": "/api/partners/:id/logo.svg",
       "destination": "/api/platform?_platform_path=partners/:id/logo.svg"
     },

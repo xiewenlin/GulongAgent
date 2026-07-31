@@ -110,7 +110,14 @@ export function DownloadPage() {
     setDownloadError("");
     setDownloading(editionKey);
     try {
-      const result = await apiFetch(`/api/downloads/${editionKey}/download`);
+      let result;
+      try {
+        result = await apiFetch(`/api/downloads/${editionKey}/download`);
+      } catch (primaryError) {
+        const channelId = releases[editionKey]?.channelId;
+        if (!channelId) throw primaryError;
+        result = await apiFetch(`/api/releases/${encodeURIComponent(channelId)}/download`);
+      }
       window.location.assign(result.url);
     } catch (error) {
       setDownloadError(error.message);
