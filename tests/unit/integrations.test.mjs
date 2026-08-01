@@ -238,6 +238,13 @@ test("the primary Worker navigation is a direct link without a dropdown", async 
   assert.doesNotMatch(workerEntry, /children/);
 });
 
+test("the primary navigation exposes a single complaint entry backed by the feedback page", async () => {
+  const source = await readFile(new URL("../../src/App.jsx", import.meta.url), "utf8");
+  assert.match(source, /\{ label: "吐槽", href: "\/feedback" \}/);
+  assert.match(source, /pathname === "\/feedback"\) page = <FeedbackPage/);
+  assert.doesNotMatch(source, /className="mobile-feedback"/);
+});
+
 test("deep customization opens the supplied WeChat QR dialog without requiring login", async () => {
   const [source, qrImage] = await Promise.all([
     readFile(new URL("../../src/components/PlatformPages.jsx", import.meta.url), "utf8"),

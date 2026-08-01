@@ -637,10 +637,6 @@ img {
   right: 4px;
 }
 
-.mobile-feedback {
-  display: none;
-}
-
 .header-actions {
   display: flex;
   align-items: center;
@@ -2983,10 +2979,6 @@ textarea:focus {
   .primary-nav button {
     min-height: 44px;
     text-align: left;
-  }
-
-  .mobile-feedback {
-    display: block;
   }
 
   .theme-button,

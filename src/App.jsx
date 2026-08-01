@@ -41,6 +41,7 @@ const primaryNav = [
   { label: "开发者", href: "/developer" },
   { label: "定价", href: "/pricing" },
   { label: "下载", href: "/download" },
+  { label: "吐槽", href: "/feedback" },
 ];
 
 const THEME_ICON_VERSION = "20260728-3d-favicon-1";
@@ -226,7 +227,6 @@ export function App() {
           </button>
           <nav className={mobileOpen ? "primary-nav open" : "primary-nav"} aria-label="主要导航">
             {primaryNav.map((item) => <div className={`primary-nav-item ${pathname === item.href.split("?")[0] ? "active" : ""}`} key={item.href}><button type="button" onClick={() => navigate(item.href)}>{item.label}{item.children && <CaretDown size={15} />}</button>{item.children && <div className="primary-submenu">{item.children.map((child) => <button type="button" key={child.href} onClick={() => navigate(child.href)}>{child.label}<ArrowRight size={16} /></button>)}</div>}</div>)}
-            <button className="mobile-feedback" type="button" onClick={() => navigate("/feedback")}>问题反馈</button>
           </nav>
           <div className="header-actions">
             <button className="theme-button" type="button" aria-label="自定义主题" onClick={() => setThemeOpen(true)}><Palette size={18} /></button>
