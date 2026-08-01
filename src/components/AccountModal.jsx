@@ -1,4 +1,4 @@
-import { Eye, EyeSlash, LockKey, SignIn, UserCircle, X } from "@phosphor-icons/react";
+import { ArrowLeft, EnvelopeSimple, Eye, EyeSlash, Key, LockKey, SignIn, UserCircle, X } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 import { apiFetch } from "../api.js";
 
@@ -7,14 +7,26 @@ export function AccountModal({ open, initialMode = "login", onClose, onUser, the
   const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [form, setForm] = useState({ identifier: "", username: "", email: "", displayName: "", inviteCode: "", password: "" });
+  const [success, setSuccess] = useState("");
+  const [resetSent, setResetSent] = useState(false);
+  const [cooldown, setCooldown] = useState(0);
+  const [form, setForm] = useState({ identifier: "", username: "", email: "", displayName: "", inviteCode: "", password: "", resetCode: "", newPassword: "", confirmPassword: "" });
 
   useEffect(() => {
     if (open) {
       setMode(initialMode);
       setError("");
+      setSuccess("");
+      setResetSent(false);
+      setCooldown(0);
     }
   }, [open, initialMode]);
+
+  useEffect(() => {
+    if (cooldown <= 0) return undefined;
+    const timer = window.setInterval(() => setCooldown((value) => Math.max(0, value - 1)), 1000);
+    return () => window.clearInterval(timer);
+  }, [cooldown > 0]);
 
   if (!open) return null;
 
@@ -22,7 +34,24 @@ export function AccountModal({ open, initialMode = "login", onClose, onUser, the
     event.preventDefault();
     setBusy(true);
     setError("");
+    setSuccess("");
     try {
+      if (mode === "forgot") {
+        if (!resetSent) {
+          const result = await apiFetch("/api/auth/forgot-password", { method: "POST", body: JSON.stringify({ email: form.email }) });
+          setResetSent(true);
+          setCooldown(60);
+          setSuccess(result.message || "验证码邮件已发送，请检查收件箱和垃圾邮箱");
+          return;
+        }
+        if (form.newPassword !== form.confirmPassword) throw new Error("两次输入的新密码不一致");
+        const result = await apiFetch("/api/auth/reset-password", { method: "POST", body: JSON.stringify({ email: form.email, code: form.resetCode, newPassword: form.newPassword }) });
+        setForm((current) => ({ ...current, identifier: current.email, password: "", resetCode: "", newPassword: "", confirmPassword: "" }));
+        setResetSent(false);
+        setMode("login");
+        setSuccess(result.message || "密码已重置，请使用新密码登录");
+        return;
+      }
       const body = mode === "login"
         ? { identifier: form.identifier, password: form.password }
         : { email: form.email, username: form.username || undefined, displayName: form.displayName || undefined, inviteCode: form.inviteCode || undefined, password: form.password };
@@ -36,18 +65,35 @@ export function AccountModal({ open, initialMode = "login", onClose, onUser, the
     }
   }
 
+  async function resendCode() {
+    if (busy || cooldown > 0) return;
+    setBusy(true); setError(""); setSuccess("");
+    try {
+      const result = await apiFetch("/api/auth/forgot-password", { method: "POST", body: JSON.stringify({ email: form.email }) });
+      setCooldown(60);
+      setSuccess(result.message || "新的验证码邮件已发送");
+    } catch (reason) { setError(reason.message); }
+    finally { setBusy(false); }
+  }
+
+  function switchMode(nextMode) {
+    setMode(nextMode);
+    setError(""); setSuccess(""); setShowPassword(false);
+    if (nextMode !== "forgot") setResetSent(false);
+  }
+
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <section className="account-modal" role="dialog" aria-modal="true" aria-labelledby="account-title">
         <button className="modal-close" type="button" aria-label="关闭" onClick={onClose}><X size={20} /></button>
         <div className="account-brand"><img src={themeIcon} alt="" /><span>Chandler × 古龙统一账号</span></div>
-        <h2 id="account-title">{mode === "login" ? "欢迎回来" : "创建你的古龙账号"}</h2>
-        <p>{mode === "login" ? "使用用户名或邮箱继续进入开放平台。" : "注册后即可上传第二大脑、提交反馈并创建 API Key。"}</p>
+        <h2 id="account-title">{mode === "login" ? "欢迎回来" : mode === "register" ? "创建你的古龙账号" : resetSent ? "输入邮箱验证码" : "找回你的密码"}</h2>
+        <p>{mode === "login" ? "使用用户名或邮箱继续进入开放平台。" : mode === "register" ? "注册后即可上传第二大脑、提交反馈并创建 API Key。" : resetSent ? "验证码已经发送到你的邮箱，校验后即可设置新密码。" : "输入注册邮箱，我们会发送一封安全验证邮件。"}</p>
 
-        <div className="account-tabs" role="tablist">
-          <button type="button" className={mode === "login" ? "active" : ""} onClick={() => setMode("login")}>登录</button>
-          <button type="button" className={mode === "register" ? "active" : ""} onClick={() => setMode("register")}>注册</button>
-        </div>
+        {mode === "forgot" ? <button type="button" className="account-back-login" onClick={() => switchMode("login")}><ArrowLeft size={18} /> 返回登录</button> : <div className="account-tabs" role="tablist">
+          <button type="button" className={mode === "login" ? "active" : ""} onClick={() => switchMode("login")}>登录</button>
+          <button type="button" className={mode === "register" ? "active" : ""} onClick={() => switchMode("register")}>注册</button>
+        </div>}
 
         <form onSubmit={submit}>
           {mode === "login" && (
@@ -63,11 +109,20 @@ export function AccountModal({ open, initialMode = "login", onClose, onUser, the
               <label><span>邀请码（可选）</span><div className="input-shell"><UserCircle size={18} /><input maxLength={64} value={form.inviteCode} onChange={(event) => setForm({ ...form, inviteCode: event.target.value })} placeholder="如有邀请码可填写" /></div></label>
             </>
           )}
-          <label><span>密码</span><div className="input-shell"><LockKey size={18} /><input required type={showPassword ? "text" : "password"} minLength={mode === "register" ? 10 : 1} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} autoComplete={mode === "login" ? "current-password" : "new-password"} placeholder={mode === "register" ? "至少 10 位，建议使用密码管理器" : "输入密码"} /><button type="button" aria-label={showPassword ? "隐藏密码" : "显示密码"} onClick={() => setShowPassword(!showPassword)}>{showPassword ? <EyeSlash size={18} /> : <Eye size={18} />}</button></div></label>
+          {mode === "forgot" && <label><span>注册邮箱</span><div className="input-shell"><EnvelopeSimple size={18} /><input required disabled={resetSent} type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} autoComplete="email" placeholder="name@example.com" /></div></label>}
+          {(mode === "login" || mode === "register") && <label><span className="account-label-row"><span>密码</span>{mode === "login" && <button type="button" onClick={() => switchMode("forgot")}>忘记密码？</button>}</span><div className="input-shell"><LockKey size={18} /><input required type={showPassword ? "text" : "password"} minLength={mode === "register" ? 10 : 1} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} autoComplete={mode === "login" ? "current-password" : "new-password"} placeholder={mode === "register" ? "至少 10 位，建议使用密码管理器" : "输入密码"} /><button type="button" aria-label={showPassword ? "隐藏密码" : "显示密码"} onClick={() => setShowPassword(!showPassword)}>{showPassword ? <EyeSlash size={18} /> : <Eye size={18} />}</button></div></label>}
+          {mode === "forgot" && resetSent && <>
+            <div className="reset-email-confirm"><EnvelopeSimple size={18} /><span>验证邮件已发送至 <strong>{form.email}</strong></span><button type="button" onClick={() => { setResetSent(false); setSuccess(""); setError(""); }}>修改邮箱</button></div>
+            <label><span>邮箱验证码</span><div className="input-shell"><Key size={18} /><input required minLength={6} maxLength={2048} value={form.resetCode} onChange={(event) => setForm({ ...form, resetCode: event.target.value.trim() })} autoComplete="one-time-code" placeholder="粘贴邮件中的验证码或重置令牌" /></div><small className="reset-code-help">邮件中如果显示为较长的重置令牌，也可直接完整粘贴到这里。</small></label>
+            <label><span>新密码</span><div className="input-shell"><LockKey size={18} /><input required type={showPassword ? "text" : "password"} minLength={10} maxLength={255} value={form.newPassword} onChange={(event) => setForm({ ...form, newPassword: event.target.value })} autoComplete="new-password" placeholder="至少 10 位，建议混合字母、数字和符号" /><button type="button" aria-label={showPassword ? "隐藏密码" : "显示密码"} onClick={() => setShowPassword(!showPassword)}>{showPassword ? <EyeSlash size={18} /> : <Eye size={18} />}</button></div></label>
+            <label><span>确认新密码</span><div className="input-shell"><LockKey size={18} /><input required type={showPassword ? "text" : "password"} minLength={10} maxLength={255} value={form.confirmPassword} onChange={(event) => setForm({ ...form, confirmPassword: event.target.value })} autoComplete="new-password" placeholder="再次输入新密码" /></div></label>
+            <div className="reset-code-actions"><span>没有收到？请同时检查垃圾邮箱</span><button type="button" disabled={busy || cooldown > 0} onClick={resendCode}>{cooldown > 0 ? `${cooldown} 秒后可重发` : "重新发送验证码"}</button></div>
+          </>}
+          {success && <div className="form-success" role="status">{success}</div>}
           {error && <div className="form-error" role="alert">{error}</div>}
-          <button className="button primary full" type="submit" disabled={busy}>{busy ? "请稍候…" : <><SignIn size={18} /> {mode === "login" ? "登录" : "创建账号"}</>}</button>
+          <button className="button primary full" type="submit" disabled={busy}>{busy ? "请稍候…" : <>{mode === "forgot" ? resetSent ? <Key size={18} /> : <EnvelopeSimple size={18} /> : <SignIn size={18} />} {mode === "login" ? "登录" : mode === "register" ? "创建账号" : resetSent ? "验证并重置密码" : "发送邮箱验证码"}</>}</button>
         </form>
-        <small className="privacy-note">继续即表示你同意平台服务条款与隐私政策。账号与密码由 Chandler 统一身份服务处理，古龙官网不保存密码。</small>
+        <small className="privacy-note">{mode === "forgot" ? "验证码与新密码由 Chandler 统一身份服务安全校验；重置成功后，原有登录会话会自动失效。" : "继续即表示你同意平台服务条款与隐私政策。账号与密码由 Chandler 统一身份服务处理，古龙官网不保存密码。"}</small>
       </section>
     </div>
   );

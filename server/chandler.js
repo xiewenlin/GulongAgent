@@ -127,6 +127,30 @@ export function loginWithChandler(identifier, password) {
   });
 }
 
+export function forgotPasswordWithChandler(email) {
+  return chandlerRequest("/v1/auth/forgot-password", {
+    method: "POST",
+    body: { email: email.trim().toLowerCase() },
+  });
+}
+
+export async function resetPasswordWithChandler(token, newPassword) {
+  try {
+    return await chandlerRequest("/v1/auth/reset-password", {
+      method: "POST",
+      body: { token: token.trim(), new_password: newPassword },
+    });
+  } catch (error) {
+    if (error instanceof ChandlerError && ["token.invalid", "auth.token_invalid"].includes(error.code)) {
+      throw new ChandlerError("邮箱验证码无效或已过期，请重新获取", { status: 400, code: error.code, detail: error.detail });
+    }
+    if (error instanceof ChandlerError && error.code === "auth.weak_password") {
+      throw new ChandlerError("新密码强度不足，请至少使用大写字母、小写字母、数字和符号中的三类", { status: 422, code: error.code, detail: error.detail });
+    }
+    throw error;
+  }
+}
+
 export async function resolveWebsiteLoginEmail(identifier) {
   const normalized = String(identifier || "").trim().normalize("NFKC").toLowerCase();
   if (!normalized || normalized.includes("@")) return normalized;

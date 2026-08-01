@@ -48,6 +48,7 @@ import {
   createPartnerSku,
   createSubscriptionCheckout,
   externalAuthFromResponse,
+  forgotPasswordWithChandler,
   getChandlerAccessToken,
   issueOfflineCredential,
   isChandlerBootstrapAdmin,
@@ -61,6 +62,7 @@ import {
   markChandlerProductEdition,
   productEditionFromChannel,
   registerWithChandler,
+  resetPasswordWithChandler,
   resolveChandlerIdentity,
   setPartnerSkuStatus,
   upsertChandlerUser,
@@ -135,6 +137,16 @@ const RegisterSchema = z
 const LoginSchema = z.object({
   identifier: z.string().trim().min(3).max(254),
   password: z.string().min(1).max(128),
+});
+
+const ForgotPasswordSchema = z.object({
+  email: z.email(),
+});
+
+const ResetPasswordSchema = z.object({
+  email: z.email(),
+  code: z.string().trim().min(6).max(2048),
+  newPassword: z.string().min(10).max(255),
 });
 
 async function requireAdmin(c) {
@@ -1759,6 +1771,34 @@ const loginRoute = createRoute({
   },
 });
 
+const forgotPasswordRoute = createRoute({
+  method: "post",
+  path: "/api/auth/forgot-password",
+  tags: ["Authentication"],
+  summary: "发送找回密码邮件",
+  description: "通过 Chandler 统一身份服务向邮箱发送一次性验证码或重置令牌。无论邮箱是否存在，成功受理时都返回相同响应，防止账号枚举。",
+  request: { body: { content: { "application/json": { schema: ForgotPasswordSchema } } } },
+  responses: {
+    202: { description: "邮件请求已受理", content: { "application/json": { schema: z.object({ status: z.literal("accepted"), message: z.string() }) } } },
+    429: { description: "请求过于频繁", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const resetPasswordRoute = createRoute({
+  method: "post",
+  path: "/api/auth/reset-password",
+  tags: ["Authentication"],
+  summary: "使用邮箱验证码重置密码",
+  description: "校验邮件中的一次性验证码或重置令牌并设置新密码。成功后吊销该用户在古龙官网与 Chandler 的既有登录会话。",
+  request: { body: { content: { "application/json": { schema: ResetPasswordSchema } } } },
+  responses: {
+    200: { description: "密码已重置", content: { "application/json": { schema: z.object({ status: z.literal("reset"), message: z.string() }) } } },
+    400: { description: "验证码无效或过期", content: { "application/json": { schema: ErrorSchema } } },
+    422: { description: "新密码强度不足", content: { "application/json": { schema: ErrorSchema } } },
+    429: { description: "尝试过于频繁", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 app.use("*", requestId());
 app.use(
   "*",
@@ -1918,6 +1958,51 @@ app.openapi(loginRoute, async (c) => {
       createdAt: user.createdAt,
     },
   });
+});
+
+app.openapi(forgotPasswordRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const input = c.req.valid("json");
+  const email = normalizeEmail(input.email);
+  const ipKey = fingerprintIp(c.req.header("x-forwarded-for") || "local");
+  const emailKey = hashOpaqueToken(email, "password-reset-email").slice(0, 24);
+  const [ipRate, emailRate] = await Promise.all([
+    enforceRateLimit(`password-forgot-ip:${ipKey}`, { limit: 8, windowMs: 30 * 60_000 }),
+    enforceRateLimit(`password-forgot-email:${emailKey}`, { limit: 3, windowMs: 30 * 60_000 }),
+  ]);
+  if (!ipRate.allowed || !emailRate.allowed) {
+    return c.json({ code: "RATE_LIMITED", message: "验证码发送过于频繁，请稍后再试" }, 429);
+  }
+  await forgotPasswordWithChandler(email);
+  c.header("Cache-Control", "no-store, max-age=0");
+  return c.json({ status: "accepted", message: "如果该邮箱已注册，验证码邮件会在几分钟内送达" }, 202);
+});
+
+app.openapi(resetPasswordRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const input = c.req.valid("json");
+  const email = normalizeEmail(input.email);
+  const ipKey = fingerprintIp(c.req.header("x-forwarded-for") || "local");
+  const codeKey = hashOpaqueToken(input.code, "password-reset-code").slice(0, 24);
+  const [ipRate, codeRate] = await Promise.all([
+    enforceRateLimit(`password-reset-ip:${ipKey}`, { limit: 12, windowMs: 30 * 60_000 }),
+    enforceRateLimit(`password-reset-code:${codeKey}`, { limit: 5, windowMs: 30 * 60_000 }),
+  ]);
+  if (!ipRate.allowed || !codeRate.allowed) {
+    return c.json({ code: "RATE_LIMITED", message: "验证码校验尝试过多，请重新获取验证码" }, 429);
+  }
+
+  await resetPasswordWithChandler(input.code, input.newPassword);
+  const users = await getCollection("users");
+  const user = await users.findOne({ emailNormalized: email }, { projection: { _id: 1 } });
+  if (user) {
+    await Promise.all([
+      (await getCollection("sessions")).deleteMany({ userId: user._id }),
+      users.updateOne({ _id: user._id }, { $set: { passwordResetAt: new Date(), updatedAt: new Date() } }),
+    ]);
+  }
+  c.header("Cache-Control", "no-store, max-age=0");
+  return c.json({ status: "reset", message: "密码已重置，请使用新密码重新登录" });
 });
 
 app.get("/api/auth/me", async (c) => {

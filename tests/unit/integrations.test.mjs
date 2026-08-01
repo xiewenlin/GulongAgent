@@ -8,11 +8,13 @@ import {
   createDirectPaymentOrder,
   createPartnerPriceVersion,
   externalAuthFromResponse,
+  forgotPasswordWithChandler,
   isChandlerBootstrapAdmin,
   listAllPartnerClientUsers,
   listPartnerSubscriptionPlans,
   productEdition,
   productEditionFromChannel,
+  resetPasswordWithChandler,
   resolveWebsiteLoginEmail,
 } from "../../server/chandler.js";
 import { browserUploadCorsReady, browserUploadCorsRule, cosConfig, sanitizeFilename } from "../../server/cos.js";
@@ -57,6 +59,25 @@ test("website login normalizes e-mail identifiers and resolves registered userna
   assert.match(chandlerSource, /chandlerRequest\("\/v1\/oauth\/token"/);
   assert.match(chandlerSource, /application\/x-www-form-urlencoded/);
   assert.match(chandlerSource, /auth\.invalid_credentials/);
+});
+
+test("Chandler password recovery sends mail and resets with the one-time token", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), method: options.method, body: JSON.parse(options.body) });
+    return new Response(JSON.stringify({ data: { status: "accepted" } }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    await forgotPasswordWithChandler(" Member@Example.com ");
+    await resetPasswordWithChandler(" reset-token-123 ", "New-Strong-Pass456!");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(calls[0].url, "https://api.chandler.work/v1/auth/forgot-password");
+  assert.deepEqual(calls[0].body, { email: "member@example.com" });
+  assert.equal(calls[1].url, "https://api.chandler.work/v1/auth/reset-password");
+  assert.deepEqual(calls[1].body, { token: "reset-token-123", new_password: "New-Strong-Pass456!" });
 });
 
 test("user provider keys use purpose-bound encryption", () => {
@@ -245,6 +266,25 @@ test("the primary navigation exposes a single complaint entry backed by the feed
   assert.doesNotMatch(source, /className="mobile-feedback"/);
 });
 
+test("email verification-code password recovery is wired end to end", async () => {
+  const [modalSource, serverSource, css] = await Promise.all([
+    readFile(new URL("../../src/components/AccountModal.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/styles.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(modalSource, /忘记密码？/);
+  assert.match(modalSource, /\/api\/auth\/forgot-password/);
+  assert.match(modalSource, /\/api\/auth\/reset-password/);
+  assert.match(modalSource, /autoComplete="one-time-code"/);
+  assert.match(modalSource, /两次输入的新密码不一致/);
+  assert.match(serverSource, /password-forgot-email:/);
+  assert.match(serverSource, /password-reset-code:/);
+  assert.match(serverSource, /deleteMany\(\{ userId: user\._id \}\)/);
+  assert.match(serverSource, /Cache-Control", "no-store, max-age=0/);
+  assert.match(css, /\.reset-code-actions\s*\{/);
+  assert.match(css, /\.account-label-row\s*\{/);
+});
+
 test("deep customization opens the supplied WeChat QR dialog without requiring login", async () => {
   const [source, qrImage] = await Promise.all([
     readFile(new URL("../../src/components/PlatformPages.jsx", import.meta.url), "utf8"),
@@ -322,6 +362,8 @@ test("OpenAPI document includes Chandler admin, offline credentials, dated attac
   const response = await app.request("http://localhost/api/openapi.json");
   assert.equal(response.status, 200);
   const document = await response.json();
+  assert.ok(document.paths["/api/auth/forgot-password"]?.post);
+  assert.ok(document.paths["/api/auth/reset-password"]?.post);
   assert.ok(document.paths["/api/auth/offline-credential"]);
   assert.ok(document.paths["/api/v1/brain/attachments/latest"]);
   assert.ok(document.paths["/api/releases/latest"]);

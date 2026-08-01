@@ -2503,6 +2503,17 @@ textarea:focus {
   font-weight: 800;
 }
 
+.account-back-login { margin: 20px 0 17px; padding: 7px 0; display: inline-flex; align-items: center; gap: 7px; color: var(--jade); border: 0; background: transparent; font-size: 18px; font-weight: 800; cursor: pointer; }
+.account-label-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.account-label-row > button { padding: 0; color: var(--jade); border: 0; background: transparent; font-size: 18px; font-weight: 800; cursor: pointer; }
+.reset-email-confirm { padding: 12px 13px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 9px; color: var(--muted); border: 1px solid var(--line); border-radius: 10px; background: var(--bg-soft); font-size: 18px; }
+.reset-email-confirm strong { color: var(--ink); overflow-wrap: anywhere; }
+.reset-email-confirm button,
+.reset-code-actions button { padding: 0; color: var(--jade); border: 0; background: transparent; font-size: 18px; font-weight: 800; cursor: pointer; }
+.reset-code-help { color: var(--muted); font-size: 18px; line-height: 1.55; }
+.reset-code-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 18px; }
+.reset-code-actions button:disabled { color: color-mix(in srgb, var(--muted) 62%, transparent); cursor: not-allowed; }
+
 .register-choice {
   margin-bottom: 16px;
   padding: 4px;
@@ -2554,6 +2565,8 @@ textarea:focus {
 .input-shell input:focus {
   outline: none;
 }
+
+.input-shell input:disabled { color: var(--muted); background: transparent; cursor: not-allowed; }
 
 .input-shell button {
   width: 32px;
@@ -3284,6 +3297,10 @@ textarea:focus {
   .custom-contact-modal {
     padding: 30px 22px 22px;
   }
+
+  .reset-email-confirm { grid-template-columns: auto minmax(0, 1fr); }
+  .reset-email-confirm button { grid-column: 2; justify-self: start; }
+  .reset-code-actions { align-items: flex-start; flex-direction: column; }
 }
 
 /* Personal account console */
