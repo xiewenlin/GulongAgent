@@ -425,7 +425,11 @@ async function adminUserDirectoryFilter(query = {}) {
   return clauses.length ? { $and: clauses } : {};
 }
 
-function adminUserDirectoryItem(user) {
+function adminUserDirectoryItem(user, subscription = null, now = new Date()) {
+  const membershipStatus = subscription
+    ? subscriptionPeriodState(subscription.currentPeriodStart, subscription.currentPeriodEnd, now)
+    : "inactive";
+  const isMember = membershipStatus === "active";
   return {
     id: user.chandlerUserId || user._id.toString(),
     website_user_id: user._id.toString(),
@@ -433,6 +437,11 @@ function adminUserDirectoryItem(user) {
     display_name: user.displayName || user.username || null,
     status: user.status || "active",
     role: user.role || "user",
+    account_type: user.role === "admin" ? "administrator" : isMember ? "subscription_member" : "standard_user",
+    is_member: isMember,
+    membership_status: membershipStatus,
+    membership_valid_from: subscription?.currentPeriodStart || null,
+    membership_valid_until: subscription?.currentPeriodEnd || null,
     edition_name: user.editionName || "古龙版",
     created_at: new Date(user.createdAt || 0).toISOString(),
   };
@@ -447,7 +456,19 @@ async function websiteAdminUserDirectory(query = {}) {
     usersCollection.find(filter, { projection: { passwordHash: 0 } }).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).toArray(),
     usersCollection.countDocuments(filter),
   ]);
-  return { users: users.map(adminUserDirectoryItem), total, page, limit, pages: Math.ceil(total / limit) };
+  const ownerIds = users.map((user) => user._id);
+  const subscriptions = ownerIds.length
+    ? await (await getCollection("subscriptions")).find({ ownerId: { $in: ownerIds } }).toArray()
+    : [];
+  const subscriptionsByOwner = new Map(subscriptions.map((subscription) => [subscription.ownerId.toString(), subscription]));
+  const now = new Date();
+  return {
+    users: users.map((user) => adminUserDirectoryItem(user, subscriptionsByOwner.get(user._id.toString()), now)),
+    total,
+    page,
+    limit,
+    pages: Math.ceil(total / limit),
+  };
 }
 
 function subscriptionDirectoryCapabilities({ synchronized = false } = {}) {

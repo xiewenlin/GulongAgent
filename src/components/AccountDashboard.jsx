@@ -175,7 +175,7 @@ export function AccountDashboard({ user, openAuth, navigate, onUser }) {
   const isMember = subscription?.status === "active";
   const accountRole = data?.profile.role || user.role || "user";
   const isAdmin = accountRole === "admin";
-  const identityLabel = isAdmin ? "管理员" : isMember ? "会员用户" : "普通用户";
+  const identityLabel = isAdmin ? "管理员" : isMember ? "订阅会员" : "普通用户";
   const editionName = data?.profile.edition?.name || user.edition?.name || "古龙版";
   const avatar = data?.profile.avatar || user.avatar || null;
   const unreadNotifications = (data?.notifications || []).filter((item) => !item.readAt);

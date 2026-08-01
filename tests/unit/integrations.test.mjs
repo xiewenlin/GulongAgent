@@ -640,9 +640,11 @@ test("admin subscription directory uses Chandler application scope and explicit 
 });
 
 test("administrator subscription periods are authoritative across website and desktop clients", async () => {
-  const [serverSource, dbSource] = await Promise.all([
+  const [serverSource, dbSource, adminSource, accountSource] = await Promise.all([
     readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
     readFile(new URL("../../server/db.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/AccountDashboard.jsx", import.meta.url), "utf8"),
   ]);
   assert.match(serverSource, /manualPeriodOverride:\s*true/);
   assert.match(serverSource, /subscriptionPeriodState\(subscription\.currentPeriodStart, subscription\.currentPeriodEnd, now\)/);
@@ -651,6 +653,11 @@ test("administrator subscription periods are authoritative across website and de
   assert.match(serverSource, /type:\s*"subscription_period_updated"|"subscription_period_updated"/);
   assert.doesNotMatch(serverSource, /safeDate\(subscription\.currentPeriodEnd\)/);
   assert.match(dbSource, /subscription_period_audits_by_user/);
+  assert.match(serverSource, /account_type: user\.role === "admin" \? "administrator" : isMember \? "subscription_member" : "standard_user"/);
+  assert.match(serverSource, /membership_status: membershipStatus/);
+  assert.match(adminSource, /user\.is_member \? "订阅会员" : "普通用户"/);
+  assert.match(adminSource, /Promise\.all\(\[inspect\(user\), load\(\)\]\)/);
+  assert.match(accountSource, /isMember \? "订阅会员" : "普通用户"/);
 });
 
 test("Chandler v2.2 pricing uses application-level price versions before the local mirror", async () => {
