@@ -3610,6 +3610,69 @@ app.post("/api/feedback", async (c) => {
   return c.json({ id: result.insertedId.toString(), status: "open" }, 201);
 });
 
+app.get("/api/admin/feedback", async (c) => {
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  const page = Math.max(1, Math.min(5000, Number.parseInt(c.req.query("page") || "1", 10) || 1));
+  const limit = Math.max(1, Math.min(100, Number.parseInt(c.req.query("limit") || "30", 10) || 30));
+  const query = String(c.req.query("q") || "").trim().slice(0, 160);
+  const filter = {};
+
+  if (query) {
+    const keyword = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = { $regex: keyword, $options: "i" };
+    const users = await getCollection("users");
+    const matchingUsers = await users.find({
+      $or: ["displayName", "username", "email", "emailNormalized"].map((field) => ({ [field]: regex })),
+    }, { projection: { _id: 1 } }).limit(1000).toArray();
+    const statusLabels = { open: "待处理", processing: "处理中", resolved: "已回复", closed: "已关闭" };
+    const matchingStatuses = Object.entries(statusLabels)
+      .filter(([status, label]) => status.includes(query.toLowerCase()) || label.includes(query) || query.includes(label))
+      .map(([status]) => status);
+    filter.$or = [
+      { message: regex },
+      { status: regex },
+      ...(matchingUsers.length ? [{ ownerId: { $in: matchingUsers.map((user) => user._id) } }] : []),
+      ...(matchingStatuses.length ? [{ status: { $in: matchingStatuses } }] : []),
+      ...(ObjectId.isValid(query) ? [{ _id: new ObjectId(query) }] : []),
+    ];
+  }
+
+  const feedback = await getCollection("feedback");
+  const [items, total] = await Promise.all([
+    feedback.find(filter).sort({ createdAt: -1, _id: -1 }).skip((page - 1) * limit).limit(limit).toArray(),
+    feedback.countDocuments(filter),
+  ]);
+  const ownerIds = [...new Set(items.map((item) => item.ownerId?.toString()).filter((id) => ObjectId.isValid(id)))].map((id) => new ObjectId(id));
+  const owners = ownerIds.length ? await (await getCollection("users")).find(
+    { _id: { $in: ownerIds } },
+    { projection: { displayName: 1, username: 1, email: 1, avatar: 1 } },
+  ).toArray() : [];
+  const ownerMap = new Map(owners.map((owner) => [owner._id.toString(), owner]));
+
+  return c.json({
+    items: items.map((item) => {
+      const owner = ownerMap.get(item.ownerId?.toString());
+      return {
+        id: item._id.toString(),
+        message: item.message,
+        status: item.status || "open",
+        screenshots: (Array.isArray(item.screenshots) ? item.screenshots : []).map(parseHttpUrl).filter(Boolean),
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt || null,
+        owner: owner ? {
+          id: owner._id.toString(),
+          displayName: owner.displayName || null,
+          username: owner.username || null,
+          email: owner.email || null,
+          avatar: parseHttpUrl(owner.avatar),
+        } : null,
+      };
+    }),
+    pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) },
+  });
+});
+
 app.openapi(workerSearchAssigneesRoute, async (c) => {
   const auth = await authenticate(c); if (auth.error) return auth.error;
   const query = c.req.valid("query").q.trim();

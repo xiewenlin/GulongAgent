@@ -4,6 +4,7 @@ import {
   ArrowSquareOut,
   CalendarBlank,
   Briefcase,
+  ChatCircleText,
   ChartLineUp,
   CheckCircle,
   CloudArrowDown,
@@ -40,6 +41,7 @@ const menu = [
   { id: "versions", label: "版本管理", icon: Package },
   { id: "payments", label: "订单管理", icon: ShieldCheck },
   { id: "worker", label: "威客审核", icon: Briefcase },
+  { id: "feedback", label: "用户反馈", icon: ChatCircleText },
 ];
 
 const subscriptionStatusLabels = {
@@ -508,6 +510,47 @@ function WorkerReviewManager() {
   return <section className="admin-module"><header className="admin-module-head"><div><span>WORKER ESCROW REVIEW</span><h2>威客审核</h2><p>审核任务预算与双方查看微信号的 2 元线下订单；只有审核通过才开放对应能力。</p></div><button className="button secondary" onClick={load}><ArrowClockwise size={17} />刷新</button></header>{message && <AdminNotice tone={message.startsWith("已") ? "success" : "error"}>{message}</AdminNotice>}<div className="worker-admin-kind-tabs"><button className={kind === "task" ? "active" : ""} onClick={() => setKind("task")}><CurrencyCny size={19} />任务预算审核</button><button className={kind === "contact" ? "active" : ""} onClick={() => setKind("contact")}><UsersThree size={19} />联系方式订单</button></div><div className="offline-review-tabs"><button className={tab === "pending" ? "active" : ""} onClick={() => setTab("pending")}><span>待审核</span><strong>{summary.pending || 0}</strong></button><button className={tab === "reviewed" ? "active" : ""} onClick={() => setTab("reviewed")}><span>已审核</span><strong>{summary.reviewed || 0}</strong></button></div>{items.length ? <div className="worker-admin-review-list">{items.map((item) => <article key={item.id}><div><span>{kind === "task" ? "任务预算" : "联系方式查看"}</span><h3>{kind === "task" ? item.title : item.taskTitle}</h3><p>{kind === "task" ? `${item.publisher?.displayName || "发单用户"} · ${item.assignment?.label || "公开接单"}` : `${item.requester?.displayName || "用户"} 申请查看 ${item.target?.displayName || "任务另一方"}`}</p><small>{kind === "task" ? item.paymentOrderNo : item.orderNo}</small></div><strong>{formatMoney(kind === "task" ? item.budgetFen : item.amountFen)}</strong><em className={`status-pill ${kind === "task" ? item.paymentStatus : item.status}`}>{(kind === "task" ? item.paymentStatus : item.status) === "pending" ? "待审核" : (kind === "task" ? item.paymentStatus : item.status) === "approved" ? "已通过" : "已拒绝"}</em>{tab === "pending" && <div className="admin-row-actions"><button className="button small primary" disabled={busy === item.id} onClick={() => approve(item)}>确认到账并通过</button><button className="button small secondary" disabled={busy === item.id} onClick={() => setRejecting({ item, reason: "" })}>拒绝通过</button></div>}</article>)}</div> : <EmptyState icon={Briefcase} title={tab === "pending" ? "没有待审核威客订单" : "还没有已审核记录"} text="新订单提交后会自动显示在这里。" />}{rejecting && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setRejecting(null)}><form className="admin-form-modal" onSubmit={reject}><button className="modal-close" type="button" onClick={() => setRejecting(null)}><X size={18} /></button><span>REJECT WORKER PAYMENT</span><h2>填写拒绝原因</h2><p>原因会原样发送给申请用户，并允许用户调整后重新提交。</p><label><span>拒绝原因</span><textarea autoFocus required minLength={2} maxLength={500} value={rejecting.reason} onChange={(event) => setRejecting({ ...rejecting, reason: event.target.value })} /></label><button className="button primary full" disabled={busy === rejecting.item.id}>保存并通知用户</button></form></div>}</section>;
 }
 
+const feedbackStatusLabels = { open: "待处理", processing: "处理中", resolved: "已回复", closed: "已关闭" };
+
+function FeedbackManager() {
+  const [keyword, setKeyword] = useState("");
+  const [items, setItems] = useState([]);
+  const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+
+  async function load(event, page = 1, query = keyword) {
+    event?.preventDefault();
+    setBusy(true); setMessage("");
+    const params = new URLSearchParams({ page: String(page), limit: "30" });
+    if (query.trim()) params.set("q", query.trim());
+    try {
+      const result = await apiFetch(`/api/admin/feedback?${params}`);
+      setItems(result.items || []);
+      setPagination(result.pagination || { page: 1, pages: 1, total: 0 });
+    } catch (error) { setMessage(error.message); }
+    finally { setBusy(false); }
+  }
+
+  useEffect(() => { load(); }, []);
+
+  return <section className="admin-module feedback-manager">
+    <header className="admin-module-head"><div><span>VOICE OF USER</span><h2>用户反馈</h2><p>集中查看官网“问题反馈”提交的真实记录。列表按提交时间倒序排列，最新反馈始终显示在最上方。</p></div><button className="button secondary" disabled={busy} onClick={() => load(null, pagination.page || 1)}><ArrowClockwise size={17} /> {busy ? "加载中" : "刷新"}</button></header>
+    <form className="feedback-admin-filter" onSubmit={(event) => load(event, 1)}><label><MagnifyingGlass size={19} /><input value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="搜索反馈内容、昵称、用户名、邮箱、编号或状态" /></label><button className="button primary" disabled={busy}><MagnifyingGlass size={17} /> 搜索反馈</button>{keyword && <button type="button" className="button ghost" onClick={() => { setKeyword(""); load(null, 1, ""); }}>清空</button>}</form>
+    {message && <AdminNotice tone="error">{message}</AdminNotice>}
+    {items.length ? <div className="admin-feedback-list">{items.map((item) => {
+      const ownerName = item.owner?.displayName || item.owner?.username || item.owner?.email || "匿名用户";
+      return <article key={item.id}>
+        <header><div className="feedback-user-avatar">{item.owner?.avatar ? <img src={item.owner.avatar} alt="" /> : ownerName.slice(0, 1).toUpperCase()}</div><div><strong>{ownerName}</strong><span>{item.owner?.email || "匿名反馈"}</span></div><em className={`status-pill ${item.status}`}>{feedbackStatusLabels[item.status] || item.status || "待处理"}</em></header>
+        <p>{item.message}</p>
+        {item.screenshots?.length > 0 && <div className="admin-feedback-images">{item.screenshots.map((url, index) => <a key={`${url}-${index}`} href={url} target="_blank" rel="noreferrer" aria-label={`查看第 ${index + 1} 张反馈截图`}><img src={url} alt={`反馈截图 ${index + 1}`} /><ArrowSquareOut size={18} /></a>)}</div>}
+        <footer><time dateTime={item.createdAt}>{new Date(item.createdAt).toLocaleString("zh-CN")}</time><span>反馈编号：{item.id}</span></footer>
+      </article>;
+    })}</div> : <EmptyState icon={ChatCircleText} title={busy ? "正在读取用户反馈" : keyword ? "没有匹配的反馈" : "暂时还没有用户反馈"} text={keyword ? "请尝试更换关键词后重新搜索。" : "用户从官网提交问题反馈后，会按最新时间优先显示在这里。"} />}
+    <footer className="admin-module-footer feedback-pagination"><span>共 {pagination.total || 0} 条反馈</span><div><button className="button small ghost" disabled={busy || (pagination.page || 1) <= 1} onClick={() => load(null, (pagination.page || 1) - 1)}>上一页</button><strong>第 {pagination.page || 1} / {pagination.pages || 1} 页</strong><button className="button small ghost" disabled={busy || (pagination.page || 1) >= (pagination.pages || 1)} onClick={() => load(null, (pagination.page || 1) + 1)}>下一页</button></div></footer>
+  </section>;
+}
+
 const paymentStatusText = { pending: "待支付", paid: "已支付", approved: "已通过", rejected: "已拒绝", failed: "支付失败", refunded: "已退款", cancelled: "已取消", canceled: "已取消" };
 
 function PaymentManager() {
@@ -588,5 +631,5 @@ export function AdminPage({ user, openAuth }) {
   const [active, setActive] = useState("dashboard");
   if (!user) return <main id="main-content" className="admin-gate section-shell"><LockKey size={38} /><h1>登录管理员账号</h1><p>管理员后台已接入 Chandler 统一身份，只接受 Chandler 返回的管理员角色。</p><button className="button primary" onClick={() => openAuth("login")}>登录继续</button></main>;
   if (user.role !== "admin") return <main id="main-content" className="admin-gate section-shell"><ShieldCheck size={38} /><h1>当前账号没有后台权限</h1><p>请让 Chandler 平台管理员授予此账号管理员角色后重新登录。</p></main>;
-  return <main id="main-content" className="admin-page"><aside className="admin-sidebar"><div><span>GULONG CONSOLE</span><h1>管理员后台</h1><p>{user.displayName || user.username || user.email}</p></div><nav>{menu.map((item) => { const Icon = item.icon; return <button key={item.id} className={active === item.id ? "active" : ""} onClick={() => setActive(item.id)}><Icon size={19} weight={active === item.id ? "fill" : "regular"} /> {item.label}</button>; })}</nav><footer><UsersThree size={18} /><span>Chandler 统一账号</span></footer></aside><div className="admin-content">{active === "dashboard" && <AdminDashboard />}{active === "users" && <ChandlerUserManager />}{active === "prices" && <ChandlerPriceManager />}{active === "partners" && <PartnerManager />}{active === "brain" && <BrainAttachmentManager />}{active === "versions" && <VersionManager />}{active === "payments" && <PaymentManager />}{active === "worker" && <WorkerReviewManager />}</div></main>;
+  return <main id="main-content" className="admin-page"><aside className="admin-sidebar"><div><span>GULONG CONSOLE</span><h1>管理员后台</h1><p>{user.displayName || user.username || user.email}</p></div><nav>{menu.map((item) => { const Icon = item.icon; return <button key={item.id} className={active === item.id ? "active" : ""} onClick={() => setActive(item.id)}><Icon size={19} weight={active === item.id ? "fill" : "regular"} /> {item.label}</button>; })}</nav><footer><UsersThree size={18} /><span>Chandler 统一账号</span></footer></aside><div className="admin-content">{active === "dashboard" && <AdminDashboard />}{active === "users" && <ChandlerUserManager />}{active === "prices" && <ChandlerPriceManager />}{active === "partners" && <PartnerManager />}{active === "brain" && <BrainAttachmentManager />}{active === "versions" && <VersionManager />}{active === "payments" && <PaymentManager />}{active === "worker" && <WorkerReviewManager />}{active === "feedback" && <FeedbackManager />}</div></main>;
 }

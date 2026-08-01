@@ -737,6 +737,25 @@ test("order management separates online and offline orders with multidimensional
   assert.match(dbSource, /offline_payments_by_owner_and_date/);
 });
 
+test("administrator feedback records are newest-first and support fuzzy keyword search", async () => {
+  const [adminSource, serverSource, css] = await Promise.all([
+    readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/styles.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(adminSource, /\{ id: "worker", label: "威客审核", icon: Briefcase \},\s*\{ id: "feedback", label: "用户反馈", icon: ChatCircleText \}/);
+  assert.match(adminSource, /active === "feedback" && <FeedbackManager \/>/);
+  assert.match(adminSource, /\/api\/admin\/feedback\?\$\{params\}/);
+  assert.match(adminSource, /搜索反馈内容、昵称、用户名、邮箱、编号或状态/);
+  assert.match(serverSource, /app\.get\("\/api\/admin\/feedback"/);
+  assert.match(serverSource, /requireAdmin\(c\)/);
+  assert.match(serverSource, /feedback\.find\(filter\)\.sort\(\{ createdAt: -1, _id: -1 \}\)/);
+  assert.match(serverSource, /\["displayName", "username", "email", "emailNormalized"\]/);
+  assert.match(serverSource, /\{ message: regex \}/);
+  assert.match(css, /\.admin-feedback-list\s*\{/);
+  assert.match(css, /\.feedback-admin-filter\s*\{/);
+});
+
 test("administrator release controls are explicit and legacy direct distribution stays unreachable", async () => {
   const [source, adminSource] = await Promise.all([
     readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
