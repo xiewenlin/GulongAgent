@@ -56,6 +56,7 @@ import {
   listPartnerPriceVersions,
   listPartnerSubscriptionPlans,
   loginWithChandler,
+  resolveWebsiteLoginEmail,
   logoutFromChandler,
   markChandlerProductEdition,
   productEditionFromChannel,
@@ -75,7 +76,12 @@ import {
 } from "./cos.js";
 import { buildAdminAnalyticsDashboard, recordAnalyticsEvent } from "./analytics.js";
 import { recoverExpiredDirectReleaseLock } from "./release-lock.js";
-import { OFFLINE_REVIEW_REJECTION_REASON, offlineReviewWechatMessage } from "./offline-review.js";
+import {
+  OFFLINE_REVIEW_REJECTION_REASON,
+  chandlerOrderItems,
+  normalizeChandlerOfflineOrder,
+  offlineReviewWechatMessage,
+} from "./offline-review.js";
 import {
   WORKER_MAX_ASSETS_PER_SECTION,
   canBypassWorkerContactPayment,
@@ -96,6 +102,8 @@ const AVATAR_MAX_BYTES = 10 * 1024 * 1024;
 const AVATAR_CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 const SUBSCRIPTION_PRICE_MIN_FEN = 100;
 const SUBSCRIPTION_PRICE_MAX_FEN = 5_000_000;
+let offlinePaymentSyncPromise = null;
+let offlinePaymentSynchronizedAt = 0;
 
 const ErrorSchema = z.object({
   code: z.string().openapi({ example: "VALIDATION_ERROR" }),
@@ -225,8 +233,10 @@ function partnerAssetUploadTicket({ kind, contentType, filename }) {
 }
 
 function safeDate(value, endOfDay = false) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ""))) return null;
-  const date = new Date(`${value}T${endOfDay ? "23:59:59.999" : "00:00:00.000"}+08:00`);
+  const input = String(value || "");
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(input)
+    ? new Date(`${input}T${endOfDay ? "23:59:59.999" : "00:00:00.000"}+08:00`)
+    : new Date(input);
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
@@ -793,6 +803,120 @@ async function enqueueOfflineReviewEvent(order, source = "new-order") {
   );
 }
 
+async function ensureOfflineReviewEvent(order, source = "backfill") {
+  const events = await getCollection("offlinePaymentReviewEvents");
+  const existing = await events.findOne({ orderId: order._id });
+  if (existing && !["completed", "cancelled"].includes(existing.status)) return false;
+  await enqueueOfflineReviewEvent(order, source);
+  return true;
+}
+
+function desktopOfflinePaymentRow(order) {
+  const editionKey = order.editionKey === "yongshenghua" || String(order.applicationKey || "").includes("airos") ? "yongshenghua" : "gulong";
+  const target = chandlerApplicationTargets().find((item) => item.editionKey === editionKey) || chandlerApplicationTargets()[0];
+  return {
+    id: order._id.toString(),
+    websiteOrderId: order._id.toString(),
+    application: {
+      key: editionKey === "yongshenghua" ? "airos-eternal-flower" : "gulong",
+      name: editionKey === "yongshenghua" ? "爱若斯-永生花" : "古龙智能引擎",
+      clientId: target?.id || "",
+      themeName: editionKey === "yongshenghua" ? "永生花" : "上古神龙",
+    },
+    orderNo: order.orderNo,
+    userId: order.chandlerUserId || "",
+    userEmail: order.userEmail || "",
+    planKind: order.cycle === "year" ? "yearly" : "monthly",
+    productName: order.plan?.productName || (order.cycle === "year" ? "年度订阅会员" : "月度订阅会员"),
+    amountFen: order.amountFen,
+    reviewStatus: order.status,
+    submittedAt: order.createdAt,
+    reviewedAt: order.reviewedAt ? new Date(order.reviewedAt).toISOString() : "",
+    validFrom: order.validFrom ? new Date(order.validFrom).toISOString() : "",
+    validUntil: order.validUntil ? new Date(order.validUntil).toISOString() : "",
+  };
+}
+
+async function synchronizeChandlerOfflinePayments(accessToken) {
+  if (!accessToken) return { imported: 0, inspected: 0 };
+  const offlinePayments = await getCollection("offlinePayments");
+  let imported = 0;
+  let inspected = 0;
+  for (const target of chandlerApplicationTargets()) {
+    let payload;
+    try {
+      payload = await chandlerRequest(`/v1/me/orders?client_id=${encodeURIComponent(target.id)}&page=1&limit=100`, { accessToken, timeoutMs: 8_000 });
+    } catch {
+      continue;
+    }
+    for (const rawOrder of chandlerOrderItems(payload)) {
+      const candidate = normalizeChandlerOfflineOrder(rawOrder, { ...target, key: target.editionKey === "yongshenghua" ? "airos-eternal-flower" : "gulong" });
+      if (!candidate || candidate.reviewStatus !== "pending") continue;
+      inspected += 1;
+      const owner = await upsertChandlerUser({
+        id: candidate.chandlerUserId,
+        email: candidate.userEmail,
+        display_name: candidate.userEmail.split("@")[0],
+        status: "active",
+      }, {
+        identity: { role: "user", editionKey: candidate.editionKey, editionName: candidate.editionName, editionSource: "desktop-offline-payment" },
+        defaultEdition: candidate.editionKey,
+      });
+      const document = {
+        orderNo: candidate.orderNo,
+        chandlerOrderNo: candidate.orderNo,
+        ownerId: owner._id,
+        chandlerUserId: candidate.chandlerUserId,
+        userEmail: candidate.userEmail,
+        cycle: candidate.cycle,
+        amountFen: candidate.amountFen,
+        plan: {
+          productId: candidate.partnerData.product_id || "subscription",
+          productName: candidate.partnerData.product_name || (candidate.cycle === "year" ? "年度订阅会员" : "月度订阅会员"),
+          skuId: candidate.partnerData.sku_id || null,
+          skuName: candidate.partnerData.sku_name || null,
+          source: "desktop-chandler-import",
+        },
+        partnerData: candidate.partnerData,
+        applicationId: candidate.applicationId,
+        applicationKey: candidate.applicationKey,
+        editionKey: candidate.editionKey,
+        status: "pending",
+        source: "desktop-chandler-import",
+        createdAt: candidate.createdAt,
+        updatedAt: new Date(),
+      };
+      let order = await offlinePayments.findOne({ orderNo: candidate.orderNo });
+      if (!order) {
+        try {
+          const result = await offlinePayments.insertOne(document);
+          order = { ...document, _id: result.insertedId };
+          imported += 1;
+        } catch (error) {
+          if (error?.code !== 11000) throw error;
+          order = await offlinePayments.findOne({ orderNo: candidate.orderNo });
+        }
+      }
+      if (order?.status === "pending") await ensureOfflineReviewEvent(order, imported ? "desktop-chandler-import" : "desktop-chandler-backfill").catch(() => null);
+    }
+  }
+  return { imported, inspected };
+}
+
+async function syncChandlerOfflinePayments(accessToken, { force = false } = {}) {
+  if (!accessToken) return { imported: 0, inspected: 0, skipped: true };
+  if (!force && Date.now() - offlinePaymentSynchronizedAt < 30_000) return { imported: 0, inspected: 0, skipped: true };
+  if (offlinePaymentSyncPromise) return offlinePaymentSyncPromise;
+  offlinePaymentSyncPromise = synchronizeChandlerOfflinePayments(accessToken);
+  try {
+    const result = await offlinePaymentSyncPromise;
+    offlinePaymentSynchronizedAt = Date.now();
+    return result;
+  } finally {
+    offlinePaymentSyncPromise = null;
+  }
+}
+
 function desktopReviewEvent(event, order) {
   return {
     eventId: event._id.toString(),
@@ -848,11 +972,13 @@ async function approveOfflinePayment({ orderId, actorUserId, actorChandlerUserId
     ),
   ]);
   if (accessToken && order.chandlerOrderNo) {
-    await chandlerRequest(`/v1/me/orders/${encodeURIComponent(order.chandlerOrderNo)}/partner-data?client_id=${encodeURIComponent(chandlerConfig().applicationId)}`, { method: "PUT", accessToken, body: { partner_data: partnerData } }).catch(() => null);
+    const applicationId = order.applicationId || chandlerConfig().applicationId;
+    await chandlerRequest(`/v1/me/orders/${encodeURIComponent(order.chandlerOrderNo)}/partner-data?client_id=${encodeURIComponent(applicationId)}`, { method: "PUT", accessToken, body: { partner_data: partnerData } }).catch(() => null);
   }
   if (accessToken && order.chandlerUserId) {
     try {
-      const path = `/v1/me/oauth/clients/${encodeURIComponent(chandlerConfig().applicationId)}/users/${encodeURIComponent(order.chandlerUserId)}/attributes`;
+      const applicationId = order.applicationId || chandlerConfig().applicationId;
+      const path = `/v1/me/oauth/clients/${encodeURIComponent(applicationId)}/users/${encodeURIComponent(order.chandlerUserId)}/attributes`;
       const current = await chandlerRequest(path, { accessToken });
       const attributes = current.attributes && typeof current.attributes === "object" ? current.attributes : {};
       await chandlerRequest(path, { method: "PUT", accessToken, body: { attributes: { ...attributes, subscription_status: "active", subscription_source: "offline_review", subscription_order_no: order.orderNo, subscription_valid_from: start.toISOString(), subscription_valid_until: end.toISOString(), subscription_valid_from_unix_ms: start.getTime(), subscription_valid_until_unix_ms: end.getTime(), subscription_reviewed_at_unix_ms: now.getTime() } } });
@@ -883,7 +1009,8 @@ async function rejectOfflinePayment({ orderId, actorUserId, actorChandlerUserId,
     { upsert: true },
   );
   if (accessToken && order.chandlerOrderNo) {
-    await chandlerRequest(`/v1/me/orders/${encodeURIComponent(order.chandlerOrderNo)}/partner-data?client_id=${encodeURIComponent(chandlerConfig().applicationId)}`, { method: "PUT", accessToken, body: { partner_data: partnerData } }).catch(() => null);
+    const applicationId = order.applicationId || chandlerConfig().applicationId;
+    await chandlerRequest(`/v1/me/orders/${encodeURIComponent(order.chandlerOrderNo)}/partner-data?client_id=${encodeURIComponent(applicationId)}`, { method: "PUT", accessToken, body: { partner_data: partnerData } }).catch(() => null);
   }
   return { ok: true, orderNo: order.orderNo, status: "rejected", reason: normalizedReason, message: `审核已拒绝，原因已经同步给用户：${normalizedReason}` };
 }
@@ -1279,6 +1406,77 @@ const DesktopReviewEventSchema = z.object({
   message: z.string(),
   status: z.enum(["leased", "awaiting_action"]),
   leaseUntil: z.coerce.date().nullable(),
+});
+
+const DesktopOfflinePaymentSchema = z.object({
+  id: z.string(),
+  websiteOrderId: z.string(),
+  application: z.object({ key: z.string(), name: z.string(), clientId: z.string(), themeName: z.string() }),
+  orderNo: z.string(),
+  userId: z.string(),
+  userEmail: z.string(),
+  planKind: z.enum(["monthly", "yearly"]),
+  productName: z.string(),
+  amountFen: z.number().int(),
+  reviewStatus: z.enum(["pending", "approved", "rejected"]),
+  submittedAt: z.coerce.date(),
+  reviewedAt: z.string(),
+  validFrom: z.string(),
+  validUntil: z.string(),
+});
+
+const desktopCreateOfflinePaymentRoute = createRoute({
+  method: "post",
+  path: "/api/v1/desktop/offline-payments",
+  tags: ["Desktop Synchronization"],
+  summary: "桌面端提交线下支付待审核订单",
+  description: "使用普通用户当前 Chandler Bearer Token，将“我已支付”声明幂等写入官网 MongoDB 权威审核队列。成功后网页管理员和已绑定的管理员桌面端可跨设备立即读取。",
+  security: [{ bearerAuth: [] }],
+  request: { body: { content: { "application/json": { schema: z.object({
+    clientOrderNo: z.string().min(16).max(200),
+    applicationKey: z.enum(["gulong", "airos-eternal-flower"]),
+    themeName: z.string().min(1).max(80),
+    releaseChannel: z.string().min(1).max(100),
+    planKind: z.enum(["monthly", "yearly"]),
+    expectedAmountFen: z.number().int().min(100).max(5_000_000),
+  }) } } } },
+  responses: {
+    201: { description: "已进入统一审核队列", content: { "application/json": { schema: z.object({ order: DesktopOfflinePaymentSchema, idempotent: z.boolean() }) } } },
+    401: { description: "Chandler 登录失效", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "价格或幂等订单冲突", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const desktopAdminOfflinePaymentsRoute = createRoute({
+  method: "get",
+  path: "/api/v1/admin/offline-payments",
+  tags: ["Desktop Synchronization"],
+  summary: "管理员桌面端跨设备读取线下支付订单",
+  description: "只允许 Chandler 全局管理员读取官网统一审核队列；同时补录旧版桌面端已经镜像到 Chandler、但尚未进入官网 MongoDB 的订单。",
+  security: [{ bearerAuth: [] }],
+  request: { query: z.object({ status: z.enum(["pending", "reviewed", "approved", "rejected"]).optional(), limit: z.coerce.number().int().min(1).max(100).optional() }) },
+  responses: {
+    200: { description: "统一审核订单", content: { "application/json": { schema: z.object({ orders: z.array(DesktopOfflinePaymentSchema), synchronized: z.object({ imported: z.number().int(), inspected: z.number().int(), skipped: z.boolean().optional() }) }) } } },
+    403: { description: "非管理员", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const desktopAdminApproveOfflinePaymentRoute = createRoute({
+  method: "post",
+  path: "/api/v1/admin/offline-payments/{orderId}/approve",
+  tags: ["Desktop Synchronization"],
+  summary: "管理员桌面端审核通过官网线下支付订单",
+  description: "使用 Chandler 全局管理员身份审核官网 MongoDB 权威订单，会员权益会立即同步到网页端和普通用户桌面端。",
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ orderId: z.string().min(1).max(100) }),
+    body: { content: { "application/json": { schema: z.object({ validFrom: z.string().optional(), validUntil: z.string().optional() }) } } },
+  },
+  responses: {
+    200: { description: "审核完成", content: { "application/json": { schema: DesktopOfflinePaymentSchema } } },
+    403: { description: "非管理员", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "订单状态已经变化", content: { "application/json": { schema: ErrorSchema } } },
+  },
 });
 
 const desktopReviewBindRoute = createRoute({
@@ -1677,7 +1875,8 @@ app.openapi(loginRoute, async (c) => {
   if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "登录尝试过多，请稍后重试" }, 429);
 
   const input = c.req.valid("json");
-  const chandlerAuth = await loginWithChandler(input.identifier, input.password);
+  const loginEmail = await resolveWebsiteLoginEmail(input.identifier);
+  const chandlerAuth = await loginWithChandler(loginEmail, input.password);
   const identity = await resolveChandlerIdentity(chandlerAuth.user, chandlerAuth.access_token);
   const user = await upsertChandlerUser(chandlerAuth.user, {
     username: input.identifier.includes("@") ? undefined : input.identifier,
@@ -4296,6 +4495,7 @@ app.get("/api/admin/payments", async (c) => {
 
 app.get("/api/admin/offline-payments", async (c) => {
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  await syncChandlerOfflinePayments(await getChandlerAccessToken(auth.session).catch(() => null)).catch(() => null);
   c.header("Cache-Control", "private, no-store, max-age=0");
   const requestedStatus = c.req.query("status");
   const page = Math.max(1, Number.parseInt(c.req.query("page") || "1", 10) || 1);
@@ -4392,6 +4592,123 @@ app.post("/api/billing/offline-payments/:id/resubmit", async (c) => {
   return c.json({ ok: true, orderNo: order.orderNo, status: "pending" });
 });
 
+app.openapi(desktopCreateOfflinePaymentRoute, async (c) => {
+  const auth = await authenticateDesktopChandler(c);
+  if (auth.error) return auth.error;
+  const body = c.req.valid("json");
+  const cycle = body.planKind === "yearly" ? "year" : "month";
+  const pricing = await currentSubscriptionPricing();
+  const amountFen = cycle === "year" ? pricing.yearly.amountFen : pricing.monthly.amountFen;
+  if (body.expectedAmountFen !== amountFen) {
+    return c.json({ code: "PRICE_CHANGED", message: `官网订阅价格已更新为 ¥${(amountFen / 100).toFixed(2)}，请刷新桌面端套餐后重新提交` }, 409);
+  }
+  const orders = await getCollection("offlinePayments");
+  const existing = await orders.findOne({ desktopRequestId: body.clientOrderNo });
+  if (existing) {
+    if (String(existing.ownerId) !== String(auth.user._id)) return c.json({ code: "ORDER_CONFLICT", message: "该桌面端订单号已经属于其他账号" }, 409);
+    return c.json({ order: desktopOfflinePaymentRow(existing), idempotent: true }, 201);
+  }
+  const now = new Date();
+  const editionKey = body.applicationKey === "airos-eternal-flower" ? "yongshenghua" : "gulong";
+  const orderNo = `GLD${Date.now()}${randomBytes(4).toString("hex").toUpperCase()}`;
+  const partnerData = {
+    schema_version: 3,
+    application_key: body.applicationKey,
+    application_name: editionKey === "yongshenghua" ? "爱若斯-永生花" : "古龙智能引擎",
+    theme_name: body.themeName,
+    release_channel: body.releaseChannel,
+    release_channel_name: body.releaseChannel,
+    user_id: String(auth.chandlerUser.id),
+    user_email: auth.user.email || auth.chandlerUser.email || null,
+    product_id: "subscription",
+    product_name: cycle === "year" ? "年度订阅会员" : "月度订阅会员",
+    plan_kind: body.planKind,
+    amount_fen: amountFen,
+    payment_method: "offline",
+    platform_service_fee: false,
+    review_status: "pending",
+    business_payment_status: "awaiting_manual_review",
+    submitted_at: now.toISOString(),
+    submitted_at_unix_ms: now.getTime(),
+    source: "windows-desktop-official-queue",
+  };
+  const document = {
+    orderNo,
+    desktopRequestId: body.clientOrderNo,
+    chandlerOrderNo: null,
+    ownerId: auth.user._id,
+    chandlerUserId: String(auth.chandlerUser.id),
+    userEmail: auth.user.email || auth.chandlerUser.email || null,
+    cycle,
+    amountFen,
+    plan: { productId: "subscription", productName: partnerData.product_name, skuId: null, skuName: null, source: "desktop-official-queue" },
+    partnerData,
+    applicationKey: body.applicationKey,
+    editionKey,
+    releaseChannelName: body.releaseChannel,
+    status: "pending",
+    source: "desktop-official-queue",
+    createdAt: now,
+    updatedAt: now,
+  };
+  let result;
+  try {
+    result = await orders.insertOne(document);
+  } catch (error) {
+    if (error?.code !== 11000) throw error;
+    const duplicate = await orders.findOne({ desktopRequestId: body.clientOrderNo });
+    if (!duplicate || String(duplicate.ownerId) !== String(auth.user._id)) return c.json({ code: "ORDER_CONFLICT", message: "订单提交发生冲突，请刷新后重试" }, 409);
+    return c.json({ order: desktopOfflinePaymentRow(duplicate), idempotent: true }, 201);
+  }
+  const order = { ...document, _id: result.insertedId };
+  await enqueueOfflineReviewEvent(order, "desktop-official-queue");
+  return c.json({ order: desktopOfflinePaymentRow(order), idempotent: false }, 201);
+});
+
+app.openapi(desktopAdminOfflinePaymentsRoute, async (c) => {
+  const auth = await authenticateDesktopChandler(c, { admin: true });
+  if (auth.error) return auth.error;
+  const synchronized = await syncChandlerOfflinePayments(auth.accessToken).catch(() => ({ imported: 0, inspected: 0 }));
+  const requested = c.req.valid("query").status;
+  const limit = c.req.valid("query").limit || 100;
+  const statusFilter = requested === "reviewed"
+    ? { $in: ["approved", "rejected"] }
+    : ["pending", "approved", "rejected"].includes(requested)
+      ? requested
+      : { $in: ["pending", "approved", "rejected"] };
+  const orders = await (await getCollection("offlinePayments"))
+    .find({ status: statusFilter })
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .toArray();
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  return c.json({ orders: orders.map(desktopOfflinePaymentRow), synchronized });
+});
+
+app.openapi(desktopAdminApproveOfflinePaymentRoute, async (c) => {
+  const auth = await authenticateDesktopChandler(c, { admin: true });
+  if (auth.error) return auth.error;
+  const { orderId } = c.req.valid("param");
+  if (!ObjectId.isValid(orderId)) return c.json({ code: "ORDER_NOT_FOUND", message: "线下支付申请不存在" }, 404);
+  const body = c.req.valid("json");
+  const result = await approveOfflinePayment({
+    orderId,
+    actorUserId: auth.user._id.toString(),
+    actorChandlerUserId: String(auth.chandlerUser.id),
+    accessToken: auth.accessToken,
+    validFrom: body.validFrom,
+    validUntil: body.validUntil,
+  });
+  if (result.error) return c.json({ code: result.error.code, message: result.error.message }, result.error.status);
+  const now = new Date();
+  await (await getCollection("offlinePaymentReviewEvents")).updateOne(
+    { orderId: new ObjectId(orderId), status: { $in: ["pending", "leased", "awaiting_action"] } },
+    { $set: { status: "completed", action: "approve", completedAt: now, updatedAt: now } },
+  );
+  const order = await (await getCollection("offlinePayments")).findOne({ _id: new ObjectId(orderId) });
+  return c.json(desktopOfflinePaymentRow(order));
+});
+
 app.openapi(desktopReviewBindRoute, async (c) => {
   const auth = await authenticateDesktopChandler(c, { admin: true });
   if (auth.error) return auth.error;
@@ -4438,6 +4755,7 @@ app.openapi(desktopReviewClaimRoute, async (c) => {
   if (!worker) return c.json({ code: "WORKER_NOT_BOUND", message: "请先在管理员桌面端绑定当前微信会话" }, 403);
   const rate = await enforceRateLimit(`desktop-review-claim:${workerId}`, { limit: 90, windowMs: 60_000 });
   if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "审核任务轮询过于频繁" }, 429);
+  await syncChandlerOfflinePayments(auth.accessToken).catch(() => null);
 
   const now = new Date();
   const events = await getCollection("offlinePaymentReviewEvents");

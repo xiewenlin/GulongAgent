@@ -13,12 +13,15 @@ import {
   listPartnerSubscriptionPlans,
   productEdition,
   productEditionFromChannel,
+  resolveWebsiteLoginEmail,
 } from "../../server/chandler.js";
 import { browserUploadCorsReady, browserUploadCorsRule, cosConfig, sanitizeFilename } from "../../server/cos.js";
 import { readExternalAuth, readUserSecret, sealExternalAuth, sealUserSecret } from "../../server/security.js";
 import { recoverExpiredDirectReleaseLock } from "../../server/release-lock.js";
 import {
   OFFLINE_REVIEW_REJECTION_REASON,
+  chandlerOrderItems,
+  normalizeChandlerOfflineOrder,
   offlineReviewWechatMessage,
   parseOfflineReviewWechatAction,
 } from "../../server/offline-review.js";
@@ -42,6 +45,18 @@ test("Chandler session tokens are encrypted and round-trip server-side", () => {
   assert.equal(sealed.includes("access-secret"), false);
   assert.equal(sealed.includes("refresh-secret"), false);
   assert.deepEqual(readExternalAuth({ externalAuth: sealed }), auth);
+});
+
+test("website login normalizes e-mail identifiers and resolves registered usernames before Chandler login", async () => {
+  assert.equal(await resolveWebsiteLoginEmail("  Member@Example.COM  "), "member@example.com");
+  const source = await readFile(new URL("../../server/app.js", import.meta.url), "utf8");
+  const chandlerSource = await readFile(new URL("../../server/chandler.js", import.meta.url), "utf8");
+  assert.match(source, /const loginEmail = await resolveWebsiteLoginEmail\(input\.identifier\)/);
+  assert.match(source, /loginWithChandler\(loginEmail, input\.password\)/);
+  assert.match(chandlerSource, /usernameNormalized: normalized/);
+  assert.match(chandlerSource, /chandlerRequest\("\/v1\/oauth\/token"/);
+  assert.match(chandlerSource, /application\/x-www-form-urlencoded/);
+  assert.match(chandlerSource, /auth\.invalid_credentials/);
 });
 
 test("user provider keys use purpose-bound encryption", () => {
@@ -330,6 +345,9 @@ test("OpenAPI document includes Chandler admin, offline credentials, dated attac
   assert.ok(document.paths["/api/v1/admin/wechat-review/claim"]);
   assert.ok(document.paths["/api/v1/admin/wechat-review/{eventId}/notified"]);
   assert.ok(document.paths["/api/v1/admin/wechat-review/{eventId}/action"]);
+  assert.ok(document.paths["/api/v1/desktop/offline-payments"]);
+  assert.ok(document.paths["/api/v1/admin/offline-payments"]);
+  assert.ok(document.paths["/api/v1/admin/offline-payments/{orderId}/approve"]);
   assert.ok(document.paths["/api/v1/desktop/account/subscription"]);
   assert.ok(document.paths["/api/admin/release-channels/{id}/manual-upload"]);
   assert.ok(document.paths["/api/admin/release-uploads/{id}/complete"]);
@@ -494,8 +512,42 @@ test("administrator WeChat review menu accepts only explicit numeric actions", (
   assert.match(message, /仅当前已绑定的管理员微信会话/);
 });
 
+test("desktop Chandler offline orders normalize into the website review queue", () => {
+  const items = chandlerOrderItems({ orders: [{
+    platform_order_no: "ord_desktop_1",
+    partner_data: {
+      application_key: "gulong",
+      payment_method: "offline",
+      review_status: "pending",
+      plan_kind: "yearly",
+      amount_fen: 298000,
+      user_id: "chandler-user-1",
+      user_email: "member@example.com",
+      submitted_at_unix_ms: 1785542400000,
+    },
+  }] });
+  assert.equal(items.length, 1);
+  assert.deepEqual(normalizeChandlerOfflineOrder(items[0], { id: "cm_gulong", editionKey: "gulong" }), {
+    orderNo: "ord_desktop_1",
+    chandlerUserId: "chandler-user-1",
+    userEmail: "member@example.com",
+    cycle: "year",
+    amountFen: 298000,
+    reviewStatus: "pending",
+    partnerData: items[0].partner_data,
+    applicationId: "cm_gulong",
+    applicationKey: "gulong",
+    editionKey: "gulong",
+    editionName: "古龙版",
+    createdAt: new Date(1785542400000),
+  });
+  assert.equal(normalizeChandlerOfflineOrder({ platform_order_no: "ord_online", partner_data: { payment_method: "wechat" } }), null);
+});
+
 test("desktop WeChat review API validates Chandler administrators and a bound worker", async () => {
   const source = await readFile(new URL("../../server/app.js", import.meta.url), "utf8");
+  assert.match(source, /desktopCreateOfflinePaymentRoute/);
+  assert.match(source, /syncChandlerOfflinePayments\(auth\.accessToken\)/);
   assert.match(source, /authenticateDesktopChandler\(c, \{ admin: true \}\)/);
   assert.match(source, /identity\.role !== "admin"/);
   assert.match(source, /workerId, ownerId: auth\.user\._id, enabled: true, channel: "personal-wechat"/);
@@ -505,6 +557,12 @@ test("desktop WeChat review API validates Chandler administrators and a bound wo
   assert.match(source, /private, no-store, max-age=0/);
 
   for (const request of [
+    new Request("http://localhost/api/v1/desktop/offline-payments", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ clientOrderNo: "offline_local_gulong_test_1", applicationKey: "gulong", themeName: "上古神龙", releaseChannel: "古龙版", planKind: "monthly", expectedAmountFen: 29800 }),
+    }),
+    new Request("http://localhost/api/v1/admin/offline-payments"),
     new Request("http://localhost/api/v1/admin/wechat-review/bind", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -649,6 +707,7 @@ test("order management separates online and offline orders with multidimensional
   assert.doesNotMatch(adminSource, /<option value="unassigned"/);
   assert.match(adminSource, /type="date"/);
   assert.match(adminSource, /nextMode === "online" \? "payments" : "offline-payments"/);
+  assert.match(adminSource, /setInterval\(\(\) => load\(null, "offline", "pending", filters, true\), 15_000\)/);
   assert.match(serverSource, /app\.get\("\/api\/admin\/payments"/);
   assert.match(serverSource, /async function adminOrderBaseFilter/);
   assert.match(serverSource, /"providerTransactionId"/);

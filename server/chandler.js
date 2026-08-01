@@ -54,7 +54,9 @@ function friendlyMessage(status, payload) {
   if (code === "catalog.sku_inactive") return "该订阅套餐已经停售，请刷新套餐列表后重试";
   if (code === "catalog.price_not_found") return "该订阅套餐当前没有生效中的价格版本";
   if (code === "catalog.sku_exists") return "当前应用中已经存在相同编码的 SKU";
-  if (status === 401) return "登录已失效，请重新登录";
+  if (code === "auth.invalid_credentials") return "用户名、邮箱或密码不正确";
+  if (code === "token.invalid" || code === "auth.token_invalid") return "登录已失效，请重新登录";
+  if (status === 401) return raw || "登录已失效，请重新登录";
   if (status === 403) return "当前账号没有执行该操作的 Chandler 权限";
   if (status === 409) return "该账号、订单或操作已存在，请刷新后查看";
   if (status === 428) return "该账号已启用多因素认证，请先在 Chandler 完成验证";
@@ -68,10 +70,12 @@ export async function chandlerRequest(path, {
   accessToken,
   apiKey,
   body,
+  form,
   timeoutMs = 15_000,
 } = {}) {
   const headers = { Accept: "application/json" };
   if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (form !== undefined) headers["Content-Type"] = "application/x-www-form-urlencoded";
   if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
   if (apiKey) headers["X-API-Key"] = apiKey;
   let response;
@@ -79,7 +83,9 @@ export async function chandlerRequest(path, {
     response = await fetch(`${chandlerConfig().baseUrl}${path}`, {
       method,
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: form !== undefined
+        ? new URLSearchParams(form).toString()
+        : body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (error) {
@@ -119,6 +125,16 @@ export function loginWithChandler(identifier, password) {
     method: "POST",
     body: { email: identifier.trim(), password, device_type: "web" },
   });
+}
+
+export async function resolveWebsiteLoginEmail(identifier) {
+  const normalized = String(identifier || "").trim().normalize("NFKC").toLowerCase();
+  if (!normalized || normalized.includes("@")) return normalized;
+  const user = await (await getCollection("users")).findOne(
+    { usernameNormalized: normalized },
+    { projection: { email: 1, emailNormalized: 1 } },
+  );
+  return String(user?.emailNormalized || user?.email || normalized).trim().toLowerCase();
 }
 
 export function logoutFromChandler(refreshToken) {
@@ -342,9 +358,9 @@ export async function getChandlerAccessToken(session, { forceRefresh = false } =
   if (!forceRefresh && auth.accessToken && auth.accessExpiresAt > Date.now() + 60_000) {
     return auth.accessToken;
   }
-  const refreshed = await chandlerRequest("/v1/auth/refresh", {
+  const refreshed = await chandlerRequest("/v1/oauth/token", {
     method: "POST",
-    body: { refresh_token: auth.refreshToken },
+    form: { grant_type: "refresh_token", refresh_token: auth.refreshToken },
   });
   auth = {
     ...auth,

@@ -24,3 +24,45 @@ export function parseOfflineReviewWechatAction(text) {
     ? { action: "approve", reason: null }
     : { action: "reject", reason: String(match[2] || OFFLINE_REVIEW_REJECTION_REASON).trim().slice(0, 500) };
 }
+
+function chandlerOrderRoot(value) {
+  return value?.order && typeof value.order === "object" ? value.order : value;
+}
+
+export function chandlerOrderItems(payload) {
+  const root = payload?.data && typeof payload.data === "object" ? payload.data : payload;
+  for (const key of ["orders", "items", "results"]) {
+    if (Array.isArray(root?.[key])) return root[key];
+  }
+  return Array.isArray(root) ? root : [];
+}
+
+export function normalizeChandlerOfflineOrder(value, application = {}) {
+  const order = chandlerOrderRoot(value);
+  const partner = order?.partner_data;
+  if (!partner || typeof partner !== "object" || Array.isArray(partner) || partner.payment_method !== "offline") return null;
+  const reviewStatus = String(partner.review_status || "pending").trim().toLowerCase();
+  const planKind = String(partner.plan_kind || "").trim().toLowerCase();
+  const amountFen = Number(partner.amount_fen ?? order.amount ?? order.amount_fen);
+  const orderNo = String(order.platform_order_no || order.order_no || "").trim();
+  const chandlerUserId = String(partner.chandler_user_id || partner.user_id || order.user_id || "").trim();
+  const userEmail = String(partner.user_email || order.user_email || "").trim().toLowerCase();
+  if (!orderNo || !chandlerUserId || !userEmail.includes("@") || !["monthly", "yearly", "month", "year"].includes(planKind)) return null;
+  if (!Number.isSafeInteger(amountFen) || amountFen < 100 || amountFen > 5_000_000) return null;
+  const submittedUnixMs = Number(partner.submitted_at_unix_ms || (/^\d{10,16}$/.test(String(partner.submitted_at || "")) ? partner.submitted_at : 0));
+  const submittedDate = submittedUnixMs > 0 ? new Date(submittedUnixMs) : new Date(partner.submitted_at || order.created_at || Date.now());
+  return {
+    orderNo,
+    chandlerUserId,
+    userEmail,
+    cycle: planKind === "yearly" || planKind === "year" ? "year" : "month",
+    amountFen,
+    reviewStatus,
+    partnerData: partner,
+    applicationId: String(application.id || ""),
+    applicationKey: String(partner.application_key || application.key || "gulong"),
+    editionKey: application.editionKey === "yongshenghua" ? "yongshenghua" : "gulong",
+    editionName: application.editionKey === "yongshenghua" ? "永生花版" : "古龙版",
+    createdAt: Number.isNaN(submittedDate.getTime()) ? new Date() : submittedDate,
+  };
+}

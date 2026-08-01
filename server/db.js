@@ -150,6 +150,10 @@ export async function ensureIndexes() {
           { unique: true, name: "uniq_offline_payment_order" },
         ),
         db.collection("offlinePayments").createIndex(
+          { desktopRequestId: 1 },
+          { unique: true, sparse: true, name: "uniq_offline_payment_desktop_request" },
+        ),
+        db.collection("offlinePayments").createIndex(
           { status: 1, reviewedAt: -1, updatedAt: -1 },
           { name: "offline_payments_analytics" },
         ),

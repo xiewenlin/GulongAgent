@@ -521,9 +521,9 @@ function PaymentManager() {
   const [rejecting, setRejecting] = useState(null);
   const [busy, setBusy] = useState("");
 
-  async function load(event, nextMode = mode, nextReviewTab = reviewTab, nextFilters = filters) {
+  async function load(event, nextMode = mode, nextReviewTab = reviewTab, nextFilters = filters, silent = false) {
     event?.preventDefault();
-    setBusy("orders"); setMessage("");
+    if (!silent) { setBusy("orders"); setMessage(""); }
     const params = new URLSearchParams({ limit: "100" });
     if (nextMode === "offline") params.set("status", nextReviewTab);
     for (const [key, value] of Object.entries(nextFilters)) if (value) params.set(key, value);
@@ -532,13 +532,18 @@ function PaymentManager() {
       setOrders(result.orders || []);
       setSummary(result.summary || { total: 0, pending: 0, reviewed: 0, approved: 0, rejected: 0 });
     } catch (error) { setMessage(error.message); }
-    finally { setBusy(""); }
+    finally { if (!silent) setBusy(""); }
   }
 
   useEffect(() => {
     apiFetch("/api/admin/release-channels").then((result) => setChannels(result.channels || [])).catch(() => setChannels([]));
   }, []);
   useEffect(() => { load(null, mode, reviewTab); }, [mode, reviewTab]);
+  useEffect(() => {
+    if (mode !== "offline" || reviewTab !== "pending") return undefined;
+    const timer = window.setInterval(() => load(null, "offline", "pending", filters, true), 15_000);
+    return () => window.clearInterval(timer);
+  }, [mode, reviewTab, filters]);
 
   function switchMode(nextMode) {
     setOrders([]); setMessage(""); setMode(nextMode);
