@@ -6,6 +6,7 @@ const DEFAULT_BASE_URL = "https://api.chandler.work";
 const DEFAULT_APPLICATION_ID = "cm_89be865af1af48f4a83406f0cf1a472e";
 const DEFAULT_AIROS_APPLICATION_ID = "cm_8b022909f72d4daab8379517271e9658";
 const BOOTSTRAP_ADMIN_EMAIL = "1186664388@qq.com";
+const accessRefreshPromises = new Map();
 
 const PRODUCT_EDITIONS = Object.freeze({
   gulong: Object.freeze({ key: "gulong", name: "古龙版" }),
@@ -374,29 +375,58 @@ export function externalAuthFromResponse(auth) {
   };
 }
 
-export async function getChandlerAccessToken(session, { forceRefresh = false } = {}) {
-  let auth = readExternalAuth(session);
-  if (!auth || auth.provider !== "chandler") {
-    throw new ChandlerError("当前会话不是 Chandler 统一账号", { status: 401, code: "CHANDLER_SESSION_REQUIRED" });
-  }
-  if (!forceRefresh && auth.accessToken && auth.accessExpiresAt > Date.now() + 60_000) {
-    return auth.accessToken;
-  }
-  const refreshed = await chandlerRequest("/v1/oauth/token", {
+export function refreshChandlerLogin(refreshToken) {
+  return chandlerRequest("/v1/auth/refresh", {
     method: "POST",
-    form: { grant_type: "refresh_token", refresh_token: auth.refreshToken },
+    body: { refresh_token: refreshToken },
   });
+}
+
+async function refreshChandlerSession(session, { forceRefresh = false } = {}) {
+  const sessionId = session._id instanceof ObjectId ? session._id : new ObjectId(session._id);
+  const sessions = await getCollection("sessions");
+  const currentSession = await sessions.findOne({ _id: sessionId });
+  let auth = readExternalAuth(currentSession || session);
+  if (!auth || auth.provider !== "chandler" || !auth.refreshToken) {
+    throw new ChandlerError("Chandler 登录已失效，请重新登录", { status: 401, code: "CHANDLER_SESSION_EXPIRED" });
+  }
+  if (!forceRefresh && auth.accessToken && auth.accessExpiresAt > Date.now() + 60_000) return auth.accessToken;
+  const refreshed = await refreshChandlerLogin(auth.refreshToken);
+  if (!refreshed?.access_token) {
+    throw new ChandlerError("Chandler 没有返回新的访问令牌，请重新登录", { status: 401, code: "CHANDLER_REFRESH_INVALID" });
+  }
   auth = {
     ...auth,
     accessToken: refreshed.access_token,
     refreshToken: refreshed.refresh_token || auth.refreshToken,
     accessExpiresAt: accessExpiresAt(refreshed),
   };
-  await (await getCollection("sessions")).updateOne(
-    { _id: new ObjectId(session._id) },
+  await sessions.updateOne(
+    { _id: sessionId },
     { $set: { externalAuth: sealExternalAuth(auth), lastSeenAt: new Date() } },
   );
   return auth.accessToken;
+}
+
+export async function getChandlerAccessToken(session, { forceRefresh = false } = {}) {
+  const auth = readExternalAuth(session);
+  if (!auth || auth.provider !== "chandler") {
+    throw new ChandlerError("当前会话不是 Chandler 统一账号", { status: 401, code: "CHANDLER_SESSION_REQUIRED" });
+  }
+  if (!forceRefresh && auth.accessToken && auth.accessExpiresAt > Date.now() + 60_000) {
+    return auth.accessToken;
+  }
+  const refreshKey = String(session._id);
+  let pending = accessRefreshPromises.get(refreshKey);
+  if (!pending) {
+    pending = refreshChandlerSession(session, { forceRefresh });
+    accessRefreshPromises.set(refreshKey, pending);
+  }
+  try {
+    return await pending;
+  } finally {
+    if (accessRefreshPromises.get(refreshKey) === pending) accessRefreshPromises.delete(refreshKey);
+  }
 }
 
 export async function listCatalogPlans() {

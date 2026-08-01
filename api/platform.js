@@ -10,7 +10,14 @@ export default {
         headers: { "Content-Type": "application/json; charset=utf-8" },
       });
     }
-    url.pathname = `/api/${path}`;
+    const normalizedPath = path.replace(/\/+$/, "");
+    if (!normalizedPath) {
+      return new Response(JSON.stringify({ code: "NOT_FOUND", message: "接口不存在" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+      });
+    }
+    url.pathname = `/api/${normalizedPath}`;
     url.searchParams.delete("_platform_path");
     return app.fetch(new Request(url, request));
   },

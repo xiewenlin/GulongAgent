@@ -14,6 +14,7 @@ import {
   listPartnerSubscriptionPlans,
   productEdition,
   productEditionFromChannel,
+  refreshChandlerLogin,
   resetPasswordWithChandler,
   resolveWebsiteLoginEmail,
 } from "../../server/chandler.js";
@@ -56,9 +57,28 @@ test("website login normalizes e-mail identifiers and resolves registered userna
   assert.match(source, /const loginEmail = await resolveWebsiteLoginEmail\(input\.identifier\)/);
   assert.match(source, /loginWithChandler\(loginEmail, input\.password\)/);
   assert.match(chandlerSource, /usernameNormalized: normalized/);
-  assert.match(chandlerSource, /chandlerRequest\("\/v1\/oauth\/token"/);
-  assert.match(chandlerSource, /application\/x-www-form-urlencoded/);
+  assert.match(chandlerSource, /chandlerRequest\("\/v1\/auth\/refresh"/);
+  assert.doesNotMatch(chandlerSource, /grant_type: "refresh_token"/);
   assert.match(chandlerSource, /auth\.invalid_credentials/);
+});
+
+test("Chandler login refresh uses the live auth refresh contract", async () => {
+  const originalFetch = globalThis.fetch;
+  let call;
+  globalThis.fetch = async (url, options = {}) => {
+    call = { url: String(url), method: options.method, headers: options.headers, body: JSON.parse(options.body) };
+    return new Response(JSON.stringify({ data: { access_token: "next-access", refresh_token: "next-refresh", expires_in: 3600 } }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const result = await refreshChandlerLogin("current-refresh");
+    assert.equal(result.access_token, "next-access");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(call.url, "https://api.chandler.work/v1/auth/refresh");
+  assert.equal(call.method, "POST");
+  assert.equal(call.headers["Content-Type"], "application/json");
+  assert.deepEqual(call.body, { refresh_token: "current-refresh" });
 });
 
 test("Chandler password recovery sends mail and resets with the one-time token", async () => {
@@ -518,6 +538,26 @@ test("Vercel platform entry restores nested API paths", async () => {
   assert.equal(downloadsResponse.status, 200);
   assert.equal(downloadsResponse.headers.get("Cache-Control"), "no-store, max-age=0");
   assert.deepEqual((await downloadsResponse.json()).editions, []);
+
+  const trailingSlashResponse = await platform.fetch(new Request("https://example.test/api/platform?_platform_path=releases/latest/"));
+  assert.equal(trailingSlashResponse.status, 200);
+  assert.deepEqual(await trailingSlashResponse.json(), { release: null });
+});
+
+test("administrator routes survive Chandler refresh changes and Vercel wildcard slashes", async () => {
+  const [serverSource, chandlerSource, platformSource] = await Promise.all([
+    readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../../server/chandler.js", import.meta.url), "utf8"),
+    readFile(new URL("../../api/platform.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(chandlerSource, /refreshChandlerLogin\(auth\.refreshToken\)/);
+  assert.match(chandlerSource, /const accessRefreshPromises = new Map\(\)/);
+  assert.match(chandlerSource, /currentSession = await sessions\.findOne/);
+  assert.match(serverSource, /const locallyVerifiedAdmin = auth\.user\.role === "admin"/);
+  assert.match(serverSource, /if \(!locallyVerifiedAdmin\) throw error/);
+  assert.match(serverSource, /app\.get\("\/api\/admin\/worker-payments"/);
+  assert.match(serverSource, /app\.get\("\/api\/admin\/worker-contact-payments"/);
+  assert.match(platformSource, /path\.replace\(\/\\\/\+\$\/, ""\)/);
 });
 
 test("Vercel consolidates nested account and configuration routes", async () => {

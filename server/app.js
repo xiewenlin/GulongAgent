@@ -152,13 +152,22 @@ const ResetPasswordSchema = z.object({
 async function requireAdmin(c) {
   const auth = await authenticate(c);
   if (auth.error) return auth;
+  const locallyVerifiedAdmin = auth.user.role === "admin";
   if (auth.user.authProvider === "chandler") {
-    const accessToken = await getChandlerAccessToken(auth.session);
-    const profile = await chandlerRequest("/v1/me", { accessToken });
-    const identity = await resolveChandlerIdentity(profile, accessToken);
-    const user = await upsertChandlerUser(profile, { identity });
-    auth.user.role = user.role;
-    auth.user.edition = { key: user.editionKey || "gulong", name: user.editionName || "古龙版", source: user.editionSource || "default" };
+    try {
+      const accessToken = await getChandlerAccessToken(auth.session);
+      const profile = await chandlerRequest("/v1/me", { accessToken });
+      const identity = await resolveChandlerIdentity(profile, accessToken);
+      const user = await upsertChandlerUser(profile, { identity });
+      auth.user.role = user.role;
+      auth.user.edition = { key: user.editionKey || "gulong", name: user.editionName || "古龙版", source: user.editionSource || "default" };
+    } catch (error) {
+      if (!locallyVerifiedAdmin) throw error;
+      // A previously verified local administrator must retain access to
+      // MongoDB-backed operations during a transient Chandler outage. Remote
+      // mutations still call Chandler separately and keep their own guards.
+      auth.chandlerWarning = error.message;
+    }
   }
   if (auth.user.role !== "admin") {
     return { error: c.json({ code: "FORBIDDEN", message: "仅管理员可执行此操作" }, 403) };
