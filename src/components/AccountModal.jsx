@@ -2,6 +2,34 @@ import { ArrowLeft, EnvelopeSimple, Eye, EyeSlash, Key, LockKey, SignIn, UserCir
 import { useEffect, useState } from "react";
 import { apiFetch } from "../api.js";
 
+const MIN_PASSWORD_LENGTH = 8;
+
+function PasswordVisibilityButton({ visible, onChange, controls }) {
+  function keepPasswordFieldActive(event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function toggleVisibility(event) {
+    keepPasswordFieldActive(event);
+    onChange((current) => !current);
+  }
+
+  return (
+    <button
+      className="password-visibility-toggle"
+      type="button"
+      aria-label={visible ? "隐藏密码" : "显示密码"}
+      aria-controls={controls}
+      aria-pressed={visible}
+      onMouseDown={keepPasswordFieldActive}
+      onClick={toggleVisibility}
+    >
+      {visible ? <EyeSlash size={18} /> : <Eye size={18} />}
+    </button>
+  );
+}
+
 export function AccountModal({ open, initialMode = "login", onClose, onUser, themeIcon }) {
   const [mode, setMode] = useState(initialMode);
   const [showPassword, setShowPassword] = useState(false);
@@ -47,6 +75,7 @@ export function AccountModal({ open, initialMode = "login", onClose, onUser, the
         if (form.newPassword !== form.confirmPassword) throw new Error("两次输入的新密码不一致");
         const result = await apiFetch("/api/auth/reset-password", { method: "POST", body: JSON.stringify({ email: form.email, code: form.resetCode, newPassword: form.newPassword }) });
         setForm((current) => ({ ...current, identifier: current.email, password: "", resetCode: "", newPassword: "", confirmPassword: "" }));
+        setShowPassword(false);
         setResetSent(false);
         setMode("login");
         setSuccess(result.message || "密码已重置，请使用新密码登录");
@@ -110,12 +139,12 @@ export function AccountModal({ open, initialMode = "login", onClose, onUser, the
             </>
           )}
           {mode === "forgot" && <label><span>注册邮箱</span><div className="input-shell"><EnvelopeSimple size={18} /><input required disabled={resetSent} type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} autoComplete="email" placeholder="name@example.com" /></div></label>}
-          {(mode === "login" || mode === "register") && <label><span className="account-label-row"><span>密码</span>{mode === "login" && <button type="button" onClick={() => switchMode("forgot")}>忘记密码？</button>}</span><div className="input-shell"><LockKey size={18} /><input required type={showPassword ? "text" : "password"} minLength={mode === "register" ? 10 : 1} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} autoComplete={mode === "login" ? "current-password" : "new-password"} placeholder={mode === "register" ? "至少 10 位，建议使用密码管理器" : "输入密码"} /><button type="button" aria-label={showPassword ? "隐藏密码" : "显示密码"} onClick={() => setShowPassword(!showPassword)}>{showPassword ? <EyeSlash size={18} /> : <Eye size={18} />}</button></div></label>}
+          {(mode === "login" || mode === "register") && <div className="account-password-field"><div className="account-label-row"><label htmlFor="account-password">密码</label>{mode === "login" && <button type="button" onClick={() => switchMode("forgot")}>忘记密码？</button>}</div><div className="input-shell"><LockKey size={18} /><input id="account-password" required type={showPassword ? "text" : "password"} minLength={mode === "register" ? MIN_PASSWORD_LENGTH : 1} maxLength={128} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} autoComplete={mode === "login" ? "current-password" : "new-password"} placeholder={mode === "register" ? "至少 8 位，建议使用密码管理器" : "输入密码"} /><PasswordVisibilityButton visible={showPassword} onChange={setShowPassword} controls="account-password" /></div></div>}
           {mode === "forgot" && resetSent && <>
             <div className="reset-email-confirm"><EnvelopeSimple size={18} /><span>验证邮件已发送至 <strong>{form.email}</strong></span><button type="button" onClick={() => { setResetSent(false); setSuccess(""); setError(""); }}>修改邮箱</button></div>
             <label><span>邮箱验证码</span><div className="input-shell"><Key size={18} /><input required minLength={6} maxLength={2048} value={form.resetCode} onChange={(event) => setForm({ ...form, resetCode: event.target.value.trim() })} autoComplete="one-time-code" placeholder="粘贴邮件中的验证码或重置令牌" /></div><small className="reset-code-help">邮件中如果显示为较长的重置令牌，也可直接完整粘贴到这里。</small></label>
-            <label><span>新密码</span><div className="input-shell"><LockKey size={18} /><input required type={showPassword ? "text" : "password"} minLength={10} maxLength={255} value={form.newPassword} onChange={(event) => setForm({ ...form, newPassword: event.target.value })} autoComplete="new-password" placeholder="至少 10 位，建议混合字母、数字和符号" /><button type="button" aria-label={showPassword ? "隐藏密码" : "显示密码"} onClick={() => setShowPassword(!showPassword)}>{showPassword ? <EyeSlash size={18} /> : <Eye size={18} />}</button></div></label>
-            <label><span>确认新密码</span><div className="input-shell"><LockKey size={18} /><input required type={showPassword ? "text" : "password"} minLength={10} maxLength={255} value={form.confirmPassword} onChange={(event) => setForm({ ...form, confirmPassword: event.target.value })} autoComplete="new-password" placeholder="再次输入新密码" /></div></label>
+            <div className="account-password-field"><label htmlFor="account-new-password">新密码</label><div className="input-shell"><LockKey size={18} /><input id="account-new-password" required type={showPassword ? "text" : "password"} minLength={MIN_PASSWORD_LENGTH} maxLength={255} value={form.newPassword} onChange={(event) => setForm({ ...form, newPassword: event.target.value })} autoComplete="new-password" placeholder="至少 8 位，建议混合字母、数字和符号" /><PasswordVisibilityButton visible={showPassword} onChange={setShowPassword} controls="account-new-password account-confirm-password" /></div></div>
+            <label><span>确认新密码</span><div className="input-shell"><LockKey size={18} /><input id="account-confirm-password" required type={showPassword ? "text" : "password"} minLength={MIN_PASSWORD_LENGTH} maxLength={255} value={form.confirmPassword} onChange={(event) => setForm({ ...form, confirmPassword: event.target.value })} autoComplete="new-password" placeholder="再次输入新密码" /></div></label>
             <div className="reset-code-actions"><span>没有收到？请同时检查垃圾邮箱</span><button type="button" disabled={busy || cooldown > 0} onClick={resendCode}>{cooldown > 0 ? `${cooldown} 秒后可重发` : "重新发送验证码"}</button></div>
           </>}
           {success && <div className="form-success" role="status">{success}</div>}

@@ -297,6 +297,15 @@ test("email verification-code password recovery is wired end to end", async () =
   assert.match(modalSource, /\/api\/auth\/reset-password/);
   assert.match(modalSource, /autoComplete="one-time-code"/);
   assert.match(modalSource, /两次输入的新密码不一致/);
+  assert.match(modalSource, /const MIN_PASSWORD_LENGTH = 8/);
+  assert.match(modalSource, /function PasswordVisibilityButton/);
+  assert.match(modalSource, /event\.preventDefault\(\)/);
+  assert.match(modalSource, /event\.stopPropagation\(\)/);
+  assert.match(modalSource, /className="account-password-field"/);
+  assert.doesNotMatch(modalSource, /<label><span className="account-label-row"/);
+  assert.doesNotMatch(modalSource, /minLength=\{10\}|至少 10 位/);
+  assert.match(serverSource, /password: z\.string\(\)\.min\(8\)\.max\(128\)/);
+  assert.match(serverSource, /newPassword: z\.string\(\)\.min\(8\)\.max\(255\)/);
   assert.match(serverSource, /password-forgot-email:/);
   assert.match(serverSource, /password-reset-code:/);
   assert.match(serverSource, /deleteMany\(\{ userId: user\._id \}\)/);

@@ -141,7 +141,7 @@ const RegisterSchema = z
     email: z.email(),
     displayName: z.string().trim().min(1).max(64).optional(),
     inviteCode: z.string().trim().max(64).optional(),
-    password: z.string().min(10).max(128),
+    password: z.string().min(8).max(128),
   });
 
 const LoginSchema = z.object({
@@ -156,7 +156,7 @@ const ForgotPasswordSchema = z.object({
 const ResetPasswordSchema = z.object({
   email: z.email(),
   code: z.string().trim().min(6).max(2048),
-  newPassword: z.string().min(10).max(255),
+  newPassword: z.string().min(8).max(255),
 });
 
 async function requireAdmin(c) {
