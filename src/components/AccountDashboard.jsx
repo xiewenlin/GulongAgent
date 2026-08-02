@@ -23,6 +23,7 @@ import {
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
 import { apiFetch, formatMoney } from "../api.js";
+import { useConfirmDialog } from "./ConfirmDialog.jsx";
 import { WorkerManagementPanel } from "./WorkerPages.jsx";
 
 const dashboardMenu = [
@@ -82,6 +83,7 @@ function FeedbackCard({ item }) {
 }
 
 export function AccountDashboard({ user, openAuth, navigate, onUser }) {
+  const confirmAction = useConfirmDialog();
   const [active, setActive] = useState(() => {
     const section = new URLSearchParams(window.location.search).get("section");
     return dashboardMenu.some((item) => item.id === section) ? section : "overview";
@@ -137,7 +139,14 @@ export function AccountDashboard({ user, openAuth, navigate, onUser }) {
   }
 
   async function removeMiniMax() {
-    if (!window.confirm("确定删除已保存的 MiniMax 配置吗？桌面端将无法继续拉取。")) return;
+    if (!await confirmAction({
+      tone: "danger",
+      eyebrow: "DELETE MODEL CREDENTIAL",
+      title: "删除 MiniMax 配置？",
+      message: "删除后，网站将立即停止向桌面端提供这份模型配置。",
+      note: "此操作不会删除你的 MiniMax 官方账号，但需要重新填写 API Key 才能恢复使用。",
+      confirmLabel: "确认删除",
+    })) return;
     await apiFetch("/api/account/integrations/minimax", { method: "DELETE" });
     setData((current) => ({ ...current, minimax: { configured: false, apiHost: "https://api.minimaxi.com/v1", model: "MiniMax-M3" } }));
     setMessage("MiniMax 配置已删除。");
@@ -182,7 +191,14 @@ export function AccountDashboard({ user, openAuth, navigate, onUser }) {
   }
 
   async function cancelSubscription() {
-    if (!window.confirm("本周期结束后停止自动续订？当前会员权益会保留到到期日。")) return;
+    if (!await confirmAction({
+      tone: "warning",
+      eyebrow: "SUBSCRIPTION RENEWAL",
+      title: "停止自动续订？",
+      message: "当前会员权益会完整保留到本周期到期日，届时不再自动续费。",
+      note: "你可以在到期前继续使用全部已开通的会员能力。",
+      confirmLabel: "停止自动续订",
+    })) return;
     try { await apiFetch("/api/billing/subscription/cancel", { method: "POST", body: "{}" }); setMessage("已关闭自动续订，本周期权益不受影响。"); await load(); }
     catch (error) { setMessage(error.message); }
   }

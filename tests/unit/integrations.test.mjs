@@ -878,7 +878,8 @@ test("feedback processing has three states, COS result attachments, deletion and
   assert.match(adminSource, /\[\["open", "待处理"\], \["processing", "处理中"\], \["resolved", "已处理"\]\]/);
   assert.match(adminSource, /保存为处理中/);
   assert.match(adminSource, /标记已处理并通知用户/);
-  assert.match(adminSource, /window\.confirm\(`确定删除这条用户反馈吗/);
+  assert.match(adminSource, /title: "永久删除这条用户反馈？"/);
+  assert.match(adminSource, /confirmLabel: "永久删除反馈"/);
   assert.match(adminSource, /video\/mp4,video\/webm,video\/quicktime/);
   assert.match(serverSource, /app\.post\("\/api\/admin\/feedback\/:id\/assets\/presign"/);
   assert.match(serverSource, /app\.post\("\/api\/admin\/feedback\/:id\/assets\/:uploadId\/complete"/);
@@ -895,6 +896,32 @@ test("feedback processing has three states, COS result attachments, deletion and
   assert.match(vercel, /admin\/feedback\/:id\/assets\/:uploadId\/complete/);
   assert.match(vercel, /admin\/feedback\/:id\/assets\/presign/);
   assert.match(vercel, /feedback\/:id\/assets\/:assetId/);
+});
+
+test("all consequential actions use the shared themed confirmation dialog", async () => {
+  const [mainSource, dialogSource, adminSource, accountSource, workerSource, css, agentInstructions] = await Promise.all([
+    readFile(new URL("../../src/main.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/ConfirmDialog.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/AccountDashboard.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/WorkerPages.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/styles.css", import.meta.url), "utf8"),
+    readFile(new URL("../../AGENTS.md", import.meta.url), "utf8"),
+  ]);
+  assert.match(mainSource, /<ConfirmDialogProvider>/);
+  assert.match(dialogSource, /role="alertdialog"/);
+  assert.match(dialogSource, /aria-modal="true"/);
+  assert.match(dialogSource, /event\.key === "Escape"/);
+  assert.match(dialogSource, /cancelButtonRef\.current\?\.focus/);
+  assert.match(css, /\.app-confirm-dialog\s*\{/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
+  assert.match(agentInstructions, /Never use browser-native `alert`, `confirm`, or `prompt` dialogs/);
+  for (const source of [adminSource, accountSource, workerSource]) {
+    assert.doesNotMatch(source, /window\.(alert|confirm|prompt)\s*\(/);
+  }
+  assert.equal((adminSource.match(/useConfirmDialog\(\)/g) || []).length, 5);
+  assert.equal((accountSource.match(/useConfirmDialog\(\)/g) || []).length, 1);
+  assert.equal((workerSource.match(/useConfirmDialog\(\)/g) || []).length, 1);
 });
 
 test("administrator release controls are explicit and legacy direct distribution stays unreachable", async () => {

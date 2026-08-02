@@ -16,3 +16,4 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 - Keep all theme variants light, calm, and legible; do not introduce gradients or a dark default theme.
 - The partner-brand neural network may use a contained dark holographic canvas, matching the Second Brain visualization, while the surrounding homepage remains light and porcelain-toned.
 - Partner-network rotation must pause only through its explicit control. Hovering a node or the canvas must never pause it, and the removed bottom status/instruction card must not be restored.
+- Never use browser-native `alert`, `confirm`, or `prompt` dialogs. All confirmations and notices must use the shared porcelain-themed application dialog so typography, hierarchy, keyboard behavior, and mobile layout remain consistent across the website.

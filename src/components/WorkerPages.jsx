@@ -22,6 +22,7 @@ import {
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
 import { apiFetch, formatMoney } from "../api.js";
+import { useConfirmDialog } from "./ConfirmDialog.jsx";
 
 const taskStatus = {
   awaiting_payment: "待付款",
@@ -142,6 +143,7 @@ function ContactAction({ task, onPayment, currentUser }) {
 }
 
 function TaskCard({ task, mode, currentUser, onRefresh, onPayment, onNeedWechat }) {
+  const confirmAction = useConfirmDialog();
   const [progress, setProgress] = useState(task.progress || 5);
   const [note, setNote] = useState(task.progressNote || "");
   const [deliveryNote, setDeliveryNote] = useState("");
@@ -168,7 +170,16 @@ function TaskCard({ task, mode, currentUser, onRefresh, onPayment, onNeedWechat 
     finally { setBusy(""); }
   }
   async function accept() {
-    if (!window.confirm("确认结果符合要求并验收吗？验收后将立即按 80% / 20% 完成结算。")) return;
+    if (!await confirmAction({
+      tone: "positive",
+      eyebrow: "ACCEPT DELIVERY",
+      title: "确认验收任务成果？",
+      message: "验收后任务会立即完成结算，接单者获得预算的 80%，平台收取 20% 服务费。",
+      detail: task.title,
+      detailLabel: "任务",
+      note: "请确认交付内容符合要求；结算完成后不可撤销。",
+      confirmLabel: "验收并完成结算",
+    })) return;
     setBusy("accept"); setError("");
     try { await apiFetch(`/api/worker/tasks/${task.id}/accept`, { method: "POST", body: "{}" }); await onRefresh(); }
     catch (reason) { setError(reason.message); }

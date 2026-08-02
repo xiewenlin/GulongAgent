@@ -32,6 +32,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { apiFetch, formatMoney } from "../api.js";
 import { AdminDashboard } from "./AdminDashboard.jsx";
+import { useConfirmDialog } from "./ConfirmDialog.jsx";
 
 const menu = [
   { id: "dashboard", label: "数据看板", icon: ChartLineUp },
@@ -71,6 +72,7 @@ function ReleaseChannelOptions({ channels }) {
 }
 
 function ChandlerUserManager() {
+  const confirmAction = useConfirmDialog();
   const [query, setQuery] = useState("");
   const [channelId, setChannelId] = useState("");
   const [channels, setChannels] = useState([]);
@@ -110,7 +112,16 @@ function ChandlerUserManager() {
 
   async function changeStatus(user) {
     const status = user.status === "disabled" ? "active" : "disabled";
-    if (!window.confirm(`${status === "disabled" ? "冻结" : "启用"} ${user.email || user.display_name || user.id}？`)) return;
+    const disabling = status === "disabled";
+    if (!await confirmAction({
+      tone: disabling ? "danger" : "positive",
+      eyebrow: disabling ? "FREEZE USER ACCOUNT" : "RESTORE USER ACCOUNT",
+      title: disabling ? "冻结这个用户账号？" : "恢复这个用户账号？",
+      message: disabling ? "冻结后该用户将无法继续使用需要登录的官网和桌面端功能。" : "恢复后该用户可以重新登录并继续使用已有权益。",
+      detail: user.email || user.display_name || user.id,
+      detailLabel: "目标用户",
+      confirmLabel: disabling ? "确认冻结" : "确认恢复",
+    })) return;
     setBusy(user.id); setMessage("");
     try {
       await apiFetch(`/api/admin/chandler/users/${encodeURIComponent(user.id)}/status`, { method: "PUT", body: JSON.stringify({ status }) });
@@ -138,7 +149,16 @@ function ChandlerUserManager() {
   }
 
   async function promoteToAdmin(user) {
-    if (!window.confirm(`确认将 ${user.display_name || user.email || user.id} 设置为古龙官网管理员吗？`)) return;
+    if (!await confirmAction({
+      tone: "secure",
+      eyebrow: "ADMINISTRATOR ACCESS",
+      title: "授予管理员权限？",
+      message: "该用户将能够进入管理员后台，并使用账号具备权限的管理功能。",
+      detail: user.display_name || user.email || user.id,
+      detailLabel: "目标用户",
+      note: "请仅向可信任的团队成员授予管理员权限。",
+      confirmLabel: "设为管理员",
+    })) return;
     setBusy(`role-${user.id}`); setMessage("");
     try {
       const result = await apiFetch(`/api/admin/users/${encodeURIComponent(user.website_user_id || user.id)}/role`, { method: "PUT", body: JSON.stringify({ role: "admin" }) });
@@ -283,6 +303,7 @@ function PartnerFormModal({ editing, form, setForm, busy, onClose, onSubmit }) {
 }
 
 function PartnerManager() {
+  const confirmAction = useConfirmDialog();
   const [partners, setPartners] = useState([]);
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -352,7 +373,17 @@ function PartnerManager() {
   }
 
   async function remove(id) {
-    if (!window.confirm("确定删除这个合作伙伴吗？对应的 COS 图片也会删除，首页会立即停止展示。")) return;
+    const partner = partners.find((item) => item.id === id);
+    if (!await confirmAction({
+      tone: "danger",
+      eyebrow: "REMOVE PARTNER",
+      title: "删除这个合作伙伴？",
+      message: "删除后，首页品牌神经网络会立即停止展示该合作伙伴。",
+      detail: partner?.name || id,
+      detailLabel: "合作伙伴",
+      note: "对应的腾讯云 COS Logo 与宣传图片也会一并删除，无法恢复。",
+      confirmLabel: "永久删除",
+    })) return;
     try { await apiFetch(`/api/admin/partners/${id}`, { method: "DELETE" }); setState({ busy: false, message: "合作伙伴及其 COS 图片已删除。", tone: "success" }); await load(); }
     catch (error) { setState({ busy: false, message: error.message, tone: "error" }); }
   }
@@ -475,6 +506,7 @@ function VersionManager() {
 }
 
 function WorkerReviewManager() {
+  const confirmAction = useConfirmDialog();
   const [kind, setKind] = useState("task");
   const [tab, setTab] = useState("pending");
   const [items, setItems] = useState([]);
@@ -492,7 +524,16 @@ function WorkerReviewManager() {
   }
   useEffect(() => { load(); }, [kind, tab]);
   async function approve(item) {
-    if (!window.confirm(kind === "task" ? `确认任务“${item.title}”预算已到账，并按“${item.assignment?.label || "公开接单"}”开放吗？` : `确认订单 ${item.orderNo} 的 2 元已到账并解锁联系方式吗？`)) return;
+    const taskPayment = kind === "task";
+    if (!await confirmAction({
+      tone: "positive",
+      eyebrow: "PAYMENT REVIEW",
+      title: taskPayment ? "确认任务预算已到账？" : "确认联系方式订单已到账？",
+      message: taskPayment ? `通过后任务将按“${item.assignment?.label || "公开接单"}”立即开放。` : "通过后，申请用户将立即获得本任务另一方的微信号。",
+      detail: taskPayment ? item.title : item.orderNo,
+      detailLabel: taskPayment ? "任务" : "订单号",
+      confirmLabel: "确认到账并通过",
+    })) return;
     setBusy(item.id);
     try {
       await apiFetch(kind === "task" ? `/api/admin/worker-payments/${item.id}/approve` : `/api/admin/worker-contact-payments/${item.id}/approve`, { method: "POST", body: "{}" });
@@ -521,6 +562,7 @@ function FeedbackResponseAssets({ assets = [] }) {
 }
 
 function FeedbackManager() {
+  const confirmAction = useConfirmDialog();
   const [keyword, setKeyword] = useState("");
   const [tab, setTab] = useState("open");
   const [items, setItems] = useState([]);
@@ -585,7 +627,16 @@ function FeedbackManager() {
   }
 
   async function remove(item) {
-    if (!window.confirm(`确定删除这条用户反馈吗？\n\n反馈编号：${item.id}\n删除后记录与处理附件不可恢复。`)) return;
+    if (!await confirmAction({
+      tone: "danger",
+      eyebrow: "DELETE USER FEEDBACK",
+      title: "永久删除这条用户反馈？",
+      message: "反馈记录、处理进度和处理结果将从管理员及用户后台同时移除。",
+      detail: item.id,
+      detailLabel: "反馈编号",
+      note: "已上传的处理图片与视频附件也会从腾讯云 COS 删除，此操作不可恢复。",
+      confirmLabel: "永久删除反馈",
+    })) return;
     setBusy(`delete-${item.id}`); setMessage("");
     try {
       await apiFetch(`/api/admin/feedback/${item.id}`, { method: "DELETE" });
@@ -618,6 +669,7 @@ function FeedbackManager() {
 const paymentStatusText = { pending: "待支付", paid: "已支付", approved: "已通过", rejected: "已拒绝", failed: "支付失败", refunded: "已退款", cancelled: "已取消", canceled: "已取消" };
 
 function PaymentManager() {
+  const confirmAction = useConfirmDialog();
   const [mode, setMode] = useState("online");
   const [reviewTab, setReviewTab] = useState("pending");
   const [filters, setFilters] = useState({ q: "", from: "", to: "", channelId: "" });
@@ -663,7 +715,15 @@ function PaymentManager() {
   }
 
   async function approve(order) {
-    if (!window.confirm(`确认 ${order.user?.email || order.userEmail || order.orderNo} 已到账并开通会员吗？`)) return;
+    if (!await confirmAction({
+      tone: "positive",
+      eyebrow: "OFFLINE PAYMENT REVIEW",
+      title: "确认款项已到账？",
+      message: "通过后会员权益会立即写入官网，并同步到桌面端。",
+      detail: order.user?.email || order.userEmail || order.orderNo,
+      detailLabel: "用户 / 订单",
+      confirmLabel: "确认到账并开通",
+    })) return;
     setBusy(order.id);
     try { await apiFetch(`/api/admin/offline-payments/${order.id}/approve`, { method: "POST", body: "{}" }); await load(null, "offline", "pending"); setMessage("已确认到账，权益已写入官网并尝试同步 Chandler。"); }
     catch (error) { setMessage(error.message); }
