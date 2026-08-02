@@ -2014,6 +2014,43 @@ textarea:focus {
   font-weight: 800;
 }
 
+.online-channel-switch button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.online-channel-switch button small {
+  padding: 2px 7px;
+  color: var(--jade);
+  border-radius: 999px;
+  background: var(--jade-soft);
+  font-size: 18px;
+  font-weight: 850;
+}
+
+.online-channel-switch button.planned small {
+  color: var(--muted);
+  background: var(--bg-soft);
+}
+
+.online-payment-status-card {
+  width: min(610px, 100%);
+  padding: 14px 16px;
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  color: var(--jade);
+  border: 1px solid color-mix(in srgb, var(--jade) 24%, var(--line));
+  border-radius: 14px;
+  background: var(--jade-soft);
+  text-align: left;
+}
+
+.online-payment-status-card div { display: grid; gap: 4px; }
+.online-payment-status-card strong { font-size: 18px; }
+.online-payment-status-card span { color: var(--muted); font-size: 18px; line-height: 1.55; }
+
 .pricing-grid {
   padding: 30px 0 100px;
   display: grid;
@@ -2638,6 +2675,16 @@ textarea:focus {
   line-height: 1.6;
 }
 
+.payment-coming-soon-modal { width: min(590px, 100%); }
+.payment-coming-soon-modal .payment-eyebrow { margin-top: 18px; }
+.coming-soon-channel-list { margin: 22px 0 16px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.coming-soon-channel-list article { padding: 17px; border: 1px solid var(--line); border-radius: 15px; background: var(--bg-soft); }
+.coming-soon-channel-list article.priority { border-color: color-mix(in srgb, var(--jade) 45%, var(--line)); background: var(--jade-soft); }
+.coming-soon-channel-list article.selected { border-color: color-mix(in srgb, var(--gold) 50%, var(--line)); background: var(--gold-soft); }
+.coming-soon-channel-list article > strong { display: block; font-size: 21px; }
+.coming-soon-channel-list article > span { display: inline-block; margin: 7px 0; color: var(--gold); font-size: 18px; font-weight: 850; }
+.coming-soon-channel-list article > p { margin: 0; color: var(--muted); font-size: 18px; line-height: 1.55; }
+
 .offline-payment-modal {
   width: min(560px, 100%);
   text-align: center;
@@ -3223,6 +3270,12 @@ textarea:focus {
   .provider-switch > span {
     display: none;
   }
+
+  .payment-method-control { justify-items: stretch; }
+  .online-channel-switch { width: 100%; flex-wrap: wrap; }
+  .online-channel-switch > span { width: 100%; }
+  .online-channel-switch button { flex: 1; justify-content: center; }
+  .coming-soon-channel-list { grid-template-columns: 1fr; }
 
   .recharge-callout {
     grid-template-columns: 46px 1fr;

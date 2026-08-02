@@ -782,6 +782,25 @@ test("website pricing and desktop synchronization read the same MongoDB price ve
   assert.match(pricingPage, /apiFetch\("\/api\/billing\/plans"\)/);
 });
 
+test("online payment is paused consistently for website and desktop clients", async () => {
+  const [serverSource, pricingPage, accountPage] = await Promise.all([
+    readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/PlatformPages.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/AccountDashboard.jsx", import.meta.url), "utf8"),
+  ]);
+  assert.match(serverSource, /ONLINE_PAYMENT_AVAILABILITY/);
+  assert.match(serverSource, /code:\s*"ONLINE_PAYMENT_COMING_SOON"/);
+  assert.match(serverSource, /priorityProvider:\s*"wechat"/);
+  assert.match(serverSource, /alipay:\s*false/);
+  assert.match(serverSource, /wechat:\s*false/);
+  assert.match(serverSource, /paymentAvailability:\s*ONLINE_PAYMENT_AVAILABILITY/);
+  assert.match(pricingPage, /线上支付将在近期开通，敬请期待/);
+  assert.match(pricingPage, /微信支付将优先开通/);
+  assert.match(pricingPage, /支付宝渠道暂未开放/);
+  assert.match(pricingPage, /online-coming-soon/);
+  assert.match(accountPage, /线上支付即将开通，微信支付将优先上线/);
+});
+
 test("order management separates online and offline orders with multidimensional filters", async () => {
   const [adminSource, serverSource, css, dbSource] = await Promise.all([
     readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),

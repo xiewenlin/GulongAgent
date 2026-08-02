@@ -104,6 +104,16 @@ const AVATAR_MAX_BYTES = 10 * 1024 * 1024;
 const AVATAR_CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 const SUBSCRIPTION_PRICE_MIN_FEN = 100;
 const SUBSCRIPTION_PRICE_MAX_FEN = 5_000_000;
+const ONLINE_PAYMENT_AVAILABILITY = Object.freeze({
+  online: false,
+  status: "coming_soon",
+  notice: "线上支付将在近期开通，敬请期待。",
+  priorityProvider: "wechat",
+  channels: {
+    wechat: { enabled: false, status: "coming_soon", label: "微信支付", message: "微信支付将优先开通，敬请期待。" },
+    alipay: { enabled: false, status: "planned", label: "支付宝", message: "支付宝渠道暂未开放，将在后续陆续开通。" },
+  },
+});
 let offlinePaymentSyncPromise = null;
 let offlinePaymentSynchronizedAt = 0;
 
@@ -1425,6 +1435,17 @@ const SubscriptionPricePointSchema = z.object({
   updatedAt: z.coerce.date().nullable(),
 });
 
+const PaymentAvailabilitySchema = z.object({
+  online: z.boolean(),
+  status: z.enum(["available", "coming_soon"]),
+  notice: z.string(),
+  priorityProvider: z.enum(["wechat", "alipay"]),
+  channels: z.object({
+    wechat: z.object({ enabled: z.boolean(), status: z.enum(["available", "coming_soon", "planned"]), label: z.string(), message: z.string() }),
+    alipay: z.object({ enabled: z.boolean(), status: z.enum(["available", "coming_soon", "planned"]), label: z.string(), message: z.string() }),
+  }),
+});
+
 const getSubscriptionPricingRoute = createRoute({
   method: "get",
   path: "/api/v1/pricing/subscriptions",
@@ -1433,7 +1454,7 @@ const getSubscriptionPricingRoute = createRoute({
   description: "公开返回古龙官网当前生效的月度与年度会员价格。管理员发布后立即更新；响应禁止缓存，桌面端应在打开订阅页时重新拉取。",
   security: [],
   responses: {
-    200: { description: "当前生效的订阅价格快照", content: { "application/json": { schema: z.object({ revision: z.string(), currency: z.literal("CNY"), monthly: SubscriptionPricePointSchema, yearly: SubscriptionPricePointSchema, updatedAt: z.coerce.date() }) } } },
+    200: { description: "当前生效的订阅价格与支付渠道快照", content: { "application/json": { schema: z.object({ revision: z.string(), currency: z.literal("CNY"), monthly: SubscriptionPricePointSchema, yearly: SubscriptionPricePointSchema, updatedAt: z.coerce.date(), paymentAvailability: PaymentAvailabilitySchema }) } } },
   },
 });
 
@@ -4341,7 +4362,14 @@ app.get("/api/billing/plans", async (c) => {
       { id: "member", name: "会员用户", monthlyFen: pricing.monthly.amountFen, yearlyFen: pricing.yearly.amountFen, autoRenew: true },
       { id: "custom", name: "深度定制", pricing: "结果式付费 · 利润五五分", autoRenew: false },
     ],
-    providers: { mode: "chandler", alipay: true, wechat: true, offline: true, autoRenew: { alipay: true, wechat: true } },
+    providers: {
+      mode: "coming_soon",
+      alipay: false,
+      wechat: false,
+      offline: true,
+      autoRenew: { alipay: false, wechat: false },
+      availability: ONLINE_PAYMENT_AVAILABILITY,
+    },
     pricingRevision: pricing.revision,
   });
 });
@@ -4354,6 +4382,14 @@ app.post("/api/billing/orders", async (c) => {
   const provider = ["wechat", "alipay", "offline"].includes(body.provider) ? body.provider : null;
   const cycle = body.cycle === "year" ? "year" : body.cycle === "month" ? "month" : null;
   const kind = body.kind === "recharge" ? "recharge" : "subscription";
+  if (provider === "wechat" || provider === "alipay") {
+    const channel = ONLINE_PAYMENT_AVAILABILITY.channels[provider];
+    return c.json({
+      code: "ONLINE_PAYMENT_COMING_SOON",
+      message: provider === "alipay" ? channel.message : `${ONLINE_PAYMENT_AVAILABILITY.notice}${channel.message}`,
+      paymentAvailability: ONLINE_PAYMENT_AVAILABILITY,
+    }, 503);
+  }
   const now = new Date();
   const pricing = kind === "subscription" ? await currentSubscriptionPricing(now) : null;
   let amountFen = kind === "recharge" ? Number(body.amountFen) : cycle === "year" ? pricing.yearly.amountFen : pricing.monthly.amountFen;
@@ -5212,7 +5248,7 @@ app.openapi(getSubscriptionPricingRoute, async (c) => {
   c.header("Cache-Control", "no-store, max-age=0");
   c.header("Pragma", "no-cache");
   c.header("Access-Control-Allow-Origin", "*");
-  return c.json(pricing);
+  return c.json({ ...pricing, paymentAvailability: ONLINE_PAYMENT_AVAILABILITY });
 });
 
 app.openapi(getMiniMaxConfigurationRoute, async (c) => {

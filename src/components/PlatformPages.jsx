@@ -259,20 +259,28 @@ export function PricingPage({ user, openAuth, navigate }) {
   const [cycle, setCycle] = useState("month");
   const [paymentMode, setPaymentMode] = useState("online");
   const [onlineProvider, setOnlineProvider] = useState("wechat");
-  const [autoRenew, setAutoRenew] = useState(true);
+  const [autoRenew, setAutoRenew] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [payment, setPayment] = useState(null);
   const [membership, setMembership] = useState(null);
   const [pricingPlans, setPricingPlans] = useState(sitePlans);
   const [customContactOpen, setCustomContactOpen] = useState(false);
+  const [paymentAvailability, setPaymentAvailability] = useState({
+    notice: "线上支付将在近期开通，敬请期待。",
+    priorityProvider: "wechat",
+    channels: {
+      wechat: { message: "微信支付将优先开通，敬请期待。" },
+      alipay: { message: "支付宝渠道暂未开放，将在后续陆续开通。" },
+    },
+  });
 
   useEffect(() => {
     apiFetch("/api/billing/plans")
       .then((result) => {
         const liveMember = (result.plans || []).find((item) => item.id === "member");
-        if (!liveMember) return;
-        setPricingPlans(sitePlans.map((item) => item.id === "member" ? { ...item, monthlyFen: liveMember.monthlyFen, yearlyFen: liveMember.yearlyFen } : item));
+        if (liveMember) setPricingPlans(sitePlans.map((item) => item.id === "member" ? { ...item, monthlyFen: liveMember.monthlyFen, yearlyFen: liveMember.yearlyFen } : item));
+        if (result.providers?.availability) setPaymentAvailability(result.providers.availability);
       })
       .catch(() => setPricingPlans(sitePlans));
   }, []);
@@ -293,11 +301,21 @@ export function PricingPage({ user, openAuth, navigate }) {
   const memberPayableFen = cycle === "year" ? Math.max(monthlyUpgrade ? 100 : 0, memberPlan.yearlyFen - upgradeCreditFen) : memberPlan.monthlyFen;
   const yearlySavingsFen = Math.max(0, memberPlan.monthlyFen * 12 - memberPlan.yearlyFen);
 
+  function showOnlinePaymentNotice(provider = "wechat") {
+    setOnlineProvider(provider);
+    setAutoRenew(false);
+    setPayment({ mode: "online-coming-soon", provider });
+  }
+
   async function startPayment(plan) {
     if (plan.id === "custom") { setCustomContactOpen(true); return; }
     if (!user) return openAuth("login");
     if (plan.id === "free") return navigate("/download");
     trackAnalyticsEvent("CHECKOUT_START", { path: "/pricing" });
+    if (paymentMode === "online") {
+      showOnlinePaymentNotice(onlineProvider);
+      return;
+    }
     if (paymentMode === "offline") {
       setPayment({ mode: "offline-cashier", cycle, amountFen: plan.id === "member" ? memberPayableFen : cycle === "year" ? plan.yearlyFen : plan.monthlyFen, upgradeCreditFen, planName: plan.name });
       return;
@@ -323,7 +341,7 @@ export function PricingPage({ user, openAuth, navigate }) {
       <PageIntro eyebrow="SIMPLE PRICING" title="把成本花在真正困难的任务上" description="普通能力永久免费；会员解锁第二大脑、多端消息、本地模型与完整创作流水线。" />
       <section className="pricing-controls section-shell">
         <div className="cycle-switch"><button className={cycle === "month" ? "active" : ""} onClick={() => setCycle("month")}>按月订阅</button><button className={cycle === "year" ? "active" : ""} onClick={() => setCycle("year")}>按年订阅 {yearlySavingsFen > 0 && <span>省 {formatMoney(yearlySavingsFen)}</span>}</button></div>
-        <div className="payment-method-control"><div className="provider-switch"><button className={paymentMode === "online" ? "active" : ""} onClick={() => setPaymentMode("online")}>线上支付</button><button className={paymentMode === "offline" ? "active" : ""} onClick={() => { setPaymentMode("offline"); setAutoRenew(false); }}>线下支付</button></div>{paymentMode === "online" && <div className="online-channel-switch" aria-label="线上支付渠道"><span>选择渠道</span><button className={onlineProvider === "wechat" ? "active" : ""} onClick={() => setOnlineProvider("wechat")}>微信支付</button><button className={onlineProvider === "alipay" ? "active" : ""} onClick={() => setOnlineProvider("alipay")}>支付宝</button></div>}</div>
+        <div className="payment-method-control"><div className="provider-switch"><button className={paymentMode === "online" ? "active" : ""} onClick={() => { setPaymentMode("online"); showOnlinePaymentNotice("wechat"); }}>线上支付</button><button className={paymentMode === "offline" ? "active" : ""} onClick={() => { setPaymentMode("offline"); setAutoRenew(false); }}>线下支付</button></div>{paymentMode === "online" && <><div className="online-channel-switch" aria-label="线上支付渠道"><span>开通计划</span><button className={onlineProvider === "wechat" ? "active" : ""} aria-disabled="true" onClick={() => showOnlinePaymentNotice("wechat")}>微信支付<small>优先开通</small></button><button className={onlineProvider === "alipay" ? "active planned" : "planned"} aria-disabled="true" onClick={() => showOnlinePaymentNotice("alipay")}>支付宝<small>后续开放</small></button></div><div className="online-payment-status-card" role="status"><CreditCard size={21} weight="duotone" /><div><strong>{paymentAvailability.notice}</strong><span>我们将优先开通微信支付；支付宝渠道将在后续陆续开放。</span></div></div></>}</div>
       </section>
       <section className="pricing-grid section-shell">
         {pricingPlans.map((plan) => (
@@ -334,21 +352,21 @@ export function PricingPage({ user, openAuth, navigate }) {
             {plan.id === "member" && monthlyUpgrade && <div className="upgrade-credit"><CheckCircle size={19} weight="fill" /><div><strong>月度会员升级抵扣 {formatMoney(upgradeCreditFen)}</strong><span>年度原价 {formatMoney(plan.yearlyFen)}，本次只需补足剩余费用。</span></div></div>}
             {plan.subpricing && <p className="plan-subprice">{plan.subpricing}</p>}
             <ul>{plan.features.map((feature) => <li key={feature}><Check size={17} weight="bold" /> {feature}</li>)}</ul>
-            {plan.id === "member" && <label className={`auto-renew ${paymentMode === "offline" ? "disabled" : ""}`}><input type="checkbox" disabled={paymentMode === "offline"} checked={autoRenew} onChange={(event) => setAutoRenew(event.target.checked)} /><span><strong>{paymentMode === "offline" ? "人工审核到账" : "到期自动续订"}</strong><small>{paymentMode === "offline" ? "线下订单确认后开通本期会员，续费时需重新提交。" : "可随时取消；实际扣款需完成支付渠道签约。"}</small></span></label>}
-            <button className={`button full ${plan.featured ? "primary" : "secondary"}`} disabled={busy} onClick={() => startPayment(plan)}>{plan.id === "free" ? "免费下载" : plan.id === "custom" ? "联系定制" : monthlyUpgrade ? "补差价升级年度会员" : "立即开通"}</button>
+            {plan.id === "member" && <label className="auto-renew disabled"><input type="checkbox" disabled checked={autoRenew} onChange={(event) => setAutoRenew(event.target.checked)} /><span><strong>{paymentMode === "offline" ? "人工审核到账" : "线上自动续订即将开放"}</strong><small>{paymentMode === "offline" ? "线下订单确认后开通本期会员，续费时需重新提交。" : "微信支付开通后将逐步支持自动续订；当前不会产生扣款。"}</small></span></label>}
+            <button className={`button full ${plan.featured ? "primary" : "secondary"}`} disabled={busy} onClick={() => startPayment(plan)}>{plan.id === "free" ? "免费下载" : plan.id === "custom" ? "联系定制" : paymentMode === "online" ? "线上支付即将开通" : monthlyUpgrade ? "补差价升级年度会员" : "立即开通"}</button>
           </article>
         ))}
       </section>
       {error && <div className="page-error section-shell">{error}</div>}
-      <section className="recharge-callout section-shell" id="recharge"><div className="wallet-orb"><Wallet size={28} /></div><div><h3>单次充值</h3><p>不订阅也可以按需充值余额，后续用于按量调用模型与工作流。</p></div><button className="button secondary" onClick={() => user ? setPayment({ recharge: true }) : openAuth("login")}><CreditCard size={18} /> 充值余额</button></section>
+      <section className="recharge-callout section-shell" id="recharge"><div className="wallet-orb"><Wallet size={28} /></div><div><h3>单次充值</h3><p>线上充值将在微信支付开通后同步开放，支付宝渠道后续陆续接入。</p></div><button className="button secondary" onClick={() => user ? showOnlinePaymentNotice("wechat") : openAuth("login")}><CreditCard size={18} /> 线上充值即将开通</button></section>
       {customContactOpen && <CustomizationContactDialog onClose={() => setCustomContactOpen(false)} />}
-      {payment && !payment.recharge && <PaymentDialog payment={payment} provider={onlineProvider} onPayment={setPayment} onClose={() => setPayment(null)} />}
+      {payment && !payment.recharge && <PaymentDialog payment={payment} provider={payment.provider || onlineProvider} availability={paymentAvailability} onPayment={setPayment} onClose={() => setPayment(null)} />}
       {payment?.recharge && <RechargeDialog provider={onlineProvider} onClose={() => setPayment(null)} navigate={navigate} />}
     </main>
   );
 }
 
-function PaymentDialog({ payment, provider, onPayment, onClose }) {
+function PaymentDialog({ payment, provider, availability, onPayment, onClose }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   async function confirmOffline() {
@@ -358,6 +376,10 @@ function PaymentDialog({ payment, provider, onPayment, onClose }) {
       onPayment(result);
     } catch (reason) { setError(reason.message); }
     finally { setBusy(false); }
+  }
+  if (payment.mode === "online-coming-soon") {
+    const isAlipay = provider === "alipay";
+    return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="payment-modal payment-coming-soon-modal" role="dialog" aria-modal="true" aria-labelledby="online-payment-coming-title"><button className="modal-close" onClick={onClose}><X size={19} /></button><div className="payment-logo"><CreditCard size={28} /></div><span className="payment-eyebrow">ONLINE PAYMENT ROADMAP</span><h2 id="online-payment-coming-title">{isAlipay ? "支付宝将在后续开放" : "线上支付即将开通"}</h2><p>{isAlipay ? availability.channels.alipay.message : availability.notice}</p><div className="coming-soon-channel-list"><article className={!isAlipay ? "priority" : ""}><strong>微信支付</strong><span>首批开通</span><p>{availability.channels.wechat.message}</p></article><article className={isAlipay ? "selected" : ""}><strong>支付宝</strong><span>后续开放</span><p>{availability.channels.alipay.message}</p></article></div><small>当前可切换到“线下支付”，扫码付款并提交管理员审核。</small><button className="button primary full" onClick={onClose}>我知道了</button></section></div>;
   }
   if (payment.mode === "offline-cashier") {
     return <div className="modal-backdrop"><section className="payment-modal offline-payment-modal" role="dialog" aria-modal="true"><button className="modal-close" disabled={busy} onClick={onClose}><X size={19} /></button><div className="payment-logo"><ShieldCheck size={28} /></div><span className="payment-eyebrow">OFFLINE PAYMENT</span><h2>扫码支付后提交人工审核</h2><p>请扫描企业收款码完成付款。付款后点击“我已支付”，系统会创建待审核订单。</p><img className="payment-qr enterprise-qr" src="/assets/enterprise-payment-qr.jpg" alt="古龙企业微信收款码" /><div className="offline-payment-summary"><span>{payment.cycle === "year" ? "年度会员" : "月度会员"}</span><strong>{formatMoney(payment.amountFen)}</strong></div>{payment.upgradeCreditFen > 0 && <p className="offline-upgrade-note">已按月度会员升级规则抵扣 {formatMoney(payment.upgradeCreditFen)}</p>}{error && <div className="form-error">{error}</div>}<div className="payment-dialog-actions"><button className="button secondary" disabled={busy} onClick={onClose}>返回套餐</button><button className="button primary" disabled={busy} onClick={confirmOffline}>{busy ? "正在提交" : "我已支付"}</button></div></section></div>;
