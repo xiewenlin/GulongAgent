@@ -101,6 +101,22 @@
       "destination": "/api/platform?_platform_path=admin/brain-attachments/:id"
     },
     {
+      "source": "/api/admin/feedback/:id/assets/:uploadId/complete",
+      "destination": "/api/platform?_platform_path=admin/feedback/:id/assets/:uploadId/complete"
+    },
+    {
+      "source": "/api/admin/feedback/:id/assets/presign",
+      "destination": "/api/platform?_platform_path=admin/feedback/:id/assets/presign"
+    },
+    {
+      "source": "/api/admin/feedback/:id",
+      "destination": "/api/platform?_platform_path=admin/feedback/:id"
+    },
+    {
+      "source": "/api/feedback/:id/assets/:assetId",
+      "destination": "/api/platform?_platform_path=feedback/:id/assets/:assetId"
+    },
+    {
       "source": "/api/admin/offline-payments/:id/:action",
       "destination": "/api/platform?_platform_path=admin/offline-payments/:id/:action"
     },

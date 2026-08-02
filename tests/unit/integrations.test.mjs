@@ -867,12 +867,13 @@ test("administrator feedback records are newest-first and support fuzzy keyword 
 });
 
 test("feedback processing has three states, COS result attachments, deletion and a user-visible worklog", async () => {
-  const [adminSource, accountSource, serverSource, css, dbSource] = await Promise.all([
+  const [adminSource, accountSource, serverSource, css, dbSource, vercel] = await Promise.all([
     readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../src/components/AccountDashboard.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
     readFile(new URL("../../src/styles.css", import.meta.url), "utf8"),
     readFile(new URL("../../server/db.js", import.meta.url), "utf8"),
+    readFile(new URL("../../vercel.json", import.meta.url), "utf8"),
   ]);
   assert.match(adminSource, /\[\["open", "待处理"\], \["processing", "处理中"\], \["resolved", "已处理"\]\]/);
   assert.match(adminSource, /保存为处理中/);
@@ -891,6 +892,9 @@ test("feedback processing has three states, COS result attachments, deletion and
   assert.match(css, /\.feedback-status-tabs\s*\{/);
   assert.match(css, /\.account-feedback-card\s*\{/);
   assert.match(dbSource, /feedback_response_uploads/);
+  assert.match(vercel, /admin\/feedback\/:id\/assets\/:uploadId\/complete/);
+  assert.match(vercel, /admin\/feedback\/:id\/assets\/presign/);
+  assert.match(vercel, /feedback\/:id\/assets\/:assetId/);
 });
 
 test("administrator release controls are explicit and legacy direct distribution stays unreachable", async () => {
