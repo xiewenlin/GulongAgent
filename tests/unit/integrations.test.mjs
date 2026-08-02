@@ -866,6 +866,33 @@ test("administrator feedback records are newest-first and support fuzzy keyword 
   assert.match(css, /\.feedback-admin-filter\s*\{/);
 });
 
+test("feedback processing has three states, COS result attachments, deletion and a user-visible worklog", async () => {
+  const [adminSource, accountSource, serverSource, css, dbSource] = await Promise.all([
+    readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/AccountDashboard.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/styles.css", import.meta.url), "utf8"),
+    readFile(new URL("../../server/db.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(adminSource, /\[\["open", "待处理"\], \["processing", "处理中"\], \["resolved", "已处理"\]\]/);
+  assert.match(adminSource, /保存为处理中/);
+  assert.match(adminSource, /标记已处理并通知用户/);
+  assert.match(adminSource, /window\.confirm\(`确定删除这条用户反馈吗/);
+  assert.match(adminSource, /video\/mp4,video\/webm,video\/quicktime/);
+  assert.match(serverSource, /app\.post\("\/api\/admin\/feedback\/:id\/assets\/presign"/);
+  assert.match(serverSource, /app\.post\("\/api\/admin\/feedback\/:id\/assets\/:uploadId\/complete"/);
+  assert.match(serverSource, /app\.put\("\/api\/admin\/feedback\/:id"/);
+  assert.match(serverSource, /app\.delete\("\/api\/admin\/feedback\/:id"/);
+  assert.match(serverSource, /notifyUser\(current\.ownerId, "feedback_resolved"/);
+  assert.match(serverSource, /responseAttachments/);
+  assert.match(accountSource, /\{ id: "feedback", label: "我的反馈", icon: ChatCircleText \}/);
+  assert.match(accountSource, /active === "feedback"/);
+  assert.match(accountSource, /notification\.type\?\.startsWith\("feedback_"\)/);
+  assert.match(css, /\.feedback-status-tabs\s*\{/);
+  assert.match(css, /\.account-feedback-card\s*\{/);
+  assert.match(dbSource, /feedback_response_uploads/);
+});
+
 test("administrator release controls are explicit and legacy direct distribution stays unreachable", async () => {
   const [source, adminSource] = await Promise.all([
     readFile(new URL("../../server/app.js", import.meta.url), "utf8"),

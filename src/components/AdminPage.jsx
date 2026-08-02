@@ -26,6 +26,7 @@ import {
   ShieldCheck,
   Trash,
   UsersThree,
+  VideoCamera,
   X,
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
@@ -510,44 +511,107 @@ function WorkerReviewManager() {
   return <section className="admin-module"><header className="admin-module-head"><div><span>WORKER ESCROW REVIEW</span><h2>威客审核</h2><p>审核任务预算与双方查看微信号的 2 元线下订单；只有审核通过才开放对应能力。</p></div><button className="button secondary" onClick={load}><ArrowClockwise size={17} />刷新</button></header>{message && <AdminNotice tone={message.startsWith("已") ? "success" : "error"}>{message}</AdminNotice>}<div className="worker-admin-kind-tabs"><button className={kind === "task" ? "active" : ""} onClick={() => setKind("task")}><CurrencyCny size={19} />任务预算审核</button><button className={kind === "contact" ? "active" : ""} onClick={() => setKind("contact")}><UsersThree size={19} />联系方式订单</button></div><div className="offline-review-tabs"><button className={tab === "pending" ? "active" : ""} onClick={() => setTab("pending")}><span>待审核</span><strong>{summary.pending || 0}</strong></button><button className={tab === "reviewed" ? "active" : ""} onClick={() => setTab("reviewed")}><span>已审核</span><strong>{summary.reviewed || 0}</strong></button></div>{items.length ? <div className="worker-admin-review-list">{items.map((item) => <article key={item.id}><div><span>{kind === "task" ? "任务预算" : "联系方式查看"}</span><h3>{kind === "task" ? item.title : item.taskTitle}</h3><p>{kind === "task" ? `${item.publisher?.displayName || "发单用户"} · ${item.assignment?.label || "公开接单"}` : `${item.requester?.displayName || "用户"} 申请查看 ${item.target?.displayName || "任务另一方"}`}</p><small>{kind === "task" ? item.paymentOrderNo : item.orderNo}</small></div><strong>{formatMoney(kind === "task" ? item.budgetFen : item.amountFen)}</strong><em className={`status-pill ${kind === "task" ? item.paymentStatus : item.status}`}>{(kind === "task" ? item.paymentStatus : item.status) === "pending" ? "待审核" : (kind === "task" ? item.paymentStatus : item.status) === "approved" ? "已通过" : "已拒绝"}</em>{tab === "pending" && <div className="admin-row-actions"><button className="button small primary" disabled={busy === item.id} onClick={() => approve(item)}>确认到账并通过</button><button className="button small secondary" disabled={busy === item.id} onClick={() => setRejecting({ item, reason: "" })}>拒绝通过</button></div>}</article>)}</div> : <EmptyState icon={Briefcase} title={tab === "pending" ? "没有待审核威客订单" : "还没有已审核记录"} text="新订单提交后会自动显示在这里。" />}{rejecting && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setRejecting(null)}><form className="admin-form-modal" onSubmit={reject}><button className="modal-close" type="button" onClick={() => setRejecting(null)}><X size={18} /></button><span>REJECT WORKER PAYMENT</span><h2>填写拒绝原因</h2><p>原因会原样发送给申请用户，并允许用户调整后重新提交。</p><label><span>拒绝原因</span><textarea autoFocus required minLength={2} maxLength={500} value={rejecting.reason} onChange={(event) => setRejecting({ ...rejecting, reason: event.target.value })} /></label><button className="button primary full" disabled={busy === rejecting.item.id}>保存并通知用户</button></form></div>}</section>;
 }
 
-const feedbackStatusLabels = { open: "待处理", processing: "处理中", resolved: "已回复", closed: "已关闭" };
+const feedbackStatusLabels = { open: "待处理", processing: "处理中", resolved: "已处理", closed: "已处理" };
+
+function FeedbackResponseAssets({ assets = [] }) {
+  if (!assets.length) return null;
+  return <div className="feedback-response-assets">{assets.map((asset) => asset.kind === "video"
+    ? <figure key={asset.id}><video controls preload="metadata" src={asset.url} /><figcaption><VideoCamera size={18} />{asset.filename}</figcaption></figure>
+    : <a key={asset.id} href={asset.url} target="_blank" rel="noreferrer"><img src={asset.url} alt={asset.filename} /><span><ImageSquare size={18} />{asset.filename}</span></a>)}</div>;
+}
 
 function FeedbackManager() {
   const [keyword, setKeyword] = useState("");
+  const [tab, setTab] = useState("open");
   const [items, setItems] = useState([]);
+  const [summary, setSummary] = useState({ open: 0, processing: 0, resolved: 0, total: 0 });
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("");
+  const [handling, setHandling] = useState(null);
 
-  async function load(event, page = 1, query = keyword) {
+  async function load(event, page = 1, query = keyword, status = tab) {
     event?.preventDefault();
-    setBusy(true); setMessage("");
-    const params = new URLSearchParams({ page: String(page), limit: "30" });
+    setBusy("load"); setMessage("");
+    const params = new URLSearchParams({ page: String(page), limit: "30", status });
     if (query.trim()) params.set("q", query.trim());
     try {
       const result = await apiFetch(`/api/admin/feedback?${params}`);
       setItems(result.items || []);
+      setSummary(result.summary || { open: 0, processing: 0, resolved: 0, total: 0 });
       setPagination(result.pagination || { page: 1, pages: 1, total: 0 });
     } catch (error) { setMessage(error.message); }
-    finally { setBusy(false); }
+    finally { setBusy(""); }
   }
 
   useEffect(() => { load(); }, []);
 
+  function switchTab(status) {
+    setTab(status);
+    load(null, 1, keyword, status);
+  }
+
+  function beginHandling(item) {
+    setHandling({ item, progress: item.progress || "", response: item.response || "", files: [] });
+    setMessage("");
+  }
+
+  async function uploadResponseFiles(feedbackId, files) {
+    const attachmentIds = [];
+    for (const file of files) {
+      const ticket = await apiFetch(`/api/admin/feedback/${feedbackId}/assets/presign`, { method: "POST", body: JSON.stringify({ filename: file.name, contentType: file.type, bytes: file.size }) });
+      const uploaded = await fetch(ticket.uploadUrl, { method: "PUT", headers: ticket.requiredHeaders, body: file });
+      if (!uploaded.ok) throw new Error(`附件“${file.name}”上传失败，请重试`);
+      await apiFetch(`/api/admin/feedback/${feedbackId}/assets/${ticket.uploadId}/complete`, { method: "POST", body: "{}" });
+      attachmentIds.push(ticket.uploadId);
+    }
+    return attachmentIds;
+  }
+
+  async function save(status) {
+    if (!handling) return;
+    if (handling.progress.trim().length < 2) return setMessage("请填写处理进度。");
+    if (status === "resolved" && handling.response.trim().length < 2) return setMessage("标记为已处理前，请填写处理结果。");
+    setBusy(`handle-${handling.item.id}`); setMessage("");
+    try {
+      const attachmentIds = await uploadResponseFiles(handling.item.id, handling.files);
+      await apiFetch(`/api/admin/feedback/${handling.item.id}`, { method: "PUT", body: JSON.stringify({ status, progress: handling.progress, response: handling.response, attachmentIds }) });
+      setHandling(null);
+      setMessage(status === "resolved" ? "处理结果已保存，并已通知反馈用户。" : "处理进度已保存。用户可在“我的反馈”中查看。" );
+      if (status !== tab) { setTab(status); await load(null, 1, keyword, status); }
+      else await load(null, pagination.page, keyword, tab);
+    } catch (error) { setMessage(error.message); }
+    finally { setBusy(""); }
+  }
+
+  async function remove(item) {
+    if (!window.confirm(`确定删除这条用户反馈吗？\n\n反馈编号：${item.id}\n删除后记录与处理附件不可恢复。`)) return;
+    setBusy(`delete-${item.id}`); setMessage("");
+    try {
+      await apiFetch(`/api/admin/feedback/${item.id}`, { method: "DELETE" });
+      setMessage("用户反馈及其处理附件已删除。");
+      await load(null, items.length === 1 && pagination.page > 1 ? pagination.page - 1 : pagination.page, keyword, tab);
+    } catch (error) { setMessage(error.message); }
+    finally { setBusy(""); }
+  }
+
   return <section className="admin-module feedback-manager">
-    <header className="admin-module-head"><div><span>VOICE OF USER</span><h2>用户反馈</h2><p>集中查看官网“问题反馈”提交的真实记录。列表按提交时间倒序排列，最新反馈始终显示在最上方。</p></div><button className="button secondary" disabled={busy} onClick={() => load(null, pagination.page || 1)}><ArrowClockwise size={17} /> {busy ? "加载中" : "刷新"}</button></header>
+    <header className="admin-module-head"><div><span>VOICE OF USER</span><h2>用户反馈</h2><p>从待处理、处理中到已处理完整跟踪用户问题；处理结果与附件会同步到用户后台。</p></div><button className="button secondary" disabled={Boolean(busy)} onClick={() => load(null, pagination.page || 1)}><ArrowClockwise size={17} /> {busy === "load" ? "加载中" : "刷新"}</button></header>
+    <div className="feedback-status-tabs" role="tablist" aria-label="用户反馈处理状态">{[["open", "待处理"], ["processing", "处理中"], ["resolved", "已处理"]].map(([status, label]) => <button type="button" role="tab" aria-selected={tab === status} className={tab === status ? "active" : ""} key={status} onClick={() => switchTab(status)}><span>{label}</span><strong>{summary[status] || 0}</strong></button>)}</div>
     <form className="feedback-admin-filter" onSubmit={(event) => load(event, 1)}><label><MagnifyingGlass size={19} /><input value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="搜索反馈内容、昵称、用户名、邮箱、编号或状态" /></label><button className="button primary" disabled={busy}><MagnifyingGlass size={17} /> 搜索反馈</button>{keyword && <button type="button" className="button ghost" onClick={() => { setKeyword(""); load(null, 1, ""); }}>清空</button>}</form>
-    {message && <AdminNotice tone="error">{message}</AdminNotice>}
+    {message && <AdminNotice tone={message.startsWith("处理") || message.includes("已删除") ? "success" : "error"}>{message}</AdminNotice>}
     {items.length ? <div className="admin-feedback-list">{items.map((item) => {
       const ownerName = item.owner?.displayName || item.owner?.username || item.owner?.email || "匿名用户";
       return <article key={item.id}>
-        <header><div className="feedback-user-avatar">{item.owner?.avatar ? <img src={item.owner.avatar} alt="" /> : ownerName.slice(0, 1).toUpperCase()}</div><div><strong>{ownerName}</strong><span>{item.owner?.email || "匿名反馈"}</span></div><em className={`status-pill ${item.status}`}>{feedbackStatusLabels[item.status] || item.status || "待处理"}</em></header>
+        <header><div className="feedback-user-avatar">{item.owner?.avatar ? <img src={item.owner.avatar} alt="" /> : ownerName.slice(0, 1).toUpperCase()}</div><div><strong>{ownerName}</strong><span>{item.owner?.email || "匿名反馈"}</span></div><div className="admin-feedback-card-actions"><em className={`status-pill ${item.status}`}>{feedbackStatusLabels[item.status] || item.status || "待处理"}</em><button className="button small secondary" disabled={Boolean(busy)} onClick={() => beginHandling(item)}>{item.status === "open" ? "处理" : "查看并更新"}</button><button className="icon-danger" disabled={Boolean(busy)} onClick={() => remove(item)} aria-label={`删除反馈 ${item.id}`}><Trash size={18} /></button></div></header>
         <p>{item.message}</p>
         {item.screenshots?.length > 0 && <div className="admin-feedback-images">{item.screenshots.map((url, index) => <a key={`${url}-${index}`} href={url} target="_blank" rel="noreferrer" aria-label={`查看第 ${index + 1} 张反馈截图`}><img src={url} alt={`反馈截图 ${index + 1}`} /><ArrowSquareOut size={18} /></a>)}</div>}
+        {(item.progress || item.response) && <div className="admin-feedback-response"><span>处理记录</span>{item.progress && <p><strong>处理进度</strong>{item.progress}</p>}{item.response && <p><strong>处理结果</strong>{item.response}</p>}<FeedbackResponseAssets assets={item.responseAttachments} /></div>}
         <footer><time dateTime={item.createdAt}>{new Date(item.createdAt).toLocaleString("zh-CN")}</time><span>反馈编号：{item.id}</span></footer>
       </article>;
-    })}</div> : <EmptyState icon={ChatCircleText} title={busy ? "正在读取用户反馈" : keyword ? "没有匹配的反馈" : "暂时还没有用户反馈"} text={keyword ? "请尝试更换关键词后重新搜索。" : "用户从官网提交问题反馈后，会按最新时间优先显示在这里。"} />}
+    })}</div> : <EmptyState icon={ChatCircleText} title={busy === "load" ? "正在读取用户反馈" : keyword ? "没有匹配的反馈" : `当前没有${feedbackStatusLabels[tab]}反馈`} text={keyword ? "请尝试更换关键词后重新搜索。" : "新反馈和处理进展会自动进入对应状态列表。"} />}
     <footer className="admin-module-footer feedback-pagination"><span>共 {pagination.total || 0} 条反馈</span><div><button className="button small ghost" disabled={busy || (pagination.page || 1) <= 1} onClick={() => load(null, (pagination.page || 1) - 1)}>上一页</button><strong>第 {pagination.page || 1} / {pagination.pages || 1} 页</strong><button className="button small ghost" disabled={busy || (pagination.page || 1) >= (pagination.pages || 1)} onClick={() => load(null, (pagination.page || 1) + 1)}>下一页</button></div></footer>
+    {handling && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && setHandling(null)}><section className="admin-form-modal feedback-handle-modal" role="dialog" aria-modal="true" aria-labelledby="feedback-handle-title"><button className="modal-close" type="button" disabled={Boolean(busy)} onClick={() => setHandling(null)}><X size={18} /></button><span>FEEDBACK WORKLOG</span><h2 id="feedback-handle-title">处理用户反馈</h2><p className="feedback-handle-source">{handling.item.message}</p><label><span>处理进度</span><textarea required minLength={2} maxLength={5000} rows={4} value={handling.progress} onChange={(event) => setHandling({ ...handling, progress: event.target.value })} placeholder="例如：已复现问题，正在检查桌面端与官网的同步链路。" /></label><label><span>处理结果</span><textarea maxLength={20000} rows={6} value={handling.response} onChange={(event) => setHandling({ ...handling, response: event.target.value })} placeholder="处理完成后，向用户清楚说明修复结果、使用方法或后续安排。" /></label><label className="feedback-result-picker"><span><ImageSquare size={20} />处理图片或视频</span><strong>{handling.files.length ? `已选择 ${handling.files.length} 个附件` : "选择图片或视频"}</strong><small>图片支持 JPG、PNG、WebP、GIF；视频支持 MP4、WebM、MOV。单个文件不超过 200 MB，最多 12 个。</small><input type="file" multiple accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" onChange={(event) => setHandling({ ...handling, files: Array.from(event.target.files || []).slice(0, 12) })} /></label>{handling.files.length > 0 && <div className="feedback-selected-files">{handling.files.map((file, index) => <span key={`${file.name}-${file.lastModified}`}>{file.type.startsWith("video/") ? <VideoCamera size={18} /> : <ImageSquare size={18} />}{file.name}<button type="button" onClick={() => setHandling({ ...handling, files: handling.files.filter((_, candidate) => candidate !== index) })}><X size={15} /></button></span>)}</div>}{handling.item.responseAttachments?.length > 0 && <div className="feedback-existing-results"><strong>已上传的处理附件</strong><FeedbackResponseAssets assets={handling.item.responseAttachments} /></div>}<div className="feedback-handle-actions"><button type="button" className="button ghost" disabled={Boolean(busy)} onClick={() => setHandling(null)}>取消</button><button type="button" className="button secondary" disabled={Boolean(busy)} onClick={() => save("processing")}><FloppyDisk size={18} />保存为处理中</button><button type="button" className="button primary" disabled={Boolean(busy)} onClick={() => save("resolved")}><CheckCircle size={18} />标记已处理并通知用户</button></div></section></div>}
   </section>;
 }
 

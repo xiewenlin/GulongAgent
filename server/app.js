@@ -102,6 +102,8 @@ const MINIMAX_API_HOST = "https://api.minimaxi.com/v1";
 const MINIMAX_DEFAULT_MODEL = "MiniMax-M3";
 const AVATAR_MAX_BYTES = 10 * 1024 * 1024;
 const AVATAR_CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+const FEEDBACK_RESPONSE_CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "video/mp4", "video/webm", "video/quicktime"]);
+const FEEDBACK_RESPONSE_MAX_BYTES = 200 * 1024 * 1024;
 const SUBSCRIPTION_PRICE_MIN_FEN = 100;
 const SUBSCRIPTION_PRICE_MAX_FEN = 5_000_000;
 const ONLINE_PAYMENT_AVAILABILITY = Object.freeze({
@@ -594,6 +596,19 @@ async function adminOrderRows(orders) {
 
 function objectSize(head) {
   return Number(head?.headers?.["content-length"] || head?.ContentLength || head?.contentLength || 0);
+}
+
+function feedbackResponseAssetJson(asset, feedbackId = asset.feedbackId) {
+  const resolvedFeedbackId = feedbackId?.toString?.() || String(feedbackId || "");
+  return {
+    id: asset._id?.toString?.() || String(asset.id || ""),
+    filename: asset.filename,
+    contentType: asset.contentType,
+    bytes: asset.bytes,
+    kind: String(asset.contentType || "").startsWith("video/") ? "video" : "image",
+    url: `/api/feedback/${resolvedFeedbackId}/assets/${asset._id?.toString?.() || asset.id}`,
+    createdAt: asset.createdAt,
+  };
 }
 
 function workerPerson(user) {
@@ -2156,9 +2171,14 @@ app.get("/api/account/dashboard", async (c) => {
       id: item._id.toString(),
       message: item.message,
       status: item.status,
+      progress: item.progress || null,
       response: item.response || item.adminResponse || null,
+      screenshots: (Array.isArray(item.screenshots) ? item.screenshots : []).map(parseHttpUrl).filter(Boolean),
+      responseAttachments: (Array.isArray(item.responseAttachments) ? item.responseAttachments : []).map((asset) => feedbackResponseAssetJson(asset, item._id)),
       createdAt: item.createdAt,
       updatedAt: item.updatedAt || item.createdAt,
+      processingAt: item.processingAt || null,
+      resolvedAt: item.resolvedAt || null,
     })),
     orders: [
       ...payments.map((item) => ({ id: item._id.toString(), orderNo: item.orderNo, kind: item.kind, cycle: item.cycle, provider: item.provider, amountFen: item.amountFen, status: item.status, createdAt: item.createdAt })),
@@ -3731,7 +3751,8 @@ app.get("/api/admin/feedback", async (c) => {
   const page = Math.max(1, Math.min(5000, Number.parseInt(c.req.query("page") || "1", 10) || 1));
   const limit = Math.max(1, Math.min(100, Number.parseInt(c.req.query("limit") || "30", 10) || 30));
   const query = String(c.req.query("q") || "").trim().slice(0, 160);
-  const filter = {};
+  const requestedStatus = ["open", "processing", "resolved"].includes(c.req.query("status")) ? c.req.query("status") : "open";
+  const baseFilter = {};
 
   if (query) {
     const keyword = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -3740,11 +3761,11 @@ app.get("/api/admin/feedback", async (c) => {
     const matchingUsers = await users.find({
       $or: ["displayName", "username", "email", "emailNormalized"].map((field) => ({ [field]: regex })),
     }, { projection: { _id: 1 } }).limit(1000).toArray();
-    const statusLabels = { open: "待处理", processing: "处理中", resolved: "已回复", closed: "已关闭" };
+    const statusLabels = { open: "待处理", processing: "处理中", resolved: "已处理", closed: "已处理" };
     const matchingStatuses = Object.entries(statusLabels)
       .filter(([status, label]) => status.includes(query.toLowerCase()) || label.includes(query) || query.includes(label))
       .map(([status]) => status);
-    filter.$or = [
+    baseFilter.$or = [
       { message: regex },
       { status: regex },
       ...(matchingUsers.length ? [{ ownerId: { $in: matchingUsers.map((user) => user._id) } }] : []),
@@ -3754,9 +3775,17 @@ app.get("/api/admin/feedback", async (c) => {
   }
 
   const feedback = await getCollection("feedback");
-  const [items, total] = await Promise.all([
+  const openClause = { $or: [{ status: "open" }, { status: null }, { status: { $exists: false } }] };
+  const processingClause = { status: "processing" };
+  const resolvedClause = { status: { $in: ["resolved", "closed"] } };
+  const statusClause = requestedStatus === "processing" ? processingClause : requestedStatus === "resolved" ? resolvedClause : openClause;
+  const filter = { $and: [baseFilter, statusClause] };
+  const [items, total, openCount, processingCount, resolvedCount] = await Promise.all([
     feedback.find(filter).sort({ createdAt: -1, _id: -1 }).skip((page - 1) * limit).limit(limit).toArray(),
     feedback.countDocuments(filter),
+    feedback.countDocuments({ $and: [baseFilter, openClause] }),
+    feedback.countDocuments({ $and: [baseFilter, processingClause] }),
+    feedback.countDocuments({ $and: [baseFilter, resolvedClause] }),
   ]);
   const ownerIds = [...new Set(items.map((item) => item.ownerId?.toString()).filter((id) => ObjectId.isValid(id)))].map((id) => new ObjectId(id));
   const owners = ownerIds.length ? await (await getCollection("users")).find(
@@ -3773,8 +3802,13 @@ app.get("/api/admin/feedback", async (c) => {
         message: item.message,
         status: item.status || "open",
         screenshots: (Array.isArray(item.screenshots) ? item.screenshots : []).map(parseHttpUrl).filter(Boolean),
+        progress: item.progress || null,
+        response: item.response || item.adminResponse || null,
+        responseAttachments: (Array.isArray(item.responseAttachments) ? item.responseAttachments : []).map((asset) => feedbackResponseAssetJson(asset, item._id)),
         createdAt: item.createdAt,
         updatedAt: item.updatedAt || null,
+        processingAt: item.processingAt || null,
+        resolvedAt: item.resolvedAt || null,
         owner: owner ? {
           id: owner._id.toString(),
           displayName: owner.displayName || null,
@@ -3784,8 +3818,157 @@ app.get("/api/admin/feedback", async (c) => {
         } : null,
       };
     }),
+    summary: { open: openCount, processing: processingCount, resolved: resolvedCount, total: openCount + processingCount + resolvedCount },
     pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) },
   });
+});
+
+app.post("/api/admin/feedback/:id/assets/presign", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "FEEDBACK_NOT_FOUND", message: "用户反馈不存在" }, 404);
+  const feedbackId = new ObjectId(c.req.param("id"));
+  const feedback = await (await getCollection("feedback")).findOne({ _id: feedbackId });
+  if (!feedback) return c.json({ code: "FEEDBACK_NOT_FOUND", message: "用户反馈不存在" }, 404);
+  const body = await c.req.json();
+  const filename = sanitizeFilename(body.filename, "feedback-result.bin");
+  const contentType = String(body.contentType || "").split(";")[0].trim().toLowerCase();
+  const bytes = Number(body.bytes);
+  if (!FEEDBACK_RESPONSE_CONTENT_TYPES.has(contentType) || !Number.isSafeInteger(bytes) || bytes < 1 || bytes > FEEDBACK_RESPONSE_MAX_BYTES) {
+    return c.json({ code: "VALIDATION_ERROR", message: "处理附件仅支持图片或 MP4、WebM、MOV 视频，单个文件不超过 200 MB" }, 400);
+  }
+  try { await ensureBrowserUploadCors(); }
+  catch { return c.json({ code: "COS_CORS_CONFIGURATION_FAILED", message: "腾讯云 COS 暂未允许官网上传处理附件，请稍后重试" }, 503); }
+  const uploadId = new ObjectId();
+  const objectKey = `feedback/responses/${feedbackId}/${uploadId}-${filename}`;
+  const now = new Date();
+  await (await getCollection("feedbackResponseUploads")).insertOne({
+    _id: uploadId,
+    feedbackId,
+    objectKey,
+    filename,
+    contentType,
+    bytes,
+    status: "uploading",
+    createdBy: new ObjectId(auth.user.id),
+    createdAt: now,
+    updatedAt: now,
+  });
+  const requiredHeaders = { "Content-Type": contentType };
+  return c.json({
+    uploadId: uploadId.toString(),
+    uploadUrl: createPresignedPutUrl(objectKey, { expires: 60 * 60, headers: requiredHeaders }),
+    requiredHeaders,
+    expiresIn: 3600,
+  }, 201);
+});
+
+app.post("/api/admin/feedback/:id/assets/:uploadId/complete", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id")) || !ObjectId.isValid(c.req.param("uploadId"))) return c.json({ code: "UPLOAD_NOT_FOUND", message: "处理附件上传记录不存在" }, 404);
+  const feedbackId = new ObjectId(c.req.param("id"));
+  const uploads = await getCollection("feedbackResponseUploads");
+  const upload = await uploads.findOne({ _id: new ObjectId(c.req.param("uploadId")), feedbackId, status: "uploading" });
+  if (!upload) return c.json({ code: "UPLOAD_NOT_FOUND", message: "处理附件上传记录不存在或已完成" }, 404);
+  let head;
+  try { head = await headObject(upload.objectKey); }
+  catch { return c.json({ code: "UPLOAD_NOT_READY", message: "腾讯云 COS 尚未收到完整附件，请稍后重试" }, 409); }
+  const actualBytes = objectSize(head);
+  const actualType = String(head?.headers?.["content-type"] || head?.ContentType || "").split(";")[0].trim().toLowerCase();
+  if (actualBytes !== upload.bytes || (actualType && actualType !== upload.contentType)) {
+    await deleteObject(upload.objectKey).catch(() => {});
+    await uploads.updateOne({ _id: upload._id }, { $set: { status: "failed", error: "COS_OBJECT_MISMATCH", updatedAt: new Date() } });
+    return c.json({ code: "UPLOAD_MISMATCH", message: "处理附件大小或类型校验失败，请重新上传" }, 409);
+  }
+  const completedAt = new Date();
+  const completed = { ...upload, status: "ready", completedAt, updatedAt: completedAt };
+  await uploads.updateOne({ _id: upload._id, status: "uploading" }, { $set: { status: "ready", completedAt, updatedAt: completedAt } });
+  return c.json({ asset: feedbackResponseAssetJson(completed) });
+});
+
+app.get("/api/feedback/:id/assets/:assetId", async (c) => {
+  const auth = await authenticate(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id")) || !ObjectId.isValid(c.req.param("assetId"))) return c.json({ code: "ASSET_NOT_FOUND", message: "处理附件不存在" }, 404);
+  const feedbackId = new ObjectId(c.req.param("id"));
+  const feedback = await (await getCollection("feedback")).findOne({ _id: feedbackId });
+  const asset = await (await getCollection("feedbackResponseUploads")).findOne({ _id: new ObjectId(c.req.param("assetId")), feedbackId, status: "attached" });
+  if (!feedback || !asset) return c.json({ code: "ASSET_NOT_FOUND", message: "处理附件不存在" }, 404);
+  const isOwner = feedback.ownerId?.toString?.() === auth.user.id;
+  if (!isOwner && auth.user.role !== "admin") return c.json({ code: "FORBIDDEN", message: "你没有权限查看该处理附件" }, 403);
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  return c.redirect(createPresignedDownloadUrl(asset.objectKey), 302);
+});
+
+app.put("/api/admin/feedback/:id", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "FEEDBACK_NOT_FOUND", message: "用户反馈不存在" }, 404);
+  const feedbackId = new ObjectId(c.req.param("id"));
+  const body = await c.req.json();
+  const status = body.status === "resolved" ? "resolved" : body.status === "processing" ? "processing" : null;
+  const progress = String(body.progress || "").trim();
+  const response = String(body.response || "").trim();
+  const attachmentIds = [...new Set((Array.isArray(body.attachmentIds) ? body.attachmentIds : []).map(String))].slice(0, 12);
+  if (!status || progress.length < 2 || progress.length > 5_000 || response.length > 20_000 || (status === "resolved" && response.length < 2) || attachmentIds.some((id) => !ObjectId.isValid(id))) {
+    return c.json({ code: "VALIDATION_ERROR", message: "请填写处理进度；标记已处理时还必须填写处理结果" }, 400);
+  }
+  const feedbackCollection = await getCollection("feedback");
+  const current = await feedbackCollection.findOne({ _id: feedbackId });
+  if (!current) return c.json({ code: "FEEDBACK_NOT_FOUND", message: "用户反馈不存在" }, 404);
+  const uploads = await getCollection("feedbackResponseUploads");
+  const selectedUploads = attachmentIds.length ? await uploads.find({ _id: { $in: attachmentIds.map((id) => new ObjectId(id)) }, feedbackId, status: "ready" }).toArray() : [];
+  if (selectedUploads.length !== attachmentIds.length) return c.json({ code: "ATTACHMENT_NOT_READY", message: "部分处理附件尚未上传完成，请重新选择" }, 409);
+  const existingAttachments = Array.isArray(current.responseAttachments) ? current.responseAttachments : [];
+  const attachmentMap = new Map(existingAttachments.map((asset) => [asset._id?.toString?.() || String(asset.id || ""), asset]));
+  for (const upload of selectedUploads) attachmentMap.set(upload._id.toString(), { _id: upload._id, filename: upload.filename, contentType: upload.contentType, bytes: upload.bytes, objectKey: upload.objectKey, createdAt: upload.createdAt });
+  const now = new Date();
+  const set = {
+    status,
+    progress,
+    response: response || null,
+    responseAttachments: [...attachmentMap.values()],
+    handledBy: new ObjectId(auth.user.id),
+    updatedAt: now,
+    ...(status === "processing" && !current.processingAt ? { processingAt: now } : {}),
+    ...(status === "resolved" ? { resolvedAt: now } : {}),
+  };
+  const updated = await feedbackCollection.findOneAndUpdate({ _id: feedbackId }, { $set: set }, { returnDocument: "after" });
+  if (selectedUploads.length) await uploads.updateMany({ _id: { $in: selectedUploads.map((upload) => upload._id) } }, { $set: { status: "attached", attachedAt: now, updatedAt: now } });
+  if (status === "resolved" && current.status !== "resolved" && current.ownerId) {
+    await notifyUser(current.ownerId, "feedback_resolved", "你的问题反馈已处理", response, { feedbackId, feedbackStatus: status });
+  }
+  return c.json({
+    item: {
+      id: updated._id.toString(),
+      status: updated.status,
+      progress: updated.progress,
+      response: updated.response,
+      responseAttachments: (updated.responseAttachments || []).map((asset) => feedbackResponseAssetJson(asset, updated._id)),
+      updatedAt: updated.updatedAt,
+      processingAt: updated.processingAt || null,
+      resolvedAt: updated.resolvedAt || null,
+    },
+  });
+});
+
+app.delete("/api/admin/feedback/:id", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "FEEDBACK_NOT_FOUND", message: "用户反馈不存在" }, 404);
+  const feedbackId = new ObjectId(c.req.param("id"));
+  const feedbackCollection = await getCollection("feedback");
+  const item = await feedbackCollection.findOne({ _id: feedbackId });
+  if (!item) return c.json({ code: "FEEDBACK_NOT_FOUND", message: "用户反馈不存在" }, 404);
+  const uploads = await getCollection("feedbackResponseUploads");
+  const uploadRecords = await uploads.find({ feedbackId }).toArray();
+  const objectKeys = [...new Set([
+    ...uploadRecords.map((asset) => asset.objectKey),
+    ...(Array.isArray(item.responseAttachments) ? item.responseAttachments.map((asset) => asset.objectKey) : []),
+  ].filter(Boolean))];
+  await Promise.allSettled(objectKeys.map((objectKey) => deleteObject(objectKey)));
+  await Promise.all([uploads.deleteMany({ feedbackId }), feedbackCollection.deleteOne({ _id: feedbackId })]);
+  return c.json({ ok: true, deletedAttachments: objectKeys.length });
 });
 
 app.openapi(workerSearchAssigneesRoute, async (c) => {

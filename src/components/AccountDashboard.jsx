@@ -28,6 +28,7 @@ import { WorkerManagementPanel } from "./WorkerPages.jsx";
 const dashboardMenu = [
   { id: "overview", label: "账户总览", icon: Gauge },
   { id: "brain", label: "第二大脑", icon: Brain },
+  { id: "feedback", label: "我的反馈", icon: ChatCircleText },
   { id: "worker", label: "威客管理", icon: Briefcase },
   { id: "billing", label: "会员与充值", icon: CreditCard },
   { id: "profile", label: "个人资料", icon: UserCircle },
@@ -45,7 +46,9 @@ const statusText = {
   approved: "已通过",
   rejected: "已拒绝",
   open: "待处理",
-  resolved: "已回复",
+  processing: "处理中",
+  resolved: "已处理",
+  closed: "已处理",
 };
 
 function EmptyPanel({ icon: Icon, title, text, action }) {
@@ -65,8 +68,24 @@ function BrainCard({ item }) {
   </article>;
 }
 
+function FeedbackCard({ item }) {
+  const status = item.status || "open";
+  return <article className={`account-feedback-card ${status}`}>
+    <header><div><span>反馈编号</span><strong>{item.id}</strong></div><em className={`status-pill ${status}`}>{statusText[status] || status}</em></header>
+    <section><span>我的反馈</span><p>{item.message}</p></section>
+    {item.screenshots?.length > 0 && <div className="account-feedback-screenshots">{item.screenshots.map((url, index) => <a key={`${url}-${index}`} href={url} target="_blank" rel="noreferrer"><img src={url} alt={`反馈截图 ${index + 1}`} /></a>)}</div>}
+    {(item.progress || item.response) && <div className="account-feedback-worklog"><strong>{status === "resolved" || status === "closed" ? "处理结果" : "当前处理进度"}</strong>{item.progress && <p>{item.progress}</p>}{item.response && <div><span>古龙团队回复</span><p>{item.response}</p></div>}</div>}
+    {item.responseAttachments?.length > 0 && <div className="account-feedback-results">{item.responseAttachments.map((asset) => asset.kind === "video" ? <figure key={asset.id}><video controls preload="metadata" src={asset.url} /><figcaption>{asset.filename}</figcaption></figure> : <a key={asset.id} href={asset.url} target="_blank" rel="noreferrer"><img src={asset.url} alt={asset.filename} /><span>{asset.filename}</span></a>)}</div>}
+    {status === "open" && <p className="account-feedback-waiting"><Clock size={18} />反馈已进入待处理队列，我们会持续更新这里。</p>}
+    <footer><time>{new Date(item.createdAt).toLocaleString("zh-CN")}</time>{item.resolvedAt && <span>处理完成：{new Date(item.resolvedAt).toLocaleString("zh-CN")}</span>}</footer>
+  </article>;
+}
+
 export function AccountDashboard({ user, openAuth, navigate, onUser }) {
-  const [active, setActive] = useState(() => new URLSearchParams(window.location.search).get("section") === "worker" ? "worker" : "overview");
+  const [active, setActive] = useState(() => {
+    const section = new URLSearchParams(window.location.search).get("section");
+    return dashboardMenu.some((item) => item.id === section) ? section : "overview";
+  });
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
@@ -142,7 +161,7 @@ export function AccountDashboard({ user, openAuth, navigate, onUser }) {
   }
 
   async function openNotification(notification) {
-    setActive(notification.type?.startsWith("worker_") ? "worker" : notification.type === "administrator_role_granted" ? "overview" : "billing");
+    setActive(notification.type?.startsWith("feedback_") ? "feedback" : notification.type?.startsWith("worker_") ? "worker" : notification.type === "administrator_role_granted" ? "overview" : "billing");
     if (!notification.readAt) {
       await apiFetch(`/api/account/notifications/${notification.id}/read`, { method: "POST", body: "{}" }).catch(() => {});
       setData((current) => ({ ...current, notifications: current.notifications.map((item) => item.id === notification.id ? { ...item, readAt: new Date().toISOString() } : item) }));
@@ -196,6 +215,8 @@ export function AccountDashboard({ user, openAuth, navigate, onUser }) {
       </>}
 
       {active === "brain" && <section className="account-module"><header><div><span>KNOWLEDGE RETURN</span><h2>“把你的知识带回古龙”处理记录</h2><p>从上传、排队、分析到完成，全流程状态与反馈都在这里。</p></div><button className="button primary" onClick={() => navigate("/upload")}><UploadSimple size={17} /> 上传新知识</button></header>{data?.brainUploads?.length ? <div className="account-brain-list">{data.brainUploads.map((item) => <BrainCard item={item} key={item.id} />)}</div> : <EmptyPanel icon={Brain} title="等待你的第一份知识" text="将第二大脑存储目录压缩为 ZIP，上传后我们会持续更新处理状态。" />}</section>}
+
+      {active === "feedback" && <section className="account-module account-feedback-module"><header><div><span>MY FEEDBACK</span><h2>我的反馈</h2><p>查看你提交的问题、处理进度、团队回复以及图片和视频结果。</p></div><button className="button primary" onClick={() => navigate("/feedback")}><ChatCircleText size={18} />提交新反馈</button></header>{data?.feedback?.length ? <div className="account-feedback-list">{data.feedback.map((item) => <FeedbackCard item={item} key={item.id} />)}</div> : <EmptyPanel icon={ChatCircleText} title="还没有反馈记录" text="提交问题或建议后，处理状态和结果会在这里持续更新。" action={<button className="button small secondary" onClick={() => navigate("/feedback")}>去提交反馈</button>} />}</section>}
 
       {active === "worker" && <WorkerManagementPanel user={user} navigate={navigate} />}
 

@@ -493,7 +493,7 @@ export function FeedbackPage({ user }) {
         }));
       }
       const response = await apiFetch("/api/feedback", { method: "POST", body: JSON.stringify({ message, screenshots }) });
-      setResult(`反馈已提交，编号：${response.id}`); setMessage(""); setFiles([]);
+      setResult(`反馈已提交，编号：${response.id}。登录用户可在用户后台“我的反馈”查看处理进度和结果。`); setMessage(""); setFiles([]);
     } catch (reason) { setResult(reason.message); } finally { setBusy(false); }
   }
 

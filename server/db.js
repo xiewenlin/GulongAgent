@@ -109,6 +109,14 @@ export async function ensureIndexes() {
           { createdAt: -1 },
           { name: "feedback_recent" },
         ),
+        db.collection("feedback").createIndex(
+          { status: 1, updatedAt: -1, createdAt: -1 },
+          { name: "feedback_by_status" },
+        ),
+        db.collection("feedbackResponseUploads").createIndex(
+          { feedbackId: 1, status: 1, createdAt: -1 },
+          { name: "feedback_response_uploads" },
+        ),
         db.collection("uploads").createIndex(
           { ownerId: 1, createdAt: -1 },
           { name: "uploads_by_owner" },
