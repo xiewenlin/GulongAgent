@@ -327,7 +327,7 @@ export function PricingPage({ user, openAuth, navigate }) {
       <PageIntro eyebrow="SIMPLE PRICING" title="把成本花在真正困难的任务上" description="普通能力永久免费；会员解锁第二大脑、多端消息、本地模型与完整创作流水线。" />
       <section className="pricing-controls section-shell">
         <div className="cycle-switch"><button className={cycle === "month" ? "active" : ""} onClick={() => setCycle("month")}>按月订阅</button><button className={cycle === "year" ? "active" : ""} onClick={() => setCycle("year")}>按年订阅 {yearlySavingsFen > 0 && <span>省 {formatMoney(yearlySavingsFen)}</span>}</button></div>
-        <div className="payment-method-control"><div className="provider-switch"><button className={paymentMode === "online" ? "active" : ""} onClick={() => setPaymentMode("online")}>线上支付</button><button className={paymentMode === "offline" ? "active" : ""} onClick={() => setPaymentMode("offline")}>线下支付</button></div>{paymentMode === "online" && <div className="online-payment-status-card ready" role="status"><CreditCard size={21} weight="duotone" /><div><strong>微信支付</strong><span>{paymentAvailability.notice}</span></div><em>已开通</em></div>}</div>
+        <div className="payment-method-control"><div className="provider-switch"><button className={paymentMode === "online" ? "active" : ""} onClick={() => setPaymentMode("online")}>线上支付</button><button className={paymentMode === "offline" ? "active" : ""} onClick={() => setPaymentMode("offline")}>线下支付</button></div></div>
       </section>
       <section className="pricing-grid section-shell">
         {pricingPlans.map((plan) => (
@@ -338,7 +338,7 @@ export function PricingPage({ user, openAuth, navigate }) {
             {plan.id === "member" && monthlyUpgrade && <div className="upgrade-credit"><CheckCircle size={19} weight="fill" /><div><strong>月度会员升级抵扣 {formatMoney(upgradeCreditFen)}</strong><span>年度原价 {formatMoney(plan.yearlyFen)}，本次只需补足剩余费用。</span></div></div>}
             {plan.subpricing && <p className="plan-subprice">{plan.subpricing}</p>}
             <ul>{plan.features.map((feature) => <li key={feature}><Check size={17} weight="bold" /> {feature}</li>)}</ul>
-            {plan.id === "member" && <div className="manual-renew-note"><Clock size={20} /><span><strong>{paymentMode === "offline" ? "人工审核到账" : "微信手动续费"}</strong><small>{paymentMode === "offline" ? "付款后提交审核，确认到账后同步官网与桌面端。" : "当前不自动扣款；到期前 7 天起每天提醒一次。"}</small></span></div>}
+            {plan.id === "member" && paymentMode === "offline" && <div className="manual-renew-note"><Clock size={20} /><span><strong>人工审核到账</strong><small>付款后提交审核，确认到账后同步官网与桌面端。</small></span></div>}
             {plan.id === "custom" ? <div className="custom-plan-actions"><button className="button secondary full" disabled={busy} onClick={() => setCustomContactOpen(true)}>联系定制</button><button className="button primary full" disabled={busy} onClick={() => user ? setCustomOrderOpen(true) : openAuth("login")}><Plus size={18} />新建订单</button></div> : <button className={`button full ${plan.featured ? "primary" : "secondary"}`} disabled={busy} onClick={() => startPayment(plan)}>{plan.id === "free" ? "免费下载" : busy ? "正在创建微信订单" : monthlyUpgrade ? "补差价升级年度会员" : paymentMode === "online" ? "微信支付开通" : "线下申请开通"}</button>}
           </article>
         ))}

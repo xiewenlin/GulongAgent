@@ -831,8 +831,11 @@ test("online payment exposes WeChat only and uses manual renewal lifecycle contr
   assert.match(serverSource, /priorityProvider:\s*"wechat"/);
   assert.match(serverSource, /wechat:\s*true/);
   assert.match(serverSource, /paymentAvailability:\s*ONLINE_PAYMENT_AVAILABILITY/);
-  assert.match(pricingPage, /微信在线支付已开通/);
-  assert.match(pricingPage, /当前不自动扣款/);
+  assert.doesNotMatch(pricingPage, /online-payment-status-card/);
+  assert.doesNotMatch(pricingPage, /微信手动续费/);
+  assert.doesNotMatch(pricingPage, /当前不自动扣款/);
+  assert.match(pricingPage, /paymentMode === "offline"/);
+  assert.match(pricingPage, /人工审核到账/);
   assert.doesNotMatch(pricingPage, /支付宝/);
   assert.match(serverSource, /RENEWAL_REMINDER_DAYS = 7/);
   assert.match(serverSource, /subscription_renewal_due/);
