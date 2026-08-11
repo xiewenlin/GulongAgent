@@ -1038,6 +1038,18 @@ function desktopOfflinePaymentRow(order) {
   };
 }
 
+function desktopChandlerApplication(applicationKey, themeName = "") {
+  const editionKey = applicationKey === "airos-eternal-flower" ? "yongshenghua" : "gulong";
+  const target = chandlerApplicationTargets().find((item) => item.editionKey === editionKey);
+  if (!target?.id) throw new ChandlerError("订阅应用尚未配置", { status: 503, code: "CHANDLER_APPLICATION_REQUIRED" });
+  return {
+    key: editionKey === "yongshenghua" ? "airos-eternal-flower" : "gulong",
+    name: editionKey === "yongshenghua" ? "爱若斯-永生花" : "古龙智能引擎",
+    clientId: target.id,
+    themeName: String(themeName || (editionKey === "yongshenghua" ? "永生花" : "上古神龙")).trim(),
+  };
+}
+
 async function synchronizeChandlerOfflinePayments(accessToken) {
   if (!accessToken) return { imported: 0, inspected: 0 };
   const offlinePayments = await getCollection("offlinePayments");
@@ -1745,6 +1757,64 @@ const desktopSubscriptionStatusRoute = createRoute({
   description: "使用当前 Chandler Bearer Token 映射官网账号，返回 MongoDB 权威订阅状态；线下订单通过后桌面端下次轮询即可立即解锁。",
   security: [{ bearerAuth: [] }],
   responses: { 200: { description: "实时订阅状态", content: { "application/json": { schema: z.object({ isMember: z.boolean(), subscription: z.record(z.string(), z.unknown()).nullable(), checkedAt: z.coerce.date() }) } } }, 401: { description: "Chandler 登录失效", content: { "application/json": { schema: ErrorSchema } } } },
+});
+
+const DesktopChandlerApplicationKeySchema = z.enum(["gulong", "airos-eternal-flower"]);
+
+const desktopChandlerCatalogRoute = createRoute({
+  method: "get",
+  path: "/api/v1/desktop/chandler/catalog",
+  tags: ["Desktop Synchronization"],
+  summary: "通过官网服务端凭据读取 Chandler 订阅目录",
+  security: [{ bearerAuth: [] }],
+  request: { query: z.object({ applicationKey: DesktopChandlerApplicationKeySchema, themeName: z.string().max(100).optional() }) },
+  responses: {
+    200: { description: "订阅目录", content: { "application/json": { schema: z.object({ plans: z.array(z.record(z.string(), z.unknown())) }) } } },
+    401: { description: "登录失效", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "非管理员", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const desktopChandlerPublishPriceRoute = createRoute({
+  method: "post",
+  path: "/api/v1/desktop/chandler/prices",
+  tags: ["Desktop Synchronization"],
+  summary: "通过官网服务端凭据发布 Chandler 价格版本",
+  security: [{ bearerAuth: [] }],
+  request: { body: { content: { "application/json": { schema: z.object({ applicationKey: DesktopChandlerApplicationKeySchema, themeName: z.string().max(100).optional(), skuId: z.string().min(1).max(100), amountFen: z.number().int().min(SUBSCRIPTION_PRICE_MIN_FEN).max(SUBSCRIPTION_PRICE_MAX_FEN), effectiveAt: z.string().datetime() }) } } } },
+  responses: {
+    201: { description: "价格版本", content: { "application/json": { schema: z.record(z.string(), z.unknown()) } } },
+    401: { description: "登录失效", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "非管理员", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const desktopChandlerCheckoutRoute = createRoute({
+  method: "post",
+  path: "/api/v1/desktop/chandler/checkout",
+  tags: ["Desktop Synchronization"],
+  summary: "通过官网服务端凭据创建桌面端在线订阅订单",
+  security: [{ bearerAuth: [] }],
+  request: { body: { content: { "application/json": { schema: z.object({ applicationKey: DesktopChandlerApplicationKeySchema, themeName: z.string().max(100), planKind: z.enum(["monthly", "yearly"]), channel: z.literal("wechat"), expectedAmountFen: z.number().int().min(SUBSCRIPTION_PRICE_MIN_FEN).max(SUBSCRIPTION_PRICE_MAX_FEN), clientOrderNo: z.string().min(16).max(200), releaseChannel: z.string().min(1).max(100) }) } } } },
+  responses: {
+    201: { description: "待支付订单", content: { "application/json": { schema: z.record(z.string(), z.unknown()) } } },
+    401: { description: "登录失效", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "价格已变化", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const desktopChandlerOrderStatusRoute = createRoute({
+  method: "get",
+  path: "/api/v1/desktop/chandler/orders/{orderNo}",
+  tags: ["Desktop Synchronization"],
+  summary: "查询当前桌面用户的在线订阅订单",
+  security: [{ bearerAuth: [] }],
+  request: { params: z.object({ orderNo: z.string().min(1).max(200) }) },
+  responses: {
+    200: { description: "订单状态", content: { "application/json": { schema: z.object({ orderNo: z.string(), status: z.string(), paid: z.boolean() }) } } },
+    401: { description: "登录失效", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "订单不存在", content: { "application/json": { schema: ErrorSchema } } },
+  },
 });
 
 const ChandlerAdminUserSchema = z.object({
@@ -5635,6 +5705,162 @@ app.openapi(desktopSubscriptionStatusRoute, async (c) => {
       renewalMode: "manual",
     } : null,
     checkedAt: now,
+  });
+});
+
+app.openapi(desktopChandlerCatalogRoute, async (c) => {
+  const auth = await authenticateDesktopChandler(c, { admin: true });
+  if (auth.error) return auth.error;
+  const query = c.req.valid("query");
+  const application = desktopChandlerApplication(query.applicationKey, query.themeName);
+  const plans = await listPartnerSubscriptionPlans(null, application.clientId);
+  return c.json({
+    plans: plans.map((plan) => ({
+      application,
+      productId: plan.productId,
+      productName: application.name,
+      productDescription: plan.skuCode || "",
+      skuId: plan.skuId,
+      skuName: plan.skuName,
+      skuType: plan.skuType || plan.skuCode || "",
+      priceId: plan.priceId || "",
+      amountFen: Number(plan.amountFen || 0),
+      currency: plan.currency || "CNY",
+      billingInterval: plan.billingInterval || "",
+    })),
+  });
+});
+
+app.openapi(desktopChandlerPublishPriceRoute, async (c) => {
+  const auth = await authenticateDesktopChandler(c, { admin: true });
+  if (auth.error) return auth.error;
+  const input = c.req.valid("json");
+  const application = desktopChandlerApplication(input.applicationKey, input.themeName);
+  const plans = await listPartnerSubscriptionPlans(null, application.clientId);
+  const plan = plans.find((item) => item.skuId === input.skuId);
+  if (!plan) return c.json({ code: "SKU_NOT_FOUND", message: "所选订阅套餐已经下架，请刷新后重试" }, 404);
+  const price = await createPartnerPriceVersion(null, {
+    skuId: plan.skuId,
+    amountFen: input.amountFen,
+    currency: plan.currency || "CNY",
+    billingInterval: plan.billingInterval,
+    intervalCount: plan.intervalCount || 1,
+    effectiveAt: input.effectiveAt,
+    applicationId: application.clientId,
+  });
+  await persistChandlerPriceVersion({ plan, price, createdBy: auth.user._id.toString(), source: "desktop-admin-official-proxy" });
+  return c.json({
+    application,
+    skuId: price.sku_id || input.skuId,
+    priceId: price.id || "",
+    amountFen: Number(price.amount || input.amountFen),
+    currency: price.currency || plan.currency || "CNY",
+    billingInterval: price.billing_interval || "once",
+    status: price.status || "active",
+    effectiveAt: price.effective_at || input.effectiveAt,
+    message: "新的订阅价格版本已由官网安全代理发布",
+  }, 201);
+});
+
+app.openapi(desktopChandlerCheckoutRoute, async (c) => {
+  const auth = await authenticateDesktopChandler(c);
+  if (auth.error) return auth.error;
+  const input = c.req.valid("json");
+  const application = desktopChandlerApplication(input.applicationKey, input.themeName);
+  const cycle = input.planKind === "yearly" ? "year" : "month";
+  const pricing = await currentSubscriptionPricing();
+  const amountFen = cycle === "year" ? pricing.yearly.amountFen : pricing.monthly.amountFen;
+  if (input.expectedAmountFen !== amountFen) {
+    return c.json({ code: "PRICE_CHANGED", message: `官网订阅价格已更新为 ¥${(amountFen / 100).toFixed(2)}，请刷新后重新提交` }, 409);
+  }
+  const payments = await getCollection("payments");
+  const existing = await payments.findOne({ ownerId: auth.user._id, desktopRequestId: input.clientOrderNo });
+  if (existing) {
+    return c.json({
+      application,
+      orderNo: existing.orderNo,
+      amountFen: existing.amountFen,
+      currency: existing.currency || "CNY",
+      subject: existing.subject || (cycle === "year" ? "年度订阅会员" : "月度订阅会员"),
+      channel: existing.provider || "wechat",
+      codeUrl: existing.codeUrl || "",
+      h5Url: existing.h5Url || "",
+      payUrl: existing.payUrl || "",
+    }, 201);
+  }
+  const result = await createSubscriptionCheckout(null, {
+    cycle,
+    channel: input.channel,
+    merchantOrderNo: input.clientOrderNo,
+    expectedAmountFen: amountFen,
+    source: "windows-desktop-official-proxy",
+    applicationId: application.clientId,
+    applicationKey: application.key,
+    productName: `${application.name}会员`,
+    partnerData: {
+      user_id: String(auth.chandlerUser.id),
+      user_email: auth.user.email || auth.chandlerUser.email || null,
+      theme_name: application.themeName,
+      release_channel: input.releaseChannel,
+      release_channel_name: input.releaseChannel,
+      client_version: c.req.header("x-gulong-version") || null,
+    },
+  });
+  const orderNo = result.orderNo || result.order?.platform_order_no || result.order?.order_no;
+  if (!orderNo) return c.json({ code: "CHANDLER_ORDER_INVALID", message: "合作平台没有返回订单号，未发起支付" }, 502);
+  const prepay = result.prepay || result.payment || {};
+  const checkout = result.checkout || result.order || {};
+  const subject = checkout.subject || (cycle === "year" ? "年度订阅会员" : "月度订阅会员");
+  const document = {
+    orderNo,
+    merchantOrderNo: input.clientOrderNo,
+    desktopRequestId: input.clientOrderNo,
+    ownerId: auth.user._id,
+    provider: input.channel,
+    kind: "subscription",
+    cycle,
+    applicationKey: application.key,
+    applicationId: application.clientId,
+    themeName: application.themeName,
+    releaseChannel: input.releaseChannel,
+    amountFen,
+    currency: checkout.currency || "CNY",
+    subject,
+    codeUrl: prepay.code_url || "",
+    h5Url: prepay.h5_url || "",
+    payUrl: prepay.pay_url || "",
+    autoRenew: false,
+    chandler: true,
+    status: "pending",
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+  await payments.insertOne(document);
+  return c.json({
+    application,
+    orderNo,
+    amountFen,
+    currency: document.currency,
+    subject,
+    channel: input.channel,
+    codeUrl: document.codeUrl,
+    h5Url: document.h5Url,
+    payUrl: document.payUrl,
+  }, 201);
+});
+
+app.openapi(desktopChandlerOrderStatusRoute, async (c) => {
+  const auth = await authenticateDesktopChandler(c);
+  if (auth.error) return auth.error;
+  const { orderNo } = c.req.valid("param");
+  const payment = await (await getCollection("payments")).findOne({ orderNo, ownerId: auth.user._id });
+  if (!payment) return c.json({ code: "ORDER_NOT_FOUND", message: "订单不存在或不属于当前账号" }, 404);
+  const reconciled = await reconcileChandlerPayment(orderNo);
+  const status = reconciled?.status || payment.status || "pending";
+  return c.json({
+    orderNo,
+    status,
+    paid: chandlerOrderPaid({ status }) || chandlerOrderPaid({ status: reconciled?.remoteStatus }),
   });
 });
 

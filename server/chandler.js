@@ -637,14 +637,24 @@ export function createPartnerPriceVersion(accessToken, {
   });
 }
 
-export async function createSubscriptionCheckout(accessToken, { cycle, channel = "wechat", merchantOrderNo, expectedAmountFen, source = "gulong-web", partnerData = {} }) {
+export async function createSubscriptionCheckout(accessToken, {
+  cycle,
+  channel = "wechat",
+  merchantOrderNo,
+  expectedAmountFen,
+  source = "gulong-web",
+  partnerData = {},
+  applicationId = chandlerConfig().applicationId,
+  applicationKey = "gulong-web",
+  productName = "古龙智能引擎会员",
+}) {
   if (channel !== "wechat") throw new ChandlerError("线上支付当前仅支持微信支付", { status: 400, code: "PAYMENT_CHANNEL_UNSUPPORTED" });
   if (!Number.isSafeInteger(expectedAmountFen) || expectedAmountFen < 100) {
     throw new ChandlerError("订阅订单金额无效", { status: 400, code: "PAYMENT_AMOUNT_INVALID" });
   }
   const singlePaymentPlan = {
-    productId: chandlerConfig().applicationId,
-    productName: "古龙智能引擎会员",
+    productId: applicationId,
+    productName,
     skuName: cycle === "year" ? "年度订阅会员" : "月度订阅会员",
     billingInterval: cycle === "year" ? "year" : "month",
     amountFen: expectedAmountFen,
@@ -659,13 +669,14 @@ export async function createSubscriptionCheckout(accessToken, { cycle, channel =
     source,
     partnerData: {
       schema_version: 3,
-      application_key: "gulong-web",
+      application_key: applicationKey,
       kind: "subscription",
       cycle: singlePaymentPlan.billingInterval,
       amount_fen: expectedAmountFen,
       renewal_mode: "manual",
       ...partnerData,
     },
+    applicationId,
   });
   return { checkout: singlePayment.order, prepay: singlePayment.payment, plan: singlePaymentPlan, orderNo: singlePayment.orderNo };
 }
@@ -679,6 +690,7 @@ export async function createDirectPaymentOrder(accessToken, {
   source,
   partnerData,
   prepay = true,
+  applicationId = chandlerConfig().applicationId,
 }) {
   if (channel !== "wechat") throw new ChandlerError("线上支付当前仅支持微信支付", { status: 400, code: "PAYMENT_CHANNEL_UNSUPPORTED" });
   const config = chandlerConfig();
@@ -686,7 +698,7 @@ export async function createDirectPaymentOrder(accessToken, {
     method: "POST",
     ...partnerCredential(accessToken),
     body: {
-      application_id: config.applicationId,
+      application_id: applicationId || config.applicationId,
       merchant_order_no: merchantOrderNo,
       channel,
       ...(skuId ? { sku_id: skuId } : { amount: amountFen, currency: "CNY" }),

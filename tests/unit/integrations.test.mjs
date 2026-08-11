@@ -148,6 +148,17 @@ test("Chandler v3.2 server calls prefer the GulongAgent API Key and Webhooks use
   assert.equal(calls[0].body.channel, "wechat");
 });
 
+test("desktop Chandler partner operations stay behind the official website proxy", async () => {
+  const source = await readFile(new URL("../../server/app.js", import.meta.url), "utf8");
+  assert.match(source, /desktopChandlerCatalogRoute/);
+  assert.match(source, /desktopChandlerPublishPriceRoute/);
+  assert.match(source, /desktopChandlerCheckoutRoute/);
+  assert.match(source, /desktopChandlerOrderStatusRoute/);
+  assert.match(source, /authenticateDesktopChandler\(c, \{ admin: true \}\)/);
+  assert.match(source, /findOne\(\{ orderNo, ownerId: auth\.user\._id \}\)/);
+  assert.doesNotMatch(source, /process\.env\.GulongAgent[^\n]*return c\.json/);
+});
+
 test("Chandler v3.2 wrappers keep SKU compatibility while publishing once-only prices", async () => {
   const originalFetch = globalThis.fetch;
   const calls = [];
@@ -456,6 +467,10 @@ test("OpenAPI document includes Chandler admin, offline credentials, dated attac
   assert.ok(document.paths["/api/v1/admin/offline-payments"]);
   assert.ok(document.paths["/api/v1/admin/offline-payments/{orderId}/approve"]);
   assert.ok(document.paths["/api/v1/desktop/account/subscription"]);
+  assert.ok(document.paths["/api/v1/desktop/chandler/catalog"]);
+  assert.ok(document.paths["/api/v1/desktop/chandler/prices"]);
+  assert.ok(document.paths["/api/v1/desktop/chandler/checkout"]);
+  assert.ok(document.paths["/api/v1/desktop/chandler/orders/{orderNo}"]);
   assert.ok(document.paths["/api/admin/release-channels/{id}/manual-upload"]);
   assert.ok(document.paths["/api/admin/release-uploads/{id}/complete"]);
   assert.ok(document.paths["/api/release-worker/releases/prepare"]);
