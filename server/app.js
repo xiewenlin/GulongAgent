@@ -75,6 +75,7 @@ import {
 } from "./cos.js";
 import { buildAdminAnalyticsDashboard, recordAnalyticsEvent } from "./analytics.js";
 import { recoverExpiredDirectReleaseLock } from "./release-lock.js";
+import { creditMonthlySubscriptionBalance, registerPearApiRoutes } from "./pearapi.js";
 import {
   OFFLINE_REVIEW_REJECTION_REASON,
   chandlerOrderItems,
@@ -1183,6 +1184,7 @@ async function approveOfflinePayment({ orderId, actorUserId, actorChandlerUserId
       { $set: { title: "线下支付审核已通过", message: `订单 ${order.orderNo} 已确认到账，会员权益已经生效。`, orderNo: order.orderNo, readAt: null, updatedAt: now }, $setOnInsert: { createdAt: now } },
       { upsert: true },
     ),
+    ...(order.cycle === "month" ? [creditMonthlySubscriptionBalance({ ownerId: order.ownerId, amountFen: order.amountFen, source: "offline_subscription", sourceId: order.orderNo })] : []),
   ]);
   if (accessToken && order.chandlerOrderNo) {
     const applicationId = order.applicationId || chandlerConfig().applicationId;
@@ -2086,6 +2088,8 @@ app.onError((error, c) => {
 app.notFound((c) =>
   c.json({ code: "NOT_FOUND", message: "接口不存在", requestId: c.get("requestId") }, 404),
 );
+
+registerPearApiRoutes(app, { authenticate, requireAdmin, requireTrustedMutation });
 
 app.openapi(healthRoute, async (c) => {
   const database = await pingDatabase();
@@ -5119,6 +5123,9 @@ async function activatePayment(orderNo, providerTransactionId) {
       },
       { upsert: true },
     );
+    if (payment.cycle === "month") {
+      await creditMonthlySubscriptionBalance({ ownerId: payment.ownerId, amountFen: payment.amountFen, source: "online_subscription", sourceId: payment.orderNo });
+    }
     await notifyUserOnce(payment.ownerId, "subscription_payment_succeeded", "会员续费已生效", `微信支付已到账，${payment.cycle === "year" ? "年度" : "月度"}会员权益已同步到官网与桌面端。`, { orderNo: payment.orderNo });
   } else if (payment.kind === "recharge") {
     await (await getCollection("wallets")).updateOne(
@@ -6059,8 +6066,8 @@ app.doc("/api/openapi.json", {
   openapi: "3.1.0",
   info: {
     title: "古龙 Gulong Agent Engine API",
-    version: "1.7.0",
-    description: "已按 Chandler v3.2 升级：服务端管理与支付调用使用环境变量 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费。另提供任务、第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
+    version: "1.8.0",
+    description: "已按 Chandler v3.2 与 PearAPI 统一接入升级：服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费。另提供任务、第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
   },
   servers: [
     { url: "/", description: "当前环境" },

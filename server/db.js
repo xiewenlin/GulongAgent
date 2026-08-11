@@ -97,6 +97,10 @@ export async function ensureIndexes() {
           { ownerId: 1, createdAt: -1 },
           { name: "payments_by_owner_and_date" },
         ),
+        db.collection("wallets").createIndex(
+          { ownerId: 1 },
+          { unique: true, name: "uniq_wallet_owner" },
+        ),
         db.collection("platformCredentials").createIndex(
           { provider: 1 },
           { unique: true, name: "uniq_platform_credential_provider" },

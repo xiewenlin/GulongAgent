@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { ObjectId } from "mongodb";
 import { createRoute, z } from "@hono/zod-openapi";
 import { getCollection } from "./db.js";
+import { enforceRateLimit } from "./rate-limit.js";
 import { readUserSecret, sealUserSecret } from "./security.js";
 
 export const PEAR_API_BASE_URL = "https://api.pearapi.ai";
@@ -178,11 +179,15 @@ export async function creditMonthlySubscriptionBalance({ ownerId, amountFen, sou
   const wallets = await getCollection("wallets");
   const now = new Date();
   const credit = { key, kind: "monthly_subscription", amountFen: creditFen, createdAt: now };
-  let updated = await wallets.updateOne(
-    { ownerId, "credits.key": { $ne: key } },
-    { $inc: { balanceFen: creditFen }, $push: { credits: { $each: [credit], $slice: -120 } }, $set: { updatedAt: now } },
-  );
-  if (!updated.matchedCount) {
+  const current = await wallets.findOne({ ownerId }, { projection: { credits: 1 } });
+  if (current?.credits?.some((item) => item.key === key)) return { applied: false, reason: "already_applied" };
+  let updated = current
+    ? await wallets.updateOne(
+      { _id: current._id, "credits.key": { $ne: key } },
+      { $inc: { balanceFen: creditFen }, $push: { credits: { $each: [credit], $slice: -120 } }, $set: { updatedAt: now } },
+    )
+    : { matchedCount: 0, modifiedCount: 0 };
+  if (!current) {
     try {
       const inserted = await wallets.insertOne({ ownerId, balanceFen: creditFen, credits: [credit], createdAt: now, updatedAt: now });
       return { applied: Boolean(inserted.insertedId), amountFen: creditFen };
@@ -256,6 +261,8 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
   app.openapi(chatRoute, async (c) => {
     const rejected = requireTrustedMutation(c); if (rejected) return rejected;
     const auth = await authenticate(c); if (auth.error) return auth.error;
+    const rate = await enforceRateLimit(`pear-chat:${auth.user.id}`, { limit: 30, windowMs: 5 * 60_000 });
+    if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "对话请求过于频繁，请稍后再试" }, 429);
     const input = c.req.valid("json");
     if (!FREE_MODEL_IDS.has(input.model)) return c.json({ code: "MODEL_NOT_ALLOWED", message: "请选择管理员公布的 PearAPI 免费模型" }, 400);
     const ownerId = new ObjectId(auth.user.id);
@@ -343,6 +350,8 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
   app.openapi(adminTestRoute, async (c) => {
     const rejected = requireTrustedMutation(c); if (rejected) return rejected;
     const auth = await requireAdmin(c); if (auth.error) return auth.error;
+    const rate = await enforceRateLimit(`pear-admin-test:${auth.user.id}`, { limit: 10, windowMs: 10 * 60_000 });
+    if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "连接测试过于频繁，请稍后再试" }, 429);
     const token = credentialSecrets(await credentialRecord()).token;
     if (!token) return c.json({ code: "PEAR_API_NOT_CONFIGURED", message: "请先保存 PearAPI 默认令牌" }, 503);
     try {

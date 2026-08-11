@@ -80,3 +80,17 @@ test("website exposes the simplified agent while user settings no longer expose 
   assert.doesNotMatch(accountSource, /id: "minimax"/);
   assert.doesNotMatch(accountSource, /MiniMax 配置/);
 });
+
+test("monthly subscription payments credit the wallet once and PearAPI routes are registered", async () => {
+  const [serverSource, dbSource, pearSource] = await Promise.all([
+    readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../../server/db.js", import.meta.url), "utf8"),
+    readFile(new URL("../../server/pearapi.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(serverSource, /registerPearApiRoutes\(app, \{ authenticate, requireAdmin, requireTrustedMutation \}\)/);
+  assert.match(serverSource, /source: "online_subscription"/);
+  assert.match(serverSource, /source: "offline_subscription"/);
+  assert.match(dbSource, /uniq_wallet_owner/);
+  assert.match(pearSource, /"credits\.key": \{ \$ne: key \}/);
+  assert.match(pearSource, /limit: 30, windowMs: 5 \* 60_000/);
+});
