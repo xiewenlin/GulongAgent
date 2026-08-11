@@ -97,6 +97,22 @@ export async function ensureIndexes() {
           { ownerId: 1, createdAt: -1 },
           { name: "payments_by_owner_and_date" },
         ),
+        db.collection("platformCredentials").createIndex(
+          { provider: 1 },
+          { unique: true, name: "uniq_platform_credential_provider" },
+        ),
+        db.collection("agentUsage").createIndex(
+          { requestId: 1 },
+          { unique: true, name: "uniq_agent_usage_request" },
+        ),
+        db.collection("agentUsage").createIndex(
+          { ownerId: 1, status: 1, createdAt: -1 },
+          { name: "agent_usage_by_owner_and_date" },
+        ),
+        db.collection("agentMessages").createIndex(
+          { ownerId: 1, conversationId: 1, createdAt: 1 },
+          { name: "agent_messages_by_conversation" },
+        ),
         db.collection("tasks").createIndex(
           { ownerId: 1, createdAt: -1 },
           { name: "tasks_by_owner" },

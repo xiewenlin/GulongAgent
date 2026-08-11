@@ -18,6 +18,7 @@ import {
   GearSix,
   Handshake,
   ImageSquare,
+  Lightning,
   LockKey,
   MagnifyingGlass,
   Package,
@@ -39,6 +40,7 @@ const menu = [
   { id: "dashboard", label: "数据看板", icon: ChartLineUp },
   { id: "users", label: "订阅用户", icon: UsersThree },
   { id: "prices", label: "订阅价格", icon: Cube },
+  { id: "tokens", label: "令牌配置", icon: LockKey },
   { id: "partners", label: "合作伙伴", icon: Handshake },
   { id: "workflows", label: "工作流管理", icon: FlowArrow },
   { id: "brain", label: "第二大脑", icon: FileZip },
@@ -818,9 +820,72 @@ function PaymentManager() {
   </section>;
 }
 
+function PearTokenManager() {
+  const [config, setConfig] = useState(null);
+  const [form, setForm] = useState({ key: "", token: "", imageMin: "", imageMax: "", videoMin: "", videoMax: "" });
+  const [busy, setBusy] = useState("");
+  const [message, setMessage] = useState("");
+
+  function yuan(fen) {
+    return Number(fen || 0) ? (Number(fen) / 100).toFixed(2) : "";
+  }
+
+  function fen(value) {
+    const number = Number(value || 0);
+    return Math.max(0, Math.round(number * 100));
+  }
+
+  async function load() {
+    setBusy("load"); setMessage("");
+    try {
+      const result = await apiFetch("/api/admin/pearapi/config");
+      setConfig(result);
+      setForm((current) => ({ ...current, imageMin: yuan(result.pricing?.imageMinFen), imageMax: yuan(result.pricing?.imageMaxFen), videoMin: yuan(result.pricing?.videoMinFen), videoMax: yuan(result.pricing?.videoMaxFen) }));
+    } catch (error) { setMessage(error.message); }
+    finally { setBusy(""); }
+  }
+
+  useEffect(() => { load(); }, []);
+
+  async function save(event) {
+    event.preventDefault(); setBusy("save"); setMessage("");
+    try {
+      const result = await apiFetch("/api/admin/pearapi/config", { method: "PUT", body: JSON.stringify({ key: form.key || undefined, token: form.token || undefined, imageMinFen: fen(form.imageMin), imageMaxFen: fen(form.imageMax), videoMinFen: fen(form.videoMin), videoMaxFen: fen(form.videoMax) }) });
+      setConfig(result.config); setForm((current) => ({ ...current, key: "", token: "" }));
+      setMessage("PearAPI 全局凭据与计费区间已加密保存，网页版立即生效。");
+    } catch (error) { setMessage(error.message); }
+    finally { setBusy(""); }
+  }
+
+  async function testConnection() {
+    setBusy("test"); setMessage("");
+    try {
+      const result = await apiFetch("/api/admin/pearapi/test", { method: "POST", body: "{}" });
+      setMessage(`连接成功：${result.model} · ${result.reply}`);
+    } catch (error) { setMessage(error.message); }
+    finally { setBusy(""); }
+  }
+
+  return <section className="admin-module pear-token-manager">
+    <header className="admin-module-head"><div><span>GLOBAL MODEL CREDENTIAL</span><h2>令牌配置</h2><p>由管理员统一管理 PearAPI，普通用户与浏览器永远无法读取明文 Key 或令牌。</p></div><button className="button secondary" type="button" disabled={Boolean(busy)} onClick={load}><ArrowClockwise size={17} />刷新状态</button></header>
+    {message && <AdminNotice tone={message.includes("成功") || message.includes("已") ? "success" : "error"}>{message}</AdminNotice>}
+    <div className="pear-token-layout">
+      <form className="pear-token-form" onSubmit={save}>
+        <div className="pear-token-form-head"><div><LockKey size={29} weight="duotone" /><span><strong>PearAPI Key 与令牌</strong><small>AES-256-GCM 加密保存，保存后只显示末 4 位</small></span></div><em className={config?.tokenConfigured ? "ready" : ""}>{config?.tokenConfigured ? "文本模型已连接" : "等待配置"}</em></div>
+        <label><span>PearAPI 默认 Key</span><input type="password" minLength={config?.keyConfigured ? 0 : 8} value={form.key} onChange={(event) => setForm({ ...form, key: event.target.value })} placeholder={config?.keyMasked ? `${config.keyMasked}（留空表示不修改）` : "输入 PearAPI Key"} /><small>与桌面端一致，用于 URL / JSON / 表单中的 key 参数；网页版不会回显。</small></label>
+        <label><span>PearAPI 默认令牌</span><input type="password" minLength={config?.tokenConfigured ? 0 : 8} value={form.token} onChange={(event) => setForm({ ...form, token: event.target.value })} placeholder={config?.tokenMasked ? `${config.tokenMasked}（留空表示不修改）` : "输入令牌管理中创建的 Token"} /><small>网页版 LLM 通过服务端 Authorization: Bearer 调用，此项必须配置。</small></label>
+        <fieldset><legend>付费媒体成本区间（人民币 / 次）</legend><p>PearAPI 免费文字模型扣费为 0；图片、视频成本录入后，用户资产按官方成本增加 30% 计算可创作范围。</p><div><label><span>图片最低成本</span><input type="number" min="0" step="0.01" value={form.imageMin} onChange={(event) => setForm({ ...form, imageMin: event.target.value })} placeholder="例如 0.10" /></label><label><span>图片最高成本</span><input type="number" min="0" step="0.01" value={form.imageMax} onChange={(event) => setForm({ ...form, imageMax: event.target.value })} placeholder="例如 0.80" /></label><label><span>视频最低成本</span><input type="number" min="0" step="0.01" value={form.videoMin} onChange={(event) => setForm({ ...form, videoMin: event.target.value })} placeholder="例如 1.00" /></label><label><span>视频最高成本</span><input type="number" min="0" step="0.01" value={form.videoMax} onChange={(event) => setForm({ ...form, videoMax: event.target.value })} placeholder="例如 10.00" /></label></div></fieldset>
+        <div className="pear-token-actions"><button className="button primary" disabled={Boolean(busy)}><FloppyDisk size={17} />{busy === "save" ? "正在加密保存" : "保存并立即应用"}</button><button className="button secondary" type="button" disabled={Boolean(busy) || !config?.tokenConfigured} onClick={testConnection}><Lightning size={17} />{busy === "test" ? "正在验证" : "测试免费模型"}</button></div>
+      </form>
+      <aside className="pear-token-guide"><span>HOW TO GET TOKEN</span><h3>令牌获取方式</h3><ol><li><b>1</b><span><strong>打开 PearAPI 控制台</strong><small>使用平台账号登录管理后台。</small></span></li><li><b>2</b><span><strong>进入“令牌管理”</strong><small>创建用于古龙官网服务端的独立令牌。</small></span></li><li><b>3</b><span><strong>复制并保存到这里</strong><small>建议只授予模型调用所需的最小权限。</small></span></li></ol><a className="button secondary full" href={config?.acquisitionUrl || "https://api.pearapi.ai/zh/dashboard"} target="_blank" rel="noreferrer">打开 PearAPI 控制台 <ArrowSquareOut size={17} /></a><a className="pear-doc-link" href={config?.docsUrl || "https://api.pearapi.ai/zh/dashboard/docs"} target="_blank" rel="noreferrer">查看官方接入文档 <ArrowRight size={16} /></a><div className="pear-security-note"><ShieldCheck size={22} weight="duotone" /><p><strong>安全边界</strong><span>浏览器只调用古龙同源接口；令牌不会进入 HTML、JavaScript、日志或 API 响应。</span></p></div></aside>
+    </div>
+    <div className="pear-free-models"><header><div><span>FREE MODEL ALLOWLIST</span><h3>网页版免费 LLM 白名单</h3></div><strong>{config?.models?.length || 7} 个模型</strong></header><div>{(config?.models || []).map((model) => <article key={model.id}><div><ChatCircleText size={21} weight="duotone" /><span>{model.vendor}</span><em>免费</em></div><h4>{model.name}</h4><code>{model.id}</code><p>{model.description}</p></article>)}</div></div>
+  </section>;
+}
+
 export function AdminPage({ user, openAuth }) {
   const [active, setActive] = useState("dashboard");
   if (!user) return <main id="main-content" className="admin-gate section-shell"><LockKey size={38} /><h1>登录管理员账号</h1><p>管理员后台已接入 Chandler 统一身份，只接受 Chandler 返回的管理员角色。</p><button className="button primary" onClick={() => openAuth("login")}>登录继续</button></main>;
   if (user.role !== "admin") return <main id="main-content" className="admin-gate section-shell"><ShieldCheck size={38} /><h1>当前账号没有后台权限</h1><p>请让 Chandler 平台管理员授予此账号管理员角色后重新登录。</p></main>;
-  return <main id="main-content" className="admin-page"><aside className="admin-sidebar"><div><span>GULONG CONSOLE</span><h1>管理员后台</h1><p>{user.displayName || user.username || user.email}</p></div><nav>{menu.map((item) => { const Icon = item.icon; return <button key={item.id} className={active === item.id ? "active" : ""} onClick={() => setActive(item.id)}><Icon size={19} weight={active === item.id ? "fill" : "regular"} /> {item.label}</button>; })}</nav><footer><UsersThree size={18} /><span>Chandler 统一账号</span></footer></aside><div className="admin-content">{active === "dashboard" && <AdminDashboard />}{active === "users" && <ChandlerUserManager />}{active === "prices" && <ChandlerPriceManager />}{active === "partners" && <PartnerManager />}{active === "workflows" && <WorkflowManager />}{active === "brain" && <BrainAttachmentManager />}{active === "versions" && <VersionManager />}{active === "payments" && <PaymentManager />}{active === "worker" && <WorkerReviewManager />}{active === "feedback" && <FeedbackManager />}</div></main>;
+  return <main id="main-content" className="admin-page"><aside className="admin-sidebar"><div><span>GULONG CONSOLE</span><h1>管理员后台</h1><p>{user.displayName || user.username || user.email}</p></div><nav>{menu.map((item) => { const Icon = item.icon; return <button key={item.id} className={active === item.id ? "active" : ""} onClick={() => setActive(item.id)}><Icon size={19} weight={active === item.id ? "fill" : "regular"} /> {item.label}</button>; })}</nav><footer><UsersThree size={18} /><span>Chandler 统一账号</span></footer></aside><div className="admin-content">{active === "dashboard" && <AdminDashboard />}{active === "users" && <ChandlerUserManager />}{active === "prices" && <ChandlerPriceManager />}{active === "tokens" && <PearTokenManager />}{active === "partners" && <PartnerManager />}{active === "workflows" && <WorkflowManager />}{active === "brain" && <BrainAttachmentManager />}{active === "versions" && <VersionManager />}{active === "payments" && <PaymentManager />}{active === "worker" && <WorkerReviewManager />}{active === "feedback" && <FeedbackManager />}</div></main>;
 }

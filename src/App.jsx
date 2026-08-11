@@ -24,6 +24,7 @@ import { HomePage } from "./components/HomePage.jsx";
 import { ProductManualPage } from "./components/ProductManualPage.jsx";
 import { SecondBrainPage } from "./components/SecondBrainPage.jsx";
 import { SubscriptionReminderDialog } from "./components/SubscriptionReminderDialog.jsx";
+import { WebAgentPage } from "./components/WebAgentPage.jsx";
 import { WorkerPage } from "./components/WorkerPages.jsx";
 import { ShortDramaPage, WorkflowPage } from "./components/WorkflowPages.jsx";
 import {
@@ -186,7 +187,7 @@ export function App() {
 
   function navigate(to) {
     if (to.startsWith("http")) return window.location.assign(to);
-    if (subscriptionLifecycle?.restricted && ["/brain", "/upload"].some((path) => to.startsWith(path))) {
+    if (subscriptionLifecycle?.restricted && ["/agent", "/brain", "/upload"].some((path) => to.startsWith(path))) {
       setRenewalOpen(true);
       return;
     }
@@ -223,6 +224,7 @@ export function App() {
   const pathname = window.location.pathname;
   let page;
   if (pathname === "/admin") page = <AdminPage user={user} openAuth={openAuth} />;
+  else if (pathname === "/agent") page = <WebAgentPage user={user} openAuth={openAuth} navigate={navigate} themeIcon={themeIcon} />;
   else if (pathname === "/account") page = <AccountDashboard user={user} openAuth={openAuth} navigate={navigate} onUser={setUser} />;
   else if (pathname === "/manual") page = <ProductManualPage navigate={navigate} />;
   else if (pathname === "/brain") page = <SecondBrainPage user={user} openAuth={openAuth} navigate={navigate} />;
@@ -240,11 +242,11 @@ export function App() {
   return (
     <div className="site-app">
       <a className="skip-link" href="#main-content">跳到主要内容</a>
-      <header className="site-header">
+      {pathname !== "/agent" && <header className="site-header">
         <div className="header-inner section-shell">
-          <button className="brand" type="button" onClick={() => navigate("/")} aria-label="古龙首页">
+          <button className="brand" type="button" onClick={() => navigate("/agent")} aria-label="进入古龙网页版 Agent">
             <img key={`brand-${activeTheme.id}`} src={themeIcon} alt="" />
-            <span><strong>古龙</strong><small>Gulong Agent Engine</small></span>
+            <span><strong>古龙</strong><small>网页版入口</small></span>
           </button>
           <nav className={mobileOpen ? "primary-nav open" : "primary-nav"} aria-label="主要导航">
             {primaryNav.map((item) => <div className={`primary-nav-item ${pathname === item.href.split("?")[0] ? "active" : ""}`} key={item.href}><button type="button" onClick={() => navigate(item.href)}>{item.label}{item.children && <CaretDown size={15} />}</button>{item.children && <div className="primary-submenu">{item.children.map((child) => <button type="button" key={child.href} onClick={() => navigate(child.href)}>{child.label}<ArrowRight size={16} /></button>)}</div>}</div>)}
@@ -262,11 +264,11 @@ export function App() {
             <button className="mobile-menu" type="button" aria-label={mobileOpen ? "关闭菜单" : "打开菜单"} onClick={() => setMobileOpen(!mobileOpen)}>{mobileOpen ? <X size={22} /> : <List size={22} />}</button>
           </div>
         </div>
-      </header>
+      </header>}
 
       {page}
 
-      <footer className="site-footer">
+      {pathname !== "/agent" && <footer className="site-footer">
         <div className="footer-main section-shell">
           <div className="footer-brand"><img src={themeIcon} alt="" /><div><strong>古龙</strong><span>Gulong Agent Engine</span></div><p>不是又一个聊天机器人，而是一套会持续成长的 AI 操作系统。</p></div>
           <div><h3>产品</h3><button onClick={() => navigate("/manual")}>产品手册</button><button onClick={() => navigate("/brain")}>第二大脑</button><button onClick={() => navigate("/workflows")}>工作流</button><button onClick={() => navigate("/short-drama")}>短剧</button><button onClick={() => navigate("/pricing")}>订阅与定价</button></div>
@@ -274,9 +276,9 @@ export function App() {
           <div><h3>支持</h3><button onClick={() => navigate("/download")}>软件下载</button><button onClick={() => navigate("/feedback")}>问题反馈</button><button onClick={() => setThemeOpen(true)}>自定义主题</button></div>
         </div>
         <div className="footer-bottom section-shell"><span>© 2026 古龙 Gulong Agent Engine</span><span>AI 智能体 · 非自然人</span><div><a href="#privacy">隐私政策</a><a href="#terms">服务条款</a></div></div>
-      </footer>
+      </footer>}
 
-      <button className="floating-feedback" type="button" onClick={() => navigate("/feedback")}><ChatCircleText size={20} /><span>反馈</span></button>
+      {pathname !== "/agent" && <button className="floating-feedback" type="button" onClick={() => navigate("/feedback")}><ChatCircleText size={20} /><span>反馈</span></button>}
 
       <AccountModal open={authOpen} initialMode={authMode} onClose={() => setAuthOpen(false)} onUser={setUser} themeIcon={themeIcon} />
       {renewalOpen && subscriptionLifecycle && <SubscriptionReminderDialog lifecycle={subscriptionLifecycle} onRenew={() => { setRenewalOpen(false); navigate("/pricing"); }} onClose={() => { window.localStorage.setItem(`gulong-renewal-reminder-${new Date().toISOString().slice(0, 10)}`, "dismissed"); setRenewalOpen(false); }} />}
