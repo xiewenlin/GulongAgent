@@ -1,3 +1,4 @@
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { ObjectId } from "mongodb";
 import { getCollection } from "./db.js";
 import { readExternalAuth, sealExternalAuth } from "./security.js";
@@ -46,7 +47,28 @@ export function chandlerConfig() {
     airosApplicationId: process.env.CHANDLER_AIROS_APPLICATION_ID?.trim() || DEFAULT_AIROS_APPLICATION_ID,
     monthlyPriceFen: Number(process.env.CHANDLER_MONTHLY_PRICE_FEN || 29_800),
     yearlyPriceFen: Number(process.env.CHANDLER_YEARLY_PRICE_FEN || 298_000),
+    apiKey: process.env.GulongAgent?.trim() || process.env.CHANDLER_API_KEY?.trim() || "",
+    clientSecret: process.env.CHANDLER_CLIENT_SECRET?.trim() || "",
+    webhookHmacKey: process.env.CHANDLER_WEBHOOK_HMAC_KEY?.trim() || "",
   };
+}
+
+function serverApiKey(apiKey) {
+  const value = String(apiKey || chandlerConfig().apiKey || "").trim();
+  if (!value) {
+    throw new ChandlerError("Chandler 服务端 API Key 尚未配置", {
+      status: 503,
+      code: "CHANDLER_API_KEY_REQUIRED",
+    });
+  }
+  return value;
+}
+
+function partnerCredential(accessToken) {
+  const apiKey = chandlerConfig().apiKey;
+  if (apiKey) return { apiKey };
+  if (accessToken) return { accessToken };
+  return { apiKey: serverApiKey() };
 }
 
 function friendlyMessage(status, payload) {
@@ -78,7 +100,7 @@ export async function chandlerRequest(path, {
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (form !== undefined) headers["Content-Type"] = "application/x-www-form-urlencoded";
   if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
-  if (apiKey) headers["X-API-Key"] = apiKey;
+  if (apiKey) headers.Authorization = `Apikey ${apiKey}`;
   let response;
   try {
     response = await fetch(`${chandlerConfig().baseUrl}${path}`, {
@@ -103,6 +125,29 @@ export async function chandlerRequest(path, {
     });
   }
   return payload?.data ?? payload;
+}
+
+export function chandlerServerRequest(path, options = {}) {
+  return chandlerRequest(path, { ...options, accessToken: undefined, apiKey: serverApiKey(options.apiKey) });
+}
+
+export function chandlerWebhookHmacKey() {
+  const config = chandlerConfig();
+  if (config.webhookHmacKey) return config.webhookHmacKey.toLowerCase();
+  if (config.clientSecret) return createHash("sha256").update(config.clientSecret, "utf8").digest("hex");
+  throw new ChandlerError("Chandler Webhook 验签密钥尚未配置", {
+    status: 503,
+    code: "CHANDLER_WEBHOOK_KEY_REQUIRED",
+  });
+}
+
+export function verifyChandlerWebhook(rawBody, signature) {
+  const received = String(signature || "").trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(received)) return false;
+  const expected = createHmac("sha256", chandlerWebhookHmacKey())
+    .update(Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(String(rawBody || ""), "utf8"))
+    .digest("hex");
+  return timingSafeEqual(Buffer.from(received, "hex"), Buffer.from(expected, "hex"));
 }
 
 export function registerWithChandler({ email, username, password, displayName, inviteCode }) {
@@ -472,7 +517,7 @@ function partnerClientUsers(payload) {
 export async function listPartnerClientUsers(accessToken, applicationId = chandlerConfig().applicationId, { page = 1, limit = 100 } = {}) {
   const result = await chandlerRequest(
     `/v1/me/oauth/clients/${encodeURIComponent(applicationId)}/users?page=${Math.max(1, Math.trunc(page))}&limit=${Math.min(100, Math.max(1, Math.trunc(limit)))}`,
-    { accessToken },
+    partnerCredential(accessToken),
   );
   const items = partnerClientUsers(result);
   return {
@@ -502,14 +547,14 @@ export async function listAllPartnerClientUsers(accessToken, applicationId = cha
 export function getPartnerClientUserAttributes(accessToken, userId, applicationId = chandlerConfig().applicationId) {
   return chandlerRequest(
     `/v1/me/oauth/clients/${encodeURIComponent(applicationId)}/users/${encodeURIComponent(userId)}/attributes`,
-    { accessToken },
+    partnerCredential(accessToken),
   );
 }
 
 export async function listPartnerSkus(accessToken, applicationId = chandlerConfig().applicationId) {
   return partnerSkus(await chandlerRequest(
     `/v1/me/oauth/clients/${encodeURIComponent(applicationId)}/skus`,
-    { accessToken },
+    partnerCredential(accessToken),
   ));
 }
 
@@ -548,7 +593,7 @@ export async function listPartnerSubscriptionPlans(accessToken, applicationId = 
 export function createPartnerSku(accessToken, { code, name, applicationId = chandlerConfig().applicationId }) {
   return chandlerRequest(`/v1/me/oauth/clients/${encodeURIComponent(applicationId)}/skus`, {
     method: "POST",
-    accessToken,
+    ...partnerCredential(accessToken),
     body: { code, name },
   });
 }
@@ -556,7 +601,7 @@ export function createPartnerSku(accessToken, { code, name, applicationId = chan
 export function setPartnerSkuStatus(accessToken, skuId, status, applicationId = chandlerConfig().applicationId) {
   return chandlerRequest(`/v1/me/oauth/clients/${encodeURIComponent(applicationId)}/skus/${encodeURIComponent(skuId)}/status`, {
     method: "POST",
-    accessToken,
+    ...partnerCredential(accessToken),
     body: { status },
   });
 }
@@ -564,7 +609,7 @@ export function setPartnerSkuStatus(accessToken, skuId, status, applicationId = 
 export async function listPartnerPriceVersions(accessToken, skuId, applicationId = chandlerConfig().applicationId) {
   return partnerPrices(await chandlerRequest(
     `/v1/me/oauth/clients/${encodeURIComponent(applicationId)}/skus/${encodeURIComponent(skuId)}/prices`,
-    { accessToken },
+    partnerCredential(accessToken),
   ));
 }
 
@@ -580,45 +625,49 @@ export function createPartnerPriceVersion(accessToken, {
 }) {
   return chandlerRequest(`/v1/me/oauth/clients/${encodeURIComponent(applicationId)}/skus/${encodeURIComponent(skuId)}/prices`, {
     method: "POST",
-    accessToken,
+    ...partnerCredential(accessToken),
     body: {
       amount: amountFen,
       currency,
-      billing_interval: billingInterval,
-      interval_count: intervalCount,
+      billing_interval: "once",
+      interval_count: 1,
       effective_at: effectiveAt,
       expires_at: expiresAt,
     },
   });
 }
 
-export async function createSubscriptionCheckout(accessToken, { cycle, channel, merchantOrderNo, expectedAmountFen, source = "gulong-web" }) {
-  const config = chandlerConfig();
-  const plans = await listPartnerSubscriptionPlans(accessToken, config.applicationId);
-  const marker = cycle === "year" ? "year" : "month";
-  const plan = plans.find((item) => `${item.skuType} ${item.billingInterval}`.toLowerCase().includes(marker));
-  if (!plan?.priceId || !Number.isSafeInteger(plan.amountFen)) throw new ChandlerError("Chandler 当前没有可用的对应订阅套餐或生效价格", { status: 503, code: "PLAN_NOT_CONFIGURED" });
-  if (Number.isSafeInteger(expectedAmountFen) && plan.amountFen !== expectedAmountFen) {
-    throw new ChandlerError(`Chandler 当前价格为 ¥${(plan.amountFen / 100).toFixed(2)}，官网价格为 ¥${(expectedAmountFen / 100).toFixed(2)}，请刷新价格后重试`, { status: 409, code: "PRICE_VERSION_MISMATCH" });
+export async function createSubscriptionCheckout(accessToken, { cycle, channel = "wechat", merchantOrderNo, expectedAmountFen, source = "gulong-web", partnerData = {} }) {
+  if (channel !== "wechat") throw new ChandlerError("线上支付当前仅支持微信支付", { status: 400, code: "PAYMENT_CHANNEL_UNSUPPORTED" });
+  if (!Number.isSafeInteger(expectedAmountFen) || expectedAmountFen < 100) {
+    throw new ChandlerError("订阅订单金额无效", { status: 400, code: "PAYMENT_AMOUNT_INVALID" });
   }
-  const direct = await createDirectPaymentOrder(accessToken, {
+  const singlePaymentPlan = {
+    productId: chandlerConfig().applicationId,
+    productName: "古龙智能引擎会员",
+    skuName: cycle === "year" ? "年度订阅会员" : "月度订阅会员",
+    billingInterval: cycle === "year" ? "year" : "month",
+    amountFen: expectedAmountFen,
+    currency: "CNY",
+    priceSource: "gulong-membership-ledger",
+  };
+  const singlePayment = await createDirectPaymentOrder(accessToken, {
     merchantOrderNo,
     channel,
-    skuId: plan.skuId,
-    subject: plan.skuName,
+    amountFen: expectedAmountFen,
+    subject: singlePaymentPlan.skuName,
     source,
     partnerData: {
-      schema_version: 2,
+      schema_version: 3,
       application_key: "gulong-web",
-      product_id: plan.productId,
-      product_name: plan.productName,
-      sku_id: plan.skuId,
-      sku_name: plan.skuName,
-      price_id: plan.priceId,
-      price_source: "chandler-partner-sku",
+      kind: "subscription",
+      cycle: singlePaymentPlan.billingInterval,
+      amount_fen: expectedAmountFen,
+      renewal_mode: "manual",
+      ...partnerData,
     },
   });
-  return { checkout: direct.order, prepay: direct.payment, plan, orderNo: direct.orderNo };
+  return { checkout: singlePayment.order, prepay: singlePayment.payment, plan: singlePaymentPlan, orderNo: singlePayment.orderNo };
 }
 
 export async function createDirectPaymentOrder(accessToken, {
@@ -631,10 +680,11 @@ export async function createDirectPaymentOrder(accessToken, {
   partnerData,
   prepay = true,
 }) {
+  if (channel !== "wechat") throw new ChandlerError("线上支付当前仅支持微信支付", { status: 400, code: "PAYMENT_CHANNEL_UNSUPPORTED" });
   const config = chandlerConfig();
   const order = await chandlerRequest("/v1/pay/orders", {
     method: "POST",
-    accessToken,
+    ...partnerCredential(accessToken),
     body: {
       application_id: config.applicationId,
       merchant_order_no: merchantOrderNo,
@@ -648,10 +698,14 @@ export async function createDirectPaymentOrder(accessToken, {
   const orderNo = order.platform_order_no || order.order_no;
   const payment = prepay ? await chandlerRequest(`/v1/pay/orders/${encodeURIComponent(orderNo)}/prepay`, {
     method: "POST",
-    accessToken,
+    ...partnerCredential(accessToken),
     body: {},
   }) : null;
   return { order, payment, orderNo };
+}
+
+export function getDirectPaymentOrder(orderNo) {
+  return chandlerServerRequest(`/v1/pay/orders/${encodeURIComponent(orderNo)}`);
 }
 
 export function issueOfflineCredential(accessToken, installId) {

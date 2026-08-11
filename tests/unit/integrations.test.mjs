@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import app from "../../server/app.js";
@@ -17,6 +18,7 @@ import {
   refreshChandlerLogin,
   resetPasswordWithChandler,
   resolveWebsiteLoginEmail,
+  verifyChandlerWebhook,
 } from "../../server/chandler.js";
 import { browserUploadCorsReady, browserUploadCorsRule, cosConfig, sanitizeFilename } from "../../server/cos.js";
 import { readExternalAuth, readUserSecret, sealExternalAuth, sealUserSecret } from "../../server/security.js";
@@ -120,7 +122,33 @@ test("official Chandler and Chengdu COS defaults stay pinned", () => {
   assert.equal(typeof cos.configured, "boolean");
 });
 
-test("Chandler v2.2 wrappers use application SKU prices and authoritative sku_id orders", async () => {
+test("Chandler v3.2 server calls prefer the GulongAgent API Key and Webhooks use constant-time HMAC validation", async () => {
+  const originalFetch = globalThis.fetch;
+  const previousApiKey = process.env.GulongAgent;
+  const previousHmacKey = process.env.CHANDLER_WEBHOOK_HMAC_KEY;
+  const calls = [];
+  process.env.GulongAgent = "server-api-key-test";
+  process.env.CHANDLER_WEBHOOK_HMAC_KEY = "a".repeat(64);
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), headers: options.headers, body: JSON.parse(options.body) });
+    return new Response(JSON.stringify({ data: { platform_order_no: "ord-v32", amount: 8800 } }), { status: 201, headers: { "content-type": "application/json" } });
+  };
+  try {
+    await createDirectPaymentOrder(null, { merchantOrderNo: "merchant-v32", channel: "wechat", amountFen: 8800, subject: "订阅", source: "test", partnerData: {}, prepay: false });
+    const rawBody = Buffer.from('{"platform_order_no":"ord-v32"}', "utf8");
+    const signature = createHmac("sha256", "a".repeat(64)).update(rawBody).digest("hex");
+    assert.equal(verifyChandlerWebhook(rawBody, signature), true);
+    assert.equal(verifyChandlerWebhook(rawBody, "0".repeat(64)), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousApiKey === undefined) delete process.env.GulongAgent; else process.env.GulongAgent = previousApiKey;
+    if (previousHmacKey === undefined) delete process.env.CHANDLER_WEBHOOK_HMAC_KEY; else process.env.CHANDLER_WEBHOOK_HMAC_KEY = previousHmacKey;
+  }
+  assert.equal(calls[0].headers.Authorization, "Apikey server-api-key-test");
+  assert.equal(calls[0].body.channel, "wechat");
+});
+
+test("Chandler v3.2 wrappers keep SKU compatibility while publishing once-only prices", async () => {
   const originalFetch = globalThis.fetch;
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
@@ -148,6 +176,7 @@ test("Chandler v2.2 wrappers use application SKU prices and authoritative sku_id
   const priceCall = calls.find((call) => call.url.endsWith("/skus/sku-month/prices"));
   assert.equal(priceCall.method, "POST");
   assert.equal(priceCall.body.amount, 3600);
+  assert.equal(priceCall.body.billing_interval, "once");
   const orderCall = calls.find((call) => call.url.endsWith("/v1/pay/orders"));
   assert.equal(orderCall.body.sku_id, "sku-month");
   assert.equal("amount" in orderCall.body, false);
@@ -272,11 +301,11 @@ test("worker assignment search, visibility, notifications and publishing control
   assert.match(adminPageSource, /item\.assignment\?\.label/);
 });
 
-test("the primary Worker navigation is a direct link without a dropdown", async () => {
+test("primary navigation promotes workflows and reserves short drama without exposing the Worker route", async () => {
   const source = await readFile(new URL("../../src/App.jsx", import.meta.url), "utf8");
-  const workerEntry = source.match(/\{ label: "威客"[^\n]+/u)?.[0] || "";
-  assert.match(workerEntry, /href: "\/worker\?tab=publish"/);
-  assert.doesNotMatch(workerEntry, /children/);
+  assert.match(source, /\{ label: "工作流", href: "\/workflows" \}/);
+  assert.match(source, /\{ label: "短剧", href: "\/short-drama" \}/);
+  assert.doesNotMatch(source, /\{ label: "威客", href:/);
 });
 
 test("the primary navigation exposes a single complaint entry backed by the feedback page", async () => {
@@ -324,8 +353,8 @@ test("deep customization opens the supplied WeChat QR dialog without requiring l
   assert.match(source, /deep-customization-wechat\.jpg/);
   assert.match(source, /event\.key === "Escape"/);
   assert.match(source, /event\.target === event\.currentTarget && onClose\(\)/);
-  const startPaymentSource = source.slice(source.indexOf("async function startPayment"), source.indexOf("trackAnalyticsEvent", source.indexOf("async function startPayment")));
-  assert.ok(startPaymentSource.indexOf('if (plan.id === "custom")') < startPaymentSource.indexOf('if (!user) return openAuth("login")'));
+  assert.match(source, /onClick=\{\(\) => setCustomContactOpen\(true\)\}>联系定制/);
+  assert.match(source, /新建订单/);
 });
 
 test("worker market protects WeChat contacts and preserves promoted administrator roles", async () => {
@@ -758,7 +787,7 @@ test("administrator subscription periods are authoritative across website and de
   assert.match(accountSource, /isMember \? "订阅会员" : "普通用户"/);
 });
 
-test("Chandler v2.2 pricing uses application-level price versions before the local mirror", async () => {
+test("Chandler v3.2 pricing uses application-level price versions before the local mirror", async () => {
   const [adminSource, serverSource, chandlerSource] = await Promise.all([
     readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
@@ -791,23 +820,23 @@ test("website pricing and desktop synchronization read the same MongoDB price ve
   assert.match(pricingPage, /apiFetch\("\/api\/billing\/plans"\)/);
 });
 
-test("online payment is paused consistently for website and desktop clients", async () => {
+test("online payment exposes WeChat only and uses manual renewal lifecycle controls", async () => {
   const [serverSource, pricingPage, accountPage] = await Promise.all([
     readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
     readFile(new URL("../../src/components/PlatformPages.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../src/components/AccountDashboard.jsx", import.meta.url), "utf8"),
   ]);
   assert.match(serverSource, /ONLINE_PAYMENT_AVAILABILITY/);
-  assert.match(serverSource, /code:\s*"ONLINE_PAYMENT_COMING_SOON"/);
+  assert.match(serverSource, /online:\s*true/);
   assert.match(serverSource, /priorityProvider:\s*"wechat"/);
-  assert.match(serverSource, /alipay:\s*false/);
-  assert.match(serverSource, /wechat:\s*false/);
+  assert.match(serverSource, /wechat:\s*true/);
   assert.match(serverSource, /paymentAvailability:\s*ONLINE_PAYMENT_AVAILABILITY/);
-  assert.match(pricingPage, /线上支付将在近期开通，敬请期待/);
-  assert.match(pricingPage, /微信支付将优先开通/);
-  assert.match(pricingPage, /支付宝渠道暂未开放/);
-  assert.match(pricingPage, /online-coming-soon/);
-  assert.match(accountPage, /线上支付即将开通，微信支付将优先上线/);
+  assert.match(pricingPage, /微信在线支付已开通/);
+  assert.match(pricingPage, /当前不自动扣款/);
+  assert.doesNotMatch(pricingPage, /支付宝/);
+  assert.match(serverSource, /RENEWAL_REMINDER_DAYS = 7/);
+  assert.match(serverSource, /subscription_renewal_due/);
+  assert.match(accountPage, /会员与充值/);
 });
 
 test("order management separates online and offline orders with multidimensional filters", async () => {
@@ -845,6 +874,16 @@ test("order management separates online and offline orders with multidimensional
   assert.match(css, /grid-template-areas:\s*"keyword keyword channel channel"\s*"from to actions actions"/);
   assert.match(dbSource, /payments_by_owner_and_date/);
   assert.match(dbSource, /offline_payments_by_owner_and_date/);
+});
+
+test("desktop management console can reuse a validated Chandler administrator bearer", async () => {
+  const source = await readFile(new URL("../../server/app.js", import.meta.url), "utf8");
+  assert.match(source, /async function requireAdmin\(c\)[\s\S]*authenticateDesktopChandler\(c, \{ admin: true \}\)/);
+  assert.match(source, /kind:\s*"desktop-chandler"/);
+  assert.match(source, /auth\.user\.authProvider === "chandler" && auth\.kind !== "desktop-chandler"/);
+  assert.match(source, /async function getAdminChandlerAccessToken\(auth\)[\s\S]*auth\?\.kind === "desktop-chandler"[\s\S]*auth\.desktop\.accessToken/);
+  assert.match(source, /getAdminChandlerAccessToken\(auth\)/);
+  assert.match(source, /authorization\.startsWith\("Bearer "\) && authorization\.slice\(7\)\.trim\(\)/);
 });
 
 test("administrator feedback records are newest-first and support fuzzy keyword search", async () => {
@@ -919,7 +958,7 @@ test("all consequential actions use the shared themed confirmation dialog", asyn
   for (const source of [adminSource, accountSource, workerSource]) {
     assert.doesNotMatch(source, /window\.(alert|confirm|prompt)\s*\(/);
   }
-  assert.equal((adminSource.match(/useConfirmDialog\(\)/g) || []).length, 5);
+  assert.equal((adminSource.match(/useConfirmDialog\(\)/g) || []).length, 6);
   assert.equal((accountSource.match(/useConfirmDialog\(\)/g) || []).length, 1);
   assert.equal((workerSource.match(/useConfirmDialog\(\)/g) || []).length, 1);
 });

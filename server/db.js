@@ -193,6 +193,22 @@ export async function ensureIndexes() {
           { ownerId: 1, readAt: 1, createdAt: -1 },
           { name: "notifications_unread" },
         ),
+        db.collection("notifications").createIndex(
+          { ownerId: 1, type: 1, reminderDate: 1 },
+          { unique: true, partialFilterExpression: { reminderDate: { $type: "string" } }, name: "uniq_daily_subscription_reminder" },
+        ),
+        db.collection("publicWorkflows").createIndex(
+          { systemKey: 1 },
+          { unique: true, sparse: true, name: "uniq_public_workflow_system_key" },
+        ),
+        db.collection("publicWorkflows").createIndex(
+          { status: 1, sort: 1, createdAt: -1 },
+          { name: "public_workflows_listing" },
+        ),
+        db.collection("workflowImageUploads").createIndex(
+          { expiresAt: 1 },
+          { expireAfterSeconds: 0, name: "ttl_workflow_image_uploads" },
+        ),
         db.collection("workerTasks").createIndex(
           { status: 1, createdAt: -1 },
           { name: "worker_tasks_market" },

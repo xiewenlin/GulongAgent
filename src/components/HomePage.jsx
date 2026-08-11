@@ -19,6 +19,7 @@ import { apiFetch } from "../api.js";
 import { capabilities, workflowSteps } from "../data/site.js";
 import { ProductDemo } from "./ProductDemo.jsx";
 import { PartnerNetwork } from "./PartnerNetwork.jsx";
+import { WorkflowCard } from "./WorkflowPages.jsx";
 
 const iconMap = {
   route: FlowArrow,
@@ -29,9 +30,11 @@ const iconMap = {
 
 export function HomePage({ navigate, openTheme, themeIcon, downloadLatest }) {
   const [partners, setPartners] = useState([]);
+  const [workflows, setWorkflows] = useState([]);
 
   useEffect(() => {
     apiFetch("/api/partners").then((result) => setPartners(result.partners || [])).catch(() => setPartners([]));
+    apiFetch("/api/workflows").then((result) => setWorkflows(result.workflows || [])).catch(() => setWorkflows([]));
   }, []);
 
   return (
@@ -46,7 +49,7 @@ export function HomePage({ navigate, openTheme, themeIcon, downloadLatest }) {
             <p>把目标交给古龙：它会自动选择最合适的模型，调用插件、技能与工作流，把执行经验沉淀进第二大脑，并让每一步都可追溯、可恢复、可持续。</p>
             <div className="hero-actions">
               <button className="button primary" type="button" onClick={downloadLatest}><WindowsLogo size={20} weight="fill" /> 下载 Windows 版</button>
-              <button className="button secondary" type="button" onClick={() => navigate("/developer")}><Code size={20} /> 开发者接入</button>
+              <button className="button secondary" type="button" onClick={() => navigate("/workflows")}><FlowArrow size={20} /> 探索工作流</button>
             </div>
             <div className="trust-row">
               <span><ShieldCheck size={18} /> 本地优先</span>
@@ -94,9 +97,10 @@ export function HomePage({ navigate, openTheme, themeIcon, downloadLatest }) {
           })}
         </section>
 
-        <section className="home-worker section-shell">
-          <div className="home-worker-copy"><span>GULONG WORKER MARKET</span><h2>系统自动接单，<br /><em>AI 攻城狮军团</em>帮你快速搞定</h2><p>难题不用独自硬扛。发布需求、托管预算、跟进进度、验收交付；也可以把你的能力变成收入，接单赚钱。</p><div><button className="button primary" onClick={() => navigate("/worker?tab=publish")}><PaperPlaneRight size={20} />发布任务</button><button className="button secondary" onClick={() => navigate("/worker?tab=earn")}><HandCoins size={20} />接单赚钱</button></div></div>
-          <div className="home-worker-engine"><div className="home-worker-orbit"><span>需求</span><span>接单</span><strong>古龙<br />威客</strong><span>交付</span><span>结算</span></div><div className="home-worker-rules"><article><strong>80%</strong><span>接单者任务收入</span></article><article><strong>60%</strong><span>工作流复用双方分佣</span></article><article><strong>40%</strong><span>平台复用收益</span></article></div><p><ShieldCheck size={19} />预算审核后开放接单 · 验收后自动结算 · 每一步可追踪</p></div>
+        <section className="home-workflows section-shell">
+          <div className="section-heading"><span>WORKFLOW LIBRARY</span><h2>成熟能力，打开就能用</h2><p>每个工作流都是经过整理的功能入口。威客已经上架：发布任务、接单赚钱、跟踪交付都从同一个工作流进入。</p></div>
+          <div className="public-workflow-grid">{workflows.slice(0, 3).map((workflow) => <WorkflowCard key={workflow.id} workflow={workflow} navigate={navigate} />)}</div>
+          <button className="text-link" type="button" onClick={() => navigate("/workflows")}>查看全部工作流 <ArrowRight size={18} /></button>
         </section>
 
         {partners.length > 0 && <PartnerNetwork partners={partners} />}
@@ -106,7 +110,7 @@ export function HomePage({ navigate, openTheme, themeIcon, downloadLatest }) {
             <span className="section-kicker">LOCAL-FIRST, CLOUD-READY</span>
             <h2>能力在本地生长，服务在云端连接</h2>
             <p>古龙把离线运行、隐私隔离与云端开放接口放进同一套架构。个人可以安心积累第二大脑，团队和开发者也能用 API 将智能体能力嵌入自己的产品。</p>
-            <button className="text-link" type="button" onClick={() => navigate("/developer")}>了解开放平台 <ArrowRight size={17} /></button>
+            <button className="text-link" type="button" onClick={() => navigate("/workflows")}>探索工作流 <ArrowRight size={17} /></button>
           </div>
           <div className="architecture-flow" aria-label="古龙能力架构">
             <div><strong>你的目标</strong><small>自然语言 / 文件 / 多模态</small></div>

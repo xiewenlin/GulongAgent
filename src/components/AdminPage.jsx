@@ -13,6 +13,7 @@ import {
   CurrencyCny,
   DownloadSimple,
   FileZip,
+  FlowArrow,
   FloppyDisk,
   GearSix,
   Handshake,
@@ -39,6 +40,7 @@ const menu = [
   { id: "users", label: "订阅用户", icon: UsersThree },
   { id: "prices", label: "订阅价格", icon: Cube },
   { id: "partners", label: "合作伙伴", icon: Handshake },
+  { id: "workflows", label: "工作流管理", icon: FlowArrow },
   { id: "brain", label: "第二大脑", icon: FileZip },
   { id: "versions", label: "版本管理", icon: Package },
   { id: "payments", label: "订单管理", icon: ShieldCheck },
@@ -666,6 +668,71 @@ function FeedbackManager() {
   </section>;
 }
 
+function WorkflowManager() {
+  const confirmAction = useConfirmDialog();
+  const [workflows, setWorkflows] = useState([]);
+  const [editing, setEditing] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [message, setMessage] = useState("");
+
+  async function load() {
+    setBusy("load"); setMessage("");
+    try { const result = await apiFetch("/api/admin/workflows"); setWorkflows(result.workflows || []); }
+    catch (error) { setMessage(error.message); }
+    finally { setBusy(""); }
+  }
+  useEffect(() => { load(); }, []);
+
+  function openEditor(workflow = null) {
+    setEditing({
+      id: workflow?.id || null,
+      name: workflow?.name || "",
+      description: workflow?.description || "",
+      url: workflow?.url || "",
+      sort: workflow?.sort ?? 100,
+      status: workflow?.status || "active",
+      imageUrl: workflow?.imageUrl || "",
+      file: null,
+    });
+    setMessage("");
+  }
+
+  async function uploadImage(file) {
+    const ticket = await apiFetch("/api/admin/workflows/assets/presign", { method: "POST", body: JSON.stringify({ filename: file.name, contentType: file.type, bytes: file.size }) });
+    const response = await fetch(ticket.uploadUrl, { method: "PUT", headers: ticket.requiredHeaders, body: file });
+    if (!response.ok) throw new Error("图片上传到腾讯云 COS 失败，请重试");
+    await apiFetch(`/api/admin/workflows/assets/${ticket.uploadId}/complete`, { method: "POST", body: "{}" });
+    return ticket.uploadId;
+  }
+
+  async function save(event) {
+    event.preventDefault();
+    setBusy("save"); setMessage("");
+    try {
+      const imageUploadId = editing.file ? await uploadImage(editing.file) : null;
+      const payload = { name: editing.name, description: editing.description, url: editing.url, sort: Number(editing.sort), status: editing.status, ...(imageUploadId ? { imageUploadId } : {}) };
+      await apiFetch(editing.id ? `/api/admin/workflows/${editing.id}` : "/api/admin/workflows", { method: editing.id ? "PUT" : "POST", body: JSON.stringify(payload) });
+      setEditing(null); setMessage(editing.id ? "工作流已更新。" : "工作流已创建并加入官网列表。"); await load();
+    } catch (error) { setMessage(error.message); }
+    finally { setBusy(""); }
+  }
+
+  async function remove(workflow) {
+    if (!await confirmAction({ tone: "danger", eyebrow: "DELETE WORKFLOW", title: `删除“${workflow.name}”？`, message: "删除后官网工作流列表将立即移除该入口；如果图片存储在 COS，也会同步删除。", confirmLabel: "确认删除" })) return;
+    setBusy(workflow.id);
+    try { await apiFetch(`/api/admin/workflows/${workflow.id}`, { method: "DELETE" }); setMessage("工作流已删除。"); await load(); }
+    catch (error) { setMessage(error.message); }
+    finally { setBusy(""); }
+  }
+
+  return <section className="admin-module workflow-manager">
+    <header className="admin-module-head"><div><span>PUBLIC WORKFLOW CATALOG</span><h2>工作流管理</h2><p>配置官网可搜索的工作流入口；图片直传腾讯云 COS，名称与跳转地址实时生效。</p></div><button className="button primary" onClick={() => openEditor()}><Plus size={18} />新建工作流</button></header>
+    {message && <AdminNotice tone={message.includes("已") ? "success" : "error"}>{message}</AdminNotice>}
+    {workflows.length ? <div className="admin-workflow-grid">{workflows.map((workflow) => <article key={workflow.id}><img src={workflow.imageUrl} alt={`${workflow.name}图标`} /><div><span>{workflow.status === "active" ? "官网展示中" : "已停用"}</span><h3>{workflow.name}</h3><p>{workflow.description}</p><code>{workflow.url}</code></div><div><button className="button small secondary" onClick={() => openEditor(workflow)}><PencilSimple size={16} />修改</button><button className="button small danger" disabled={busy === workflow.id} onClick={() => remove(workflow)}><Trash size={16} />删除</button></div></article>)}</div> : <EmptyState icon={FlowArrow} title={busy === "load" ? "正在读取工作流" : "还没有工作流"} text="点击右上角新建第一个官网工作流。" />}
+    {editing && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && setEditing(null)}><form className="admin-form-modal workflow-editor-modal" onSubmit={save}><button className="modal-close" type="button" disabled={Boolean(busy)} onClick={() => setEditing(null)}><X size={18} /></button><span>WORKFLOW EDITOR</span><h2>{editing.id ? "修改工作流" : "新建工作流"}</h2><p>上传一张清晰图标，填写名称与网址。站内功能可直接使用 / 开头的路径。</p><div className="workflow-editor-layout"><label className="workflow-image-picker"><span>工作流图片</span><div>{editing.file ? <img src={URL.createObjectURL(editing.file)} alt="新图片预览" /> : editing.imageUrl ? <img src={editing.imageUrl} alt="当前图片" /> : <ImageSquare size={46} />}</div><strong>{editing.file ? editing.file.name : "选择图片"}</strong><input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => setEditing({ ...editing, file: event.target.files?.[0] || null })} /></label><div className="workflow-editor-fields"><label><span>名称</span><input required minLength={2} maxLength={60} value={editing.name} onChange={(event) => setEditing({ ...editing, name: event.target.value })} placeholder="例如：威客" /></label><label><span>跳转 URL</span><input required value={editing.url} onChange={(event) => setEditing({ ...editing, url: event.target.value })} placeholder="/worker?tab=publish 或 https://..." /></label><label><span>功能说明</span><textarea maxLength={300} rows={4} value={editing.description} onChange={(event) => setEditing({ ...editing, description: event.target.value })} placeholder="用一句通俗的话告诉用户这个工作流能解决什么问题。" /></label><div className="workflow-editor-row"><label><span>排序</span><input type="number" value={editing.sort} onChange={(event) => setEditing({ ...editing, sort: event.target.value })} /></label><label><span>状态</span><select value={editing.status} onChange={(event) => setEditing({ ...editing, status: event.target.value })}><option value="active">官网展示</option><option value="disabled">暂时停用</option></select></label></div></div></div><button className="button primary full" disabled={Boolean(busy)}>{busy === "save" ? "正在保存" : editing.id ? "保存工作流" : "创建并加入官网"}</button></form></div>}
+  </section>;
+}
+
 const paymentStatusText = { pending: "待支付", paid: "已支付", approved: "已通过", rejected: "已拒绝", failed: "支付失败", refunded: "已退款", cancelled: "已取消", canceled: "已取消" };
 
 function PaymentManager() {
@@ -755,5 +822,5 @@ export function AdminPage({ user, openAuth }) {
   const [active, setActive] = useState("dashboard");
   if (!user) return <main id="main-content" className="admin-gate section-shell"><LockKey size={38} /><h1>登录管理员账号</h1><p>管理员后台已接入 Chandler 统一身份，只接受 Chandler 返回的管理员角色。</p><button className="button primary" onClick={() => openAuth("login")}>登录继续</button></main>;
   if (user.role !== "admin") return <main id="main-content" className="admin-gate section-shell"><ShieldCheck size={38} /><h1>当前账号没有后台权限</h1><p>请让 Chandler 平台管理员授予此账号管理员角色后重新登录。</p></main>;
-  return <main id="main-content" className="admin-page"><aside className="admin-sidebar"><div><span>GULONG CONSOLE</span><h1>管理员后台</h1><p>{user.displayName || user.username || user.email}</p></div><nav>{menu.map((item) => { const Icon = item.icon; return <button key={item.id} className={active === item.id ? "active" : ""} onClick={() => setActive(item.id)}><Icon size={19} weight={active === item.id ? "fill" : "regular"} /> {item.label}</button>; })}</nav><footer><UsersThree size={18} /><span>Chandler 统一账号</span></footer></aside><div className="admin-content">{active === "dashboard" && <AdminDashboard />}{active === "users" && <ChandlerUserManager />}{active === "prices" && <ChandlerPriceManager />}{active === "partners" && <PartnerManager />}{active === "brain" && <BrainAttachmentManager />}{active === "versions" && <VersionManager />}{active === "payments" && <PaymentManager />}{active === "worker" && <WorkerReviewManager />}{active === "feedback" && <FeedbackManager />}</div></main>;
+  return <main id="main-content" className="admin-page"><aside className="admin-sidebar"><div><span>GULONG CONSOLE</span><h1>管理员后台</h1><p>{user.displayName || user.username || user.email}</p></div><nav>{menu.map((item) => { const Icon = item.icon; return <button key={item.id} className={active === item.id ? "active" : ""} onClick={() => setActive(item.id)}><Icon size={19} weight={active === item.id ? "fill" : "regular"} /> {item.label}</button>; })}</nav><footer><UsersThree size={18} /><span>Chandler 统一账号</span></footer></aside><div className="admin-content">{active === "dashboard" && <AdminDashboard />}{active === "users" && <ChandlerUserManager />}{active === "prices" && <ChandlerPriceManager />}{active === "partners" && <PartnerManager />}{active === "workflows" && <WorkflowManager />}{active === "brain" && <BrainAttachmentManager />}{active === "versions" && <VersionManager />}{active === "payments" && <PaymentManager />}{active === "worker" && <WorkerReviewManager />}{active === "feedback" && <FeedbackManager />}</div></main>;
 }

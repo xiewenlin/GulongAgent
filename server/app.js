@@ -31,13 +31,8 @@ import {
 } from "./security.js";
 import { enforceRateLimit } from "./rate-limit.js";
 import {
-  buildAlipayPagePayUrl,
   createMockPaymentUrl,
-  createWechatNativeOrder,
-  decryptWechatResource,
   paymentCapabilities,
-  verifyAlipayNotification,
-  verifyWechatNotification,
 } from "./payments.js";
 import {
   ChandlerError,
@@ -50,6 +45,7 @@ import {
   externalAuthFromResponse,
   forgotPasswordWithChandler,
   getChandlerAccessToken,
+  getDirectPaymentOrder,
   issueOfflineCredential,
   isChandlerBootstrapAdmin,
   getPartnerClientUserAttributes,
@@ -66,6 +62,7 @@ import {
   resolveChandlerIdentity,
   setPartnerSkuStatus,
   upsertChandlerUser,
+  verifyChandlerWebhook,
 } from "./chandler.js";
 import {
   cosConfig,
@@ -104,16 +101,19 @@ const AVATAR_MAX_BYTES = 10 * 1024 * 1024;
 const AVATAR_CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 const FEEDBACK_RESPONSE_CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "video/mp4", "video/webm", "video/quicktime"]);
 const FEEDBACK_RESPONSE_MAX_BYTES = 200 * 1024 * 1024;
+const WORKFLOW_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
+const WORKFLOW_IMAGE_CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 const SUBSCRIPTION_PRICE_MIN_FEN = 100;
 const SUBSCRIPTION_PRICE_MAX_FEN = 5_000_000;
+const CUSTOM_ORDER_MAX_FEN = 10_000_000;
+const RENEWAL_REMINDER_DAYS = 7;
 const ONLINE_PAYMENT_AVAILABILITY = Object.freeze({
-  online: false,
-  status: "coming_soon",
-  notice: "线上支付将在近期开通，敬请期待。",
+  online: true,
+  status: "available",
+  notice: "微信在线支付已开通；会员到期前 7 天起每天提醒手动续费。",
   priorityProvider: "wechat",
   channels: {
-    wechat: { enabled: false, status: "coming_soon", label: "微信支付", message: "微信支付将优先开通，敬请期待。" },
-    alipay: { enabled: false, status: "planned", label: "支付宝", message: "支付宝渠道暂未开放，将在后续陆续开通。" },
+    wechat: { enabled: true, status: "available", label: "微信支付", message: "扫码完成单次付款，到账后自动开通或续费。" },
   },
 });
 let offlinePaymentSyncPromise = null;
@@ -162,10 +162,26 @@ const ResetPasswordSchema = z.object({
 });
 
 async function requireAdmin(c) {
-  const auth = await authenticate(c);
+  let auth = await authenticate(c, { required: false });
+  if (!auth && bearerToken(c) && !bearerToken(c).startsWith("gla_live_")) {
+    const desktop = await authenticateDesktopChandler(c, { admin: true });
+    if (desktop.error) return desktop;
+    auth = {
+      kind: "desktop-chandler",
+      user: {
+        ...desktop.user,
+        id: desktop.user._id.toString(),
+        role: desktop.identity.role,
+        authProvider: "chandler",
+      },
+      session: null,
+      desktop,
+    };
+  }
+  if (!auth) return { error: c.json({ code: "UNAUTHORIZED", message: "请先登录或提供有效管理员凭据" }, 401) };
   if (auth.error) return auth;
   const locallyVerifiedAdmin = auth.user.role === "admin";
-  if (auth.user.authProvider === "chandler") {
+  if (auth.user.authProvider === "chandler" && auth.kind !== "desktop-chandler") {
     try {
       const accessToken = await getChandlerAccessToken(auth.session);
       const profile = await chandlerRequest("/v1/me", { accessToken });
@@ -187,7 +203,17 @@ async function requireAdmin(c) {
   return auth;
 }
 
+async function getAdminChandlerAccessToken(auth) {
+  if (chandlerConfig().apiKey) return null;
+  if (auth?.kind === "desktop-chandler" && auth.desktop?.accessToken) {
+    return auth.desktop.accessToken;
+  }
+  return getChandlerAccessToken(auth?.session);
+}
+
 function requireTrustedMutation(c) {
+  const authorization = String(c.req.header("authorization") || "");
+  if (authorization.startsWith("Bearer ") && authorization.slice(7).trim()) return null;
   return isTrustedBrowserRequest(c)
     ? null
     : c.json({ code: "ORIGIN_REJECTED", message: "请求来源不受信任" }, 403);
@@ -263,6 +289,49 @@ function partnerAssetUploadTicket({ kind, contentType, filename }) {
     expiresIn: 1200,
     requiredHeaders: { "Content-Type": contentType },
   };
+}
+
+function workflowTargetUrl(value) {
+  const input = String(value || "").trim();
+  if (input.startsWith("/") && !input.startsWith("//")) return input;
+  return parseHttpUrl(input);
+}
+
+function workflowJson(workflow) {
+  return {
+    id: workflow._id.toString(),
+    name: workflow.name,
+    description: workflow.description || "",
+    url: workflow.url,
+    imageUrl: workflow.imageMode === "cos" ? `/api/workflows/${workflow._id}/image` : workflow.imageUrl,
+    status: workflow.status || "active",
+    sort: Number(workflow.sort || 0),
+    systemKey: workflow.systemKey || null,
+    createdAt: workflow.createdAt,
+    updatedAt: workflow.updatedAt,
+  };
+}
+
+async function ensureDefaultPublicWorkflows() {
+  const workflows = await getCollection("publicWorkflows");
+  const now = new Date();
+  await workflows.updateOne(
+    { systemKey: "worker-market" },
+    {
+      $setOnInsert: {
+        name: "威客",
+        description: "发布任务或接单赚钱，让 AI 攻城狮军团协同完成复杂交付。",
+        url: "/worker?tab=publish",
+        imageMode: "bundled",
+        imageUrl: "/assets/workflow-worker-v1.png",
+        status: "active",
+        sort: 10,
+        createdAt: now,
+      },
+      $set: { updatedAt: now },
+    },
+    { upsert: true },
+  );
 }
 
 function safeDate(value, endOfDay = false) {
@@ -696,6 +765,71 @@ async function notifyUserOnce(ownerId, type, title, message, details = {}) {
     { $set: { title, message, readAt: null, ...details, updatedAt: now }, $setOnInsert: { createdAt: now } },
     { upsert: true },
   );
+}
+
+function subscriptionLifecycle(subscription, now = new Date()) {
+  const status = subscription
+    ? subscriptionPeriodState(subscription.currentPeriodStart, subscription.currentPeriodEnd, now)
+    : "inactive";
+  const end = subscription?.currentPeriodEnd ? new Date(subscription.currentPeriodEnd) : null;
+  const remainingMs = end && !Number.isNaN(end.getTime()) ? end.getTime() - now.getTime() : null;
+  const daysRemaining = remainingMs === null ? null : Math.max(0, Math.ceil(remainingMs / 86_400_000));
+  return {
+    status,
+    restricted: status === "expired",
+    renewalDue: status === "active" && daysRemaining !== null && daysRemaining <= RENEWAL_REMINDER_DAYS,
+    daysRemaining,
+    currentPeriodEnd: end,
+    renewalMode: "manual",
+  };
+}
+
+async function refreshSubscriptionLifecycle(ownerId, now = new Date()) {
+  const subscriptions = await getCollection("subscriptions");
+  const subscription = await subscriptions.findOne({ ownerId });
+  const lifecycle = subscriptionLifecycle(subscription, now);
+  if (!subscription) return lifecycle;
+
+  if (subscription.status !== lifecycle.status || subscription.autoRenew) {
+    await subscriptions.updateOne(
+      { _id: subscription._id },
+      { $set: { status: lifecycle.status, autoRenew: false, statusEvaluatedAt: now, updatedAt: now } },
+    );
+  }
+
+  if (lifecycle.renewalDue) {
+    const reminderDate = now.toISOString().slice(0, 10);
+    await (await getCollection("notifications")).updateOne(
+      { ownerId, type: "subscription_renewal_due", reminderDate },
+      {
+        $setOnInsert: {
+          title: `会员将在 ${lifecycle.daysRemaining} 天后到期`,
+          message: `当前套餐将于 ${lifecycle.currentPeriodEnd.toLocaleDateString("zh-CN")} 到期。Chandler 暂不支持自动扣款，请及时使用微信手动续费。`,
+          actionPath: "/pricing",
+          readAt: null,
+          createdAt: now,
+        },
+        $set: { updatedAt: now },
+      },
+      { upsert: true },
+    );
+  }
+  return lifecycle;
+}
+
+async function sendDailyRenewalReminders(now = new Date()) {
+  const upperBound = new Date(now.getTime() + RENEWAL_REMINDER_DAYS * 86_400_000);
+  const subscriptions = await getCollection("subscriptions");
+  const expiring = await subscriptions.find({
+    currentPeriodEnd: { $gt: now, $lte: upperBound },
+    status: { $nin: ["cancelled", "canceled", "expired"] },
+  }, { projection: { ownerId: 1 } }).limit(10_000).toArray();
+  await mapWithConcurrency(expiring, 12, (item) => refreshSubscriptionLifecycle(item.ownerId, now));
+  const expired = await subscriptions.updateMany(
+    { currentPeriodEnd: { $lte: now }, status: { $nin: ["expired", "cancelled", "canceled"] } },
+    { $set: { status: "expired", autoRenew: false, statusEvaluatedAt: now, updatedAt: now } },
+  );
+  return { reminded: expiring.length, expired: expired.modifiedCount, evaluatedAt: now };
 }
 
 async function workerTaskDetails(task) {
@@ -1454,10 +1588,9 @@ const PaymentAvailabilitySchema = z.object({
   online: z.boolean(),
   status: z.enum(["available", "coming_soon"]),
   notice: z.string(),
-  priorityProvider: z.enum(["wechat", "alipay"]),
+  priorityProvider: z.literal("wechat"),
   channels: z.object({
     wechat: z.object({ enabled: z.boolean(), status: z.enum(["available", "coming_soon", "planned"]), label: z.string(), message: z.string() }),
-    alipay: z.object({ enabled: z.boolean(), status: z.enum(["available", "coming_soon", "planned"]), label: z.string(), message: z.string() }),
   }),
 });
 
@@ -1687,7 +1820,7 @@ const adminPublishChandlerPriceRoute = createRoute({
   path: "/api/admin/chandler/prices",
   tags: ["Admin · Chandler"],
   summary: "手动修改并立即发布订阅价格",
-  description: "通过 Chandler v2.2 应用级价格版本接口在远程服务器创建不可变价格版本；远程成功后再镜像到官网 MongoDB，官网定价页、下单接口与桌面端价格 API 读取同一版本。",
+  description: "通过 Chandler v3.2 应用级单次价格版本接口在远程服务器创建不可变价格版本；远程成功后镜像到官网 MongoDB，会员周期由古龙业务账本维护。",
   request: { body: { content: { "application/json": { schema: z.object({ skuId: z.string().min(1).max(100), amountFen: z.number().int().min(SUBSCRIPTION_PRICE_MIN_FEN).max(SUBSCRIPTION_PRICE_MAX_FEN), effectiveAt: z.string().datetime().optional(), expiresAt: z.string().datetime().nullable().optional() }) } } } },
   responses: {
     201: { description: "新价格版本", content: { "application/json": { schema: z.record(z.string(), z.unknown()) } } },
@@ -1702,7 +1835,7 @@ const adminCreateChandlerSkuRoute = createRoute({
   path: "/api/admin/chandler/skus",
   tags: ["Admin · Chandler"],
   summary: "在古龙应用中创建 Chandler SKU",
-  description: "对应 Chandler v2.2 POST /v1/me/oauth/clients/{client_id}/skus，仅应用 owner/admin 可执行。",
+  description: "对应 Chandler v3.2 POST /v1/me/oauth/clients/{client_id}/skus，仅应用 owner/admin 可执行。",
   request: { body: { content: { "application/json": { schema: z.object({ code: z.string().min(1).max(100), name: z.string().min(1).max(160) }) } } } },
   responses: {
     201: { description: "新 SKU", content: { "application/json": { schema: z.record(z.string(), z.unknown()) } } },
@@ -2052,8 +2185,15 @@ app.openapi(resetPasswordRoute, async (c) => {
 
 app.get("/api/auth/me", async (c) => {
   const auth = await authenticate(c, { required: false });
+  const evaluatedLifecycle = auth?.user
+    ? await refreshSubscriptionLifecycle(new ObjectId(auth.user.id)).catch(() => null)
+    : null;
+  const lifecycle = auth?.user?.role === "admin" && evaluatedLifecycle
+    ? { ...evaluatedLifecycle, restricted: false, renewalDue: false }
+    : evaluatedLifecycle;
   return c.json({
     user: auth?.user || null,
+    subscriptionLifecycle: lifecycle,
     databaseConfigured: isDatabaseConfigured(),
     identityProvider: "chandler",
   });
@@ -2063,6 +2203,7 @@ app.get("/api/account/dashboard", async (c) => {
   const auth = await authenticate(c);
   if (auth.error) return auth.error;
   const ownerId = new ObjectId(auth.user.id);
+  const lifecycle = await refreshSubscriptionLifecycle(ownerId).catch(() => null);
   let chandlerAccessToken = null;
   if (auth.kind === "session" && auth.user.authProvider === "chandler") {
     try {
@@ -2154,6 +2295,7 @@ app.get("/api/account/dashboard", async (c) => {
       autoRenew: Boolean(effectiveSubscription.autoRenew),
       cancelAtPeriodEnd: Boolean(effectiveSubscription.cancelAtPeriodEnd),
     } : null,
+    subscriptionLifecycle: lifecycle,
     balanceFen: wallet?.balanceFen || 0,
     brainUploads: uploads.map((item) => ({
       id: item._id.toString(),
@@ -2432,7 +2574,7 @@ app.delete("/api/auth/account", async (c) => {
   const user = await (await getCollection("users")).findOne({ _id: ownerId });
   if (!user) return c.json({ code: "USER_NOT_FOUND", message: "账户不存在" }, 404);
   if (user.authProvider === "chandler") {
-    const accessToken = await getChandlerAccessToken(auth.session);
+    const accessToken = await getAdminChandlerAccessToken(auth);
     await chandlerRequest("/v1/me/deletion-requests", {
       method: "POST",
       accessToken,
@@ -2507,7 +2649,7 @@ app.openapi(adminListChandlerUsersRoute, async (c) => {
   const query = c.req.valid("query");
   if (query.channelId && query.channelId !== "unassigned" && !ObjectId.isValid(query.channelId)) return c.json({ code: "VALIDATION_ERROR", message: "发行渠道筛选值无效" }, 400);
   try {
-    const accessToken = await getChandlerAccessToken(auth.session);
+    const accessToken = await getAdminChandlerAccessToken(auth);
     const synchronized = await synchronizeChandlerApplicationUsers(accessToken);
     const directory = await websiteAdminUserDirectory(query);
     return c.json({
@@ -2559,7 +2701,7 @@ app.openapi(adminSetWebsiteRoleRoute, async (c) => {
   let target = await users.findOne({ $or: filters });
   if (!target) {
     try {
-      const accessToken = await getChandlerAccessToken(auth.session);
+      const accessToken = await getAdminChandlerAccessToken(auth);
       const remote = await chandlerRequest(`/v1/admin/users/${encodeURIComponent(targetId)}`, { accessToken });
       target = await upsertChandlerUser(remote, { identity: { role: "admin", editionKey: "gulong", editionName: "古龙版", editionSource: "admin-promotion" } });
     } catch {
@@ -2650,7 +2792,7 @@ app.openapi(adminUpdateSubscriptionPeriodRoute, async (c) => {
   let chandlerSynced = false;
   if (target.chandlerUserId) {
     try {
-      const accessToken = await getChandlerAccessToken(auth.session);
+      const accessToken = await getAdminChandlerAccessToken(auth);
       const path = `/v1/me/oauth/clients/${encodeURIComponent(chandlerConfig().applicationId)}/users/${encodeURIComponent(target.chandlerUserId)}/attributes`;
       const current = await chandlerRequest(path, { accessToken });
       const attributes = current.attributes && typeof current.attributes === "object" ? current.attributes : {};
@@ -2688,7 +2830,7 @@ app.openapi(adminUpdateSubscriptionPeriodRoute, async (c) => {
 app.openapi(adminSetChandlerUserStatusRoute, async (c) => {
   const rejected = requireTrustedMutation(c); if (rejected) return rejected;
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
-  const accessToken = await getChandlerAccessToken(auth.session);
+  const accessToken = await getAdminChandlerAccessToken(auth);
   const user = await chandlerRequest(`/v1/admin/users/${encodeURIComponent(c.req.valid("param").id)}/status`, {
     method: "PUT",
     accessToken,
@@ -2709,7 +2851,7 @@ app.openapi(adminChandlerUserSubscriptionsRoute, async (c) => {
 
   if (user?.chandlerUserId) {
     try {
-      const accessToken = await getChandlerAccessToken(auth.session);
+      const accessToken = await getAdminChandlerAccessToken(auth);
       const authorizedIds = Array.isArray(user.chandlerAuthorizedApplications) ? new Set(user.chandlerAuthorizedApplications) : null;
       const targets = chandlerApplicationTargets().filter((target) => !authorizedIds?.size || authorizedIds.has(target.id));
       const results = await Promise.allSettled(targets.map(async (target) => {
@@ -2766,7 +2908,7 @@ app.openapi(adminChandlerUserSubscriptionsRoute, async (c) => {
 
 app.openapi(adminChandlerCatalogRoute, async (c) => {
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
-  const accessToken = await getChandlerAccessToken(auth.session);
+  const accessToken = await getAdminChandlerAccessToken(auth);
   const plans = await listPartnerSubscriptionPlans(accessToken);
   await synchronizeActiveChandlerPrices(plans, auth.user.id);
   const now = new Date();
@@ -2791,14 +2933,14 @@ app.openapi(adminChandlerCatalogRoute, async (c) => {
       scheduledEffectiveAt: scheduled?.effectiveAt || null,
     };
   });
-  return c.json({ plans: mergedPlans, targetPrices: { month: pricing.monthly.amountFen, year: pricing.yearly.amountFen }, pricingRevision: pricing.revision, desktopSyncEndpoint: "/api/v1/pricing/subscriptions", pricingAuthority: "chandler-partner-sku-v2.2", applicationId: chandlerConfig().applicationId });
+  return c.json({ plans: mergedPlans, targetPrices: { month: pricing.monthly.amountFen, year: pricing.yearly.amountFen }, pricingRevision: pricing.revision, desktopSyncEndpoint: "/api/v1/pricing/subscriptions", pricingAuthority: "chandler-v3.2-once-price-plus-gulong-membership-ledger", applicationId: chandlerConfig().applicationId });
 });
 
 app.openapi(adminPublishChandlerPriceRoute, async (c) => {
   const rejected = requireTrustedMutation(c); if (rejected) return rejected;
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
   const input = c.req.valid("json");
-  const accessToken = await getChandlerAccessToken(auth.session);
+  const accessToken = await getAdminChandlerAccessToken(auth);
   const plans = await listPartnerSubscriptionPlans(accessToken);
   const plan = plans.find((item) => item.skuId === input.skuId);
   if (!plan) return c.json({ code: "SKU_NOT_FOUND", message: "所选订阅套餐已下架，请刷新后重试" }, 404);
@@ -2823,7 +2965,7 @@ app.openapi(adminPublishChandlerPriceRoute, async (c) => {
     id: saved._id.toString(),
     chandlerPriceId: chandlerPrice.id,
     source: "website-admin",
-    remoteAuthority: "chandler-partner-sku-v2.2",
+    remoteAuthority: "chandler-v3.2-api-key",
     chandlerSyncStatus: "synced",
     amountFen,
     billingInterval: plan.billingInterval,
@@ -2840,13 +2982,13 @@ app.openapi(adminPublishChandlerPriceRoute, async (c) => {
 app.openapi(adminCreateChandlerSkuRoute, async (c) => {
   const rejected = requireTrustedMutation(c); if (rejected) return rejected;
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
-  const accessToken = await getChandlerAccessToken(auth.session);
+  const accessToken = await getAdminChandlerAccessToken(auth);
   return c.json(await createPartnerSku(accessToken, c.req.valid("json")), 201);
 });
 
 app.openapi(adminListChandlerPriceVersionsRoute, async (c) => {
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
-  const accessToken = await getChandlerAccessToken(auth.session);
+  const accessToken = await getAdminChandlerAccessToken(auth);
   const prices = await listPartnerPriceVersions(accessToken, c.req.valid("param").skuId);
   return c.json({ prices });
 });
@@ -2854,7 +2996,7 @@ app.openapi(adminListChandlerPriceVersionsRoute, async (c) => {
 app.openapi(adminSetChandlerSkuStatusRoute, async (c) => {
   const rejected = requireTrustedMutation(c); if (rejected) return rejected;
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
-  const accessToken = await getChandlerAccessToken(auth.session);
+  const accessToken = await getAdminChandlerAccessToken(auth);
   const { skuId } = c.req.valid("param");
   const { status } = c.req.valid("json");
   const result = await setPartnerSkuStatus(accessToken, skuId, status);
@@ -2865,7 +3007,7 @@ app.openapi(adminRequestChandlerEntitlementRoute, async (c) => {
   const rejected = requireTrustedMutation(c); if (rejected) return rejected;
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
   const input = c.req.valid("json");
-  const accessToken = await getChandlerAccessToken(auth.session);
+  const accessToken = await getAdminChandlerAccessToken(auth);
   const approval = await chandlerRequest("/v1/admin/approvals", {
     method: "POST",
     accessToken,
@@ -3570,6 +3712,8 @@ app.post("/api/uploads/token", async (c) => {
 app.post("/api/brain/uploads/presign", async (c) => {
   const rejected = requireTrustedMutation(c); if (rejected) return rejected;
   const auth = await authenticate(c); if (auth.error) return auth.error;
+  const lifecycle = await refreshSubscriptionLifecycle(new ObjectId(auth.user.id));
+  if (auth.user.role !== "admin" && lifecycle.restricted) return c.json({ code: "SUBSCRIPTION_EXPIRED", message: "会员已到期，请先续费后再上传第二大脑" }, 402);
   const body = await c.req.json();
   const originalName = sanitizeFilename(body.filename, "second-brain.zip");
   const size = Number(body.size);
@@ -4536,25 +4680,153 @@ app.post("/api/admin/worker-workflows/:id/revenue", async (c) => {
   return c.json({ ok: true, revenue });
 });
 
+app.get("/api/workflows", async (c) => {
+  await ensureDefaultPublicWorkflows();
+  const q = String(c.req.query("q") || "").trim();
+  const filter = { status: "active" };
+  if (q) {
+    const keyword = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    filter.$or = ["name", "description"].map((field) => ({ [field]: { $regex: keyword, $options: "i" } }));
+  }
+  const workflows = await (await getCollection("publicWorkflows")).find(filter).sort({ sort: 1, createdAt: -1 }).limit(100).toArray();
+  c.header("Cache-Control", "public, max-age=30, stale-while-revalidate=120");
+  return c.json({ workflows: workflows.map(workflowJson), query: q });
+});
+
+app.get("/api/workflows/:id/image", async (c) => {
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "WORKFLOW_NOT_FOUND", message: "工作流不存在" }, 404);
+  const workflow = await (await getCollection("publicWorkflows")).findOne({ _id: new ObjectId(c.req.param("id")), imageMode: "cos", imageObjectKey: { $type: "string" } });
+  if (!workflow) return c.json({ code: "WORKFLOW_IMAGE_NOT_FOUND", message: "工作流图片不存在" }, 404);
+  c.header("Cache-Control", "public, max-age=300");
+  return c.redirect(createPresignedDownloadUrl(workflow.imageObjectKey, { expiresIn: 900 }), 302);
+});
+
+app.get("/api/admin/workflows", async (c) => {
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  await ensureDefaultPublicWorkflows();
+  const workflows = await (await getCollection("publicWorkflows")).find({}).sort({ sort: 1, createdAt: -1 }).limit(500).toArray();
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  return c.json({ workflows: workflows.map(workflowJson) });
+});
+
+app.post("/api/admin/workflows/assets/presign", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  const body = await c.req.json().catch(() => ({}));
+  const contentType = String(body.contentType || "").toLowerCase();
+  const bytes = Number(body.bytes);
+  const filename = sanitizeFilename(body.filename, "workflow.png");
+  if (!WORKFLOW_IMAGE_CONTENT_TYPES.has(contentType) || !Number.isSafeInteger(bytes) || bytes < 1 || bytes > WORKFLOW_IMAGE_MAX_BYTES) {
+    return c.json({ code: "VALIDATION_ERROR", message: "请上传不超过 20MB 的 PNG、JPG、WebP 或 GIF 图片" }, 400);
+  }
+  const uploadId = new ObjectId();
+  const objectKey = `workflows/images/${uploadId}-${filename}`;
+  const requiredHeaders = { "Content-Type": contentType };
+  const now = new Date();
+  await (await getCollection("workflowImageUploads")).insertOne({ _id: uploadId, objectKey, filename, contentType, bytes, status: "uploading", createdBy: new ObjectId(auth.user.id), createdAt: now, expiresAt: new Date(now.getTime() + 60 * 60_000) });
+  return c.json({ uploadId: uploadId.toString(), uploadUrl: createPresignedPutUrl(objectKey, { headers: requiredHeaders }), requiredHeaders, expiresIn: 3600 }, 201);
+});
+
+app.post("/api/admin/workflows/assets/:uploadId/complete", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("uploadId"))) return c.json({ code: "UPLOAD_NOT_FOUND", message: "上传记录不存在" }, 404);
+  const uploads = await getCollection("workflowImageUploads");
+  const upload = await uploads.findOne({ _id: new ObjectId(c.req.param("uploadId")), status: "uploading" });
+  if (!upload) return c.json({ code: "UPLOAD_NOT_FOUND", message: "上传记录不存在或已完成" }, 404);
+  const head = await headObject(upload.objectKey);
+  if (objectSize(head) !== upload.bytes) return c.json({ code: "UPLOAD_SIZE_MISMATCH", message: "COS 文件大小校验失败" }, 409);
+  await uploads.updateOne({ _id: upload._id, status: "uploading" }, { $set: { status: "ready", completedAt: new Date() } });
+  return c.json({ uploadId: upload._id.toString(), status: "ready" });
+});
+
+app.post("/api/admin/workflows", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  const body = await c.req.json().catch(() => ({}));
+  const name = String(body.name || "").trim();
+  const description = String(body.description || "").trim();
+  const url = workflowTargetUrl(body.url);
+  if (name.length < 2 || name.length > 60 || description.length > 300 || !url) return c.json({ code: "VALIDATION_ERROR", message: "请填写 2–60 字名称和有效站内路径或 HTTPS 链接" }, 400);
+  let image = { imageMode: "bundled", imageUrl: "/assets/workflow-worker-v1.png" };
+  if (body.imageUploadId) {
+    if (!ObjectId.isValid(body.imageUploadId)) return c.json({ code: "UPLOAD_NOT_FOUND", message: "图片上传记录无效" }, 400);
+    const upload = await (await getCollection("workflowImageUploads")).findOneAndUpdate({ _id: new ObjectId(body.imageUploadId), status: "ready" }, { $set: { status: "attached", attachedAt: new Date() } }, { returnDocument: "after" });
+    if (!upload) return c.json({ code: "UPLOAD_NOT_READY", message: "请等待图片上传完成" }, 409);
+    image = { imageMode: "cos", imageObjectKey: upload.objectKey, imageContentType: upload.contentType };
+  }
+  const now = new Date();
+  const result = await (await getCollection("publicWorkflows")).insertOne({ name, description, url, ...image, status: body.status === "disabled" ? "disabled" : "active", sort: Number.isFinite(Number(body.sort)) ? Math.trunc(Number(body.sort)) : 100, createdBy: new ObjectId(auth.user.id), createdAt: now, updatedAt: now });
+  const workflow = await (await getCollection("publicWorkflows")).findOne({ _id: result.insertedId });
+  return c.json({ workflow: workflowJson(workflow) }, 201);
+});
+
+app.put("/api/admin/workflows/:id", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "WORKFLOW_NOT_FOUND", message: "工作流不存在" }, 404);
+  const workflows = await getCollection("publicWorkflows");
+  const current = await workflows.findOne({ _id: new ObjectId(c.req.param("id")) });
+  if (!current) return c.json({ code: "WORKFLOW_NOT_FOUND", message: "工作流不存在" }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const name = String(body.name ?? current.name).trim();
+  const description = String(body.description ?? current.description ?? "").trim();
+  const url = workflowTargetUrl(body.url ?? current.url);
+  if (name.length < 2 || name.length > 60 || description.length > 300 || !url) return c.json({ code: "VALIDATION_ERROR", message: "工作流信息不完整" }, 400);
+  const set = { name, description, url, status: body.status === "disabled" ? "disabled" : "active", sort: Number.isFinite(Number(body.sort)) ? Math.trunc(Number(body.sort)) : Number(current.sort || 100), updatedAt: new Date(), updatedBy: new ObjectId(auth.user.id) };
+  let oldObjectKey = null;
+  if (body.imageUploadId) {
+    if (!ObjectId.isValid(body.imageUploadId)) return c.json({ code: "UPLOAD_NOT_FOUND", message: "图片上传记录无效" }, 400);
+    const upload = await (await getCollection("workflowImageUploads")).findOneAndUpdate({ _id: new ObjectId(body.imageUploadId), status: "ready" }, { $set: { status: "attached", attachedAt: new Date() } }, { returnDocument: "after" });
+    if (!upload) return c.json({ code: "UPLOAD_NOT_READY", message: "请等待图片上传完成" }, 409);
+    oldObjectKey = current.imageMode === "cos" ? current.imageObjectKey : null;
+    Object.assign(set, { imageMode: "cos", imageObjectKey: upload.objectKey, imageContentType: upload.contentType });
+  }
+  const updated = await workflows.findOneAndUpdate({ _id: current._id }, { $set: set }, { returnDocument: "after" });
+  if (oldObjectKey) await deleteObject(oldObjectKey).catch(() => null);
+  return c.json({ workflow: workflowJson(updated) });
+});
+
+app.delete("/api/admin/workflows/:id", async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "WORKFLOW_NOT_FOUND", message: "工作流不存在" }, 404);
+  const workflows = await getCollection("publicWorkflows");
+  const workflow = await workflows.findOne({ _id: new ObjectId(c.req.param("id")) });
+  if (!workflow) return c.json({ code: "WORKFLOW_NOT_FOUND", message: "工作流不存在" }, 404);
+  await workflows.deleteOne({ _id: workflow._id });
+  if (workflow.imageMode === "cos" && workflow.imageObjectKey) await deleteObject(workflow.imageObjectKey).catch(() => null);
+  return c.json({ ok: true });
+});
+
 app.get("/api/billing/plans", async (c) => {
   const pricing = await currentSubscriptionPricing();
   c.header("Cache-Control", "no-store, max-age=0");
   return c.json({
     plans: [
       { id: "free", name: "普通用户", monthlyFen: 0, yearlyFen: 0, autoRenew: false },
-      { id: "member", name: "会员用户", monthlyFen: pricing.monthly.amountFen, yearlyFen: pricing.yearly.amountFen, autoRenew: true },
+      { id: "member", name: "会员用户", monthlyFen: pricing.monthly.amountFen, yearlyFen: pricing.yearly.amountFen, autoRenew: false, renewalMode: "manual", reminderDays: RENEWAL_REMINDER_DAYS },
       { id: "custom", name: "深度定制", pricing: "结果式付费 · 利润五五分", autoRenew: false },
     ],
     providers: {
-      mode: "coming_soon",
-      alipay: false,
-      wechat: false,
+      mode: "live",
+      wechat: true,
       offline: true,
-      autoRenew: { alipay: false, wechat: false },
+      autoRenew: { wechat: false },
       availability: ONLINE_PAYMENT_AVAILABILITY,
     },
     pricingRevision: pricing.revision,
   });
+});
+
+app.get("/api/cron/subscription-reminders", async (c) => {
+  const cronSecret = String(process.env.CRON_SECRET || "").trim();
+  const authorization = String(c.req.header("authorization") || "");
+  if (!cronSecret || authorization !== `Bearer ${cronSecret}`) {
+    return c.json({ code: "CRON_UNAUTHORIZED", message: "定时任务认证失败" }, 401);
+  }
+  c.header("Cache-Control", "no-store, max-age=0");
+  return c.json(await sendDailyRenewalReminders());
 });
 
 app.post("/api/billing/orders", async (c) => {
@@ -4562,21 +4834,14 @@ app.post("/api/billing/orders", async (c) => {
   const auth = await authenticate(c);
   if (auth.error) return auth.error;
   const body = await c.req.json();
-  const provider = ["wechat", "alipay", "offline"].includes(body.provider) ? body.provider : null;
+  const provider = ["wechat", "offline"].includes(body.provider) ? body.provider : null;
   const cycle = body.cycle === "year" ? "year" : body.cycle === "month" ? "month" : null;
-  const kind = body.kind === "recharge" ? "recharge" : "subscription";
-  if (provider === "wechat" || provider === "alipay") {
-    const channel = ONLINE_PAYMENT_AVAILABILITY.channels[provider];
-    return c.json({
-      code: "ONLINE_PAYMENT_COMING_SOON",
-      message: provider === "alipay" ? channel.message : `${ONLINE_PAYMENT_AVAILABILITY.notice}${channel.message}`,
-      paymentAvailability: ONLINE_PAYMENT_AVAILABILITY,
-    }, 503);
-  }
+  const kind = body.kind === "recharge" ? "recharge" : body.kind === "custom" ? "custom" : "subscription";
   const now = new Date();
   const pricing = kind === "subscription" ? await currentSubscriptionPricing(now) : null;
-  let amountFen = kind === "recharge" ? Number(body.amountFen) : cycle === "year" ? pricing.yearly.amountFen : pricing.monthly.amountFen;
-  if (!provider || !Number.isInteger(amountFen) || amountFen < 100 || amountFen > 5_000_000) {
+  let amountFen = kind === "recharge" || kind === "custom" ? Number(body.amountFen) : cycle === "year" ? pricing.yearly.amountFen : pricing.monthly.amountFen;
+  const maxAmountFen = kind === "custom" ? CUSTOM_ORDER_MAX_FEN : SUBSCRIPTION_PRICE_MAX_FEN;
+  if (!provider || !Number.isInteger(amountFen) || amountFen < 100 || amountFen > maxAmountFen) {
     return c.json({ code: "VALIDATION_ERROR", message: "支付方式、周期或金额不正确" }, 400);
   }
   if (!cycle && kind === "subscription") return c.json({ code: "VALIDATION_ERROR", message: "订阅周期不正确" }, 400);
@@ -4603,7 +4868,7 @@ app.post("/api/billing/orders", async (c) => {
     ? await effectiveLocalPrice({ cycle, at: now })
     : null;
   if (localPriceVersion) amountFen = localPriceVersion.amountFen;
-  const autoRenew = autoRenewRequested && !isMonthlyUpgrade;
+  const autoRenew = false;
 
   if (provider === "offline") {
     let plans = [];
@@ -4681,10 +4946,16 @@ app.post("/api/billing/orders", async (c) => {
     return c.json({ id: result.insertedId.toString(), orderNo, status: "pending_review", mode: "offline", amountFen, upgradeCreditFen }, 201);
   }
 
-  const accessToken = await getChandlerAccessToken(auth.session);
+  const accessToken = null;
   let result;
   if (kind === "subscription" && !isMonthlyUpgrade) {
-    result = await createSubscriptionCheckout(accessToken, { cycle, channel: provider, merchantOrderNo: orderNo, expectedAmountFen: amountFen });
+    result = await createSubscriptionCheckout(accessToken, {
+      cycle,
+      channel: provider,
+      merchantOrderNo: orderNo,
+      expectedAmountFen: amountFen,
+      partnerData: { user_id: auth.user.id, user_email: auth.user.email },
+    });
   } else if (kind === "subscription") {
     result = await createDirectPaymentOrder(accessToken, {
       merchantOrderNo: orderNo,
@@ -4699,9 +4970,9 @@ app.post("/api/billing/orders", async (c) => {
       merchantOrderNo: orderNo,
       channel: provider,
       amountFen,
-      subject: "古龙账户充值",
-      source: "gulong-web-topup",
-      partnerData: { schema_version: 1, kind: "wallet_topup", amount_fen: amountFen },
+      subject: kind === "custom" ? String(body.subject || "古龙深度定制服务订单").trim().slice(0, 80) : "古龙账户充值",
+      source: kind === "custom" ? "gulong-web-custom-order" : "gulong-web-topup",
+      partnerData: { schema_version: 3, kind: kind === "custom" ? "custom_service_order" : "wallet_topup", amount_fen: amountFen, user_id: auth.user.id, user_email: auth.user.email },
     });
   }
   const chandlerAmountFen = Number(result.checkout?.amount ?? result.order?.amount);
@@ -4737,7 +5008,7 @@ app.post("/api/billing/orders", async (c) => {
     upgradeCreditFen,
     autoRenewRequested,
     autoRenewAvailable: !isMonthlyUpgrade,
-    priceSource: kind === "subscription" && !isMonthlyUpgrade ? "chandler-partner-sku" : localPriceVersion ? "website-local" : "chandler",
+    priceSource: kind === "subscription" ? "website-membership-ledger" : "chandler",
   }, 201);
 });
 
@@ -4751,10 +5022,14 @@ async function activatePayment(orderNo, providerTransactionId) {
   if (!payment) return;
   if (payment.kind === "subscription") {
     const existingSubscription = await (await getCollection("subscriptions")).findOne({ ownerId: payment.ownerId });
+    const now = new Date();
+    const existingEnd = existingSubscription?.currentPeriodEnd ? new Date(existingSubscription.currentPeriodEnd) : null;
+    const extendingActivePeriod = Boolean(existingEnd && existingEnd > now);
+    const renewalBase = extendingActivePeriod ? existingEnd : now;
     const start = payment.upgradeFrom === "month"
-      ? new Date(payment.upgradeBaseStart || existingSubscription?.currentPeriodStart || new Date())
-      : new Date();
-    const end = new Date(start);
+      ? new Date(payment.upgradeBaseStart || existingSubscription?.currentPeriodStart || now)
+      : extendingActivePeriod ? new Date(existingSubscription.currentPeriodStart || now) : now;
+    const end = new Date(payment.upgradeFrom === "month" ? start : renewalBase);
     if (payment.cycle === "year") end.setFullYear(end.getFullYear() + 1);
     else end.setMonth(end.getMonth() + 1);
     await (await getCollection("subscriptions")).updateOne(
@@ -4767,20 +5042,43 @@ async function activatePayment(orderNo, providerTransactionId) {
           status: "active",
           currentPeriodStart: start,
           currentPeriodEnd: end,
-          autoRenew: payment.autoRenew,
+          autoRenew: false,
           updatedAt: new Date(),
         },
         $setOnInsert: { createdAt: new Date() },
       },
       { upsert: true },
     );
-  } else {
+    await notifyUserOnce(payment.ownerId, "subscription_payment_succeeded", "会员续费已生效", `微信支付已到账，${payment.cycle === "year" ? "年度" : "月度"}会员权益已同步到官网与桌面端。`, { orderNo: payment.orderNo });
+  } else if (payment.kind === "recharge") {
     await (await getCollection("wallets")).updateOne(
       { ownerId: payment.ownerId },
       { $inc: { balanceFen: payment.amountFen }, $set: { updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } },
       { upsert: true },
     );
+  } else if (payment.kind === "custom") {
+    await notifyUserOnce(payment.ownerId, "custom_order_paid", "深度定制订单支付成功", "微信支付已到账，我们会根据订单信息与你联系并推进交付。", { orderNo: payment.orderNo });
   }
+}
+
+function chandlerOrderPaid(order = {}) {
+  return ["paid", "success", "succeeded", "completed"].includes(String(order.status || order.trade_state || "").toLowerCase());
+}
+
+async function reconcileChandlerPayment(orderNo) {
+  const payment = await (await getCollection("payments")).findOne({ orderNo });
+  if (!payment) return null;
+  if (payment.status === "paid") return payment;
+  const order = await getDirectPaymentOrder(orderNo);
+  const remoteAmount = Number(order.amount);
+  if (Number.isSafeInteger(remoteAmount) && remoteAmount !== payment.amountFen) {
+    throw new ChandlerError("Chandler 订单金额与官网订单不一致", { status: 409, code: "PAYMENT_AMOUNT_MISMATCH" });
+  }
+  if (chandlerOrderPaid(order)) {
+    await activatePayment(orderNo, order.transaction_id || order.channel_transaction_no || orderNo);
+    return (await getCollection("payments")).findOne({ orderNo });
+  }
+  return { ...payment, remoteStatus: order.status || null };
 }
 
 app.post("/api/billing/mock/complete", async (c) => {
@@ -4804,38 +5102,44 @@ app.post("/api/billing/mock/complete", async (c) => {
   return c.json({ ok: true, orderNo, status: "paid" });
 });
 
-app.post("/api/billing/webhooks/alipay", async (c) => {
-  const payload = await c.req.parseBody();
-  if (!verifyAlipayNotification(payload)) return c.text("failure", 400);
-  if (["TRADE_SUCCESS", "TRADE_FINISHED"].includes(payload.trade_status)) {
-    await activatePayment(payload.out_trade_no, payload.trade_no);
+app.post("/api/billing/webhooks/chandler", async (c) => {
+  const rawBody = Buffer.from(await c.req.arrayBuffer());
+  if (!verifyChandlerWebhook(rawBody, c.req.header("x-chandler-signature"))) {
+    return c.json({ code: "INVALID_SIGNATURE", message: "Chandler Webhook 签名验证失败" }, 401);
   }
-  return c.text("success");
+  const notification = JSON.parse(rawBody.toString("utf8"));
+  const orderNo = String(notification.platform_order_no || notification.data?.platform_order_no || "").trim();
+  if (orderNo) await reconcileChandlerPayment(orderNo);
+  return c.json({ ok: true });
 });
 
-app.post("/api/billing/webhooks/wechat", async (c) => {
-  const rawBody = await c.req.text();
-  if (!verifyWechatNotification(c.req.raw.headers, rawBody)) {
-    return c.json({ code: "FAIL", message: "签名验证失败" }, 401);
-  }
-  const notification = JSON.parse(rawBody);
-  const resource = decryptWechatResource(notification.resource);
-  if (resource.trade_state === "SUCCESS") {
-    await activatePayment(resource.out_trade_no, resource.transaction_id);
-  }
-  return c.json({ code: "SUCCESS", message: "成功" });
+app.get("/api/billing/payments/:orderNo/status", async (c) => {
+  const auth = await authenticate(c);
+  if (auth.error) return auth.error;
+  const orderNo = String(c.req.param("orderNo") || "").trim();
+  const payment = await (await getCollection("payments")).findOne({ orderNo, ownerId: new ObjectId(auth.user.id) });
+  if (!payment) return c.json({ code: "ORDER_NOT_FOUND", message: "订单不存在" }, 404);
+  const reconciled = await reconcileChandlerPayment(orderNo);
+  c.header("Cache-Control", "no-store, max-age=0");
+  return c.json({ orderNo, status: reconciled?.status || "pending", remoteStatus: reconciled?.remoteStatus || null });
 });
 
 app.get("/api/billing/subscription", async (c) => {
   const auth = await authenticate(c);
   if (auth.error) return auth.error;
-  const subscription = await (await getCollection("subscriptions")).findOne({ ownerId: new ObjectId(auth.user.id) });
-  const wallet = await (await getCollection("wallets")).findOne({ ownerId: new ObjectId(auth.user.id) });
+  const ownerId = new ObjectId(auth.user.id);
+  const pendingOrders = await (await getCollection("payments")).find({ ownerId, chandler: true, status: "pending" }, { projection: { orderNo: 1 } }).sort({ createdAt: -1 }).limit(8).toArray();
+  await mapWithConcurrency(pendingOrders, 4, (item) => reconcileChandlerPayment(item.orderNo).catch(() => null));
+  const evaluatedLifecycle = await refreshSubscriptionLifecycle(ownerId);
+  const lifecycle = auth.user.role === "admin" ? { ...evaluatedLifecycle, restricted: false, renewalDue: false } : evaluatedLifecycle;
+  const subscription = await (await getCollection("subscriptions")).findOne({ ownerId });
+  const wallet = await (await getCollection("wallets")).findOne({ ownerId });
   const subscriptionStatus = subscription
     ? subscriptionPeriodState(subscription.currentPeriodStart, subscription.currentPeriodEnd)
     : null;
   return c.json({
     subscription: subscription ? { ...subscription, status: subscriptionStatus, id: subscription._id.toString(), _id: undefined, ownerId: undefined } : null,
+    subscriptionLifecycle: lifecycle,
     balanceFen: wallet?.balanceFen || 0,
   });
 });
@@ -4892,7 +5196,7 @@ app.get("/api/admin/payments", async (c) => {
 
 app.get("/api/admin/offline-payments", async (c) => {
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
-  await syncChandlerOfflinePayments(await getChandlerAccessToken(auth.session).catch(() => null)).catch(() => null);
+  await syncChandlerOfflinePayments(await getAdminChandlerAccessToken(auth).catch(() => null)).catch(() => null);
   c.header("Cache-Control", "private, no-store, max-age=0");
   const requestedStatus = c.req.query("status");
   const page = Math.max(1, Number.parseInt(c.req.query("page") || "1", 10) || 1);
@@ -4935,7 +5239,7 @@ app.post("/api/admin/offline-payments/:id/approve", async (c) => {
     orderId: c.req.param("id"),
     actorUserId: auth.user.id,
     actorChandlerUserId: readExternalAuth(auth.session)?.chandlerUserId,
-    accessToken: await getChandlerAccessToken(auth.session).catch(() => null),
+    accessToken: await getAdminChandlerAccessToken(auth).catch(() => null),
     validFrom: body.validFrom,
     validUntil: body.validUntil,
   });
@@ -4956,7 +5260,7 @@ app.post("/api/admin/offline-payments/:id/reject", async (c) => {
     orderId: c.req.param("id"),
     actorUserId: auth.user.id,
     actorChandlerUserId: readExternalAuth(auth.session)?.chandlerUserId,
-    accessToken: await getChandlerAccessToken(auth.session).catch(() => null),
+    accessToken: await getAdminChandlerAccessToken(auth).catch(() => null),
     reason: body.reason,
   });
   if (result.error) return c.json({ code: result.error.code, message: result.error.message }, result.error.status);
@@ -5306,6 +5610,7 @@ app.openapi(desktopSubscriptionStatusRoute, async (c) => {
   const auth = await authenticateDesktopChandler(c);
   if (auth.error) return auth.error;
   const now = new Date();
+  const lifecycle = await refreshSubscriptionLifecycle(auth.user._id, now);
   const subscription = await (await getCollection("subscriptions")).findOne({ ownerId: auth.user._id });
   const status = subscription
     ? subscriptionPeriodState(subscription.currentPeriodStart, subscription.currentPeriodEnd, now)
@@ -5315,6 +5620,10 @@ app.openapi(desktopSubscriptionStatusRoute, async (c) => {
   c.header("Pragma", "no-cache");
   return c.json({
     isMember: auth.identity.role === "admin" || Boolean(active),
+    restricted: auth.identity.role === "admin" ? false : lifecycle.restricted,
+    renewalDue: lifecycle.renewalDue,
+    daysRemaining: lifecycle.daysRemaining,
+    renewalAction: lifecycle.restricted || lifecycle.renewalDue ? { type: "open_url", url: "https://www.sologle.com/pricing", paymentChannel: "wechat" } : null,
     subscription: subscription ? {
       plan: subscription.plan || "member",
       cycle: subscription.cycle || null,
@@ -5322,7 +5631,8 @@ app.openapi(desktopSubscriptionStatusRoute, async (c) => {
       status,
       currentPeriodStart: subscription.currentPeriodStart || null,
       currentPeriodEnd: subscription.currentPeriodEnd || null,
-      autoRenew: Boolean(subscription.autoRenew),
+      autoRenew: false,
+      renewalMode: "manual",
     } : null,
     checkedAt: now,
   });
@@ -5331,6 +5641,8 @@ app.openapi(desktopSubscriptionStatusRoute, async (c) => {
 app.openapi(createTaskRoute, async (c) => {
   const auth = await authenticate(c, { scopes: ["tasks:write"] });
   if (auth.error) return auth.error;
+  const lifecycle = await refreshSubscriptionLifecycle(new ObjectId(auth.user.id));
+  if (auth.user.role !== "admin" && lifecycle.restricted) return c.json({ code: "SUBSCRIPTION_EXPIRED", message: "会员已到期，请使用微信续费后继续创建任务", renewalUrl: "https://www.sologle.com/pricing" }, 402);
   const body = c.req.valid("json");
   const now = new Date();
   const result = await (await getCollection("tasks")).insertOne({
@@ -5373,6 +5685,8 @@ app.openapi(getTaskRoute, async (c) => {
 app.openapi(createMemoryRoute, async (c) => {
   const auth = await authenticate(c, { scopes: ["brain:write"] });
   if (auth.error) return auth.error;
+  const lifecycle = await refreshSubscriptionLifecycle(new ObjectId(auth.user.id));
+  if (auth.user.role !== "admin" && lifecycle.restricted) return c.json({ code: "SUBSCRIPTION_EXPIRED", message: "会员已到期，请续费后继续写入第二大脑" }, 402);
   const body = c.req.valid("json");
   const content = body.content.trim();
   const result = await (await getCollection("memories")).insertOne({
@@ -5453,12 +5767,74 @@ app.openAPIRegistry.registerComponent("securitySchemes", "bearerAuth", {
   description: "开发者接口使用 gla_live_...；桌面同步接口使用桌面端当前 Chandler Access Token。",
 });
 
+app.openAPIRegistry.registerComponent("securitySchemes", "chandlerWebhookSignature", {
+  type: "apiKey",
+  in: "header",
+  name: "X-Chandler-Signature",
+  description: "Chandler v3.2 支付通知 HMAC-SHA256 十六进制签名；必须基于原始请求体校验。",
+});
+
+app.openAPIRegistry.registerPath({
+  method: "get",
+  path: "/api/workflows",
+  tags: ["Public Workflows"],
+  summary: "搜索官网工作流",
+  security: [],
+  request: { query: z.object({ q: z.string().optional() }) },
+  responses: { 200: { description: "工作流列表", content: { "application/json": { schema: z.object({ workflows: z.array(z.object({ id: z.string(), name: z.string(), description: z.string(), url: z.string(), imageUrl: z.string(), status: z.string() })), query: z.string() }) } } } },
+});
+
+app.openAPIRegistry.registerPath({
+  method: "post",
+  path: "/api/billing/orders",
+  tags: ["Billing"],
+  summary: "创建微信支付订单",
+  description: "仅支持微信。subscription 创建月/年手动续费订单；recharge 创建充值订单；custom 创建自定义金额深度定制订单。金额单位为分。",
+  request: { body: { content: { "application/json": { schema: z.object({ kind: z.enum(["subscription", "recharge", "custom"]), provider: z.literal("wechat"), cycle: z.enum(["month", "year"]).optional(), amountFen: z.number().int().min(100).optional(), subject: z.string().max(80).optional() }) } } } },
+  responses: { 201: { description: "Chandler 订单和微信预支付信息" }, 400: { description: "参数或渠道不受支持" }, 401: { description: "未登录" } },
+});
+
+app.openAPIRegistry.registerPath({
+  method: "get",
+  path: "/api/billing/payments/{orderNo}/status",
+  tags: ["Billing"],
+  summary: "查询并同步微信支付状态",
+  request: { params: z.object({ orderNo: z.string() }) },
+  responses: { 200: { description: "支付状态" }, 404: { description: "订单不存在" } },
+});
+
+app.openAPIRegistry.registerPath({
+  method: "post",
+  path: "/api/billing/webhooks/chandler",
+  tags: ["Billing"],
+  summary: "接收 Chandler 支付通知",
+  security: [{ chandlerWebhookSignature: [] }],
+  responses: { 200: { description: "通知已验签并幂等处理" }, 401: { description: "签名无效" } },
+});
+
+app.openAPIRegistry.registerPath({
+  method: "get",
+  path: "/api/admin/workflows",
+  tags: ["Administration"],
+  summary: "管理员读取工作流目录",
+  responses: { 200: { description: "全部工作流" }, 403: { description: "需要管理员角色" } },
+});
+
+app.openAPIRegistry.registerPath({
+  method: "post",
+  path: "/api/admin/workflows",
+  tags: ["Administration"],
+  summary: "管理员创建工作流",
+  request: { body: { content: { "application/json": { schema: z.object({ name: z.string().min(2).max(60), description: z.string().max(300).optional(), url: z.string(), imageUploadId: z.string().optional(), status: z.enum(["active", "disabled"]).optional(), sort: z.number().int().optional() }) } } } },
+  responses: { 201: { description: "工作流已创建" }, 403: { description: "需要管理员角色" } },
+});
+
 app.doc("/api/openapi.json", {
   openapi: "3.1.0",
   info: {
     title: "古龙 Gulong Agent Engine API",
-    version: "1.6.0",
-    description: "面向开发者的任务执行、长期记忆、用户模型配置、第二大脑附件、发行版本、Chandler 统一账号、应用级 SKU 价格版本、计费、管理员经营分析与桌面端个人微信订单审核接口。API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
+    version: "1.7.0",
+    description: "已按 Chandler v3.2 升级：服务端管理与支付调用使用环境变量 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费。另提供任务、第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
   },
   servers: [
     { url: "/", description: "当前环境" },

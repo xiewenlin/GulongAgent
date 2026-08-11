@@ -12,7 +12,6 @@ export function paymentCapabilities() {
   const mode = process.env.PAYMENT_MODE === "live" ? "live" : "mock";
   return {
     mode,
-    alipay: mode === "mock" || configured(["ALIPAY_APP_ID", "ALIPAY_PRIVATE_KEY", "ALIPAY_PUBLIC_KEY"]),
     wechat: mode === "mock" || configured([
       "WECHATPAY_APP_ID",
       "WECHATPAY_MCH_ID",
@@ -21,54 +20,9 @@ export function paymentCapabilities() {
       "WECHATPAY_API_V3_KEY",
     ]),
     autoRenew: {
-      alipay: Boolean(process.env.ALIPAY_AUTOPAY_PRODUCT_CODE),
-      wechat: Boolean(process.env.WECHATPAY_AUTORENEW_APP_ID),
+      wechat: false,
     },
   };
-}
-
-function canonicalParams(params) {
-  return Object.keys(params)
-    .filter((key) => params[key] !== undefined && params[key] !== "" && key !== "sign")
-    .sort()
-    .map((key) => `${key}=${params[key]}`)
-    .join("&");
-}
-
-export function buildAlipayPagePayUrl({ orderNo, amountFen, subject }) {
-  const gateway = process.env.ALIPAY_GATEWAY || "https://openapi.alipay.com/gateway.do";
-  const params = {
-    app_id: process.env.ALIPAY_APP_ID,
-    method: "alipay.trade.page.pay",
-    format: "JSON",
-    charset: "utf-8",
-    sign_type: "RSA2",
-    timestamp: new Date().toISOString().replace("T", " ").slice(0, 19),
-    version: "1.0",
-    notify_url: process.env.ALIPAY_NOTIFY_URL,
-    return_url: process.env.ALIPAY_RETURN_URL,
-    biz_content: JSON.stringify({
-      out_trade_no: orderNo,
-      product_code: "FAST_INSTANT_TRADE_PAY",
-      total_amount: (amountFen / 100).toFixed(2),
-      subject,
-    }),
-  };
-  const signer = createSign("RSA-SHA256");
-  signer.update(canonicalParams(params), "utf8");
-  signer.end();
-  params.sign = signer.sign(normalizePem(process.env.ALIPAY_PRIVATE_KEY), "base64");
-  return `${gateway}?${new URLSearchParams(params).toString()}`;
-}
-
-export function verifyAlipayNotification(payload) {
-  const verifier = createVerify("RSA-SHA256");
-  const canonical = canonicalParams(
-    Object.fromEntries(Object.entries(payload).filter(([key]) => key !== "sign_type")),
-  );
-  verifier.update(canonical, "utf8");
-  verifier.end();
-  return verifier.verify(normalizePem(process.env.ALIPAY_PUBLIC_KEY), payload.sign, "base64");
 }
 
 function wechatAuthorization(method, path, body) {

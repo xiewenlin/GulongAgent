@@ -23,7 +23,9 @@ import { AdminPage } from "./components/AdminPage.jsx";
 import { HomePage } from "./components/HomePage.jsx";
 import { ProductManualPage } from "./components/ProductManualPage.jsx";
 import { SecondBrainPage } from "./components/SecondBrainPage.jsx";
+import { SubscriptionReminderDialog } from "./components/SubscriptionReminderDialog.jsx";
 import { WorkerPage } from "./components/WorkerPages.jsx";
+import { ShortDramaPage, WorkflowPage } from "./components/WorkflowPages.jsx";
 import {
   BrainUploadPage,
   DeveloperPage,
@@ -37,8 +39,8 @@ import { themes } from "./data/site.js";
 const primaryNav = [
   { label: "产品能力", href: "/manual" },
   { label: "第二大脑", href: "/brain" },
-  { label: "威客", href: "/worker?tab=publish" },
-  { label: "开发者", href: "/developer" },
+  { label: "短剧", href: "/short-drama" },
+  { label: "工作流", href: "/workflows" },
   { label: "定价", href: "/pricing" },
   { label: "下载", href: "/download" },
   { label: "吐槽", href: "/feedback" },
@@ -63,6 +65,8 @@ export function App() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [notificationCount, setNotificationCount] = useState(0);
+  const [subscriptionLifecycle, setSubscriptionLifecycle] = useState(null);
+  const [renewalOpen, setRenewalOpen] = useState(false);
   const [theme, setTheme] = useState(() => window.localStorage.getItem("gulong-web-theme") || "porcelain");
   const activeTheme = themes.find((item) => item.id === theme) || themes[0];
   const themeIcon = themeIconUrl(activeTheme);
@@ -148,8 +152,19 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    apiFetch("/api/auth/me").then((result) => setUser(result.user)).catch(() => setUser(null));
+    apiFetch("/api/auth/me").then((result) => { setUser(result.user); setSubscriptionLifecycle(result.subscriptionLifecycle || null); }).catch(() => setUser(null));
   }, []);
+
+  useEffect(() => {
+    if (!user) { setSubscriptionLifecycle(null); setRenewalOpen(false); return; }
+    apiFetch("/api/billing/subscription").then((result) => {
+      const lifecycle = result.subscriptionLifecycle || null;
+      setSubscriptionLifecycle(lifecycle);
+      if (!lifecycle || (!lifecycle.restricted && !lifecycle.renewalDue)) return;
+      const reminderKey = `gulong-renewal-reminder-${new Date().toISOString().slice(0, 10)}`;
+      if (lifecycle.restricted || window.localStorage.getItem(reminderKey) !== "dismissed") setRenewalOpen(true);
+    }).catch(() => {});
+  }, [user?.id]);
 
   useEffect(() => {
     if (!user) { setNotificationCount(0); return undefined; }
@@ -171,6 +186,10 @@ export function App() {
 
   function navigate(to) {
     if (to.startsWith("http")) return window.location.assign(to);
+    if (subscriptionLifecycle?.restricted && ["/brain", "/upload"].some((path) => to.startsWith(path))) {
+      setRenewalOpen(true);
+      return;
+    }
     window.history.pushState({}, "", to);
     setRoute(currentRoute());
     if (window.location.hash) {
@@ -208,6 +227,8 @@ export function App() {
   else if (pathname === "/manual") page = <ProductManualPage navigate={navigate} />;
   else if (pathname === "/brain") page = <SecondBrainPage user={user} openAuth={openAuth} navigate={navigate} />;
   else if (pathname === "/worker") page = <WorkerPage key={route} user={user} openAuth={openAuth} navigate={navigate} />;
+  else if (pathname === "/workflows") page = <WorkflowPage navigate={navigate} />;
+  else if (pathname === "/short-drama") page = <ShortDramaPage />;
   else if (pathname === "/download") page = <DownloadPage />;
   else if (pathname === "/developer") page = <DeveloperPage user={user} openAuth={openAuth} />;
   else if (pathname === "/pricing") page = <PricingPage user={user} openAuth={openAuth} navigate={navigate} />;
@@ -248,8 +269,8 @@ export function App() {
       <footer className="site-footer">
         <div className="footer-main section-shell">
           <div className="footer-brand"><img src={themeIcon} alt="" /><div><strong>古龙</strong><span>Gulong Agent Engine</span></div><p>不是又一个聊天机器人，而是一套会持续成长的 AI 操作系统。</p></div>
-          <div><h3>产品</h3><button onClick={() => navigate("/manual")}>产品手册</button><button onClick={() => navigate("/brain")}>第二大脑</button><button onClick={() => navigate("/worker?tab=publish")}>威客市场</button><button onClick={() => navigate("/pricing")}>订阅与定价</button></div>
-          <div><h3>开发者</h3><button onClick={() => navigate("/developer")}>开放平台</button><a href="/api/docs" target="_blank" rel="noreferrer">API 文档</a><a href="/api/openapi.json" target="_blank" rel="noreferrer">OpenAPI JSON</a></div>
+          <div><h3>产品</h3><button onClick={() => navigate("/manual")}>产品手册</button><button onClick={() => navigate("/brain")}>第二大脑</button><button onClick={() => navigate("/workflows")}>工作流</button><button onClick={() => navigate("/short-drama")}>短剧</button><button onClick={() => navigate("/pricing")}>订阅与定价</button></div>
+          <div><h3>开放能力</h3><button onClick={() => navigate("/developer")}>API Key</button><a href="/api/docs" target="_blank" rel="noreferrer">API 文档</a><a href="/api/openapi.json" target="_blank" rel="noreferrer">OpenAPI JSON</a></div>
           <div><h3>支持</h3><button onClick={() => navigate("/download")}>软件下载</button><button onClick={() => navigate("/feedback")}>问题反馈</button><button onClick={() => setThemeOpen(true)}>自定义主题</button></div>
         </div>
         <div className="footer-bottom section-shell"><span>© 2026 古龙 Gulong Agent Engine</span><span>AI 智能体 · 非自然人</span><div><a href="#privacy">隐私政策</a><a href="#terms">服务条款</a></div></div>
@@ -258,6 +279,7 @@ export function App() {
       <button className="floating-feedback" type="button" onClick={() => navigate("/feedback")}><ChatCircleText size={20} /><span>反馈</span></button>
 
       <AccountModal open={authOpen} initialMode={authMode} onClose={() => setAuthOpen(false)} onUser={setUser} themeIcon={themeIcon} />
+      {renewalOpen && subscriptionLifecycle && <SubscriptionReminderDialog lifecycle={subscriptionLifecycle} onRenew={() => { setRenewalOpen(false); navigate("/pricing"); }} onClose={() => { window.localStorage.setItem(`gulong-renewal-reminder-${new Date().toISOString().slice(0, 10)}`, "dismissed"); setRenewalOpen(false); }} />}
       {themeOpen && (
         <div className="theme-drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setThemeOpen(false)}>
           <aside className="theme-drawer"><button className="modal-close" onClick={() => setThemeOpen(false)}><X size={19} /></button><span>PERSONALIZE</span><h2>选择你的古龙主题</h2><p>主题保存在当前浏览器，不会影响账户数据与功能。</p><div className="theme-options">{themes.map((item) => <button type="button" key={item.id} className={theme === item.id ? "active" : ""} onClick={() => setTheme(item.id)}><span className="theme-swatches">{item.colors.map((color) => <i key={color} style={{ backgroundColor: color }} />)}</span><strong>{item.name}</strong>{theme === item.id && <CheckCircle size={18} weight="fill" />}</button>)}</div><button className="button secondary full" onClick={() => setThemeOpen(false)}>完成设置 <ArrowRight size={16} /></button></aside>

@@ -16,15 +16,15 @@
 - Chandler 离线权益凭据：RS256 JWT、JWKS 离线验签与可选设备绑定
 - 每位开发者最多 10 个可撤销 API Key，按 scope 授权
 - MiniMax API Key 使用 AES-256-GCM 加密保存；桌面端可通过 `configuration:read` 独立权限读取自己的配置
-- 智能体任务、任务状态、第二大脑记忆、工作流开放接口
+- 智能体任务、任务状态、第二大脑记忆、可搜索工作流目录与管理员工作流管理（图片直传 COS）
 - Scalar 在线接口文档与 OpenAPI 3.1 JSON
 - 合作伙伴管理、自动生成 SVG Logo、首页品牌墙与安全官网跳转
 - “主题访问权限”用户分组自动同步为发行渠道，后台一键发版，每个渠道只保留最新版
 - 腾讯云 COS 存储第二大脑 ZIP 和 Windows 安装包；MongoDB 提供关键词/日期检索索引
 - 第二大脑附件后台列表、手动下载及按日期拉取最新附件 API
 - 文字反馈与最多 9 张问题截图
-- Chandler 微信/支付宝收银台、单次充值、月/年订阅、线下支付申请与管理员确认到账
-- 官网后台直连 Chandler 管理接口：用户搜索、账号冻结/恢复、订阅查看、权益双人审批，以及 v2.2 应用级 SKU 不可变价格版本发布与历史查询
+- Chandler v3.2 微信收银台、单次充值、自定义金额订单、月/年手动续费，以及线下支付申请与管理员确认到账
+- 官网后台通过服务端 API Key 直连 Chandler v3.2 管理接口：用户搜索、账号冻结/恢复、订阅查看、权益审批，以及应用级 SKU 单次价格版本发布与历史查询
 - 管理员实时数据看板：7/30/90 天用户增长、访问来源、激活漏斗、功能采用、任务与第二大脑运营、收入结构和自动经营洞察
 - 官网访问、软件下载和发起支付采用匿名访客/会话 ID 做最小化埋点；登录用户活跃数据来自服务端会话，不采集页面输入内容
 - MongoDB Atlas 索引、会话 TTL、限流 TTL、连接池复用
@@ -37,7 +37,7 @@ flowchart LR
   B --> C[(MongoDB Atlas)]
   A -->|限时签名直传| D[腾讯云 COS 成都]
   B --> E[Chandler 公共 OpenAPI]
-  E --> F[支付宝 / 微信支付]
+  E --> F[微信支付]
   H[Windows 发行工作器] -->|领取任务与上传安装包| B
   G[第三方开发者] -->|Bearer API Key| B
 ```
@@ -46,7 +46,7 @@ flowchart LR
 - 后端：Hono、Zod OpenAPI，运行在 Vercel Node Functions。
 - 数据库：MongoDB Node.js 原生驱动，跨热实例复用连接池。
 - 文件：腾讯云 COS 私有对象，服务端签发短时 PUT/GET URL；MongoDB 只保存所有权、状态与搜索元数据。反馈截图仍可使用 Vercel Blob。
-- 安全：Chandler 统一身份、加密保存的服务端令牌、HttpOnly 会话、API Key 摘要、来源校验、限流与最小权限 CAM。
+- 安全：Chandler 统一身份；服务端优先读取 `GulongAgent` 环境变量作为 Chandler v3.2 API Key；支付通知按原始请求体执行 HMAC-SHA256 验签并二次查询订单；浏览器只接收微信预支付结果，永不接触平台密钥。另有 HttpOnly 会话、API Key 摘要、来源校验、限流与最小权限 CAM。
 
 ## 本地开发
 
