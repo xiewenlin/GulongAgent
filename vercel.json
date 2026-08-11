@@ -21,6 +21,14 @@
   ],
   "rewrites": [
     {
+      "source": "/api/agent/:path*",
+      "destination": "/api/platform?_platform_path=agent/:path*"
+    },
+    {
+      "source": "/api/admin/pearapi/:path*",
+      "destination": "/api/platform?_platform_path=admin/pearapi/:path*"
+    },
+    {
       "source": "/api/workflows/:path*",
       "destination": "/api/platform?_platform_path=workflows/:path*"
     },

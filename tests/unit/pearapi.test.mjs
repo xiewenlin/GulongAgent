@@ -82,10 +82,11 @@ test("website exposes the simplified agent while user settings no longer expose 
 });
 
 test("monthly subscription payments credit the wallet once and PearAPI routes are registered", async () => {
-  const [serverSource, dbSource, pearSource] = await Promise.all([
+  const [serverSource, dbSource, pearSource, vercel] = await Promise.all([
     readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
     readFile(new URL("../../server/db.js", import.meta.url), "utf8"),
     readFile(new URL("../../server/pearapi.js", import.meta.url), "utf8"),
+    readFile(new URL("../../vercel.json", import.meta.url), "utf8"),
   ]);
   assert.match(serverSource, /registerPearApiRoutes\(app, \{ authenticate, requireAdmin, requireTrustedMutation \}\)/);
   assert.match(serverSource, /source: "online_subscription"/);
@@ -93,4 +94,6 @@ test("monthly subscription payments credit the wallet once and PearAPI routes ar
   assert.match(dbSource, /uniq_wallet_owner/);
   assert.match(pearSource, /"credits\.key": \{ \$ne: key \}/);
   assert.match(pearSource, /limit: 30, windowMs: 5 \* 60_000/);
+  assert.match(vercel, /"source": "\/api\/agent\/:path\*"/);
+  assert.match(vercel, /"source": "\/api\/admin\/pearapi\/:path\*"/);
 });
