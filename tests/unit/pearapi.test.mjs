@@ -88,6 +88,7 @@ test("website exposes the simplified agent while user settings no longer expose 
   assert.match(appSource, /pathname === "\/agent"/);
   assert.match(appSource, /<small className="brand-web-entry">网页版入口<\/small>/);
   assert.match(agentSource, /返回官网/);
+  assert.match(agentSource, /远程模型已连接/);
   assert.match(agentSource, /拓展技能/);
   assert.match(agentSource, /剩余用量/);
   assert.match(agentSource, /MEMBERSHIP REQUIRED/);

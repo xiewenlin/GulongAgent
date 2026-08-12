@@ -270,7 +270,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
     </div>
 
     <section className="agent-workspace section-shell">
-      <header className="agent-workspace-head"><div><span>PEARAPI FREE MODEL CLOUD</span><h1>今天想完成什么？</h1><p>7 个免费模型由古龙服务端统一调度；不暴露令牌，不加载第二大脑、本地模型、插件或工作流。</p></div><div className="agent-live-status"><i className={bootstrap?.configured ? "ready" : ""} /><span>{loading ? "正在连接" : bootstrap?.configured ? "PearAPI 已连接" : "等待管理员配置"}</span></div></header>
+      <header className="agent-workspace-head"><div><span>PEARAPI FREE MODEL CLOUD</span><h1>今天想完成什么？</h1><p>7 个免费模型由古龙服务端统一调度；不暴露令牌，不加载第二大脑、本地模型、插件或工作流。</p></div><div className="agent-live-status"><i className={bootstrap?.configured ? "ready" : ""} /><span>{loading ? "正在连接" : bootstrap?.configured ? "远程模型已连接" : "等待管理员配置"}</span></div></header>
 
       <div className="agent-chat-shell">
         <div className="agent-chat-stream" aria-live="polite">
