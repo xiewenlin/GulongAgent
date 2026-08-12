@@ -4,6 +4,15 @@ import { createRoute, z } from "@hono/zod-openapi";
 import { getCollection } from "./db.js";
 import { enforceRateLimit } from "./rate-limit.js";
 import { readUserSecret, sealUserSecret } from "./security.js";
+import {
+  PEAR_API_IMAGE_MODELS,
+  PEAR_API_MEDIA_MODEL_MAP,
+  PEAR_API_VIDEO_MODELS,
+  PEAR_IMAGE_SIZES,
+  PEAR_VIDEO_DURATIONS,
+  publicPearMediaModel,
+  resolvePearAutoModel,
+} from "./pearapi-models.js";
 
 export const PEAR_API_BASE_URL = "https://api.pearapi.ai";
 export const PEAR_API_ACQUISITION_URL = "https://api.pearapi.ai/zh/dashboard";
@@ -22,7 +31,7 @@ export const PEAR_API_FREE_MODELS = Object.freeze([
 
 const FREE_MODEL_IDS = new Set(PEAR_API_FREE_MODELS.map((model) => model.id));
 const SECRET_PATTERN = /^[^\s\u0000-\u001f\u007f]{8,4096}$/u;
-const DEFAULT_PRICING = Object.freeze({ imageMinFen: 0, imageMaxFen: 0, videoMinFen: 0, videoMaxFen: 0 });
+const DEFAULT_PRICING = Object.freeze({ imageMinFen: 1, imageMaxFen: 32, videoMinFen: 4, videoMaxFen: 193 });
 
 export class PearApiError extends Error {
   constructor(message, { status = 502, code = "PEAR_API_ERROR", details = null } = {}) {
@@ -47,10 +56,10 @@ function safeFen(value) {
 
 function normalizedPricing(value = {}) {
   const pricing = {
-    imageMinFen: safeFen(value.imageMinFen),
-    imageMaxFen: safeFen(value.imageMaxFen),
-    videoMinFen: safeFen(value.videoMinFen),
-    videoMaxFen: safeFen(value.videoMaxFen),
+    imageMinFen: safeFen(value.imageMinFen) || DEFAULT_PRICING.imageMinFen,
+    imageMaxFen: safeFen(value.imageMaxFen) || DEFAULT_PRICING.imageMaxFen,
+    videoMinFen: safeFen(value.videoMinFen) || DEFAULT_PRICING.videoMinFen,
+    videoMaxFen: safeFen(value.videoMaxFen) || DEFAULT_PRICING.videoMaxFen,
   };
   if (pricing.imageMinFen && pricing.imageMaxFen && pricing.imageMinFen > pricing.imageMaxFen) {
     [pricing.imageMinFen, pricing.imageMaxFen] = [pricing.imageMaxFen, pricing.imageMinFen];
@@ -135,10 +144,167 @@ function responseText(payload) {
   return "";
 }
 
-export async function callPearApiChat({ token, model, messages, mode = "fast" }) {
+const IMAGE_ENDPOINT = `${PEAR_API_BASE_URL}/api/image_generate`;
+const VIDEO_ENDPOINT = `${PEAR_API_BASE_URL}/api/video_generate`;
+const MEDIA_SUCCEEDED = new Set(["completed", "succeeded", "succeed", "success", "done"]);
+const MEDIA_FAILED = new Set(["failed", "failure", "error", "cancelled", "canceled", "rejected"]);
+
+function pointerValue(payload, paths) {
+  for (const path of paths) {
+    let value = payload;
+    for (const part of path.split("/").filter(Boolean)) value = value?.[part];
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return null;
+}
+
+function upstreamMessage(payload, fallback) {
+  const value = pointerValue(payload, ["/data/data/error", "/data/error", "/error/message", "/error", "/message", "/msg"]);
+  if (typeof value === "string") return value.slice(0, 500);
+  return fallback;
+}
+
+async function pearMediaRequest(endpoint, payload, timeoutMs = 25_000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      signal: controller.signal,
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw new PearApiError("PearAPI 媒体服务响应超时，请稍后重试", { status: 504, code: "PEAR_API_TIMEOUT" });
+    throw new PearApiError("暂时无法连接 PearAPI 媒体服务", { details: error?.message });
+  } finally {
+    clearTimeout(timer);
+  }
+  const raw = await response.text();
+  let result;
+  try { result = raw ? JSON.parse(raw) : {}; }
+  catch { result = { raw: raw.slice(0, 1000) }; }
+  if (!response.ok) throw new PearApiError(upstreamMessage(result, `PearAPI 返回 HTTP ${response.status}`), { status: response.status === 401 || response.status === 403 ? 503 : 502, code: "PEAR_API_UPSTREAM_ERROR" });
+  const code = String(pointerValue(result, ["/data/data/code", "/data/code", "/code"]) ?? "");
+  if (code && !["0", "200"].includes(code)) throw new PearApiError(upstreamMessage(result, "PearAPI 媒体任务提交失败"), { code: "PEAR_API_UPSTREAM_ERROR" });
+  return result;
+}
+
+async function pearImageMultipartRequest({ key, model, prompt, imageSize, referenceImages }) {
+  const form = new FormData();
+  form.append("key", key);
+  form.append("model", model);
+  form.append("prompt", prompt);
+  form.append("size", imageSize);
+  form.append("task_type", "async");
+  form.append("task_id", "");
+  for (const [index, dataUrl] of referenceImages.entries()) {
+    const match = /^data:(image\/(?:jpeg|png|webp));base64,(.+)$/i.exec(dataUrl);
+    if (!match) throw new PearApiError("参考图格式无效", { status: 400, code: "INVALID_REFERENCE_IMAGE" });
+    const body = Buffer.from(match[2], "base64");
+    form.append("images[]", new Blob([body], { type: match[1] }), `reference-${index + 1}.${match[1].split("/")[1].replace("jpeg", "jpg")}`);
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 25_000);
+  try {
+    const response = await fetch(IMAGE_ENDPOINT, { method: "POST", signal: controller.signal, headers: { Accept: "application/json" }, body: form });
+    const raw = await response.text();
+    let result;
+    try { result = raw ? JSON.parse(raw) : {}; } catch { result = { raw: raw.slice(0, 1000) }; }
+    if (!response.ok) throw new PearApiError(upstreamMessage(result, `PearAPI 返回 HTTP ${response.status}`), { status: 502, code: "PEAR_API_UPSTREAM_ERROR" });
+    return result;
+  } catch (error) {
+    if (error instanceof PearApiError) throw error;
+    if (error?.name === "AbortError") throw new PearApiError("PearAPI 图片任务提交超时，请稍后重试", { status: 504, code: "PEAR_API_TIMEOUT" });
+    throw new PearApiError("暂时无法连接 PearAPI 图片服务", { details: error?.message });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function submitPearMedia({ key, modality, model, prompt, referenceImages, imageSize, aspectRatio, duration }) {
+  if (modality === "image") {
+    return referenceImages.length
+      ? pearImageMultipartRequest({ key, model, prompt, imageSize, referenceImages })
+      : pearMediaRequest(IMAGE_ENDPOINT, { key, model, prompt, images: [], size: imageSize, task_type: "async", task_id: "" });
+  }
+  return pearMediaRequest(VIDEO_ENDPOINT, { key, model, prompt, aspect_ratio: aspectRatio, duration, images: referenceImages });
+}
+
+async function pollPearMedia({ key, modality, upstreamTaskId }) {
+  return pearMediaRequest(modality === "image" ? IMAGE_ENDPOINT : VIDEO_ENDPOINT, modality === "image" ? { key, task_id: upstreamTaskId } : { key, taskid: upstreamTaskId });
+}
+
+function mediaTaskId(payload) {
+  const value = pointerValue(payload, ["/data/data/task_id", "/data/data/taskid", "/data/data/id", "/data/task_id", "/data/taskid", "/data/id", "/task_id", "/taskid", "/id"]);
+  return value == null ? "" : String(value);
+}
+
+function imageUrls(payload) {
+  const value = pointerValue(payload, ["/data/data/image_urls", "/data/image_urls", "/image_urls", "/data/data/images", "/data/images", "/images", "/data/data/image_url", "/data/image_url", "/image_url", "/data/data/url", "/data/url", "/url"]);
+  const list = Array.isArray(value) ? value : value ? [value] : [];
+  return list.map((item) => typeof item === "string" ? item : item?.url || item?.image_url || "").filter((url) => /^https:\/\//i.test(url));
+}
+
+function videoUrls(payload) {
+  const value = pointerValue(payload, ["/data/data/api_file_url", "/content/video_url", "/content/url", "/enhancement/resultVideoUrl", "/data/content/video_url", "/data/content/url", "/data/enhancement/resultVideoUrl", "/data/api_file_url", "/api_file_url", "/data/data/url", "/data/url", "/url"]);
+  return typeof value === "string" && /^https:\/\//i.test(value) ? [value] : [];
+}
+
+function mediaStatus(payload, modality) {
+  const urls = modality === "image" ? imageUrls(payload) : videoUrls(payload);
+  if (urls.length) return { status: "succeeded", urls };
+  const raw = String(pointerValue(payload, ["/data/data/status", "/data/status", "/status"]) || "").toLowerCase();
+  if (MEDIA_FAILED.has(raw)) return { status: "failed", urls, error: upstreamMessage(payload, "PearAPI 生成任务失败") };
+  if (MEDIA_SUCCEEDED.has(raw)) return { status: "failed", urls, error: "PearAPI 已完成任务，但没有返回可用的媒体地址" };
+  return { status: "processing", urls };
+}
+
+function chargedFenForModel(model, modality, duration = 5) {
+  const durationFactor = modality === "video" ? Math.max(1, Number(duration || 5) / 5) : 1;
+  return Math.max(1, Math.ceil((Number(model.baseCostMilliFen || 0) * durationFactor * (1 + PEAR_API_MARKUP_RATE)) / 1000));
+}
+
+function mediaPublicView(job) {
+  return {
+    id: job._id.toString(),
+    conversationId: job.conversationId.toString(),
+    modality: job.modality,
+    requestedModel: job.requestedModel,
+    model: job.model,
+    modelName: job.modelName,
+    status: job.status,
+    prompt: job.prompt,
+    urls: job.urls || [],
+    chargedFen: job.chargedFen,
+    error: job.error || null,
+    createdAt: job.createdAt,
+    completedAt: job.completedAt || null,
+  };
+}
+
+async function refundMediaJob(job, error) {
+  const jobs = await getCollection("agentMediaJobs");
+  const now = new Date();
+  const claimed = await jobs.findOneAndUpdate(
+    { _id: job._id, chargeStatus: "reserved", status: { $nin: ["succeeded", "failed"] } },
+    { $set: { status: "failed", chargeStatus: "refunding", error: String(error || "生成失败").slice(0, 500), failedAt: now, updatedAt: now } },
+    { returnDocument: "after" },
+  );
+  if (!claimed) return jobs.findOne({ _id: job._id });
+  await (await getCollection("wallets")).updateOne({ ownerId: job.ownerId }, { $inc: { balanceFen: job.chargedFen }, $set: { updatedAt: now } });
+  await Promise.all([
+    jobs.updateOne({ _id: job._id, chargeStatus: "refunding" }, { $set: { chargeStatus: "refunded", refundedAt: now, updatedAt: now } }),
+    (await getCollection("agentUsage")).updateOne({ requestId: job.requestId }, { $set: { status: "failed", refundedFen: job.chargedFen, errorCode: "MEDIA_GENERATION_FAILED", failedAt: now, updatedAt: now } }),
+  ]);
+  return jobs.findOne({ _id: job._id });
+}
+
+export async function callPearApiChat({ token, model, messages }) {
   if (!FREE_MODEL_IDS.has(model)) throw new PearApiError("该模型不在古龙网页版免费模型白名单中", { status: 400, code: "MODEL_NOT_ALLOWED" });
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), mode === "deep" ? 120_000 : 60_000);
+  const timer = setTimeout(() => controller.abort(), 60_000);
   let response;
   try {
     response = await fetch(`${PEAR_API_BASE_URL}/v1/chat/completions`, {
@@ -149,8 +315,8 @@ export async function callPearApiChat({ token, model, messages, mode = "fast" })
         model,
         messages,
         stream: false,
-        temperature: mode === "deep" ? 0.35 : 0.65,
-        max_tokens: mode === "deep" ? 4096 : 2048,
+        temperature: 0.65,
+        max_tokens: 2048,
       }),
     });
   } catch (error) {
@@ -205,6 +371,7 @@ export async function creditMonthlySubscriptionBalance({ ownerId, amountFen, sou
 const ErrorSchema = z.object({ code: z.string(), message: z.string() });
 const ModelSchema = z.object({ id: z.string(), name: z.string(), vendor: z.string(), description: z.string(), free: z.literal(true) });
 const MessageSchema = z.object({ role: z.enum(["user", "assistant"]), content: z.string().trim().min(1).max(12_000) });
+const ReferenceImageSchema = z.string().max(900_000).refine((value) => /^data:image\/(jpeg|png|webp);base64,/i.test(value), "仅支持 JPEG、PNG 或 WebP 图片");
 
 export function registerPearApiRoutes(app, { authenticate, requireAdmin, requireTrustedMutation }) {
   const modelsRoute = createRoute({
@@ -217,8 +384,22 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
   });
   const chatRoute = createRoute({
     method: "post", path: "/api/agent/chat", tags: ["Web Agent"], summary: "通过 PearAPI 免费模型完成文本对话",
-    request: { body: { content: { "application/json": { schema: z.object({ model: z.string(), mode: z.enum(["fast", "deep"]).default("fast"), conversationId: z.string().optional(), messages: z.array(MessageSchema).min(1).max(24) }) } } } },
+    request: { body: { content: { "application/json": { schema: z.object({ model: z.string(), conversationId: z.string().optional(), messages: z.array(MessageSchema).min(1).max(24) }) } } } },
     responses: { 200: { description: "模型回复" }, 400: { description: "参数或模型不允许", content: { "application/json": { schema: ErrorSchema } } }, 401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } }, 402: { description: "订阅未生效", content: { "application/json": { schema: ErrorSchema } } }, 503: { description: "管理员尚未配置 PearAPI", content: { "application/json": { schema: ErrorSchema } } } },
+  });
+  const mediaCreateRoute = createRoute({
+    method: "post", path: "/api/agent/media", tags: ["Web Agent"], summary: "提交 PearAPI 图片或视频生成任务",
+    request: { body: { content: { "application/json": { schema: z.object({
+      modality: z.enum(["image", "video"]), model: z.string(), prompt: z.string().trim().min(1).max(4_096), conversationId: z.string().optional(),
+      referenceImages: z.array(ReferenceImageSchema).max(16).default([]), imageSize: z.enum(PEAR_IMAGE_SIZES).default("1:1"),
+      aspectRatio: z.enum(["16:9", "9:16"]).default("16:9"), duration: z.number().int().refine((value) => PEAR_VIDEO_DURATIONS.includes(value), "不支持的视频时长").default(5),
+    }) } } } },
+    responses: { 201: { description: "媒体任务已提交" }, 400: { description: "模型或参数无效", content: { "application/json": { schema: ErrorSchema } } }, 402: { description: "余额或订阅不足", content: { "application/json": { schema: ErrorSchema } } } },
+  });
+  const mediaStatusRoute = createRoute({
+    method: "get", path: "/api/agent/media/{id}", tags: ["Web Agent"], summary: "查询并推进 PearAPI 媒体任务",
+    request: { params: z.object({ id: z.string() }) },
+    responses: { 200: { description: "媒体任务状态" }, 404: { description: "任务不存在", content: { "application/json": { schema: ErrorSchema } } } },
   });
   const adminGetRoute = createRoute({
     method: "get", path: "/api/admin/pearapi/config", tags: ["Admin"], summary: "读取 PearAPI 全局配置（仅返回掩码）",
@@ -240,21 +421,30 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     const auth = await authenticate(c); if (auth.error) return auth.error;
     const ownerId = new ObjectId(auth.user.id);
     const now = new Date();
-    const [subscription, wallet, credential] = await Promise.all([
+    const [subscription, wallet, credential, assets] = await Promise.all([
       (await getCollection("subscriptions")).findOne({ ownerId }),
       (await getCollection("wallets")).findOne({ ownerId }),
       credentialRecord(),
+      (await getCollection("agentMediaJobs")).find({ ownerId, status: "succeeded" }).sort({ completedAt: -1 }).limit(12).toArray(),
     ]);
     const active = auth.user.role === "admin" || Boolean(subscription?.currentPeriodStart <= now && subscription?.currentPeriodEnd > now && !["cancelled", "canceled"].includes(subscription?.status));
     const pricing = normalizedPricing(credential?.pricing || DEFAULT_PRICING);
     c.header("Cache-Control", "private, no-store, max-age=0");
     return c.json({
       configured: Boolean(credentialSecrets(credential).token),
+      mediaConfigured: Boolean(credentialSecrets(credential).key),
       subscription: { active, restricted: !active, currentPeriodEnd: subscription?.currentPeriodEnd || null },
       models: PEAR_API_FREE_MODELS.map((model) => ({ ...model, free: true })),
       defaultModel: PEAR_API_FREE_MODELS[0].id,
+      mediaModels: {
+        image: PEAR_API_IMAGE_MODELS.map((model) => publicPearMediaModel(model, PEAR_API_MARKUP_RATE)),
+        video: PEAR_API_VIDEO_MODELS.map((model) => publicPearMediaModel(model, PEAR_API_MARKUP_RATE)),
+      },
+      mediaDefaults: { image: "auto-image", video: "auto-video", imageSize: "1:1", aspectRatio: "16:9", duration: 5 },
+      mediaOptions: { imageSizes: PEAR_IMAGE_SIZES, videoDurations: PEAR_VIDEO_DURATIONS, videoAspectRatios: ["16:9", "9:16"] },
       pricing: { ...pricing, markupRate: PEAR_API_MARKUP_RATE },
       quota: await usageSnapshot(ownerId, Number(wallet?.balanceFen || 0), pricing, now),
+      assets: assets.map(mediaPublicView),
     });
   });
 
@@ -278,19 +468,17 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     if (!token) return c.json({ code: "PEAR_API_NOT_CONFIGURED", message: "管理员尚未配置 PearAPI 令牌" }, 503);
     const conversationId = ObjectId.isValid(input.conversationId) ? new ObjectId(input.conversationId) : new ObjectId();
     const requestId = `pear_${Date.now().toString(36)}_${randomBytes(6).toString("hex")}`;
-    const system = input.mode === "deep"
-      ? "你是古龙网页版智能助手。先充分分析再给出清晰、可执行、通俗易懂的答案。网页版不具备第二大脑、本地模型、插件、技能或工作流，不要声称已调用这些能力。"
-      : "你是古龙网页版智能助手。直接、准确、简洁地回答。网页版不具备第二大脑、本地模型、插件、技能或工作流，不要声称已调用这些能力。";
+    const system = "你是古龙网页版智能助手。直接、准确、简洁地回答。网页版不具备第二大脑、本地模型、插件、技能或工作流，不要声称已调用这些能力。";
     const usage = { ownerId, conversationId, requestId, modality: "text", model: input.model, baseCostFen: 0, chargedFen: 0, markupRate: PEAR_API_MARKUP_RATE, status: "started", createdAt: now, updatedAt: now };
     await (await getCollection("agentUsage")).insertOne(usage);
     try {
-      const result = await callPearApiChat({ token, model: input.model, mode: input.mode, messages: [{ role: "system", content: system }, ...input.messages] });
+      const result = await callPearApiChat({ token, model: input.model, messages: [{ role: "system", content: system }, ...input.messages] });
       const completedAt = new Date();
       await Promise.all([
         (await getCollection("agentUsage")).updateOne({ requestId }, { $set: { status: "succeeded", upstreamUsage: result.usage, upstreamResponseId: result.responseId, completedAt, updatedAt: completedAt } }),
         (await getCollection("agentMessages")).insertMany([
-          { ownerId, conversationId, requestId, role: "user", content: input.messages.at(-1)?.content || "", model: input.model, mode: input.mode, createdAt: now },
-          { ownerId, conversationId, requestId, role: "assistant", content: result.text, model: input.model, mode: input.mode, createdAt: completedAt },
+          { ownerId, conversationId, requestId, role: "user", content: input.messages.at(-1)?.content || "", model: input.model, createdAt: now },
+          { ownerId, conversationId, requestId, role: "assistant", content: result.text, model: input.model, createdAt: completedAt },
         ]),
       ]);
       c.header("Cache-Control", "private, no-store, max-age=0");
@@ -299,6 +487,124 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
       await (await getCollection("agentUsage")).updateOne({ requestId }, { $set: { status: "failed", errorCode: error.code || "PEAR_API_ERROR", failedAt: new Date(), updatedAt: new Date() } });
       return c.json({ code: error.code || "PEAR_API_ERROR", message: error.message || "PearAPI 调用失败" }, error.status || 502);
     }
+  });
+
+  app.openapi(mediaCreateRoute, async (c) => {
+    const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+    const auth = await authenticate(c); if (auth.error) return auth.error;
+    const rate = await enforceRateLimit(`pear-media:${auth.user.id}`, { limit: 12, windowMs: 10 * 60_000 });
+    if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "媒体生成请求过于频繁，请稍后再试" }, 429);
+    const input = c.req.valid("json");
+    const requested = PEAR_API_MEDIA_MODEL_MAP.get(input.model);
+    if (!requested || requested.modality !== input.modality) return c.json({ code: "MODEL_NOT_ALLOWED", message: "请选择当前创作类型对应的 PearAPI 模型" }, 400);
+    const ownerId = new ObjectId(auth.user.id);
+    const now = new Date();
+    if (auth.user.role !== "admin") {
+      const subscription = await (await getCollection("subscriptions")).findOne({ ownerId });
+      if (!subscription || subscription.currentPeriodStart > now || subscription.currentPeriodEnd <= now || ["cancelled", "canceled", "expired"].includes(subscription.status)) {
+        return c.json({ code: "SUBSCRIPTION_REQUIRED", message: "图片和视频创作需要生效中的会员订阅" }, 402);
+      }
+    }
+    const record = await credentialRecord();
+    const key = credentialSecrets(record).key;
+    if (!key) return c.json({ code: "PEAR_API_KEY_NOT_CONFIGURED", message: "管理员尚未配置 PearAPI Key" }, 503);
+    const actual = requested.auto ? resolvePearAutoModel(input.modality, input.prompt) : requested;
+    if (input.referenceImages.reduce((total, value) => total + value.length, 0) > 3_200_000) return c.json({ code: "REFERENCE_IMAGES_TOO_LARGE", message: "参考图编码后总大小不能超过 3.2 MB，请压缩后重试" }, 413);
+    const referenceImages = input.referenceImages.slice(0, actual.referenceImages);
+    if (input.referenceImages.length > actual.referenceImages) return c.json({ code: "TOO_MANY_REFERENCE_IMAGES", message: `${actual.name} 最多支持 ${actual.referenceImages} 张参考图` }, 400);
+    const chargedFen = chargedFenForModel(actual, input.modality, input.duration);
+    const wallets = await getCollection("wallets");
+    const debited = await wallets.findOneAndUpdate(
+      { ownerId, balanceFen: { $gte: chargedFen } },
+      { $inc: { balanceFen: -chargedFen }, $set: { updatedAt: now } },
+      { returnDocument: "after" },
+    );
+    if (!debited) return c.json({ code: "INSUFFICIENT_BALANCE", message: `余额不足，本次预计扣除 ${chargedFen / 100} 元（已含 30% 服务费）` }, 402);
+    const conversationId = ObjectId.isValid(input.conversationId) ? new ObjectId(input.conversationId) : new ObjectId();
+    const requestId = `pear_media_${Date.now().toString(36)}_${randomBytes(6).toString("hex")}`;
+    const jobs = await getCollection("agentMediaJobs");
+    const inserted = await jobs.insertOne({
+      ownerId, conversationId, requestId, modality: input.modality, requestedModel: requested.id, model: actual.id, modelName: actual.name,
+      prompt: input.prompt, referenceCount: referenceImages.length, imageSize: input.imageSize, aspectRatio: input.aspectRatio, duration: input.duration,
+      baseCostMilliFen: actual.baseCostMilliFen, chargedFen, markupRate: PEAR_API_MARKUP_RATE, chargeStatus: "reserved", status: "submitting", createdAt: now, updatedAt: now,
+    });
+    const job = await jobs.findOne({ _id: inserted.insertedId });
+    await (await getCollection("agentUsage")).insertOne({ ownerId, conversationId, requestId, mediaJobId: job._id, modality: input.modality, model: actual.id, requestedModel: requested.id, baseCostMilliFen: actual.baseCostMilliFen, chargedFen, markupRate: PEAR_API_MARKUP_RATE, status: "started", createdAt: now, updatedAt: now });
+    try {
+      const payload = await submitPearMedia({ key, modality: input.modality, model: actual.id, prompt: input.prompt, referenceImages, imageSize: input.imageSize, aspectRatio: input.aspectRatio, duration: input.duration });
+      const parsed = mediaStatus(payload, input.modality);
+      const upstreamTaskId = mediaTaskId(payload);
+      if (parsed.status === "failed") {
+        const failed = await refundMediaJob(job, parsed.error);
+        return c.json({ code: "MEDIA_GENERATION_FAILED", message: failed.error }, 502);
+      }
+      if (!upstreamTaskId && parsed.status !== "succeeded") {
+        const failed = await refundMediaJob(job, "PearAPI 没有返回任务编号");
+        return c.json({ code: "PEAR_API_INVALID_RESPONSE", message: failed.error }, 502);
+      }
+      const completedAt = parsed.status === "succeeded" ? new Date() : null;
+      const update = { status: parsed.status, upstreamTaskId, urls: parsed.urls, nextPollAt: new Date(Date.now() + 4_000), updatedAt: new Date() };
+      if (completedAt) Object.assign(update, { completedAt, chargeStatus: "confirmed" });
+      await jobs.updateOne({ _id: job._id }, { $set: update });
+      if (completedAt) await Promise.all([
+        (await getCollection("agentUsage")).updateOne({ requestId }, { $set: { status: "succeeded", completedAt, updatedAt: completedAt } }),
+        (await getCollection("agentMessages")).insertMany([
+          { ownerId, conversationId, requestId, role: "user", content: input.prompt, modality: input.modality, model: actual.id, createdAt: now },
+          { ownerId, conversationId, requestId, role: "assistant", content: `${actual.name} 创作完成`, modality: input.modality, model: actual.id, urls: parsed.urls, createdAt: completedAt },
+        ]),
+      ]);
+      const current = await jobs.findOne({ _id: job._id });
+      c.header("Cache-Control", "private, no-store, max-age=0");
+      return c.json({ job: mediaPublicView(current) }, 201);
+    } catch (error) {
+      const failed = await refundMediaJob(job, error.message || "PearAPI 媒体任务提交失败");
+      return c.json({ code: error.code || "PEAR_API_ERROR", message: failed.error }, error.status || 502);
+    }
+  });
+
+  app.openapi(mediaStatusRoute, async (c) => {
+    const auth = await authenticate(c); if (auth.error) return auth.error;
+    const id = c.req.param("id");
+    if (!ObjectId.isValid(id)) return c.json({ code: "NOT_FOUND", message: "媒体任务不存在" }, 404);
+    const ownerId = new ObjectId(auth.user.id);
+    const jobs = await getCollection("agentMediaJobs");
+    let job = await jobs.findOne({ _id: new ObjectId(id), ...(auth.user.role === "admin" ? {} : { ownerId }) });
+    if (!job) return c.json({ code: "NOT_FOUND", message: "媒体任务不存在" }, 404);
+    if (["succeeded", "failed"].includes(job.status)) return c.json({ job: mediaPublicView(job) });
+    const now = new Date();
+    if (!job.upstreamTaskId || (job.nextPollAt && job.nextPollAt > now)) return c.json({ job: mediaPublicView(job) });
+    const leased = await jobs.findOneAndUpdate(
+      { _id: job._id, status: "processing", nextPollAt: { $lte: now }, $or: [{ pollingUntil: { $exists: false } }, { pollingUntil: { $lte: now } }] },
+      { $set: { pollingUntil: new Date(Date.now() + 30_000), nextPollAt: new Date(Date.now() + 5_000), updatedAt: now } },
+      { returnDocument: "after" },
+    );
+    if (!leased) return c.json({ job: mediaPublicView(await jobs.findOne({ _id: job._id })) });
+    try {
+      const key = credentialSecrets(await credentialRecord()).key;
+      if (!key) throw new PearApiError("管理员尚未配置 PearAPI Key", { status: 503, code: "PEAR_API_KEY_NOT_CONFIGURED" });
+      const payload = await pollPearMedia({ key, modality: job.modality, upstreamTaskId: job.upstreamTaskId });
+      const parsed = mediaStatus(payload, job.modality);
+      if (parsed.status === "failed") job = await refundMediaJob(job, parsed.error);
+      else if (parsed.status === "succeeded") {
+        const completedAt = new Date();
+        job = await jobs.findOneAndUpdate({ _id: job._id, status: "processing" }, { $set: { status: "succeeded", chargeStatus: "confirmed", urls: parsed.urls, completedAt, updatedAt: completedAt }, $unset: { pollingUntil: "" } }, { returnDocument: "after" });
+        await Promise.all([
+          (await getCollection("agentUsage")).updateOne({ requestId: job.requestId }, { $set: { status: "succeeded", completedAt, updatedAt: completedAt } }),
+          (await getCollection("agentMessages")).insertMany([
+            { ownerId: job.ownerId, conversationId: job.conversationId, requestId: job.requestId, role: "user", content: job.prompt, modality: job.modality, model: job.model, createdAt: job.createdAt },
+            { ownerId: job.ownerId, conversationId: job.conversationId, requestId: job.requestId, role: "assistant", content: `${job.modelName} 创作完成`, modality: job.modality, model: job.model, urls: parsed.urls, createdAt: completedAt },
+          ]),
+        ]);
+      } else {
+        await jobs.updateOne({ _id: job._id }, { $set: { nextPollAt: new Date(Date.now() + 5_000), updatedAt: new Date() }, $unset: { pollingUntil: "" } });
+        job = await jobs.findOne({ _id: job._id });
+      }
+    } catch (error) {
+      await jobs.updateOne({ _id: job._id }, { $set: { nextPollAt: new Date(Date.now() + 10_000), lastPollError: String(error.message || error).slice(0, 300), updatedAt: new Date() }, $unset: { pollingUntil: "" } });
+      job = await jobs.findOne({ _id: job._id });
+    }
+    c.header("Cache-Control", "private, no-store, max-age=0");
+    return c.json({ job: mediaPublicView(job) });
   });
 
   function adminView(record) {
@@ -314,6 +620,10 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
       tokenMasked: record?.tokenLast4 ? `••••••••${record.tokenLast4}` : null,
       pricing: { ...pricing, markupRate: PEAR_API_MARKUP_RATE },
       models: PEAR_API_FREE_MODELS.map((model) => ({ ...model, free: true })),
+      mediaModels: {
+        image: PEAR_API_IMAGE_MODELS.map((model) => publicPearMediaModel(model, PEAR_API_MARKUP_RATE)),
+        video: PEAR_API_VIDEO_MODELS.map((model) => publicPearMediaModel(model, PEAR_API_MARKUP_RATE)),
+      },
       updatedAt: record?.updatedAt || null,
     };
   }

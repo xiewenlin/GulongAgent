@@ -1,11 +1,9 @@
 import {
   ArrowRight,
-  Brain,
   Check,
   Coins,
   File,
   ImageSquare,
-  Lightning,
   LockKey,
   PaperPlaneRight,
   Paperclip,
@@ -19,10 +17,11 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, formatMoney } from "../api.js";
 
-const MAX_ATTACHMENTS = 12;
+const MAX_ATTACHMENTS = 16;
 const MAX_ATTACHMENT_BYTES = 192 * 1024 * 1024;
 const TEXT_ATTACHMENT_BYTES = 128 * 1024;
 const TEXT_EXTENSIONS = new Set(["txt", "md", "csv", "json"]);
+const MAX_MEDIA_REFERENCE_BYTES = 600 * 1024;
 
 const starterPrompts = [
   "帮我把这段想法整理成可执行计划",
@@ -51,6 +50,26 @@ async function attachmentContext(files) {
   return contexts.join("").slice(0, 7_000);
 }
 
+async function imageDataUrl(file) {
+  if (!file.type.match(/^image\/(jpeg|png|webp)$/i)) throw new Error("参考图仅支持 JPEG、PNG 或 WebP 格式");
+  if (file.size > MAX_MEDIA_REFERENCE_BYTES) throw new Error("单张参考图不能超过 600 KB，请压缩后重试");
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error(`无法读取参考图 ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+function MediaResult({ item }) {
+  if (item.status === "processing") return <div className="agent-media-pending"><SpinnerGap size={21} className="agent-spin" /><span>任务已进入 PearAPI 队列，正在创作…</span></div>;
+  if (item.status === "failed") return <div className="agent-media-error">生成失败，费用已退回：{item.error}</div>;
+  if (!item.urls?.length) return null;
+  return <div className="agent-media-results">{item.urls.map((url) => item.modality === "video"
+    ? <video key={url} src={url} controls preload="metadata" />
+    : <a key={url} href={url} target="_blank" rel="noreferrer"><img src={url} alt={item.content || "古龙生成图片"} /></a>)}</div>;
+}
+
 function RollingUsage({ title, data }) {
   const maximum = Math.max(1, ...(data?.days || []).map((day) => day.usedFen));
   return <section className="agent-usage-card">
@@ -76,6 +95,7 @@ function AssetPanel({ bootstrap, onClose, navigate }) {
       <div className="agent-estimate-grid"><EstimateCard icon={ImageSquare} title="预计可创作图片" value={quota?.estimates?.images} unit="张" /><EstimateCard icon={VideoCamera} title="预计可创作视频" value={quota?.estimates?.videos} unit="条" /></div>
       <RollingUsage title="本周滚动用量" data={quota?.weekly} />
       <RollingUsage title="本月滚动用量" data={quota?.monthly} />
+      {bootstrap?.assets?.length > 0 && <section className="agent-recent-assets"><header><span>RECENT CREATIONS</span><h3>最近创作</h3></header><div>{bootstrap.assets.map((asset) => <article key={asset.id}>{asset.modality === "video" ? <video src={asset.urls?.[0]} controls preload="metadata" /> : <a href={asset.urls?.[0]} target="_blank" rel="noreferrer"><img src={asset.urls?.[0]} alt={asset.prompt} /></a>}<strong>{asset.modelName}</strong><small>{asset.prompt}</small></article>)}</div></section>}
       <button className="button primary full" type="button" onClick={() => { onClose(); navigate("/pricing"); }}>充值或续订 <ArrowRight size={17} /></button>
     </aside>
   </div>;
@@ -104,8 +124,10 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
   const [model, setModel] = useState("glm-4-flash-250414");
-  const [mode, setMode] = useState("fast");
   const [creationType, setCreationType] = useState("text");
+  const [imageSize, setImageSize] = useState("1:1");
+  const [aspectRatio, setAspectRatio] = useState("16:9");
+  const [duration, setDuration] = useState(5);
   const [conversationId, setConversationId] = useState("");
   const [attachments, setAttachments] = useState([]);
   const [sending, setSending] = useState(false);
@@ -113,6 +135,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
   const [skillOpen, setSkillOpen] = useState(false);
   const inputRef = useRef(null);
   const endRef = useRef(null);
+  const pollersRef = useRef(new Map());
 
   useEffect(() => {
     if (!user) { setLoading(false); setBootstrap(null); return; }
@@ -120,13 +143,46 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
     apiFetch("/api/agent/bootstrap").then((result) => { setBootstrap(result); setModel(result.defaultModel || "glm-4-flash-250414"); }).catch((error) => setMessage(error.message)).finally(() => setLoading(false));
   }, [user?.id]);
 
+  useEffect(() => () => { for (const timer of pollersRef.current.values()) clearTimeout(timer); pollersRef.current.clear(); }, []);
+
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }); }, [messages, sending]);
 
-  const selectedModel = useMemo(() => bootstrap?.models?.find((item) => item.id === model), [bootstrap, model]);
+  const availableModels = useMemo(() => creationType === "text" ? (bootstrap?.models || []) : (bootstrap?.mediaModels?.[creationType] || []), [bootstrap, creationType]);
+  const selectedModel = useMemo(() => availableModels.find((item) => item.id === model), [availableModels, model]);
+
+  function changeCreationType(nextType) {
+    setCreationType(nextType);
+    setModel(nextType === "text" ? (bootstrap?.defaultModel || "glm-4-flash-250414") : (bootstrap?.mediaDefaults?.[nextType] || `auto-${nextType}`));
+    setAttachments((current) => nextType === "text" ? current : current.filter((file) => file.type.startsWith("image/")));
+    setMessage("");
+  }
+
+  function pollMedia(jobId) {
+    if (!jobId || pollersRef.current.has(jobId)) return;
+    const tick = async () => {
+      try {
+        const result = await apiFetch(`/api/agent/media/${jobId}`);
+        const job = result.job;
+        setMessages((current) => current.map((item) => item.jobId === jobId ? { ...item, status: job.status, urls: job.urls, error: job.error, content: job.status === "succeeded" ? `${job.modelName} 创作完成` : item.content } : item));
+        if (["succeeded", "failed"].includes(job.status)) {
+          pollersRef.current.delete(jobId);
+          apiFetch("/api/agent/bootstrap").then(setBootstrap).catch(() => {});
+          return;
+        }
+      } catch (error) { setMessage(error.message); }
+      const timer = setTimeout(tick, 5_000);
+      pollersRef.current.set(jobId, timer);
+    };
+    pollersRef.current.set(jobId, setTimeout(tick, 4_000));
+  }
 
   function pickAttachments(event) {
     const files = [...(event.target.files || [])];
     event.target.value = "";
+    if (creationType !== "text") {
+      if (files.some((file) => !file.type.match(/^image\/(jpeg|png|webp)$/i))) { setMessage("参考图仅支持 JPEG、PNG 或 WebP 格式"); return; }
+      if (files.some((file) => file.size > MAX_MEDIA_REFERENCE_BYTES)) { setMessage("单张参考图不能超过 600 KB，请压缩后重试"); return; }
+    }
     const next = [...attachments, ...files].slice(0, MAX_ATTACHMENTS);
     const total = next.reduce((sum, file) => sum + file.size, 0);
     if (total > MAX_ATTACHMENT_BYTES) { setMessage("附件总大小不能超过 192 MB"); return; }
@@ -137,17 +193,31 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
   async function send() {
     const content = draft.trim();
     if (!content || sending) return;
-    if (creationType !== "text") { setMessage("当前接入的是 PearAPI 免费文字模型；图片和视频创作会在管理员同步付费模型后开放。"); setAssetOpen(true); return; }
     if (!bootstrap?.subscription?.active) { setMessage("网页版古龙 Agent 需要生效中的会员订阅。"); return; }
-    if (!bootstrap?.configured) { setMessage("管理员尚未完成 PearAPI 令牌配置，请稍后再试。"); return; }
+    if (creationType === "text" && !bootstrap?.configured) { setMessage("管理员尚未完成 PearAPI 令牌配置，请稍后再试。"); return; }
+    if (creationType !== "text" && !bootstrap?.mediaConfigured) { setMessage("管理员尚未完成 PearAPI Key 配置，请稍后再试。"); return; }
     setSending(true); setMessage("");
     const visibleUser = { role: "user", content, createdAt: new Date().toISOString(), attachments: attachments.map((file) => ({ name: file.name, size: file.size, type: file.type })) };
     const nextMessages = [...messages, visibleUser];
     setMessages(nextMessages); setDraft(""); setAttachments([]);
     try {
+      if (creationType !== "text") {
+        const referenceImages = await Promise.all(attachments.filter((file) => file.type.startsWith("image/")).map(imageDataUrl));
+        const result = await apiFetch("/api/agent/media", { method: "POST", body: JSON.stringify({
+          modality: creationType, model, prompt: content, conversationId: conversationId || undefined, referenceImages, imageSize, aspectRatio, duration,
+        }) });
+        setConversationId(result.job.conversationId);
+        setMessages((current) => [...current, {
+          role: "assistant", content: `${result.job.modelName} 已接收创作任务`, createdAt: new Date().toISOString(),
+          jobId: result.job.id, modality: creationType, status: result.job.status, urls: result.job.urls, error: result.job.error,
+        }]);
+        if (!["succeeded", "failed"].includes(result.job.status)) pollMedia(result.job.id);
+        apiFetch("/api/agent/bootstrap").then(setBootstrap).catch(() => {});
+        return;
+      }
       const context = await attachmentContext(attachments);
       const requestMessages = nextMessages.slice(-23).map((item, index, list) => ({ role: item.role, content: index === list.length - 1 && item.role === "user" ? `${item.content}${context}`.slice(0, 12_000) : item.content.slice(0, 12_000) }));
-      const result = await apiFetch("/api/agent/chat", { method: "POST", body: JSON.stringify({ model, mode, conversationId: conversationId || undefined, messages: requestMessages }) });
+      const result = await apiFetch("/api/agent/chat", { method: "POST", body: JSON.stringify({ model, conversationId: conversationId || undefined, messages: requestMessages }) });
       setConversationId(result.conversationId);
       setMessages((current) => [...current, { ...result.message, model: result.model, free: result.free }]);
       apiFetch("/api/agent/bootstrap").then(setBootstrap).catch(() => {});
@@ -175,25 +245,27 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
 
       <div className="agent-chat-shell">
         <div className="agent-chat-stream" aria-live="polite">
-          {!messages.length && <div className="agent-empty-chat"><div className="agent-empty-mark"><Sparkle size={35} weight="duotone" /></div><h2>把目标交给古龙</h2><p>选择一个起点，或直接在下方描述任务。简单问题用快速响应，需要推演时切换深度思考。</p><div>{starterPrompts.map((prompt) => <button key={prompt} type="button" onClick={() => { setDraft(prompt); inputRef.current?.focus(); }}>{prompt}<ArrowRight size={16} /></button>)}</div></div>}
-          {messages.map((item, index) => <article className={`agent-message ${item.role}`} key={`${item.createdAt}-${index}`}><div className="agent-message-avatar">{item.role === "assistant" ? <img src={themeIcon} alt="古龙" /> : (user.displayName || user.username || "我").slice(0, 1)}</div><div><header><strong>{item.role === "assistant" ? "古龙" : "你"}</strong><time>{new Date(item.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time>{item.free && <em>免费</em>}</header><p>{item.content}</p>{item.attachments?.length > 0 && <div className="agent-message-files">{item.attachments.map((file) => <span key={file.name}><File size={15} />{file.name}</span>)}</div>}</div></article>)}
-          {sending && <article className="agent-message assistant pending"><div className="agent-message-avatar"><img src={themeIcon} alt="" /></div><div><header><strong>古龙</strong><em>{mode === "deep" ? "深度思考" : "快速响应"}</em></header><p><SpinnerGap size={20} className="agent-spin" /> 正在通过 {selectedModel?.name || model} 组织答案…</p></div></article>}
+          {!messages.length && <div className="agent-empty-chat"><div className="agent-empty-mark"><Sparkle size={35} weight="duotone" /></div><h2>把目标交给古龙</h2><p>选择文字、图片或视频，挑选模型并描述你想完成的结果。</p><div>{starterPrompts.map((prompt) => <button key={prompt} type="button" onClick={() => { setDraft(prompt); inputRef.current?.focus(); }}>{prompt}<ArrowRight size={16} /></button>)}</div></div>}
+          {messages.map((item, index) => <article className={`agent-message ${item.role}`} key={`${item.createdAt}-${index}`}><div className="agent-message-avatar">{item.role === "assistant" ? <img src={themeIcon} alt="古龙" /> : (user.displayName || user.username || "我").slice(0, 1)}</div><div><header><strong>{item.role === "assistant" ? "古龙" : "你"}</strong><time>{new Date(item.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time>{item.free && <em>免费</em>}</header><p>{item.content}</p><MediaResult item={item} />{item.attachments?.length > 0 && <div className="agent-message-files">{item.attachments.map((file) => <span key={file.name}><File size={15} />{file.name}</span>)}</div>}</div></article>)}
+          {sending && <article className="agent-message assistant pending"><div className="agent-message-avatar"><img src={themeIcon} alt="" /></div><div><header><strong>古龙</strong><em>{creationType === "text" ? "文字" : creationType === "image" ? "图片" : "视频"}</em></header><p><SpinnerGap size={20} className="agent-spin" /> 正在通过 {selectedModel?.name || model} 提交任务…</p></div></article>}
           <div ref={endRef} />
         </div>
 
         <div className="agent-composer-wrap">
           {message && <div className="agent-inline-alert"><LockKey size={18} /><span>{message}</span><button type="button" onClick={() => setMessage("")}><X size={16} /></button></div>}
           {!bootstrap?.subscription?.active && !loading && <div className="agent-membership-gate"><div><Coins size={24} weight="duotone" /><span><strong>会员订阅尚未生效</strong><small>开通月度或年度会员后使用网页版 Agent。</small></span></div><button type="button" onClick={() => navigate("/pricing")}>查看会员 <ArrowRight size={16} /></button></div>}
-          <div className="agent-mode-row"><div role="group" aria-label="响应方式"><button type="button" className={mode === "fast" ? "active" : ""} onClick={() => setMode("fast")}><Lightning size={17} weight="fill" />快速响应</button><button type="button" className={mode === "deep" ? "active" : ""} onClick={() => setMode("deep")}><Brain size={17} weight="duotone" />深度思考</button></div><span>{draft.length} / 4096</span></div>
+          <div className="agent-mode-row"><div className="agent-creation-hint">{creationType === "text" ? "免费文字对话" : `${selectedModel?.priceLabel || "按实际模型计费"} · 结算加收 30% 服务费`}</div><span>{draft.length} / 4096</span></div>
           {attachments.length > 0 && <div className="agent-attachment-row">{attachments.map((file, index) => <span key={`${file.name}-${index}`}><File size={16} /><b>{file.name}</b><small>{byteText(file.size)}</small><button type="button" aria-label={`移除 ${file.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button></span>)}</div>}
           <textarea ref={inputRef} maxLength={4096} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keyDown} placeholder="描述任务；上传附件后输入你的要求。Enter 发送，Shift + Enter 换行" />
           <footer>
-            <label className="agent-attach-button" title="最多 12 个附件，总计 192 MB"><Paperclip size={20} /><span>附件</span><input type="file" multiple accept="image/*,video/*,.txt,.md,.csv,.json,.pdf,.docx,.xlsx,.pptx" onChange={pickAttachments} /></label>
-            <div className="agent-type-select"><span>{creationType === "text" ? <TextT size={18} /> : creationType === "image" ? <ImageSquare size={18} /> : <VideoCamera size={18} />}</span><select value={creationType} onChange={(event) => setCreationType(event.target.value)}><option value="text">文字</option><option value="image">图片（即将开放）</option><option value="video">视频（即将开放）</option></select></div>
-            <div className="agent-model-select"><select value={model} onChange={(event) => setModel(event.target.value)}>{(bootstrap?.models || []).map((item) => <option value={item.id} key={item.id}>{item.name} · 免费</option>)}</select><Check size={15} weight="bold" /></div>
+            <label className="agent-attach-button" title={creationType === "text" ? "最多 12 个附件" : "上传参考图，每张不超过 600 KB"}><Paperclip size={20} /><span>{creationType === "text" ? "附件" : "参考图"}</span><input type="file" multiple accept={creationType === "text" ? "image/*,video/*,.txt,.md,.csv,.json,.pdf,.docx,.xlsx,.pptx" : "image/jpeg,image/png,image/webp"} onChange={pickAttachments} /></label>
+            <div className="agent-type-select"><span>{creationType === "text" ? <TextT size={18} /> : creationType === "image" ? <ImageSquare size={18} /> : <VideoCamera size={18} />}</span><select value={creationType} onChange={(event) => changeCreationType(event.target.value)}><option value="text">文字</option><option value="image">图片</option><option value="video">视频</option></select></div>
+            {creationType === "image" && <div className="agent-parameter-select"><select value={imageSize} onChange={(event) => setImageSize(event.target.value)}>{(bootstrap?.mediaOptions?.imageSizes || ["1:1"]).map((value) => <option key={value} value={value}>{value}</option>)}</select></div>}
+            {creationType === "video" && <><div className="agent-parameter-select"><select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)}><option value="16:9">16:9 横屏</option><option value="9:16">9:16 竖屏</option></select></div><div className="agent-parameter-select"><select value={duration} onChange={(event) => setDuration(Number(event.target.value))}>{(bootstrap?.mediaOptions?.videoDurations || [5]).map((value) => <option key={value} value={value}>{value} 秒</option>)}</select></div></>}
+            <div className="agent-model-select"><select value={model} onChange={(event) => setModel(event.target.value)}>{availableModels.map((item) => <option value={item.id} key={item.id}>{item.name}{creationType === "text" ? " · 免费" : ` · ${item.priceLabel}`}</option>)}</select><Check size={15} weight="bold" /></div>
             <button className="agent-send-button" type="button" aria-label="发送" disabled={!draft.trim() || sending || loading} onClick={send}>{sending ? <SpinnerGap size={22} className="agent-spin" /> : <PaperPlaneRight size={22} weight="fill" />}</button>
           </footer>
-          <div className="agent-composer-note"><LockKey size={14} /> PearAPI 凭据只保存在服务端加密存储中；免费 LLM 调用费用为 0 元。</div>
+          <div className="agent-composer-note"><LockKey size={14} /> PearAPI 凭据只保存在服务端加密存储中；文字模型免费，图片和视频按模型成本加 30% 结算。</div>
         </div>
       </div>
     </section>

@@ -117,6 +117,14 @@ export async function ensureIndexes() {
           { ownerId: 1, conversationId: 1, createdAt: 1 },
           { name: "agent_messages_by_conversation" },
         ),
+        db.collection("agentMediaJobs").createIndex(
+          { ownerId: 1, createdAt: -1 },
+          { name: "agent_media_by_owner" },
+        ),
+        db.collection("agentMediaJobs").createIndex(
+          { status: 1, nextPollAt: 1 },
+          { name: "agent_media_polling" },
+        ),
         db.collection("tasks").createIndex(
           { ownerId: 1, createdAt: -1 },
           { name: "tasks_by_owner" },
