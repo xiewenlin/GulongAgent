@@ -117,6 +117,14 @@ export async function ensureIndexes() {
           { ownerId: 1, conversationId: 1, createdAt: 1 },
           { name: "agent_messages_by_conversation" },
         ),
+        db.collection("agentWorkflows").createIndex(
+          { ownerId: 1, operationId: 1 },
+          { unique: true, name: "uniq_agent_workflow_operation" },
+        ),
+        db.collection("agentWorkflows").createIndex(
+          { createdAt: 1 },
+          { expireAfterSeconds: 7 * 24 * 60 * 60, name: "ttl_agent_workflows" },
+        ),
         db.collection("agentMediaJobs").createIndex(
           { ownerId: 1, createdAt: -1 },
           { name: "agent_media_by_owner" },

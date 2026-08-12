@@ -33,6 +33,13 @@ export const PEAR_API_FREE_MODELS = Object.freeze([
 const FREE_MODEL_IDS = new Set(PEAR_API_FREE_MODELS.map((model) => model.id));
 const FREE_MODEL_MAP = new Map(PEAR_API_FREE_MODELS.map((model) => [model.id, model]));
 const FREE_FALLBACK_MODEL_ID = "glm-4-flash-250414";
+const TEXT_WORKFLOW_TITLES = Object.freeze([
+  ["understand", "理解任务"],
+  ["context", "整理上下文"],
+  ["route", "匹配模型"],
+  ["inference", "远程推理"],
+  ["format", "排版与保存"],
+]);
 const SECRET_PATTERN = /^[^\s\u0000-\u001f\u007f]{8,4096}$/u;
 const DEFAULT_PRICING = Object.freeze({ imageMinFen: 1, imageMaxFen: 32, videoMinFen: 4, videoMaxFen: 193 });
 
@@ -148,6 +155,51 @@ function responseText(payload) {
   if (Array.isArray(payload?.output)) return payload.output.flatMap((item) => item?.content || []).map((item) => item?.text || "").join("\n").trim();
   if (typeof payload?.choices?.[0]?.message?.reasoning_content === "string") return payload.choices[0].message.reasoning_content.trim();
   return "";
+}
+
+function workflowPublicView(record, nowMs = Date.now()) {
+  if (!record) return null;
+  const startedAtMs = new Date(record.startedAt).getTime();
+  const completedAtMs = record.completedAt ? new Date(record.completedAt).getTime() : null;
+  return {
+    id: record.operationId,
+    operationId: record.operationId,
+    status: record.status,
+    totalMs: Math.max(0, (completedAtMs || nowMs) - startedAtMs),
+    nodes: (record.nodes || []).map((node) => ({
+      id: node.id,
+      title: node.title,
+      status: node.status,
+      detail: node.detail || null,
+      startedAtMs: node.startedAt ? new Date(node.startedAt).getTime() : null,
+      elapsedMs: node.startedAt ? Math.max(0, (node.completedAt ? new Date(node.completedAt).getTime() : nowMs) - new Date(node.startedAt).getTime()) : null,
+    })),
+  };
+}
+
+function textWorkflowNodes(now, hasAttachments = false) {
+  return TEXT_WORKFLOW_TITLES.map(([id, title], index) => ({
+    id,
+    title: id === "context" && hasAttachments ? "读取附件" : title,
+    status: index === 0 ? "running" : "pending",
+    startedAt: index === 0 ? now : null,
+    completedAt: null,
+    detail: null,
+  }));
+}
+
+function advanceWorkflowNode(nodes, nodeId, now, { detail = null, failed = false } = {}) {
+  const index = nodes.findIndex((node) => node.id === nodeId);
+  if (index < 0) return nodes;
+  return nodes.map((node, nodeIndex) => {
+    if (nodeIndex < index && node.status === "running") return { ...node, status: "completed", completedAt: now };
+    if (nodeIndex === index) return { ...node, status: failed ? "failed" : "running", startedAt: node.startedAt || now, completedAt: failed ? now : null, detail };
+    return node;
+  });
+}
+
+function completeWorkflowNode(nodes, nodeId, now, detail = null) {
+  return nodes.map((node) => node.id === nodeId ? { ...node, status: "completed", startedAt: node.startedAt || now, completedAt: now, detail: detail || node.detail } : node);
 }
 
 const IMAGE_ENDPOINT = `${PEAR_API_BASE_URL}/api/image_generate`;
@@ -452,8 +504,13 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
   });
   const chatRoute = createRoute({
     method: "post", path: "/api/agent/chat", tags: ["Web Agent"], summary: "通过 PearAPI 免费模型完成文本对话",
-    request: { body: { content: { "application/json": { schema: z.object({ model: z.string(), conversationId: z.string().optional(), messages: z.array(MessageSchema).min(1).max(24) }) } } } },
-    responses: { 200: { description: "模型回复" }, 400: { description: "参数或模型不允许", content: { "application/json": { schema: ErrorSchema } } }, 401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } }, 402: { description: "订阅未生效", content: { "application/json": { schema: ErrorSchema } } }, 503: { description: "管理员尚未配置 PearAPI", content: { "application/json": { schema: ErrorSchema } } } },
+    request: { body: { content: { "application/json": { schema: z.object({ operationId: z.string().min(16).max(96).regex(/^pearop_[a-z0-9_]+$/).optional(), model: z.string(), conversationId: z.string().optional(), messages: z.array(MessageSchema).min(1).max(24) }) } } } },
+    responses: { 200: { description: "模型回复与工作流耗时" }, 400: { description: "参数或模型不允许", content: { "application/json": { schema: ErrorSchema } } }, 401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } }, 402: { description: "订阅未生效", content: { "application/json": { schema: ErrorSchema } } }, 409: { description: "流程编号重复", content: { "application/json": { schema: ErrorSchema } } }, 503: { description: "管理员尚未配置 PearAPI", content: { "application/json": { schema: ErrorSchema } } } },
+  });
+  const workflowRoute = createRoute({
+    method: "get", path: "/api/agent/workflows/{operationId}", tags: ["Web Agent"], summary: "实时读取一次对话的处理节点与耗时",
+    request: { params: z.object({ operationId: z.string().min(16).max(96).regex(/^pearop_[a-z0-9_]+$/) }) },
+    responses: { 200: { description: "对话工作流实时状态" }, 401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } }, 404: { description: "流程不存在", content: { "application/json": { schema: ErrorSchema } } } },
   });
   const mediaCreateRoute = createRoute({
     method: "post", path: "/api/agent/media", tags: ["Web Agent"], summary: "提交 PearAPI 图片或视频生成任务",
@@ -517,6 +574,14 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     });
   });
 
+  app.openapi(workflowRoute, async (c) => {
+    const auth = await authenticate(c); if (auth.error) return auth.error;
+    const record = await (await getCollection("agentWorkflows")).findOne({ operationId: c.req.valid("param").operationId, ownerId: new ObjectId(auth.user.id) });
+    if (!record) return c.json({ code: "WORKFLOW_NOT_FOUND", message: "没有找到这次对话的处理流程" }, 404);
+    c.header("Cache-Control", "private, no-store, max-age=0");
+    return c.json({ workflow: workflowPublicView(record) });
+  });
+
   app.openapi(chatRoute, async (c) => {
     const rejected = requireTrustedMutation(c); if (rejected) return rejected;
     const auth = await authenticate(c); if (auth.error) return auth.error;
@@ -535,13 +600,39 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     const record = await credentialRecord();
     const token = credentialSecrets(record).token;
     if (!token) return c.json({ code: "PEAR_API_NOT_CONFIGURED", message: "管理员尚未配置 PearAPI 免费渠道令牌" }, 503);
+    const workflows = await getCollection("agentWorkflows");
+    const operationId = input.operationId || `pearop_${Date.now().toString(36)}_${randomBytes(5).toString("hex")}`;
+    const hasAttachments = /\[(?:文本)?附件：/.test(input.messages.at(-1)?.content || "");
+    let workflowNodes = textWorkflowNodes(now, hasAttachments);
+    const workflowCreated = await workflows.updateOne(
+      { operationId, ownerId },
+      { $setOnInsert: { operationId, ownerId, conversationId: input.conversationId || null, model: input.model, status: "running", startedAt: now, createdAt: now, updatedAt: now, nodes: workflowNodes } },
+      { upsert: true },
+    );
+    if (!workflowCreated.upsertedCount) return c.json({ code: "WORKFLOW_ID_CONFLICT", message: "本次对话编号已使用，请重新发送" }, 409);
+    const understoodAt = new Date();
+    workflowNodes = completeWorkflowNode(workflowNodes, "understand", understoodAt, `${input.messages.length} 条消息`);
+    workflowNodes = advanceWorkflowNode(workflowNodes, "context", understoodAt);
+    await workflows.updateOne({ operationId, ownerId }, { $set: { nodes: workflowNodes, updatedAt: understoodAt } });
     const conversationId = ObjectId.isValid(input.conversationId) ? new ObjectId(input.conversationId) : new ObjectId();
     const requestId = `pear_${Date.now().toString(36)}_${randomBytes(6).toString("hex")}`;
-    const system = "你是古龙网页版智能助手。直接、准确、简洁地回答。网页版不具备第二大脑、本地模型、插件、技能或工作流，不要声称已调用这些能力。";
+    const system = "你是古龙网页版智能助手。直接、准确、简洁地回答。使用规范 Markdown 组织标题、列表、强调、表格和代码，让网页可以直接排版预览。网页版不具备第二大脑、本地模型、插件、技能或扩展工作流，不要声称已调用这些能力；界面展示的只是本次请求真实经过的服务处理节点。";
     const usage = { ownerId, conversationId, requestId, modality: "text", model: input.model, baseCostFen: 0, chargedFen: 0, markupRate: PEAR_API_MARKUP_RATE, status: "started", createdAt: now, updatedAt: now };
     await (await getCollection("agentUsage")).insertOne(usage);
+    const contextReadyAt = new Date();
+    workflowNodes = completeWorkflowNode(workflowNodes, "context", contextReadyAt, hasAttachments ? "附件与对话上下文" : "最近对话上下文");
+    workflowNodes = advanceWorkflowNode(workflowNodes, "route", contextReadyAt, { detail: input.model });
+    await workflows.updateOne({ operationId, ownerId }, { $set: { nodes: workflowNodes, updatedAt: contextReadyAt } });
+    const inferenceStartedAt = new Date();
+    workflowNodes = completeWorkflowNode(workflowNodes, "route", inferenceStartedAt, input.model);
+    workflowNodes = advanceWorkflowNode(workflowNodes, "inference", inferenceStartedAt, { detail: input.model });
+    await workflows.updateOne({ operationId, ownerId }, { $set: { nodes: workflowNodes, updatedAt: inferenceStartedAt } });
     try {
       const result = await callPearApiChat({ token, tokenChannel: record?.tokenChannel || "免费", model: input.model, messages: [{ role: "system", content: system }, ...input.messages] });
+      const inferenceCompletedAt = new Date();
+      workflowNodes = completeWorkflowNode(workflowNodes, "inference", inferenceCompletedAt, result.resolvedModel);
+      workflowNodes = advanceWorkflowNode(workflowNodes, "format", inferenceCompletedAt, { detail: "Markdown 成品排版" });
+      await workflows.updateOne({ operationId, ownerId }, { $set: { nodes: workflowNodes, resolvedModel: result.resolvedModel, fallback: result.fallback, updatedAt: inferenceCompletedAt } });
       const completedAt = new Date();
       await Promise.all([
         (await getCollection("agentUsage")).updateOne({ requestId }, { $set: { status: "succeeded", resolvedModel: result.resolvedModel, modelFallback: result.fallback, fallbackReason: result.fallbackReason || null, upstreamUsage: result.usage, upstreamResponseId: result.responseId, completedAt, updatedAt: completedAt } }),
@@ -550,10 +641,19 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
           { ownerId, conversationId, requestId, role: "assistant", content: result.text, model: input.model, createdAt: completedAt },
         ]),
       ]);
+      const workflowCompletedAt = new Date();
+      workflowNodes = completeWorkflowNode(workflowNodes, "format", workflowCompletedAt);
+      await workflows.updateOne({ operationId, ownerId }, { $set: { nodes: workflowNodes, status: "completed", completedAt: workflowCompletedAt, updatedAt: workflowCompletedAt } });
+      const workflow = workflowPublicView({ operationId, status: "completed", startedAt: now, completedAt: workflowCompletedAt, nodes: workflowNodes });
       c.header("Cache-Control", "private, no-store, max-age=0");
-      return c.json({ conversationId: conversationId.toString(), requestId, message: { role: "assistant", content: result.text, createdAt: completedAt }, model: input.model, resolvedModel: result.resolvedModel, fallback: result.fallback, chargedFen: 0, free: true, usage: result.usage });
+      return c.json({ conversationId: conversationId.toString(), requestId, operationId, message: { role: "assistant", content: result.text, createdAt: completedAt }, model: input.model, resolvedModel: result.resolvedModel, fallback: result.fallback, workflow, chargedFen: 0, free: true, usage: result.usage });
     } catch (error) {
-      await (await getCollection("agentUsage")).updateOne({ requestId }, { $set: { status: "failed", errorCode: error.code || "PEAR_API_ERROR", failedAt: new Date(), updatedAt: new Date() } });
+      const failedAt = new Date();
+      workflowNodes = advanceWorkflowNode(workflowNodes, workflowNodes.find((node) => node.status === "running")?.id || "inference", failedAt, { detail: error.code || "PEAR_API_ERROR", failed: true });
+      await Promise.all([
+        (await getCollection("agentUsage")).updateOne({ requestId }, { $set: { status: "failed", errorCode: error.code || "PEAR_API_ERROR", failedAt, updatedAt: failedAt } }),
+        workflows.updateOne({ operationId, ownerId }, { $set: { nodes: workflowNodes, status: "failed", errorCode: error.code || "PEAR_API_ERROR", completedAt: failedAt, updatedAt: failedAt } }),
+      ]);
       return c.json({ code: error.code || "PEAR_API_ERROR", message: error.message || "PearAPI 调用失败" }, error.status || 502);
     }
   });

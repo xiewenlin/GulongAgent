@@ -121,6 +121,7 @@ test("PearAPI routes publish the free-model and protected admin contracts in Ope
   assert.equal((await response.json()).models.length, 7);
   const document = app.getOpenAPIDocument({ openapi: "3.1.0", info: { title: "test", version: "1" } });
   assert.ok(document.paths["/api/agent/chat"]?.post);
+  assert.ok(document.paths["/api/agent/workflows/{operationId}"]?.get);
   assert.ok(document.paths["/api/agent/bootstrap"]?.get);
   assert.ok(document.paths["/api/agent/media"]?.post);
   assert.ok(document.paths["/api/agent/media/{id}"]?.get);
@@ -150,6 +151,12 @@ test("website exposes the simplified agent while user settings no longer expose 
   assert.match(agentSource, /<option value="image">图片<\/option>/);
   assert.match(agentSource, /<option value="video">视频<\/option>/);
   assert.match(agentSource, /\/api\/agent\/media/);
+  assert.match(agentSource, /import ReactMarkdown from "react-markdown"/);
+  assert.match(agentSource, /remarkPlugins=\{\[remarkGfm\]\}/);
+  assert.match(agentSource, /<MarkdownMessage>\{item\.content\}<\/MarkdownMessage>/);
+  assert.match(agentSource, /<WorkflowTrace workflow=\{item\.workflow\}/);
+  assert.match(agentSource, /safeMarkdownHref/);
+  assert.doesNotMatch(agentSource, /rehypeRaw/);
   assert.match(adminSource, /\{ id: "tokens", label: "令牌配置", icon: LockKey \}/);
   assert.match(adminSource, /\["默认", "优质", "免费", "按次", "特价", "限时免费"\]/);
   assert.doesNotMatch(accountSource, /id: "minimax"/);
@@ -168,11 +175,15 @@ test("monthly subscription payments credit the wallet once and PearAPI routes ar
   assert.match(serverSource, /source: "offline_subscription"/);
   assert.match(dbSource, /uniq_wallet_owner/);
   assert.match(dbSource, /agent_media_polling/);
+  assert.match(dbSource, /uniq_agent_workflow_operation/);
+  assert.match(dbSource, /ttl_agent_workflows/);
   assert.match(pearSource, /"credits\.key": \{ \$ne: key \}/);
   assert.match(pearSource, /limit: 30, windowMs: 5 \* 60_000/);
   assert.match(pearSource, /const unlimited = auth\.user\.role === "admin"/);
   assert.match(pearSource, /configured: Boolean\(credentialSecrets\(credential\)\.token\)/);
   assert.match(pearSource, /callPearApiChat\(\{ token/);
+  assert.match(pearSource, /WORKFLOW_ID_CONFLICT/);
+  assert.match(pearSource, /Markdown 成品排版/);
   assert.match(pearSource, /tokenChannel: record\?\.tokenChannel \|\| "免费"/);
   assert.doesNotMatch(pearSource, /pear-chat:[\s\S]{0,1800}INSUFFICIENT_BALANCE/);
   assert.match(vercel, /"source": "\/api\/agent\/:path\*"/);

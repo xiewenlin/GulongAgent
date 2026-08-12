@@ -1,6 +1,7 @@
 import {
   ArrowRight,
   Check,
+  CheckCircle,
   Coins,
   File,
   ImageSquare,
@@ -16,6 +17,8 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { apiFetch, formatMoney } from "../api.js";
 
 const MAX_ATTACHMENTS = 16;
@@ -34,6 +37,49 @@ const starterPrompts = [
 function byteText(bytes) {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatElapsed(milliseconds) {
+  const value = Math.max(0, Number(milliseconds || 0));
+  if (value < 1_000) return `${Math.max(1, Math.round(value))} 毫秒`;
+  if (value < 60_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)} 秒`;
+  const minutes = Math.floor(value / 60_000);
+  const seconds = Math.round((value % 60_000) / 1_000);
+  return `${minutes} 分 ${seconds} 秒`;
+}
+
+function safeMarkdownHref(href) {
+  const value = String(href || "").trim();
+  if (/^(https?:|mailto:)/i.test(value) || value.startsWith("/") || value.startsWith("#")) return value;
+  return null;
+}
+
+function MarkdownMessage({ children }) {
+  return <div className="agent-markdown"><ReactMarkdown
+    remarkPlugins={[remarkGfm]}
+    components={{
+      a: ({ children: label, href }) => {
+        const safeHref = safeMarkdownHref(href);
+        return safeHref ? <a href={safeHref} target="_blank" rel="noreferrer">{label}</a> : <span>{label}</span>;
+      },
+      img: ({ alt }) => <span className="agent-markdown-image-note">图片：{alt || "模型返回的图片"}</span>,
+    }}
+  >{String(children || "")}</ReactMarkdown></div>;
+}
+
+function WorkflowTrace({ workflow, live = false }) {
+  if (!workflow?.nodes?.length) return null;
+  const completed = workflow.nodes.filter((node) => node.status === "completed").length;
+  const failed = workflow.nodes.some((node) => node.status === "failed");
+  return <section className={`agent-workflow-trace ${live ? "live" : "completed"}`} aria-label="本次回复处理流程">
+    <header><div><span>RESPONSE WORKFLOW</span><strong>{live ? "正在组织回复" : "本次回复处理流程"}</strong></div><em>{completed}/{workflow.nodes.length} 节点 · {formatElapsed(workflow.totalMs)}</em></header>
+    <div className="agent-workflow-track">{workflow.nodes.map((node, index) => <div className={`agent-workflow-node ${node.status}`} key={node.id}>
+      <i aria-hidden="true">{node.status === "completed" ? <Check size={12} weight="bold" /> : node.status === "running" ? <SpinnerGap size={13} className="agent-spin" /> : node.status === "failed" ? <X size={12} weight="bold" /> : index + 1}</i>
+      <div><strong>{node.title}</strong><span>{node.status === "completed" ? "已完成" : node.status === "running" ? "执行中" : node.status === "failed" ? "执行失败" : "等待执行"}{node.elapsedMs != null ? ` · ${formatElapsed(node.elapsedMs)}` : ""}</span>{node.detail && <small title={node.detail}>{node.detail}</small>}</div>
+      {index < workflow.nodes.length - 1 && <b aria-hidden="true" />}
+    </div>)}</div>
+    {!live && <footer><CheckCircle size={18} weight="fill" /><span>{failed ? "流程已结束" : "全部节点处理完成"}</span><strong>总耗时 {formatElapsed(workflow.totalMs)}</strong></footer>}
+  </section>;
 }
 
 async function attachmentContext(files) {
@@ -150,6 +196,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
   const [assetOpen, setAssetOpen] = useState(false);
   const [skillOpen, setSkillOpen] = useState(false);
   const [quotaPrompt, setQuotaPrompt] = useState("");
+  const [liveWorkflow, setLiveWorkflow] = useState(null);
   const inputRef = useRef(null);
   const endRef = useRef(null);
   const pollersRef = useRef(new Map());
@@ -163,6 +210,22 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
   useEffect(() => () => { for (const timer of pollersRef.current.values()) clearTimeout(timer); pollersRef.current.clear(); }, []);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }); }, [messages, sending]);
+
+  useEffect(() => {
+    if (!sending || !liveWorkflow?.operationId) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const result = await apiFetch(`/api/agent/workflows/${liveWorkflow.operationId}`);
+        if (!cancelled) setLiveWorkflow(result.workflow);
+      } catch (error) {
+        if (!cancelled && error.status !== 404) setMessage(error.message);
+      }
+    };
+    void poll();
+    const timer = setInterval(poll, 450);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [sending, liveWorkflow?.operationId]);
 
   const availableModels = useMemo(() => creationType === "text" ? (bootstrap?.models || []) : (bootstrap?.mediaModels?.[creationType] || []), [bootstrap, creationType]);
   const selectedModel = useMemo(() => availableModels.find((item) => item.id === model), [availableModels, model]);
@@ -224,6 +287,15 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
     if (creationType === "text" && !bootstrap?.configured) { setMessage("管理员尚未完成 PearAPI 免费渠道令牌配置，请稍后再试。"); return; }
     if (creationType !== "text" && !bootstrap?.mediaConfigured) { setMessage("管理员尚未完成 PearAPI Key 配置，请稍后再试。"); return; }
     setSending(true); setMessage("");
+    const operationId = creationType === "text" ? `pearop_${Date.now().toString(36)}_${crypto.getRandomValues(new Uint32Array(2)).join("_")}` : null;
+    const workflowNodes = [
+      { id: "understand", title: "理解任务", status: "running", elapsedMs: 0 },
+      { id: "context", title: attachments.length ? "读取附件" : "整理上下文", status: "pending", elapsedMs: null },
+      { id: "route", title: "匹配模型", status: "pending", elapsedMs: null },
+      { id: "inference", title: creationType === "text" ? "远程推理" : "提交创作", status: "pending", elapsedMs: null },
+      { id: "format", title: creationType === "text" ? "排版回复" : "生成结果", status: "pending", elapsedMs: null },
+    ];
+    setLiveWorkflow(operationId ? { operationId, totalMs: 0, nodes: workflowNodes } : null);
     const visibleUser = { role: "user", content, createdAt: new Date().toISOString(), attachments: attachments.map((file) => ({ name: file.name, size: file.size, type: file.type })) };
     const nextMessages = [...messages, visibleUser];
     setMessages(nextMessages); setDraft(""); setAttachments([]);
@@ -244,9 +316,9 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
       }
       const context = await attachmentContext(attachments);
       const requestMessages = nextMessages.slice(-23).map((item, index, list) => ({ role: item.role, content: index === list.length - 1 && item.role === "user" ? `${item.content}${context}`.slice(0, 12_000) : item.content.slice(0, 12_000) }));
-      const result = await apiFetch("/api/agent/chat", { method: "POST", body: JSON.stringify({ model, conversationId: conversationId || undefined, messages: requestMessages }) });
+      const result = await apiFetch("/api/agent/chat", { method: "POST", body: JSON.stringify({ operationId, model, conversationId: conversationId || undefined, messages: requestMessages }) });
       setConversationId(result.conversationId);
-      setMessages((current) => [...current, { ...result.message, model: result.model, resolvedModel: result.resolvedModel, fallback: result.fallback, free: result.free }]);
+      setMessages((current) => [...current, { ...result.message, model: result.model, resolvedModel: result.resolvedModel, fallback: result.fallback, free: result.free, workflow: result.workflow }]);
       apiFetch("/api/agent/bootstrap").then(setBootstrap).catch(() => {});
     } catch (error) {
       setMessages((current) => current.filter((item) => item !== visibleUser));
@@ -254,7 +326,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
       if (creationType !== "text" && error.code === "SUBSCRIPTION_REQUIRED") setQuotaPrompt("subscription");
       else if (creationType !== "text" && error.code === "INSUFFICIENT_BALANCE") setQuotaPrompt("recharge");
       else setMessage(error.message);
-    } finally { setSending(false); }
+    } finally { setSending(false); setLiveWorkflow(null); }
   }
 
   function keyDown(event) {
@@ -270,13 +342,13 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
     </div>
 
     <section className="agent-workspace section-shell">
-      <header className="agent-workspace-head"><div><span>PEARAPI FREE MODEL CLOUD</span><h1>今天想完成什么？</h1><p>7 个免费模型由古龙服务端统一调度；不暴露令牌，不加载第二大脑、本地模型、插件或工作流。</p></div><div className="agent-live-status"><i className={bootstrap?.configured ? "ready" : ""} /><span>{loading ? "正在连接" : bootstrap?.configured ? "远程模型已连接" : "等待管理员配置"}</span></div></header>
+      <header className="agent-workspace-head"><div><span>PEARAPI FREE MODEL CLOUD</span><h1>今天想完成什么？</h1><p>7 个免费模型由古龙服务端统一调度；每次回复展示实时处理节点，不加载第二大脑、本地模型、插件或扩展工作流。</p></div><div className="agent-live-status"><i className={bootstrap?.configured ? "ready" : ""} /><span>{loading ? "正在连接" : bootstrap?.configured ? "远程模型已连接" : "等待管理员配置"}</span></div></header>
 
       <div className="agent-chat-shell">
         <div className="agent-chat-stream" aria-live="polite">
           {!messages.length && <div className="agent-empty-chat"><div className="agent-empty-mark"><Sparkle size={35} weight="duotone" /></div><h2>把目标交给古龙</h2><p>选择文字、图片或视频，挑选模型并描述你想完成的结果。</p><div>{starterPrompts.map((prompt) => <button key={prompt} type="button" onClick={() => { setDraft(prompt); inputRef.current?.focus(); }}>{prompt}<ArrowRight size={16} /></button>)}</div></div>}
-          {messages.map((item, index) => <article className={`agent-message ${item.role}`} key={`${item.createdAt}-${index}`}><div className="agent-message-avatar">{item.role === "assistant" ? <img src={themeIcon} alt="古龙" /> : (user.displayName || user.username || "我").slice(0, 1)}</div><div><header><strong>{item.role === "assistant" ? "古龙" : "你"}</strong><time>{new Date(item.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time>{item.free && <em>免费</em>}{item.fallback && <em>已切换备用模型</em>}</header><p>{item.content}</p><MediaResult item={item} />{item.attachments?.length > 0 && <div className="agent-message-files">{item.attachments.map((file) => <span key={file.name}><File size={15} />{file.name}</span>)}</div>}</div></article>)}
-          {sending && <article className="agent-message assistant pending"><div className="agent-message-avatar"><img src={themeIcon} alt="" /></div><div><header><strong>古龙</strong><em>{creationType === "text" ? "文字" : creationType === "image" ? "图片" : "视频"}</em></header><p><SpinnerGap size={20} className="agent-spin" /> 正在通过 {selectedModel?.name || model} 提交任务…</p></div></article>}
+          {messages.map((item, index) => <article className={`agent-message ${item.role}`} key={`${item.createdAt}-${index}`}><div className="agent-message-avatar">{item.role === "assistant" ? <img src={themeIcon} alt="古龙" /> : (user.displayName || user.username || "我").slice(0, 1)}</div><div><header><strong>{item.role === "assistant" ? "古龙" : "你"}</strong><time>{new Date(item.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time>{item.free && <em>免费</em>}{item.fallback && <em>已切换备用模型</em>}</header>{item.role === "assistant" ? <MarkdownMessage>{item.content}</MarkdownMessage> : <p>{item.content}</p>}<WorkflowTrace workflow={item.workflow} /><MediaResult item={item} />{item.attachments?.length > 0 && <div className="agent-message-files">{item.attachments.map((file) => <span key={file.name}><File size={15} />{file.name}</span>)}</div>}</div></article>)}
+          {sending && <article className="agent-message assistant pending"><div className="agent-message-avatar"><img src={themeIcon} alt="" /></div><div><header><strong>古龙</strong><em>{creationType === "text" ? "文字" : creationType === "image" ? "图片" : "视频"}</em></header>{creationType === "text" && <WorkflowTrace workflow={liveWorkflow} live />}<p><SpinnerGap size={20} className="agent-spin" /> 正在通过 {selectedModel?.name || model} 处理任务…</p></div></article>}
           <div ref={endRef} />
         </div>
 

@@ -15,7 +15,7 @@ import {
   UserCircle,
   X,
 } from "@phosphor-icons/react";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { apiFetch, trackAnalyticsEvent } from "./api.js";
 import { AccountModal } from "./components/AccountModal.jsx";
 import { AccountDashboard } from "./components/AccountDashboard.jsx";
@@ -24,7 +24,6 @@ import { HomePage } from "./components/HomePage.jsx";
 import { ProductManualPage } from "./components/ProductManualPage.jsx";
 import { SecondBrainPage } from "./components/SecondBrainPage.jsx";
 import { SubscriptionReminderDialog } from "./components/SubscriptionReminderDialog.jsx";
-import { WebAgentPage } from "./components/WebAgentPage.jsx";
 import { WorkerPage } from "./components/WorkerPages.jsx";
 import { ShortDramaPage, WorkflowPage } from "./components/WorkflowPages.jsx";
 import {
@@ -36,6 +35,8 @@ import {
   PricingPage,
 } from "./components/PlatformPages.jsx";
 import { themes } from "./data/site.js";
+
+const WebAgentPage = lazy(() => import("./components/WebAgentPage.jsx").then((module) => ({ default: module.WebAgentPage })));
 
 const primaryNav = [
   { label: "产品能力", href: "/manual" },
@@ -224,7 +225,7 @@ export function App() {
   const pathname = window.location.pathname;
   let page;
   if (pathname === "/admin") page = <AdminPage user={user} openAuth={openAuth} />;
-  else if (pathname === "/agent") page = <WebAgentPage user={user} openAuth={openAuth} navigate={navigate} themeIcon={themeIcon} />;
+  else if (pathname === "/agent") page = <Suspense fallback={<main id="main-content" className="web-agent-page web-agent-gate section-shell"><span>GULONG WEB AGENT</span><h1>正在打开古龙网页版</h1><p>正在加载对话排版与实时流程组件…</p></main>}><WebAgentPage user={user} openAuth={openAuth} navigate={navigate} themeIcon={themeIcon} /></Suspense>;
   else if (pathname === "/account") page = <AccountDashboard user={user} openAuth={openAuth} navigate={navigate} onUser={setUser} />;
   else if (pathname === "/manual") page = <ProductManualPage navigate={navigate} />;
   else if (pathname === "/brain") page = <SecondBrainPage user={user} openAuth={openAuth} navigate={navigate} />;
