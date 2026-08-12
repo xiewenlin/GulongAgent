@@ -181,8 +181,9 @@
 .pear-token-form-head em { padding: 7px 10px; border-radius: 999px; color: var(--muted); background: var(--bg-soft); font-size: 18px; font-style: normal; font-weight: 800; }
 .pear-token-form-head em.ready { color: var(--success); background: color-mix(in srgb, var(--success) 9%, var(--surface)); }
 .pear-token-form > label, .pear-token-form fieldset label { display: grid; gap: 7px; color: var(--text); font-size: 18px; font-weight: 760; }
-.pear-token-form input { min-height: 51px; padding: 0 14px; border: 1px solid var(--line-strong); border-radius: 12px; outline: 0; color: var(--text); background: var(--bg-soft); font: inherit; font-size: 18px; }
-.pear-token-form input:focus { border-color: color-mix(in srgb, var(--primary) 50%, var(--line)); box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 8%, transparent); }
+.pear-token-form input, .pear-token-form select { min-height: 51px; padding: 0 14px; border: 1px solid var(--line-strong); border-radius: 12px; outline: 0; color: var(--text); background: var(--bg-soft); font: inherit; font-size: 18px; }
+.pear-token-form select { cursor: pointer; }
+.pear-token-form input:focus, .pear-token-form select:focus { border-color: color-mix(in srgb, var(--primary) 50%, var(--line)); box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 8%, transparent); }
 .pear-token-form label small { color: var(--muted); font-size: 18px; font-weight: 500; line-height: 1.55; }
 .pear-token-form fieldset { margin: 0; padding: 17px; border: 1px solid var(--line); border-radius: 16px; }
 .pear-token-form fieldset legend { padding: 0 8px; color: var(--accent); font-size: 18px; font-weight: 850; }

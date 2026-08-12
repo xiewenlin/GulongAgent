@@ -822,7 +822,7 @@ function PaymentManager() {
 
 function PearTokenManager() {
   const [config, setConfig] = useState(null);
-  const [form, setForm] = useState({ key: "", token: "", imageMin: "", imageMax: "", videoMin: "", videoMax: "" });
+  const [form, setForm] = useState({ key: "", token: "", tokenChannel: "免费", imageMin: "", imageMax: "", videoMin: "", videoMax: "" });
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("");
 
@@ -840,7 +840,7 @@ function PearTokenManager() {
     try {
       const result = await apiFetch("/api/admin/pearapi/config");
       setConfig(result);
-      setForm((current) => ({ ...current, imageMin: yuan(result.pricing?.imageMinFen), imageMax: yuan(result.pricing?.imageMaxFen), videoMin: yuan(result.pricing?.videoMinFen), videoMax: yuan(result.pricing?.videoMaxFen) }));
+      setForm((current) => ({ ...current, tokenChannel: result.tokenChannel || "免费", imageMin: yuan(result.pricing?.imageMinFen), imageMax: yuan(result.pricing?.imageMaxFen), videoMin: yuan(result.pricing?.videoMinFen), videoMax: yuan(result.pricing?.videoMaxFen) }));
     } catch (error) { setMessage(error.message); }
     finally { setBusy(""); }
   }
@@ -850,7 +850,7 @@ function PearTokenManager() {
   async function save(event) {
     event.preventDefault(); setBusy("save"); setMessage("");
     try {
-      const result = await apiFetch("/api/admin/pearapi/config", { method: "PUT", body: JSON.stringify({ key: form.key || undefined, token: form.token || undefined, imageMinFen: fen(form.imageMin), imageMaxFen: fen(form.imageMax), videoMinFen: fen(form.videoMin), videoMaxFen: fen(form.videoMax) }) });
+      const result = await apiFetch("/api/admin/pearapi/config", { method: "PUT", body: JSON.stringify({ key: form.key || undefined, token: form.token || undefined, tokenChannel: form.tokenChannel, imageMinFen: fen(form.imageMin), imageMaxFen: fen(form.imageMax), videoMinFen: fen(form.videoMin), videoMaxFen: fen(form.videoMax) }) });
       setConfig(result.config); setForm((current) => ({ ...current, key: "", token: "" }));
       setMessage("PearAPI 全局凭据与计费区间已加密保存，网页版立即生效。");
     } catch (error) { setMessage(error.message); }
@@ -861,7 +861,8 @@ function PearTokenManager() {
     setBusy("test"); setMessage("");
     try {
       const result = await apiFetch("/api/admin/pearapi/test", { method: "POST", body: "{}" });
-      setMessage(`连接成功：${result.model} · ${result.reply}`);
+      const unavailable = (result.models || []).filter((model) => !model.available).map((model) => model.name).join("、");
+      setMessage(result.allAvailable ? `连接成功：全部 ${result.total} 个免费文字模型均可用。` : `检测完成：${result.healthy}/${result.total} 个模型可用；暂不可用：${unavailable || "未知模型"}。对话时会自动切换至可用的免费模型。`);
     } catch (error) { setMessage(error.message); }
     finally { setBusy(""); }
   }
@@ -871,13 +872,14 @@ function PearTokenManager() {
     {message && <AdminNotice tone={message.includes("成功") || message.includes("已") ? "success" : "error"}>{message}</AdminNotice>}
     <div className="pear-token-layout">
       <form className="pear-token-form" onSubmit={save}>
-        <div className="pear-token-form-head"><div><LockKey size={29} weight="duotone" /><span><strong>PearAPI Key 与免费渠道令牌</strong><small>AES-256-GCM 加密保存，保存后只显示末 4 位</small></span></div><em className={config?.keyConfigured && config?.tokenConfigured ? "ready" : ""}>{config?.keyConfigured && config?.tokenConfigured ? "文字与媒体模型已连接" : "等待完整配置"}</em></div>
+        <div className="pear-token-form-head"><div><LockKey size={29} weight="duotone" /><span><strong>PearAPI Key 与渠道令牌</strong><small>AES-256-GCM 加密保存，保存后只显示末 4 位</small></span></div><em className={config?.keyConfigured && config?.tokenConfigured ? "ready" : ""}>{config?.keyConfigured && config?.tokenConfigured ? "文字与媒体模型已连接" : "等待完整配置"}</em></div>
         <label><span>PearAPI API Key</span><input type="password" minLength={config?.keyConfigured ? 0 : 8} value={form.key} onChange={(event) => setForm({ ...form, key: event.target.value })} placeholder={config?.keyMasked ? `${config.keyMasked}（留空表示不修改）` : "输入 PearAPI API Key"} /><small>用于图片、视频接口的 key 参数；网页版不会回显。</small></label>
-        <label><span>PearAPI 免费渠道令牌</span><input type="password" minLength={config?.tokenConfigured ? 0 : 8} value={form.token} onChange={(event) => setForm({ ...form, token: event.target.value })} placeholder={config?.tokenMasked ? `${config.tokenMasked}（留空表示不修改）` : "粘贴渠道为“免费”的 AI 令牌"} /><small>文字模型必填：进入 PearAPI“令牌管理”，新建令牌并把渠道选择为“免费”。API Key 或“默认”渠道令牌不能调用免费文字模型。</small></label>
+        <label><span>PearAPI 令牌渠道</span><select value={form.tokenChannel} onChange={(event) => setForm({ ...form, tokenChannel: event.target.value })}>{(config?.tokenChannels || ["默认", "优质", "免费", "按次", "特价", "限时免费"]).map((channel) => <option key={channel} value={channel}>{channel}</option>)}</select><small>请选择与 PearAPI 控制台中该枚令牌完全一致的渠道。切换渠道时需要同时填写新令牌。</small></label>
+        <label><span>PearAPI 渠道令牌</span><input type="password" minLength={config?.tokenConfigured ? 0 : 8} required={Boolean(config?.tokenConfigured && form.tokenChannel !== config?.tokenChannel)} value={form.token} onChange={(event) => setForm({ ...form, token: event.target.value })} placeholder={config?.tokenMasked ? `${config.tokenMasked}（留空表示不修改）` : `粘贴“${form.tokenChannel}”渠道的 AI 令牌`} /><small>{form.tokenChannel === "免费" ? "当前网页版免费文字模型使用“免费”渠道令牌。" : `当前选择“${form.tokenChannel}”渠道；该令牌只能调用此渠道支持的模型，免费文字模型通常需要切换到“免费”。`}</small></label>
         <fieldset><legend>付费媒体成本区间（人民币 / 次）</legend><p>PearAPI 免费文字模型扣费为 0；图片、视频成本录入后，用户资产按官方成本增加 30% 计算可创作范围。</p><div><label><span>图片最低成本</span><input type="number" min="0" step="0.01" value={form.imageMin} onChange={(event) => setForm({ ...form, imageMin: event.target.value })} placeholder="例如 0.10" /></label><label><span>图片最高成本</span><input type="number" min="0" step="0.01" value={form.imageMax} onChange={(event) => setForm({ ...form, imageMax: event.target.value })} placeholder="例如 0.80" /></label><label><span>视频最低成本</span><input type="number" min="0" step="0.01" value={form.videoMin} onChange={(event) => setForm({ ...form, videoMin: event.target.value })} placeholder="例如 1.00" /></label><label><span>视频最高成本</span><input type="number" min="0" step="0.01" value={form.videoMax} onChange={(event) => setForm({ ...form, videoMax: event.target.value })} placeholder="例如 10.00" /></label></div></fieldset>
-        <div className="pear-token-actions"><button className="button primary" disabled={Boolean(busy)}><FloppyDisk size={17} />{busy === "save" ? "正在加密保存" : "保存并立即应用"}</button><button className="button secondary" type="button" disabled={Boolean(busy) || !config?.tokenConfigured} onClick={testConnection}><Lightning size={17} />{busy === "test" ? "正在验证" : "测试免费模型"}</button></div>
+        <div className="pear-token-actions"><button className="button primary" disabled={Boolean(busy)}><FloppyDisk size={17} />{busy === "save" ? "正在加密保存" : "保存并立即应用"}</button><button className="button secondary" type="button" disabled={Boolean(busy) || !config?.tokenConfigured} onClick={testConnection}><Lightning size={17} />{busy === "test" ? "正在检测 7 个模型" : "测试全部免费模型"}</button></div>
       </form>
-      <aside className="pear-token-guide"><span>HOW TO GET FREE TOKEN</span><h3>免费渠道令牌获取方式</h3><ol><li><b>1</b><span><strong>打开 PearAPI 控制台</strong><small>使用平台账号登录管理后台。</small></span></li><li><b>2</b><span><strong>进入“令牌管理”</strong><small>点击新建令牌，把渠道明确选择为“免费”。</small></span></li><li><b>3</b><span><strong>复制 AI 令牌并保存</strong><small>粘贴到左侧“免费渠道令牌”，再测试免费模型。</small></span></li></ol><a className="button secondary full" href="https://api.pearapi.ai/zh/dashboard/tokens" target="_blank" rel="noreferrer">打开 PearAPI 令牌管理 <ArrowSquareOut size={17} /></a><a className="pear-doc-link" href={config?.docsUrl || "https://api.pearapi.ai/zh/dashboard/docs"} target="_blank" rel="noreferrer">查看官方接入文档 <ArrowRight size={16} /></a><div className="pear-security-note"><ShieldCheck size={22} weight="duotone" /><p><strong>凭据分工</strong><span>免费渠道令牌用于文字模型；API Key 用于图片与视频。两者均只保存在古龙服务端。</span></p></div></aside>
+      <aside className="pear-token-guide"><span>HOW TO GET CHANNEL TOKEN</span><h3>渠道令牌获取方式</h3><ol><li><b>1</b><span><strong>打开 PearAPI 控制台</strong><small>使用平台账号登录管理后台。</small></span></li><li><b>2</b><span><strong>进入“令牌管理”</strong><small>点击新建令牌，并确认它所属的渠道。</small></span></li><li><b>3</b><span><strong>复制 AI 令牌并保存</strong><small>左侧选择相同渠道，再粘贴令牌。免费文字模型请选择“免费”。</small></span></li></ol><a className="button secondary full" href="https://api.pearapi.ai/zh/dashboard/tokens" target="_blank" rel="noreferrer">打开 PearAPI 令牌管理 <ArrowSquareOut size={17} /></a><a className="pear-doc-link" href={config?.docsUrl || "https://api.pearapi.ai/zh/dashboard/docs"} target="_blank" rel="noreferrer">查看官方接入文档 <ArrowRight size={16} /></a><div className="pear-security-note"><ShieldCheck size={22} weight="duotone" /><p><strong>凭据分工</strong><span>渠道令牌用于文字模型；API Key 用于图片与视频。两者均只保存在古龙服务端。</span></p></div></aside>
     </div>
     <div className="pear-free-models"><header><div><span>FREE MODEL ALLOWLIST</span><h3>网页版免费 LLM 白名单</h3></div><strong>{config?.models?.length || 7} 个模型</strong></header><div>{(config?.models || []).map((model) => <article key={model.id}><div><ChatCircleText size={21} weight="duotone" /><span>{model.vendor}</span><em>免费</em></div><h4>{model.name}</h4><code>{model.id}</code><p>{model.description}</p></article>)}</div></div>
     <div className="pear-free-models pear-media-catalog"><header><div><span>MEDIA MODEL CATALOG</span><h3>PearAPI 图片与视频模型</h3></div><strong>{(config?.mediaModels?.image?.length || 0) + (config?.mediaModels?.video?.length || 0)} 个模型</strong></header><div>{[...(config?.mediaModels?.image || []), ...(config?.mediaModels?.video || [])].map((model) => <article key={model.id}><div>{model.modality === "image" ? <ImageSquare size={21} weight="duotone" /> : <VideoCamera size={21} weight="duotone" />}<span>{model.modality === "image" ? "图片" : "视频"}</span><em>{model.priceLabel}</em></div><h4>{model.name}</h4><code>{model.id}</code><p>{model.strengths?.join(" · ")}<br />参考图上限：{model.referenceImages} 张；用户结算已包含 30% 服务费。</p></article>)}</div></div>

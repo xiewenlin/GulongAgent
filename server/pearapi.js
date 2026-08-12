@@ -18,10 +18,11 @@ export const PEAR_API_BASE_URL = "https://api.pearapi.ai";
 export const PEAR_API_ACQUISITION_URL = "https://api.pearapi.ai/zh/dashboard";
 export const PEAR_API_DOCS_URL = "https://api.pearapi.ai/zh/dashboard/docs";
 export const PEAR_API_MARKUP_RATE = 0.3;
+export const PEAR_API_TOKEN_CHANNELS = Object.freeze(["默认", "优质", "免费", "按次", "特价", "限时免费"]);
 
 export const PEAR_API_FREE_MODELS = Object.freeze([
   { id: "glm-4-flash-250414", name: "GLM-4-Flash-250414", vendor: "GLM", description: "轻量通用模型，适合日常问答、多任务处理与长上下文。" },
-  { id: "GPT-OSS-120B", name: "GPT-OSS-120B", vendor: "OpenAI", description: "大参数开放模型，适合综合分析、写作与复杂指令。" },
+  { id: "GPT-OSS-120B", name: "GPT-OSS-120B", vendor: "OpenAI", upstreamIds: ["GPT-OSS-120B", "gpt-oss-120b"], description: "大参数开放模型，适合综合分析、写作与复杂指令。" },
   { id: "hunyuan-mt-7b", name: "Hunyuan-MT-7B", vendor: "Tencent", description: "面向多语言互译的轻量模型，覆盖多种语言。" },
   { id: "hy-mt2-1.8b", name: "HY-MT2-1.8B", vendor: "Tencent", description: "快速多语言翻译模型，适合短文本与高频翻译。" },
   { id: "mistral-7b-instruct-v0.2", name: "Mistral-7B-Instruct-v0.2", vendor: "Mistral", description: "经典指令模型，适合清晰、直接的文本任务。" },
@@ -30,6 +31,8 @@ export const PEAR_API_FREE_MODELS = Object.freeze([
 ]);
 
 const FREE_MODEL_IDS = new Set(PEAR_API_FREE_MODELS.map((model) => model.id));
+const FREE_MODEL_MAP = new Map(PEAR_API_FREE_MODELS.map((model) => [model.id, model]));
+const FREE_FALLBACK_MODEL_ID = "glm-4-flash-250414";
 const SECRET_PATTERN = /^[^\s\u0000-\u001f\u007f]{8,4096}$/u;
 const DEFAULT_PRICING = Object.freeze({ imageMinFen: 1, imageMaxFen: 32, videoMinFen: 4, videoMaxFen: 193 });
 
@@ -140,7 +143,10 @@ function responseText(payload) {
   const content = payload?.choices?.[0]?.message?.content;
   if (typeof content === "string") return content.trim();
   if (Array.isArray(content)) return content.map((item) => typeof item === "string" ? item : item?.text || "").join("\n").trim();
+  if (typeof payload?.choices?.[0]?.text === "string") return payload.choices[0].text.trim();
   if (typeof payload?.output_text === "string") return payload.output_text.trim();
+  if (Array.isArray(payload?.output)) return payload.output.flatMap((item) => item?.content || []).map((item) => item?.text || "").join("\n").trim();
+  if (typeof payload?.choices?.[0]?.message?.reasoning_content === "string") return payload.choices[0].message.reasoning_content.trim();
   return "";
 }
 
@@ -313,27 +319,20 @@ async function refundMediaJob(job, error) {
   return jobs.findOne({ _id: job._id });
 }
 
-export async function callPearApiChat({ token, model, messages }) {
-  if (!FREE_MODEL_IDS.has(model)) throw new PearApiError("该模型不在古龙网页版免费模型白名单中", { status: 400, code: "MODEL_NOT_ALLOWED" });
+async function requestPearApiChat({ token, model, messages, fetchImpl, timeoutMs }) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 60_000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   let response;
   try {
-    response = await fetch(`${PEAR_API_BASE_URL}/v1/chat/completions`, {
+    response = await fetchImpl(`${PEAR_API_BASE_URL}/v1/chat/completions`, {
       method: "POST",
       signal: controller.signal,
-      headers: { Authorization: `Bearer ${normalizedSecret(token)}`, "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({
-        model,
-        messages,
-        stream: false,
-        temperature: 0.65,
-        max_tokens: 2048,
-      }),
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ model, messages, stream: false }),
     });
   } catch (error) {
-    if (error?.name === "AbortError") throw new PearApiError("PearAPI 响应超时，请稍后重试", { status: 504, code: "PEAR_API_TIMEOUT" });
-    throw new PearApiError("暂时无法连接 PearAPI，请稍后重试", { details: error?.message });
+    if (error?.name === "AbortError") throw new PearApiError("PearAPI 模型响应超时", { status: 504, code: "PEAR_API_TIMEOUT", details: { retryable: true } });
+    throw new PearApiError("暂时无法连接 PearAPI", { details: { retryable: true, cause: error?.message } });
   } finally {
     clearTimeout(timer);
   }
@@ -342,15 +341,69 @@ export async function callPearApiChat({ token, model, messages }) {
   try { payload = raw ? JSON.parse(raw) : {}; }
   catch { payload = { raw: raw.slice(0, 1000) }; }
   if (!response.ok) {
-    const upstreamMessage = (typeof payload?.error === "string" ? payload.error : payload?.error?.message) || payload?.message || `PearAPI 返回 HTTP ${response.status}`;
-    if (response.status === 400 && /不支持的模型|unsupported model/i.test(String(upstreamMessage))) {
-      throw new PearApiError("PearAPI 免费模型通道未正确配置：请管理员在 PearAPI 控制台的“令牌管理”中新建渠道为“免费”的 AI 令牌，并保存到古龙后台", { status: 503, code: "PEAR_API_FREE_TOKEN_REQUIRED" });
-    }
-    throw new PearApiError(String(upstreamMessage).slice(0, 500), { status: response.status === 401 || response.status === 403 ? 503 : 502, code: response.status === 401 || response.status === 403 ? "PEAR_API_CREDENTIAL_REJECTED" : "PEAR_API_UPSTREAM_ERROR" });
+    const message = (typeof payload?.error === "string" ? payload.error : payload?.error?.message) || payload?.message || `PearAPI 返回 HTTP ${response.status}`;
+    const unsupported = response.status === 400 && /不支持的模型|unsupported model|model.+not.+(found|available|support)/i.test(String(message));
+    const retryable = unsupported || response.status === 408 || response.status === 409 || response.status === 425 || response.status === 429 || response.status >= 500;
+    throw new PearApiError(String(message).slice(0, 500), {
+      status: response.status === 401 || response.status === 403 ? 503 : retryable ? 503 : 502,
+      code: response.status === 401 || response.status === 403 ? "PEAR_API_CREDENTIAL_REJECTED" : unsupported ? "PEAR_API_MODEL_UNAVAILABLE" : "PEAR_API_UPSTREAM_ERROR",
+      details: { retryable, unsupported, upstreamStatus: response.status },
+    });
   }
   const text = responseText(payload);
-  if (!text) throw new PearApiError("PearAPI 没有返回可显示的文本", { code: "PEAR_API_EMPTY_RESPONSE" });
-  return { text, usage: payload.usage || null, responseId: payload.id || null };
+  if (!text) throw new PearApiError("PearAPI 没有返回可显示的文本", { code: "PEAR_API_EMPTY_RESPONSE", details: { retryable: true } });
+  return { text, usage: payload?.usage || null, responseId: payload?.id || null, upstreamModel: payload?.model || model };
+}
+
+export async function callPearApiChat({ token, tokenChannel = "免费", model, messages, fetchImpl = fetch, timeoutMs = 75_000, allowFallback = true }) {
+  if (!FREE_MODEL_IDS.has(model)) throw new PearApiError("该模型不在古龙网页版免费模型白名单中", { status: 400, code: "MODEL_NOT_ALLOWED" });
+  const secret = normalizedSecret(token);
+  const definition = FREE_MODEL_MAP.get(model);
+  const upstreamIds = definition?.upstreamIds || [model];
+  let lastError;
+  for (const upstreamId of upstreamIds) {
+    try {
+      const result = await requestPearApiChat({ token: secret, model: upstreamId, messages, fetchImpl, timeoutMs });
+      return { ...result, requestedModel: model, resolvedModel: upstreamId, fallback: false };
+    } catch (error) {
+      lastError = error;
+      if (!error?.details?.unsupported) break;
+    }
+  }
+  if (allowFallback && lastError?.details?.retryable && model !== FREE_FALLBACK_MODEL_ID) {
+    try {
+      const result = await requestPearApiChat({ token: secret, model: FREE_FALLBACK_MODEL_ID, messages, fetchImpl, timeoutMs });
+      return { ...result, requestedModel: model, resolvedModel: FREE_FALLBACK_MODEL_ID, fallback: true, fallbackReason: lastError.code };
+    } catch (fallbackError) {
+      if (fallbackError?.code === "PEAR_API_CREDENTIAL_REJECTED") throw fallbackError;
+    }
+  }
+  if (lastError?.details?.unsupported) {
+    throw new PearApiError(`当前配置的是“${tokenChannel}”渠道令牌，该渠道不支持所选免费模型；请核对令牌渠道，免费文字模型请选择“免费”渠道`, { status: 503, code: "PEAR_API_FREE_TOKEN_REQUIRED" });
+  }
+  throw lastError;
+}
+
+export async function checkPearApiFreeModels({ token, tokenChannel = "免费", fetchImpl = fetch, timeoutMs = 60_000 }) {
+  const models = await Promise.all(PEAR_API_FREE_MODELS.map(async (model) => {
+    const startedAt = Date.now();
+    try {
+      const result = await callPearApiChat({
+        token,
+        tokenChannel,
+        model: model.id,
+        messages: [{ role: "user", content: "仅回复：正常" }],
+        fetchImpl,
+        timeoutMs,
+        allowFallback: false,
+      });
+      return { id: model.id, name: model.name, available: true, resolvedModel: result.resolvedModel, latencyMs: Date.now() - startedAt };
+    } catch (error) {
+      return { id: model.id, name: model.name, available: false, code: error.code || "PEAR_API_ERROR", message: String(error.message || "检测失败").slice(0, 180), latencyMs: Date.now() - startedAt };
+    }
+  }));
+  const healthy = models.filter((model) => model.available).length;
+  return { healthy, total: models.length, allAvailable: healthy === models.length, models };
 }
 
 export async function creditMonthlySubscriptionBalance({ ownerId, amountFen, source, sourceId }) {
@@ -421,13 +474,13 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     responses: { 200: { description: "PearAPI 配置状态" }, 401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } }, 403: { description: "仅管理员", content: { "application/json": { schema: ErrorSchema } } } },
   });
   const adminPutRoute = createRoute({
-    method: "put", path: "/api/admin/pearapi/config", tags: ["Admin"], summary: "加密保存 PearAPI 全局 Key、令牌与媒体成本区间",
-    request: { body: { content: { "application/json": { schema: z.object({ key: z.string().max(4096).optional(), token: z.string().max(4096).optional(), clearKey: z.boolean().optional(), clearToken: z.boolean().optional(), imageMinFen: z.number().int().min(0).max(10_000_000).optional(), imageMaxFen: z.number().int().min(0).max(10_000_000).optional(), videoMinFen: z.number().int().min(0).max(10_000_000).optional(), videoMaxFen: z.number().int().min(0).max(10_000_000).optional() }) } } } },
+    method: "put", path: "/api/admin/pearapi/config", tags: ["Admin"], summary: "加密保存 PearAPI 全局 Key、渠道令牌与媒体成本区间",
+    request: { body: { content: { "application/json": { schema: z.object({ key: z.string().max(4096).optional(), token: z.string().max(4096).optional(), tokenChannel: z.enum(PEAR_API_TOKEN_CHANNELS).optional(), clearKey: z.boolean().optional(), clearToken: z.boolean().optional(), imageMinFen: z.number().int().min(0).max(10_000_000).optional(), imageMaxFen: z.number().int().min(0).max(10_000_000).optional(), videoMinFen: z.number().int().min(0).max(10_000_000).optional(), videoMaxFen: z.number().int().min(0).max(10_000_000).optional() }) } } } },
     responses: { 200: { description: "配置已保存" }, 400: { description: "配置无效", content: { "application/json": { schema: ErrorSchema } } }, 403: { description: "仅管理员", content: { "application/json": { schema: ErrorSchema } } } },
   });
   const adminTestRoute = createRoute({
-    method: "post", path: "/api/admin/pearapi/test", tags: ["Admin"], summary: "用免费模型验证 PearAPI 免费渠道令牌",
-    responses: { 200: { description: "连接成功" }, 503: { description: "免费渠道令牌无效或服务不可用", content: { "application/json": { schema: ErrorSchema } } } },
+    method: "post", path: "/api/admin/pearapi/test", tags: ["Admin"], summary: "并行检测全部 PearAPI 免费文字模型",
+    responses: { 200: { description: "返回全部免费模型的实时可用状态" }, 503: { description: "免费渠道令牌无效或服务不可用", content: { "application/json": { schema: ErrorSchema } } } },
   });
 
   app.openapi(modelsRoute, (c) => c.json({ models: PEAR_API_FREE_MODELS.map((model) => ({ ...model, free: true })), defaultModel: PEAR_API_FREE_MODELS[0].id }));
@@ -488,17 +541,17 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     const usage = { ownerId, conversationId, requestId, modality: "text", model: input.model, baseCostFen: 0, chargedFen: 0, markupRate: PEAR_API_MARKUP_RATE, status: "started", createdAt: now, updatedAt: now };
     await (await getCollection("agentUsage")).insertOne(usage);
     try {
-      const result = await callPearApiChat({ token, model: input.model, messages: [{ role: "system", content: system }, ...input.messages] });
+      const result = await callPearApiChat({ token, tokenChannel: record?.tokenChannel || "免费", model: input.model, messages: [{ role: "system", content: system }, ...input.messages] });
       const completedAt = new Date();
       await Promise.all([
-        (await getCollection("agentUsage")).updateOne({ requestId }, { $set: { status: "succeeded", upstreamUsage: result.usage, upstreamResponseId: result.responseId, completedAt, updatedAt: completedAt } }),
+        (await getCollection("agentUsage")).updateOne({ requestId }, { $set: { status: "succeeded", resolvedModel: result.resolvedModel, modelFallback: result.fallback, fallbackReason: result.fallbackReason || null, upstreamUsage: result.usage, upstreamResponseId: result.responseId, completedAt, updatedAt: completedAt } }),
         (await getCollection("agentMessages")).insertMany([
           { ownerId, conversationId, requestId, role: "user", content: input.messages.at(-1)?.content || "", model: input.model, createdAt: now },
           { ownerId, conversationId, requestId, role: "assistant", content: result.text, model: input.model, createdAt: completedAt },
         ]),
       ]);
       c.header("Cache-Control", "private, no-store, max-age=0");
-      return c.json({ conversationId: conversationId.toString(), requestId, message: { role: "assistant", content: result.text, createdAt: completedAt }, model: input.model, chargedFen: 0, free: true, usage: result.usage });
+      return c.json({ conversationId: conversationId.toString(), requestId, message: { role: "assistant", content: result.text, createdAt: completedAt }, model: input.model, resolvedModel: result.resolvedModel, fallback: result.fallback, chargedFen: 0, free: true, usage: result.usage });
     } catch (error) {
       await (await getCollection("agentUsage")).updateOne({ requestId }, { $set: { status: "failed", errorCode: error.code || "PEAR_API_ERROR", failedAt: new Date(), updatedAt: new Date() } });
       return c.json({ code: error.code || "PEAR_API_ERROR", message: error.message || "PearAPI 调用失败" }, error.status || 502);
@@ -637,6 +690,8 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
       keyMasked: record?.keyLast4 ? `••••••••${record.keyLast4}` : null,
       tokenConfigured: Boolean(record?.tokenEncrypted),
       tokenMasked: record?.tokenLast4 ? `••••••••${record.tokenLast4}` : null,
+      tokenChannel: record?.tokenChannel || "免费",
+      tokenChannels: PEAR_API_TOKEN_CHANNELS,
       pricing: { ...pricing, markupRate: PEAR_API_MARKUP_RATE },
       models: PEAR_API_FREE_MODELS.map((model) => ({ ...model, free: true })),
       mediaModels: {
@@ -663,6 +718,13 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     const now = new Date();
     const set = { pricing, updatedAt: now, updatedBy: new ObjectId(auth.user.id) };
     const unset = {};
+    const previousTokenChannel = existing?.tokenChannel || "免费";
+    const nextTokenChannel = input.tokenChannel || previousTokenChannel;
+    const hasNewToken = Boolean(String(input.token || "").trim());
+    if (existing?.tokenEncrypted && nextTokenChannel !== previousTokenChannel && !hasNewToken) {
+      return c.json({ code: "PEAR_API_TOKEN_REQUIRED", message: "切换令牌渠道时，请同时粘贴该渠道的新令牌，避免渠道与令牌不一致" }, 400);
+    }
+    set.tokenChannel = nextTokenChannel;
     if (String(input.key || "").trim()) { const key = normalizedSecret(input.key); set.keyEncrypted = sealUserSecret(key, "platform-pearapi-key"); set.keyLast4 = key.slice(-4); }
     if (String(input.token || "").trim()) { const token = normalizedSecret(input.token); set.tokenEncrypted = sealUserSecret(token, "platform-pearapi-token"); set.tokenLast4 = token.slice(-4); }
     if (input.clearKey) { unset.keyEncrypted = ""; unset.keyLast4 = ""; }
@@ -681,13 +743,10 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     const auth = await requireAdmin(c); if (auth.error) return auth.error;
     const rate = await enforceRateLimit(`pear-admin-test:${auth.user.id}`, { limit: 10, windowMs: 10 * 60_000 });
     if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "连接测试过于频繁，请稍后再试" }, 429);
-    const token = credentialSecrets(await credentialRecord()).token;
+    const record = await credentialRecord();
+    const token = credentialSecrets(record).token;
     if (!token) return c.json({ code: "PEAR_API_NOT_CONFIGURED", message: "请先保存 PearAPI 免费渠道令牌" }, 503);
-    try {
-      const result = await callPearApiChat({ token, model: PEAR_API_FREE_MODELS[0].id, messages: [{ role: "user", content: "仅回复：连接成功" }] });
-      return c.json({ ok: true, model: PEAR_API_FREE_MODELS[0].id, reply: result.text.slice(0, 120) });
-    } catch (error) {
-      return c.json({ code: error.code || "PEAR_API_ERROR", message: error.message || "PearAPI 连接测试失败" }, error.status || 503);
-    }
+    const health = await checkPearApiFreeModels({ token, tokenChannel: record?.tokenChannel || "免费" });
+    return c.json({ ok: health.allAvailable, ...health });
   });
 }
