@@ -313,7 +313,7 @@ async function refundMediaJob(job, error) {
   return jobs.findOne({ _id: job._id });
 }
 
-export async function callPearApiChat({ apiKey, model, messages }) {
+export async function callPearApiChat({ token, model, messages }) {
   if (!FREE_MODEL_IDS.has(model)) throw new PearApiError("该模型不在古龙网页版免费模型白名单中", { status: 400, code: "MODEL_NOT_ALLOWED" });
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 60_000);
@@ -322,7 +322,7 @@ export async function callPearApiChat({ apiKey, model, messages }) {
     response = await fetch(`${PEAR_API_BASE_URL}/v1/chat/completions`, {
       method: "POST",
       signal: controller.signal,
-      headers: { Authorization: `Bearer ${normalizedSecret(apiKey)}`, "Content-Type": "application/json", Accept: "application/json" },
+      headers: { Authorization: `Bearer ${normalizedSecret(token)}`, "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify({
         model,
         messages,
@@ -343,6 +343,9 @@ export async function callPearApiChat({ apiKey, model, messages }) {
   catch { payload = { raw: raw.slice(0, 1000) }; }
   if (!response.ok) {
     const upstreamMessage = (typeof payload?.error === "string" ? payload.error : payload?.error?.message) || payload?.message || `PearAPI 返回 HTTP ${response.status}`;
+    if (response.status === 400 && /不支持的模型|unsupported model/i.test(String(upstreamMessage))) {
+      throw new PearApiError("PearAPI 免费模型通道未正确配置：请管理员在 PearAPI 控制台的“令牌管理”中新建渠道为“免费”的 AI 令牌，并保存到古龙后台", { status: 503, code: "PEAR_API_FREE_TOKEN_REQUIRED" });
+    }
     throw new PearApiError(String(upstreamMessage).slice(0, 500), { status: response.status === 401 || response.status === 403 ? 503 : 502, code: response.status === 401 || response.status === 403 ? "PEAR_API_CREDENTIAL_REJECTED" : "PEAR_API_UPSTREAM_ERROR" });
   }
   const text = responseText(payload);
@@ -423,8 +426,8 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     responses: { 200: { description: "配置已保存" }, 400: { description: "配置无效", content: { "application/json": { schema: ErrorSchema } } }, 403: { description: "仅管理员", content: { "application/json": { schema: ErrorSchema } } } },
   });
   const adminTestRoute = createRoute({
-    method: "post", path: "/api/admin/pearapi/test", tags: ["Admin"], summary: "用免费模型验证 PearAPI API Key",
-    responses: { 200: { description: "连接成功" }, 503: { description: "API Key 无效或服务不可用", content: { "application/json": { schema: ErrorSchema } } } },
+    method: "post", path: "/api/admin/pearapi/test", tags: ["Admin"], summary: "用免费模型验证 PearAPI 免费渠道令牌",
+    responses: { 200: { description: "连接成功" }, 503: { description: "免费渠道令牌无效或服务不可用", content: { "application/json": { schema: ErrorSchema } } } },
   });
 
   app.openapi(modelsRoute, (c) => c.json({ models: PEAR_API_FREE_MODELS.map((model) => ({ ...model, free: true })), defaultModel: PEAR_API_FREE_MODELS[0].id }));
@@ -444,7 +447,7 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     const quota = await usageSnapshot(ownerId, Number(wallet?.balanceFen || 0), pricing, now);
     c.header("Cache-Control", "private, no-store, max-age=0");
     return c.json({
-      configured: Boolean(credentialSecrets(credential).key),
+      configured: Boolean(credentialSecrets(credential).token),
       mediaConfigured: Boolean(credentialSecrets(credential).key),
       subscription: { active, restricted: !active, currentPeriodEnd: subscription?.currentPeriodEnd || null },
       models: PEAR_API_FREE_MODELS.map((model) => ({ ...model, free: true })),
@@ -477,15 +480,15 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
       }
     }
     const record = await credentialRecord();
-    const apiKey = credentialSecrets(record).key;
-    if (!apiKey) return c.json({ code: "PEAR_API_NOT_CONFIGURED", message: "管理员尚未配置 PearAPI API Key" }, 503);
+    const token = credentialSecrets(record).token;
+    if (!token) return c.json({ code: "PEAR_API_NOT_CONFIGURED", message: "管理员尚未配置 PearAPI 免费渠道令牌" }, 503);
     const conversationId = ObjectId.isValid(input.conversationId) ? new ObjectId(input.conversationId) : new ObjectId();
     const requestId = `pear_${Date.now().toString(36)}_${randomBytes(6).toString("hex")}`;
     const system = "你是古龙网页版智能助手。直接、准确、简洁地回答。网页版不具备第二大脑、本地模型、插件、技能或工作流，不要声称已调用这些能力。";
     const usage = { ownerId, conversationId, requestId, modality: "text", model: input.model, baseCostFen: 0, chargedFen: 0, markupRate: PEAR_API_MARKUP_RATE, status: "started", createdAt: now, updatedAt: now };
     await (await getCollection("agentUsage")).insertOne(usage);
     try {
-      const result = await callPearApiChat({ apiKey, model: input.model, messages: [{ role: "system", content: system }, ...input.messages] });
+      const result = await callPearApiChat({ token, model: input.model, messages: [{ role: "system", content: system }, ...input.messages] });
       const completedAt = new Date();
       await Promise.all([
         (await getCollection("agentUsage")).updateOne({ requestId }, { $set: { status: "succeeded", upstreamUsage: result.usage, upstreamResponseId: result.responseId, completedAt, updatedAt: completedAt } }),
@@ -678,10 +681,10 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     const auth = await requireAdmin(c); if (auth.error) return auth.error;
     const rate = await enforceRateLimit(`pear-admin-test:${auth.user.id}`, { limit: 10, windowMs: 10 * 60_000 });
     if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "连接测试过于频繁，请稍后再试" }, 429);
-    const apiKey = credentialSecrets(await credentialRecord()).key;
-    if (!apiKey) return c.json({ code: "PEAR_API_NOT_CONFIGURED", message: "请先保存 PearAPI API Key" }, 503);
+    const token = credentialSecrets(await credentialRecord()).token;
+    if (!token) return c.json({ code: "PEAR_API_NOT_CONFIGURED", message: "请先保存 PearAPI 免费渠道令牌" }, 503);
     try {
-      const result = await callPearApiChat({ apiKey, model: PEAR_API_FREE_MODELS[0].id, messages: [{ role: "user", content: "仅回复：连接成功" }] });
+      const result = await callPearApiChat({ token, model: PEAR_API_FREE_MODELS[0].id, messages: [{ role: "user", content: "仅回复：连接成功" }] });
       return c.json({ ok: true, model: PEAR_API_FREE_MODELS[0].id, reply: result.text.slice(0, 120) });
     } catch (error) {
       return c.json({ code: error.code || "PEAR_API_ERROR", message: error.message || "PearAPI 连接测试失败" }, error.status || 503);

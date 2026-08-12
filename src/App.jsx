@@ -246,7 +246,7 @@ export function App() {
         <div className="header-inner section-shell">
           <button className="brand" type="button" onClick={() => navigate("/agent")} aria-label="进入古龙网页版 Agent">
             <img key={`brand-${activeTheme.id}`} src={themeIcon} alt="" />
-            <span><strong>古龙</strong><small>网页版入口</small></span>
+            <span><strong>古龙</strong><small className="brand-web-entry">网页版入口</small></span>
           </button>
           <nav className={mobileOpen ? "primary-nav open" : "primary-nav"} aria-label="主要导航">
             {primaryNav.map((item) => <div className={`primary-nav-item ${pathname === item.href.split("?")[0] ? "active" : ""}`} key={item.href}><button type="button" onClick={() => navigate(item.href)}>{item.label}{item.children && <CaretDown size={15} />}</button>{item.children && <div className="primary-submenu">{item.children.map((child) => <button type="button" key={child.href} onClick={() => navigate(child.href)}>{child.label}<ArrowRight size={16} /></button>)}</div>}</div>)}

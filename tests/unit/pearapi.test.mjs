@@ -54,7 +54,7 @@ test("desktop PearAPI media catalog and automatic routing are available on web",
 
 test("chat rejects models outside the free allowlist before any upstream request", async () => {
   await assert.rejects(
-    callPearApiChat({ apiKey: "valid-test-key", model: "unknown-paid-model", messages: [{ role: "user", content: "hello" }] }),
+    callPearApiChat({ token: "valid-test-token", model: "unknown-paid-model", messages: [{ role: "user", content: "hello" }] }),
     (error) => error.code === "MODEL_NOT_ALLOWED" && error.status === 400,
   );
 });
@@ -86,11 +86,13 @@ test("website exposes the simplified agent while user settings no longer expose 
     readFile(new URL("../../src/components/AccountDashboard.jsx", import.meta.url), "utf8"),
   ]);
   assert.match(appSource, /pathname === "\/agent"/);
-  assert.match(appSource, /<small>网页版入口<\/small>/);
+  assert.match(appSource, /<small className="brand-web-entry">网页版入口<\/small>/);
+  assert.match(agentSource, /返回官网/);
   assert.match(agentSource, /拓展技能/);
   assert.match(agentSource, /剩余用量/);
   assert.match(agentSource, /MEMBERSHIP REQUIRED/);
   assert.match(agentSource, /USAGE EXHAUSTED/);
+  assert.match(agentSource, /creationType !== "text" && user\.role !== "admin"/);
   assert.doesNotMatch(agentSource, /已包含 30% 平台服务费/);
   assert.doesNotMatch(agentSource, /结算加收 30% 服务费/);
   assert.doesNotMatch(agentSource, /深度思考/);
@@ -117,8 +119,9 @@ test("monthly subscription payments credit the wallet once and PearAPI routes ar
   assert.match(pearSource, /"credits\.key": \{ \$ne: key \}/);
   assert.match(pearSource, /limit: 30, windowMs: 5 \* 60_000/);
   assert.match(pearSource, /const unlimited = auth\.user\.role === "admin"/);
-  assert.match(pearSource, /configured: Boolean\(credentialSecrets\(credential\)\.key\)/);
-  assert.doesNotMatch(pearSource, /callPearApiChat\(\{ token/);
+  assert.match(pearSource, /configured: Boolean\(credentialSecrets\(credential\)\.token\)/);
+  assert.match(pearSource, /callPearApiChat\(\{ token/);
+  assert.doesNotMatch(pearSource, /pear-chat:[\s\S]{0,1800}INSUFFICIENT_BALANCE/);
   assert.match(vercel, /"source": "\/api\/agent\/:path\*"/);
   assert.match(vercel, /"source": "\/api\/admin\/pearapi\/:path\*"/);
 });

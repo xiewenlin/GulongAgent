@@ -221,7 +221,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
       const expectedFen = selectedModel?.chargedFen == null ? 0 : Math.ceil(Number(selectedModel.chargedFen) * durationFactor);
       if (balanceFen <= 0 || (expectedFen > 0 && balanceFen < expectedFen)) { setQuotaPrompt("recharge"); return; }
     }
-    if (creationType === "text" && !bootstrap?.configured) { setMessage("管理员尚未完成 PearAPI API Key 配置，请稍后再试。"); return; }
+    if (creationType === "text" && !bootstrap?.configured) { setMessage("管理员尚未完成 PearAPI 免费渠道令牌配置，请稍后再试。"); return; }
     if (creationType !== "text" && !bootstrap?.mediaConfigured) { setMessage("管理员尚未完成 PearAPI Key 配置，请稍后再试。"); return; }
     setSending(true); setMessage("");
     const visibleUser = { role: "user", content, createdAt: new Date().toISOString(), attachments: attachments.map((file) => ({ name: file.name, size: file.size, type: file.type })) };
@@ -265,7 +265,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
 
   return <main id="main-content" className="web-agent-page">
     <div className="agent-topbar section-shell">
-      <button className="agent-home" type="button" onClick={() => navigate("/")} aria-label="返回古龙官网首页"><img src={themeIcon} alt="" /><span><strong>古龙网页版</strong><small>轻量 · 安全 · 云端响应</small></span></button>
+      <div className="agent-home-cluster"><button className="agent-home" type="button" onClick={() => navigate("/")} aria-label="返回古龙官网首页"><img src={themeIcon} alt="" /><span><strong>古龙网页版</strong><small>轻量 · 安全 · 云端响应</small></span></button><a href="/" onClick={(event) => { event.preventDefault(); navigate("/"); }}>返回官网 <ArrowRight size={15} /></a></div>
       <nav aria-label="网页版功能"><button type="button" onClick={() => setSkillOpen(true)}><Sparkle size={21} weight="duotone" />拓展技能</button><button type="button" onClick={() => setAssetOpen(true)}><Wallet size={21} weight="duotone" />剩余用量</button></nav>
     </div>
 
