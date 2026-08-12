@@ -77,5 +77,9 @@ export function resolvePearAutoModel(modality, prompt = "") {
 
 export function publicPearMediaModel(model, markupRate = 0.3) {
   const chargedFen = model.baseCostMilliFen == null ? null : Math.ceil((model.baseCostMilliFen * (1 + markupRate)) / 1000);
-  return { ...model, chargedFen };
+  const originalPrefix = String(model.priceLabel || "").includes("按时长") ? "按时长 · 首档 " : "";
+  const priceLabel = chargedFen == null
+    ? model.priceLabel
+    : `${originalPrefix}¥${(chargedFen / 100).toFixed(2)}`;
+  return { ...model, chargedFen, priceLabel };
 }

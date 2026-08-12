@@ -7,6 +7,7 @@ import {
   LockKey,
   PaperPlaneRight,
   Paperclip,
+  ShieldCheck,
   Sparkle,
   SpinnerGap,
   TextT,
@@ -82,7 +83,7 @@ function RollingUsage({ title, data }) {
 }
 
 function EstimateCard({ icon: Icon, title, value, unit }) {
-  return <article className="agent-estimate-card"><Icon size={25} weight="duotone" /><div><span>{title}</span>{value ? <strong>{value.minimum}–{value.maximum} {unit}</strong> : <strong>等待价格同步</strong>}<small>{value ? `已包含 30% 平台服务费` : "管理员录入 PearAPI 成本后自动计算"}</small></div></article>;
+  return <article className="agent-estimate-card"><Icon size={25} weight="duotone" /><div><span>{title}</span>{value ? <strong>{value.minimum}–{value.maximum} {unit}</strong> : <strong>等待价格同步</strong>}{!value && <small>管理员录入 PearAPI 成本后自动计算</small>}</div></article>;
 }
 
 function AssetPanel({ bootstrap, onClose, navigate }) {
@@ -90,14 +91,29 @@ function AssetPanel({ bootstrap, onClose, navigate }) {
   return <div className="agent-drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
     <aside className="agent-asset-drawer">
       <button className="modal-close" type="button" onClick={onClose}><X size={20} /></button>
-      <span>MY ASSETS</span><h2>我的资产</h2><p>余额来自会员订阅与充值；PearAPI 免费文字模型不扣费，付费能力按官方成本加 30% 结算。</p>
-      <div className="agent-balance-card"><div><Wallet size={29} weight="duotone" /><span>当前可用余额</span></div><strong>{formatMoney(quota?.balanceFen || 0)}</strong><small>月度会员到账后，实付金额同步成为可用余额</small></div>
-      <div className="agent-estimate-grid"><EstimateCard icon={ImageSquare} title="预计可创作图片" value={quota?.estimates?.images} unit="张" /><EstimateCard icon={VideoCamera} title="预计可创作视频" value={quota?.estimates?.videos} unit="条" /></div>
+      <span>REMAINING USAGE</span><h2>剩余用量</h2><p>查看当前余额、预计创作数量和滚动用量记录。</p>
+      <div className="agent-balance-card"><div><Wallet size={29} weight="duotone" /><span>{quota?.unlimited ? "管理员创作权限" : "当前可用余额"}</span></div><strong>{quota?.unlimited ? "不限额" : formatMoney(quota?.balanceFen || 0)}</strong><small>{quota?.unlimited ? "管理员角色调用图片和视频模型不检查额度，也不会扣减余额" : "月度会员到账后，实付金额同步成为可用余额"}</small></div>
+      {!quota?.unlimited && <div className="agent-estimate-grid"><EstimateCard icon={ImageSquare} title="预计可创作图片" value={quota?.estimates?.images} unit="张" /><EstimateCard icon={VideoCamera} title="预计可创作视频" value={quota?.estimates?.videos} unit="条" /></div>}
       <RollingUsage title="本周滚动用量" data={quota?.weekly} />
       <RollingUsage title="本月滚动用量" data={quota?.monthly} />
       {bootstrap?.assets?.length > 0 && <section className="agent-recent-assets"><header><span>RECENT CREATIONS</span><h3>最近创作</h3></header><div>{bootstrap.assets.map((asset) => <article key={asset.id}>{asset.modality === "video" ? <video src={asset.urls?.[0]} controls preload="metadata" /> : <a href={asset.urls?.[0]} target="_blank" rel="noreferrer"><img src={asset.urls?.[0]} alt={asset.prompt} /></a>}<strong>{asset.modelName}</strong><small>{asset.prompt}</small></article>)}</div></section>}
       <button className="button primary full" type="button" onClick={() => { onClose(); navigate("/pricing"); }}>充值或续订 <ArrowRight size={17} /></button>
     </aside>
+  </div>;
+}
+
+function QuotaPrompt({ kind, onClose, navigate }) {
+  const subscription = kind === "subscription";
+  return <div className="modal-backdrop agent-quota-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+    <section className="agent-quota-modal" role="dialog" aria-modal="true" aria-labelledby="agent-quota-title">
+      <button className="modal-close" type="button" onClick={onClose} aria-label="关闭"><X size={19} /></button>
+      <div className="agent-quota-icon">{subscription ? <Coins size={34} weight="duotone" /> : <Wallet size={34} weight="duotone" />}</div>
+      <span>{subscription ? "MEMBERSHIP REQUIRED" : "USAGE EXHAUSTED"}</span>
+      <h2 id="agent-quota-title">{subscription ? "开通会员后开始创作" : "当前可用额度已用完"}</h2>
+      <p>{subscription ? "图片和视频模型仅向已开通会员的用户开放。选择适合你的会员套餐，到账后即可开始创作。" : "你的会员权益仍然有效，但创作额度已经用完。充值余额后即可继续调用图片和视频模型。"}</p>
+      <div className="agent-quota-summary"><ShieldCheck size={21} weight="duotone" /><span><strong>{subscription ? "先开通会员" : "会员无需重复开通"}</strong><small>{subscription ? "月度或年度会员均可使用媒体创作" : "只需补充余额，原会员有效期保持不变"}</small></span></div>
+      <div className="agent-quota-actions"><button className="button secondary" type="button" onClick={onClose}>暂不处理</button><button className="button primary" type="button" onClick={() => { onClose(); navigate("/pricing"); }}>{subscription ? "查看会员套餐" : "立即充值"}<ArrowRight size={17} /></button></div>
+    </section>
   </div>;
 }
 
@@ -133,6 +149,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
   const [sending, setSending] = useState(false);
   const [assetOpen, setAssetOpen] = useState(false);
   const [skillOpen, setSkillOpen] = useState(false);
+  const [quotaPrompt, setQuotaPrompt] = useState("");
   const inputRef = useRef(null);
   const endRef = useRef(null);
   const pollersRef = useRef(new Map());
@@ -193,8 +210,18 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
   async function send() {
     const content = draft.trim();
     if (!content || sending) return;
-    if (!bootstrap?.subscription?.active) { setMessage("网页版古龙 Agent 需要生效中的会员订阅。"); return; }
-    if (creationType === "text" && !bootstrap?.configured) { setMessage("管理员尚未完成 PearAPI 令牌配置，请稍后再试。"); return; }
+    if (!bootstrap?.subscription?.active) {
+      if (creationType === "text") setMessage("网页版古龙 Agent 需要生效中的会员订阅。");
+      else setQuotaPrompt("subscription");
+      return;
+    }
+    if (creationType !== "text" && user.role !== "admin") {
+      const balanceFen = Number(bootstrap?.quota?.balanceFen || 0);
+      const durationFactor = creationType === "video" ? Math.max(1, Number(duration || 5) / 5) : 1;
+      const expectedFen = selectedModel?.chargedFen == null ? 0 : Math.ceil(Number(selectedModel.chargedFen) * durationFactor);
+      if (balanceFen <= 0 || (expectedFen > 0 && balanceFen < expectedFen)) { setQuotaPrompt("recharge"); return; }
+    }
+    if (creationType === "text" && !bootstrap?.configured) { setMessage("管理员尚未完成 PearAPI API Key 配置，请稍后再试。"); return; }
     if (creationType !== "text" && !bootstrap?.mediaConfigured) { setMessage("管理员尚未完成 PearAPI Key 配置，请稍后再试。"); return; }
     setSending(true); setMessage("");
     const visibleUser = { role: "user", content, createdAt: new Date().toISOString(), attachments: attachments.map((file) => ({ name: file.name, size: file.size, type: file.type })) };
@@ -224,7 +251,9 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
     } catch (error) {
       setMessages((current) => current.filter((item) => item !== visibleUser));
       setDraft(content);
-      setMessage(error.message);
+      if (creationType !== "text" && error.code === "SUBSCRIPTION_REQUIRED") setQuotaPrompt("subscription");
+      else if (creationType !== "text" && error.code === "INSUFFICIENT_BALANCE") setQuotaPrompt("recharge");
+      else setMessage(error.message);
     } finally { setSending(false); }
   }
 
@@ -237,7 +266,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
   return <main id="main-content" className="web-agent-page">
     <div className="agent-topbar section-shell">
       <button className="agent-home" type="button" onClick={() => navigate("/")} aria-label="返回古龙官网首页"><img src={themeIcon} alt="" /><span><strong>古龙网页版</strong><small>轻量 · 安全 · 云端响应</small></span></button>
-      <nav aria-label="网页版功能"><button type="button" onClick={() => setSkillOpen(true)}><Sparkle size={21} weight="duotone" />拓展技能</button><button type="button" onClick={() => setAssetOpen(true)}><Wallet size={21} weight="duotone" />我的资产</button></nav>
+      <nav aria-label="网页版功能"><button type="button" onClick={() => setSkillOpen(true)}><Sparkle size={21} weight="duotone" />拓展技能</button><button type="button" onClick={() => setAssetOpen(true)}><Wallet size={21} weight="duotone" />剩余用量</button></nav>
     </div>
 
     <section className="agent-workspace section-shell">
@@ -254,7 +283,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
         <div className="agent-composer-wrap">
           {message && <div className="agent-inline-alert"><LockKey size={18} /><span>{message}</span><button type="button" onClick={() => setMessage("")}><X size={16} /></button></div>}
           {!bootstrap?.subscription?.active && !loading && <div className="agent-membership-gate"><div><Coins size={24} weight="duotone" /><span><strong>会员订阅尚未生效</strong><small>开通月度或年度会员后使用网页版 Agent。</small></span></div><button type="button" onClick={() => navigate("/pricing")}>查看会员 <ArrowRight size={16} /></button></div>}
-          <div className="agent-mode-row"><div className="agent-creation-hint">{creationType === "text" ? "免费文字对话" : `${selectedModel?.priceLabel || "按实际模型计费"} · 结算加收 30% 服务费`}</div><span>{draft.length} / 4096</span></div>
+          <div className="agent-mode-row"><div className="agent-creation-hint">{creationType === "text" ? "免费文字对话" : (selectedModel?.priceLabel || "按实际模型计费")}</div><span>{draft.length} / 4096</span></div>
           {attachments.length > 0 && <div className="agent-attachment-row">{attachments.map((file, index) => <span key={`${file.name}-${index}`}><File size={16} /><b>{file.name}</b><small>{byteText(file.size)}</small><button type="button" aria-label={`移除 ${file.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button></span>)}</div>}
           <textarea ref={inputRef} maxLength={4096} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keyDown} placeholder="描述任务；上传附件后输入你的要求。Enter 发送，Shift + Enter 换行" />
           <footer>
@@ -265,12 +294,12 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
             <div className="agent-model-select"><select value={model} onChange={(event) => setModel(event.target.value)}>{availableModels.map((item) => <option value={item.id} key={item.id}>{item.name}{creationType === "text" ? " · 免费" : ` · ${item.priceLabel}`}</option>)}</select><Check size={15} weight="bold" /></div>
             <button className="agent-send-button" type="button" aria-label="发送" disabled={!draft.trim() || sending || loading} onClick={send}>{sending ? <SpinnerGap size={22} className="agent-spin" /> : <PaperPlaneRight size={22} weight="fill" />}</button>
           </footer>
-          <div className="agent-composer-note"><LockKey size={14} /> PearAPI 凭据只保存在服务端加密存储中；文字模型免费，图片和视频按模型成本加 30% 结算。</div>
         </div>
       </div>
     </section>
 
     {assetOpen && <AssetPanel bootstrap={bootstrap} onClose={() => setAssetOpen(false)} navigate={navigate} />}
     {skillOpen && <SkillPanel onClose={() => setSkillOpen(false)} setDraft={(value) => { setDraft(value); setTimeout(() => inputRef.current?.focus(), 0); }} />}
+    {quotaPrompt && <QuotaPrompt kind={quotaPrompt} onClose={() => setQuotaPrompt("")} navigate={navigate} />}
   </main>;
 }

@@ -11,14 +11,14 @@ import {
   pearApiOutputRange,
   registerPearApiRoutes,
 } from "../../server/pearapi.js";
-import { PEAR_API_IMAGE_MODELS, PEAR_API_VIDEO_MODELS, resolvePearAutoModel } from "../../server/pearapi-models.js";
+import { PEAR_API_IMAGE_MODELS, PEAR_API_VIDEO_MODELS, publicPearMediaModel, resolvePearAutoModel } from "../../server/pearapi-models.js";
 
 test("PearAPI web agent only exposes the seven approved free models", () => {
   assert.equal(PEAR_API_BASE_URL, "https://api.pearapi.ai");
   assert.equal(PEAR_API_FREE_MODELS.length, 7);
   assert.deepEqual(PEAR_API_FREE_MODELS.map((model) => model.id), [
     "glm-4-flash-250414",
-    "gpt-oss-120b",
+    "GPT-OSS-120B",
     "hunyuan-mt-7b",
     "hy-mt2-1.8b",
     "mistral-7b-instruct-v0.2",
@@ -37,6 +37,12 @@ test("paid media estimates apply the required 30 percent markup", () => {
     cheapestUnitFen: 130,
     mostExpensiveUnitFen: 650,
   });
+  const image = publicPearMediaModel(PEAR_API_IMAGE_MODELS.find((model) => model.id === "boogu-image-0.1"));
+  const video = publicPearMediaModel(PEAR_API_VIDEO_MODELS.find((model) => model.id === "doubao-seedance-2-0-fast-260128"));
+  assert.equal(image.chargedFen, 13);
+  assert.equal(image.priceLabel, "¥0.13");
+  assert.equal(video.chargedFen, 60);
+  assert.equal(video.priceLabel, "按时长 · 首档 ¥0.60");
 });
 
 test("desktop PearAPI media catalog and automatic routing are available on web", () => {
@@ -48,7 +54,7 @@ test("desktop PearAPI media catalog and automatic routing are available on web",
 
 test("chat rejects models outside the free allowlist before any upstream request", async () => {
   await assert.rejects(
-    callPearApiChat({ token: "valid-test-token", model: "unknown-paid-model", messages: [{ role: "user", content: "hello" }] }),
+    callPearApiChat({ apiKey: "valid-test-key", model: "unknown-paid-model", messages: [{ role: "user", content: "hello" }] }),
     (error) => error.code === "MODEL_NOT_ALLOWED" && error.status === 400,
   );
 });
@@ -82,7 +88,11 @@ test("website exposes the simplified agent while user settings no longer expose 
   assert.match(appSource, /pathname === "\/agent"/);
   assert.match(appSource, /<small>网页版入口<\/small>/);
   assert.match(agentSource, /拓展技能/);
-  assert.match(agentSource, /我的资产/);
+  assert.match(agentSource, /剩余用量/);
+  assert.match(agentSource, /MEMBERSHIP REQUIRED/);
+  assert.match(agentSource, /USAGE EXHAUSTED/);
+  assert.doesNotMatch(agentSource, /已包含 30% 平台服务费/);
+  assert.doesNotMatch(agentSource, /结算加收 30% 服务费/);
   assert.doesNotMatch(agentSource, /深度思考/);
   assert.match(agentSource, /<option value="image">图片<\/option>/);
   assert.match(agentSource, /<option value="video">视频<\/option>/);
@@ -106,6 +116,9 @@ test("monthly subscription payments credit the wallet once and PearAPI routes ar
   assert.match(dbSource, /agent_media_polling/);
   assert.match(pearSource, /"credits\.key": \{ \$ne: key \}/);
   assert.match(pearSource, /limit: 30, windowMs: 5 \* 60_000/);
+  assert.match(pearSource, /const unlimited = auth\.user\.role === "admin"/);
+  assert.match(pearSource, /configured: Boolean\(credentialSecrets\(credential\)\.key\)/);
+  assert.doesNotMatch(pearSource, /callPearApiChat\(\{ token/);
   assert.match(vercel, /"source": "\/api\/agent\/:path\*"/);
   assert.match(vercel, /"source": "\/api\/admin\/pearapi\/:path\*"/);
 });
