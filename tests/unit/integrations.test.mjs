@@ -312,10 +312,12 @@ test("worker assignment search, visibility, notifications and publishing control
   assert.match(adminPageSource, /item\.assignment\?\.label/);
 });
 
-test("primary navigation promotes workflows and reserves short drama without exposing the Worker route", async () => {
+test("primary navigation promotes workflows and opens the deployed short-drama app without exposing the Worker route", async () => {
   const source = await readFile(new URL("../../src/App.jsx", import.meta.url), "utf8");
   assert.match(source, /\{ label: "工作流", href: "\/workflows" \}/);
-  assert.match(source, /\{ label: "短剧", href: "\/short-drama" \}/);
+  assert.match(source, /const SHORT_DRAMA_URL = "https:\/\/aipdd-drameclaw-new\.vercel\.app"/);
+  assert.match(source, /\{ label: "短剧", href: SHORT_DRAMA_URL \}/);
+  assert.match(source, /navigate\(SHORT_DRAMA_URL\)\}>短剧/);
   assert.doesNotMatch(source, /\{ label: "威客", href:/);
 });
 
