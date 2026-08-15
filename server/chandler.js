@@ -71,6 +71,15 @@ function partnerCredential(accessToken) {
   return { apiKey: serverApiKey() };
 }
 
+function partnerServiceCredential() {
+  return { apiKey: serverApiKey() };
+}
+
+function prepayCredential(accessToken) {
+  if (accessToken) return { accessToken };
+  return partnerServiceCredential();
+}
+
 function friendlyMessage(status, payload) {
   const code = payload?.error?.code || payload?.code || "";
   const raw = payload?.error?.message || payload?.message || "";
@@ -79,6 +88,12 @@ function friendlyMessage(status, payload) {
   if (code === "catalog.sku_exists") return "当前应用中已经存在相同编码的 SKU";
   if (code === "auth.invalid_credentials") return "用户名、邮箱或密码不正确";
   if (code === "token.invalid" || code === "auth.token_invalid") return "登录已失效，请重新登录";
+  if (code === "client.not_found") return "支付服务端账号尚未获得当前应用的管理员或财务权限，请管理员检查 Chandler API Key 所属账号的应用角色";
+  if (code === "payment.direct_contract_required") return "当前应用尚未完成 Chandler 线下合同确认，请管理员在合作伙伴后台完成确认后重试";
+  if (code === "pay.openid_required") return "当前微信支付缺少付款人的微信身份，请重新登录或检查支付配置中的 AppID";
+  if (code === "order.not_refundable") return "该订单当前不可退款，请检查订单状态与可退金额";
+  if (code === "order.invalid" && /refund amount/i.test(raw)) return "退款金额必须大于 0，且不能超过订单可退金额";
+  if (code === "request.invalid" && /malformed json/i.test(raw)) return "发送给 Chandler 的字段与当前接口契约不一致，请更新客户端后重试";
   if (status === 401) return raw || "登录已失效，请重新登录";
   if (status === 403) return "当前账号没有执行该操作的 Chandler 权限";
   if (status === 409) return "该账号、订单或操作已存在，请刷新后查看";
@@ -94,11 +109,14 @@ export async function chandlerRequest(path, {
   apiKey,
   body,
   form,
+  headers: customHeaders,
+  idempotencyKey,
   timeoutMs = 15_000,
 } = {}) {
-  const headers = { Accept: "application/json" };
+  const headers = { Accept: "application/json", ...(customHeaders || {}) };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (form !== undefined) headers["Content-Type"] = "application/x-www-form-urlencoded";
+  if (idempotencyKey) headers["Idempotency-Key"] = String(idempotencyKey).trim();
   if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
   if (apiKey) headers.Authorization = `Apikey ${apiKey}`;
   let response;
@@ -420,11 +438,21 @@ export function externalAuthFromResponse(auth) {
   };
 }
 
-export function refreshChandlerLogin(refreshToken) {
-  return chandlerRequest("/v1/auth/refresh", {
-    method: "POST",
-    body: { refresh_token: refreshToken },
-  });
+export async function refreshChandlerLogin(refreshToken) {
+  try {
+    return await chandlerRequest("/v1/oauth/token", {
+      method: "POST",
+      form: { grant_type: "refresh_token", refresh_token: refreshToken },
+    });
+  } catch (error) {
+    // Chandler v3.3 uses the OAuth token endpoint. Keep the legacy endpoint
+    // only as a rolling-upgrade fallback when an older node returns 404/405.
+    if (!(error instanceof ChandlerError) || ![404, 405].includes(error.status)) throw error;
+    return chandlerRequest("/v1/auth/refresh", {
+      method: "POST",
+      body: { refresh_token: refreshToken },
+    });
+  }
 }
 
 async function refreshChandlerSession(session, { forceRefresh = false } = {}) {
@@ -696,7 +724,8 @@ export async function createDirectPaymentOrder(accessToken, {
   const config = chandlerConfig();
   const order = await chandlerRequest("/v1/pay/orders", {
     method: "POST",
-    ...partnerCredential(accessToken),
+    ...partnerServiceCredential(),
+    idempotencyKey: merchantOrderNo,
     body: {
       application_id: applicationId || config.applicationId,
       merchant_order_no: merchantOrderNo,
@@ -708,9 +737,17 @@ export async function createDirectPaymentOrder(accessToken, {
     },
   });
   const orderNo = order.platform_order_no || order.order_no;
+  if (!orderNo) {
+    throw new ChandlerError("Chandler 没有返回订单号，未发起预支付", {
+      status: 502,
+      code: "CHANDLER_ORDER_INVALID",
+      detail: order,
+    });
+  }
   const payment = prepay ? await chandlerRequest(`/v1/pay/orders/${encodeURIComponent(orderNo)}/prepay`, {
     method: "POST",
-    ...partnerCredential(accessToken),
+    ...prepayCredential(accessToken),
+    idempotencyKey: `prepay-${merchantOrderNo}`,
     body: {},
   }) : null;
   return { order, payment, orderNo };

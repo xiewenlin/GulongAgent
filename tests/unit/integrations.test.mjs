@@ -59,16 +59,17 @@ test("website login normalizes e-mail identifiers and resolves registered userna
   assert.match(source, /const loginEmail = await resolveWebsiteLoginEmail\(input\.identifier\)/);
   assert.match(source, /loginWithChandler\(loginEmail, input\.password\)/);
   assert.match(chandlerSource, /usernameNormalized: normalized/);
-  assert.match(chandlerSource, /chandlerRequest\("\/v1\/auth\/refresh"/);
-  assert.doesNotMatch(chandlerSource, /grant_type: "refresh_token"/);
+  assert.match(chandlerSource, /chandlerRequest\("\/v1\/oauth\/token"/);
+  assert.match(chandlerSource, /grant_type: "refresh_token"/);
+  assert.match(chandlerSource, /\[404, 405\]\.includes\(error\.status\)/);
   assert.match(chandlerSource, /auth\.invalid_credentials/);
 });
 
-test("Chandler login refresh uses the live auth refresh contract", async () => {
+test("Chandler login refresh uses the v3.3 form-encoded OAuth contract", async () => {
   const originalFetch = globalThis.fetch;
   let call;
   globalThis.fetch = async (url, options = {}) => {
-    call = { url: String(url), method: options.method, headers: options.headers, body: JSON.parse(options.body) };
+    call = { url: String(url), method: options.method, headers: options.headers, body: new URLSearchParams(options.body) };
     return new Response(JSON.stringify({ data: { access_token: "next-access", refresh_token: "next-refresh", expires_in: 3600 } }), { status: 200, headers: { "content-type": "application/json" } });
   };
   try {
@@ -77,10 +78,11 @@ test("Chandler login refresh uses the live auth refresh contract", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
-  assert.equal(call.url, "https://api.chandler.work/v1/auth/refresh");
+  assert.equal(call.url, "https://api.chandler.work/v1/oauth/token");
   assert.equal(call.method, "POST");
-  assert.equal(call.headers["Content-Type"], "application/json");
-  assert.deepEqual(call.body, { refresh_token: "current-refresh" });
+  assert.equal(call.headers["Content-Type"], "application/x-www-form-urlencoded");
+  assert.equal(call.body.get("grant_type"), "refresh_token");
+  assert.equal(call.body.get("refresh_token"), "current-refresh");
 });
 
 test("Chandler password recovery sends mail and resets with the one-time token", async () => {
@@ -122,7 +124,7 @@ test("official Chandler and Chengdu COS defaults stay pinned", () => {
   assert.equal(typeof cos.configured, "boolean");
 });
 
-test("Chandler v3.2 server calls prefer the GulongAgent API Key and Webhooks use constant-time HMAC validation", async () => {
+test("Chandler v3.3 splits service order credentials from user prepay and keeps Webhook HMAC constant-time", async () => {
   const originalFetch = globalThis.fetch;
   const previousApiKey = process.env.GulongAgent;
   const previousHmacKey = process.env.CHANDLER_WEBHOOK_HMAC_KEY;
@@ -131,11 +133,14 @@ test("Chandler v3.2 server calls prefer the GulongAgent API Key and Webhooks use
   process.env.CHANDLER_WEBHOOK_HMAC_KEY = "a".repeat(64);
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url: String(url), headers: options.headers, body: JSON.parse(options.body) });
-    return new Response(JSON.stringify({ data: { platform_order_no: "ord-v32", amount: 8800 } }), { status: 201, headers: { "content-type": "application/json" } });
+    const data = String(url).endsWith("/prepay")
+      ? { code_url: "weixin://pay/test" }
+      : { platform_order_no: "ord-v33", amount: 8800 };
+    return new Response(JSON.stringify({ data }), { status: 201, headers: { "content-type": "application/json" } });
   };
   try {
-    await createDirectPaymentOrder(null, { merchantOrderNo: "merchant-v32", channel: "wechat", amountFen: 8800, subject: "订阅", source: "test", partnerData: {}, prepay: false });
-    const rawBody = Buffer.from('{"platform_order_no":"ord-v32"}', "utf8");
+    await createDirectPaymentOrder("payer-access-token", { merchantOrderNo: "merchant-v33", channel: "wechat", amountFen: 8800, subject: "订阅", source: "test", partnerData: {} });
+    const rawBody = Buffer.from('{"platform_order_no":"ord-v33"}', "utf8");
     const signature = createHmac("sha256", "a".repeat(64)).update(rawBody).digest("hex");
     assert.equal(verifyChandlerWebhook(rawBody, signature), true);
     assert.equal(verifyChandlerWebhook(rawBody, "0".repeat(64)), false);
@@ -145,7 +150,10 @@ test("Chandler v3.2 server calls prefer the GulongAgent API Key and Webhooks use
     if (previousHmacKey === undefined) delete process.env.CHANDLER_WEBHOOK_HMAC_KEY; else process.env.CHANDLER_WEBHOOK_HMAC_KEY = previousHmacKey;
   }
   assert.equal(calls[0].headers.Authorization, "Apikey server-api-key-test");
+  assert.equal(calls[0].headers["Idempotency-Key"], "merchant-v33");
   assert.equal(calls[0].body.channel, "wechat");
+  assert.equal(calls[1].headers.Authorization, "Bearer payer-access-token");
+  assert.equal(calls[1].headers["Idempotency-Key"], "prepay-merchant-v33");
 });
 
 test("desktop Chandler partner operations stay behind the official website proxy", async () => {
@@ -159,9 +167,11 @@ test("desktop Chandler partner operations stay behind the official website proxy
   assert.doesNotMatch(source, /process\.env\.GulongAgent[^\n]*return c\.json/);
 });
 
-test("Chandler v3.2 wrappers keep SKU compatibility while publishing once-only prices", async () => {
+test("Chandler v3.3 wrappers keep SKU compatibility while publishing once-only prices", async () => {
   const originalFetch = globalThis.fetch;
+  const previousApiKey = process.env.GulongAgent;
   const calls = [];
+  process.env.GulongAgent = "server-api-key-test";
   globalThis.fetch = async (url, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : null;
     calls.push({ url: String(url), method: options.method || "GET", body });
@@ -183,6 +193,7 @@ test("Chandler v3.2 wrappers keep SKU compatibility while publishing once-only p
     await createDirectPaymentOrder("access-token", { merchantOrderNo: "merchant-1", channel: "wechat", skuId: "sku-month", subject: "VIP 月卡", source: "test", partnerData: {}, prepay: false });
   } finally {
     globalThis.fetch = originalFetch;
+    if (previousApiKey === undefined) delete process.env.GulongAgent; else process.env.GulongAgent = previousApiKey;
   }
   const priceCall = calls.find((call) => call.url.endsWith("/skus/sku-month/prices"));
   assert.equal(priceCall.method, "POST");

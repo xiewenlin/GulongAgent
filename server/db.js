@@ -90,6 +90,22 @@ export async function ensureIndexes() {
           { unique: true, name: "uniq_payment_order" },
         ),
         db.collection("payments").createIndex(
+          { merchantOrderNo: 1 },
+          {
+            unique: true,
+            partialFilterExpression: { merchantOrderNo: { $type: "string" } },
+            name: "uniq_payment_merchant_order",
+          },
+        ),
+        db.collection("payments").createIndex(
+          { desktopRequestId: 1 },
+          {
+            unique: true,
+            partialFilterExpression: { desktopRequestId: { $type: "string" } },
+            name: "uniq_payment_desktop_request",
+          },
+        ),
+        db.collection("payments").createIndex(
           { status: 1, paidAt: -1, updatedAt: -1 },
           { name: "payments_analytics" },
         ),

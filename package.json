@@ -1,6 +1,6 @@
 {
   "name": "gulongagent",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "古龙 Gulong Agent Engine 官方网站与开放平台",
   "private": true,
   "type": "module",
