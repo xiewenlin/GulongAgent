@@ -21,6 +21,7 @@ import {
   hashPassword,
   isTrustedBrowserRequest,
   issueSession,
+  issueShortDramaSsoToken,
   normalizeEmail,
   normalizeUsername,
   revokeSession,
@@ -150,6 +151,11 @@ const RegisterSchema = z
 const LoginSchema = z.object({
   identifier: z.string().trim().min(3).max(254),
   password: z.string().min(1).max(128),
+});
+
+const ShortDramaSsoResponseSchema = z.object({
+  token: z.string(),
+  expiresIn: z.literal(120),
 });
 
 const ForgotPasswordSchema = z.object({
@@ -2021,6 +2027,18 @@ const loginRoute = createRoute({
   },
 });
 
+const shortDramaSsoRoute = createRoute({
+  method: "post",
+  path: "/api/auth/short-drama-sso",
+  tags: ["Authentication"],
+  summary: "为短剧生产站签发一次性登录票据",
+  responses: {
+    200: { description: "票据签发成功", content: { "application/json": { schema: ShortDramaSsoResponseSchema } } },
+    401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "来源不受信任", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 const forgotPasswordRoute = createRoute({
   method: "post",
   path: "/api/auth/forgot-password",
@@ -2210,6 +2228,19 @@ app.openapi(loginRoute, async (c) => {
       createdAt: user.createdAt,
     },
   });
+});
+
+app.openapi(shortDramaSsoRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const auth = await authenticate(c);
+  if (auth.error) return auth.error;
+  const rate = await enforceRateLimit(`short-drama-sso:${auth.user.id}`, {
+    limit: 30,
+    windowMs: 10 * 60_000,
+  });
+  if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "短剧登录授权过于频繁，请稍后重试" }, 429);
+  c.header("Cache-Control", "no-store, max-age=0");
+  return c.json({ token: issueShortDramaSsoToken(auth.user), expiresIn: 120 });
 });
 
 app.openapi(forgotPasswordRoute, async (c) => {
@@ -5020,7 +5051,11 @@ app.post("/api/billing/orders", async (c) => {
     return c.json({ id: result.insertedId.toString(), orderNo, status: "pending_review", mode: "offline", amountFen, upgradeCreditFen }, 201);
   }
 
-  const accessToken = null;
+  // Creating an order is a service-side, role-guarded operation and is
+  // authenticated with the configured Chandler API Key inside the adapter.
+  // Prepay deliberately retains the end-user token so Chandler can resolve
+  // the real payer/openid for JSAPI and other user-bound payment modes.
+  const accessToken = await getChandlerAccessToken(auth.session);
   let result;
   if (kind === "subscription" && !isMonthlyUpgrade) {
     result = await createSubscriptionCheckout(accessToken, {
@@ -5184,9 +5219,17 @@ app.post("/api/billing/webhooks/chandler", async (c) => {
   if (!verifyChandlerWebhook(rawBody, c.req.header("x-chandler-signature"))) {
     return c.json({ code: "INVALID_SIGNATURE", message: "Chandler Webhook 签名验证失败" }, 401);
   }
-  const notification = JSON.parse(rawBody.toString("utf8"));
+  let notification;
+  try {
+    notification = JSON.parse(rawBody.toString("utf8"));
+  } catch {
+    return c.json({ code: "INVALID_WEBHOOK_BODY", message: "Chandler Webhook 不是有效的 JSON" }, 400);
+  }
   const orderNo = String(notification.platform_order_no || notification.data?.platform_order_no || "").trim();
-  if (orderNo) await reconcileChandlerPayment(orderNo);
+  if (!orderNo) return c.json({ code: "ORDER_NUMBER_REQUIRED", message: "Chandler Webhook 缺少订单号" }, 400);
+  // reconcileChandlerPayment and activatePayment are both idempotent. A
+  // delayed or replayed webhook therefore cannot grant an entitlement twice.
+  await reconcileChandlerPayment(orderNo);
   return c.json({ ok: true });
 });
 
@@ -5795,7 +5838,7 @@ app.openapi(desktopChandlerCheckoutRoute, async (c) => {
       payUrl: existing.payUrl || "",
     }, 201);
   }
-  const result = await createSubscriptionCheckout(null, {
+  const result = await createSubscriptionCheckout(auth.accessToken, {
     cycle,
     channel: input.channel,
     merchantOrderNo: input.clientOrderNo,

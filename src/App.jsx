@@ -38,12 +38,12 @@ import { themes } from "./data/site.js";
 
 const WebAgentPage = lazy(() => import("./components/WebAgentPage.jsx").then((module) => ({ default: module.WebAgentPage })));
 
-const SHORT_DRAMA_URL = "https://aipdd-drameclaw-new.vercel.app";
+const SHORT_DRAMA_ROUTE = "/short-drama";
 
 const primaryNav = [
   { label: "产品能力", href: "/manual" },
   { label: "第二大脑", href: "/brain" },
-  { label: "短剧", href: SHORT_DRAMA_URL },
+  { label: "短剧", href: SHORT_DRAMA_ROUTE },
   { label: "工作流", href: "/workflows" },
   { label: "定价", href: "/pricing" },
   { label: "下载", href: "/download" },
@@ -233,7 +233,7 @@ export function App() {
   else if (pathname === "/brain") page = <SecondBrainPage user={user} openAuth={openAuth} navigate={navigate} />;
   else if (pathname === "/worker") page = <WorkerPage key={route} user={user} openAuth={openAuth} navigate={navigate} />;
   else if (pathname === "/workflows") page = <WorkflowPage navigate={navigate} />;
-  else if (pathname === "/short-drama") page = <ShortDramaPage />;
+  else if (pathname === "/short-drama") page = <ShortDramaPage user={user} openAuth={openAuth} />;
   else if (pathname === "/download") page = <DownloadPage />;
   else if (pathname === "/developer") page = <DeveloperPage user={user} openAuth={openAuth} />;
   else if (pathname === "/pricing") page = <PricingPage user={user} openAuth={openAuth} navigate={navigate} />;
@@ -274,7 +274,7 @@ export function App() {
       {pathname !== "/agent" && <footer className="site-footer">
         <div className="footer-main section-shell">
           <div className="footer-brand"><img src={themeIcon} alt="" /><div><strong>古龙</strong><span>Gulong Agent Engine</span></div><p>不是又一个聊天机器人，而是一套会持续成长的 AI 操作系统。</p></div>
-          <div><h3>产品</h3><button onClick={() => navigate("/manual")}>产品手册</button><button onClick={() => navigate("/brain")}>第二大脑</button><button onClick={() => navigate("/workflows")}>工作流</button><button onClick={() => navigate(SHORT_DRAMA_URL)}>短剧</button><button onClick={() => navigate("/pricing")}>订阅与定价</button></div>
+          <div><h3>产品</h3><button onClick={() => navigate("/manual")}>产品手册</button><button onClick={() => navigate("/brain")}>第二大脑</button><button onClick={() => navigate("/workflows")}>工作流</button><button onClick={() => navigate(SHORT_DRAMA_ROUTE)}>短剧</button><button onClick={() => navigate("/pricing")}>订阅与定价</button></div>
           <div><h3>开放能力</h3><button onClick={() => navigate("/developer")}>API Key</button><a href="/api/docs" target="_blank" rel="noreferrer">API 文档</a><a href="/api/openapi.json" target="_blank" rel="noreferrer">OpenAPI JSON</a></div>
           <div><h3>支持</h3><button onClick={() => navigate("/download")}>软件下载</button><button onClick={() => navigate("/feedback")}>问题反馈</button><button onClick={() => setThemeOpen(true)}>自定义主题</button></div>
         </div>

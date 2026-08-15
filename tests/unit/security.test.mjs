@@ -4,6 +4,7 @@ import {
   fingerprintIp,
   hashOpaqueToken,
   hashPassword,
+  issueShortDramaSsoToken,
   normalizeEmail,
   normalizeUsername,
   verifyPassword,
@@ -28,6 +29,27 @@ test("opaque tokens and IPs are one-way deterministic fingerprints", () => {
   assert.notEqual(hashOpaqueToken("token-a"), hashOpaqueToken("token-b"));
   assert.equal(fingerprintIp("203.0.113.9"), fingerprintIp("203.0.113.9"));
   assert.equal(fingerprintIp("203.0.113.9").length, 24);
+});
+
+test("short-drama SSO assertions are short-lived and carry the Gulong identity", () => {
+  const token = issueShortDramaSsoToken({
+    id: "user-123",
+    username: "gulong_user",
+    email: "user@example.com",
+    displayName: "古龙用户",
+    role: "user",
+  });
+  const parts = token.split(".");
+  assert.equal(parts.length, 3);
+  const header = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8"));
+  const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+  assert.deepEqual(header, { alg: "HS256", typ: "JWT" });
+  assert.equal(payload.iss, "https://sologle.com");
+  assert.equal(payload.aud, "gulong-short-drama");
+  assert.equal(payload.sub, "user-123");
+  assert.equal(payload.name, "古龙用户");
+  assert.equal(payload.exp - payload.iat, 120);
+  assert.match(payload.jti, /^[A-Za-z0-9_-]+$/);
 });
 
 test("mock payment URLs stay inside the application", () => {

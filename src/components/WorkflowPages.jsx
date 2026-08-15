@@ -1,5 +1,5 @@
-import { ArrowRight, MagnifyingGlass, Sparkle, VideoCamera } from "@phosphor-icons/react";
-import { useEffect, useState } from "react";
+import { ArrowRight, MagnifyingGlass, Sparkle } from "@phosphor-icons/react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch } from "../api.js";
 
 export function WorkflowCard({ workflow, navigate }) {
@@ -58,15 +58,71 @@ export function WorkflowPage({ navigate }) {
   );
 }
 
-export function ShortDramaPage() {
+const SHORT_DRAMA_ORIGIN = "https://aipdd-drameclaw-new.vercel.app";
+
+export function ShortDramaPage({ user, openAuth }) {
+  const frameRef = useRef(null);
+  const issueInFlightRef = useRef(null);
+  const [frameReady, setFrameReady] = useState(false);
+  const [error, setError] = useState("");
+
+  const sendSso = useCallback((target = frameRef.current?.contentWindow) => {
+    if (!user?.id || !target) return Promise.resolve();
+    if (issueInFlightRef.current) return issueInFlightRef.current;
+    const request = apiFetch("/api/auth/short-drama-sso", { method: "POST" })
+      .then((result) => {
+        target.postMessage({ type: "gulong:sso", token: result.token }, SHORT_DRAMA_ORIGIN);
+        setError("");
+      })
+      .catch((reason) => setError(reason.message || "短剧账号授权失败，请重试"))
+      .finally(() => { issueInFlightRef.current = null; });
+    issueInFlightRef.current = request;
+    return request;
+  }, [user?.id]);
+
+  useEffect(() => {
+    function onMessage(event) {
+      if (event.origin !== SHORT_DRAMA_ORIGIN) return;
+      if (event.source !== frameRef.current?.contentWindow) return;
+      if (event.data?.type === "dramaclaw:ready") {
+        setFrameReady(true);
+        if (user?.id) void sendSso(event.source);
+      } else if (event.data?.type === "dramaclaw:auth-request") {
+        if (user?.id) void sendSso(event.source);
+        else openAuth(event.data.mode === "register" ? "register" : "login");
+      } else if (event.data?.type === "dramaclaw:sso-error") {
+        setError(event.data.message || "短剧账号授权失败，请重试");
+      }
+    }
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [openAuth, sendSso, user?.id]);
+
+  useEffect(() => {
+    if (frameReady && user?.id) void sendSso();
+  }, [frameReady, sendSso, user?.id]);
+
+  useEffect(() => {
+    const mode = new URLSearchParams(window.location.search).get("auth");
+    if (!user && (mode === "login" || mode === "register")) openAuth(mode);
+  }, []);
+
   return (
     <main id="main-content" className="short-drama-page">
-      <section className="short-drama-placeholder section-shell">
-        <div className="short-drama-orb"><VideoCamera size={54} weight="duotone" /></div>
-        <span>GULONG SHORT DRAMA</span>
-        <h1>短剧创作能力，正在精心打磨</h1>
-        <p>从剧本、分镜、角色一致性到配音与成片，我们正在构建一条真正可交付的 AI 短剧生产线。功能上线前，这里暂不开放操作。</p>
-        <div><Sparkle size={20} /> 即将开放，敬请期待</div>
+      <section className="short-drama-embed-shell">
+        <div className="short-drama-embed-bar section-shell">
+          <div><span>GULONG SHORT DRAMA</span><strong>短剧生产站</strong></div>
+          <small>{user ? `已使用古龙账号：${user.displayName || user.username || "用户"}` : "使用古龙统一账号登录与注册"}</small>
+        </div>
+        {error && <div className="short-drama-embed-error" role="alert">{error}</div>}
+        <iframe
+          ref={frameRef}
+          className="short-drama-frame"
+          src={`${SHORT_DRAMA_ORIGIN}/`}
+          title="古龙短剧生产站"
+          allow="autoplay; fullscreen; clipboard-read; clipboard-write"
+          referrerPolicy="strict-origin-when-cross-origin"
+        />
       </section>
     </main>
   );

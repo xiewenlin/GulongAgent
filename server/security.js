@@ -65,6 +65,28 @@ export function fingerprintIp(value = "unknown") {
     .slice(0, 24);
 }
 
+export function issueShortDramaSsoToken(user) {
+  const now = Math.floor(Date.now() / 1000);
+  const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({
+    iss: "https://sologle.com",
+    aud: "gulong-short-drama",
+    sub: user.id,
+    username: user.username || null,
+    email: user.email || null,
+    name: user.displayName || user.username || null,
+    role: user.role || "user",
+    iat: now,
+    exp: now + 120,
+    jti: randomBytes(18).toString("base64url"),
+  })).toString("base64url");
+  const signingInput = `${header}.${payload}`;
+  const signature = createHmac("sha256", secret("SHORT_DRAMA_SSO_SECRET"))
+    .update(signingInput)
+    .digest("base64url");
+  return `${signingInput}.${signature}`;
+}
+
 export async function issueSession(c, userId, { externalAuth } = {}) {
   await ensureIndexes();
   const raw = `gls_${randomBytes(32).toString("base64url")}`;

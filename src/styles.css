@@ -333,13 +333,15 @@
 .home-workflows { margin-top: 46px; padding: 42px; border: 1px solid var(--line); border-radius: 28px; background: linear-gradient(145deg, var(--panel), var(--bg-soft)); }
 .home-workflows .section-heading { max-width: 780px; margin-bottom: 28px; }
 .home-workflows > .text-link { margin: 26px auto 0; display: flex; }
-.short-drama-page { min-height: 70vh; display: grid; align-items: center; padding: 60px 0 100px; }
-.short-drama-placeholder { max-width: 900px; padding: 70px 50px; text-align: center; border: 1px solid var(--line); border-radius: 34px; background: radial-gradient(circle at 50% 0, color-mix(in srgb, var(--accent-gold) 20%, transparent), transparent 36%), var(--panel); box-shadow: var(--shadow); }
-.short-drama-orb { width: 112px; height: 112px; margin: 0 auto 24px; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 50%; color: var(--accent); background: var(--bg-soft); }
-.short-drama-placeholder > span { color: var(--accent); font-weight: 800; letter-spacing: .14em; }
-.short-drama-placeholder h1 { margin: 16px 0; font-size: clamp(40px, 5vw, 64px); }
-.short-drama-placeholder p { max-width: 720px; margin: 0 auto; color: var(--muted); line-height: 1.9; }
-.short-drama-placeholder > div:last-child { width: fit-content; margin: 28px auto 0; padding: 13px 20px; display: flex; align-items: center; gap: 9px; border-radius: 999px; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--panel)); font-weight: 800; }
+.short-drama-page { min-height: calc(100dvh - 74px); background: #151515; }
+.short-drama-embed-shell { width: 100%; min-height: calc(100dvh - 74px); display: flex; flex-direction: column; }
+.short-drama-embed-bar { width: 100%; min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 22px; color: #eee; }
+.short-drama-embed-bar > div { display: flex; align-items: baseline; gap: 13px; }
+.short-drama-embed-bar span { color: #c9a46d; font-size: .6875rem; font-weight: 800; letter-spacing: .14em; }
+.short-drama-embed-bar strong { font-size: 1rem; }
+.short-drama-embed-bar small { color: #aaa; }
+.short-drama-embed-error { padding: 10px 24px; color: #ffd6d6; background: #7f1d1d; text-align: center; }
+.short-drama-frame { width: 100%; min-height: calc(100dvh - 132px); flex: 1; border: 0; background: #181818; }
 .admin-workflow-grid { display: grid; gap: 16px; }
 .admin-workflow-grid > article { padding: 18px; display: grid; grid-template-columns: 112px minmax(0, 1fr) auto; align-items: center; gap: 20px; border: 1px solid var(--line); border-radius: 20px; background: var(--panel); }
 .admin-workflow-grid img { width: 112px; height: 112px; object-fit: cover; border-radius: 22px; }
