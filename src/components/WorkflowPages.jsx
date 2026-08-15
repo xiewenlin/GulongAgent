@@ -112,15 +112,17 @@ export function ShortDramaPage({ user, openAuth }) {
       <section className="short-drama-embed-shell">
         <div className="short-drama-embed-bar section-shell">
           <div><span>GULONG SHORT DRAMA</span><strong>短剧生产站</strong></div>
-          <small>{user ? `已使用古龙账号：${user.displayName || user.username || "用户"}` : "使用古龙统一账号登录与注册"}</small>
+          {user ? <small>{`已使用古龙账号：${user.displayName || user.username || "用户"}`}</small> : null}
         </div>
         {error && <div className="short-drama-embed-error" role="alert">{error}</div>}
         <iframe
           ref={frameRef}
           className="short-drama-frame"
-          src={`${SHORT_DRAMA_ORIGIN}/`}
+          src={`${SHORT_DRAMA_ORIGIN}/embed.html`}
           title="古龙短剧生产站"
           allow="autoplay; fullscreen; clipboard-read; clipboard-write"
+          loading="eager"
+          fetchPriority="high"
           referrerPolicy="strict-origin-when-cross-origin"
         />
       </section>
