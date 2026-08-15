@@ -329,13 +329,26 @@ test("primary navigation keeps the short-drama app embedded without exposing the
   assert.match(source, /const SHORT_DRAMA_ROUTE = "\/short-drama"/);
   assert.match(source, /\{ label: "短剧", href: SHORT_DRAMA_ROUTE \}/);
   assert.match(source, /navigate\(SHORT_DRAMA_ROUTE\)\}>短剧/);
-  assert.match(source, /<ShortDramaPage user=\{user\} openAuth=\{openAuth\}/);
+  assert.match(source, /<ShortDramaPage user=\{user\} authResolved=\{authResolved\} openAuth=\{openAuth\}/);
   assert.doesNotMatch(source, /\{ label: "威客", href:/);
 });
 
-test("the primary navigation exposes a single complaint entry backed by the feedback page", async () => {
+test("short-drama authentication waits for the official session before opening login", async () => {
+  const [appSource, workflowSource] = await Promise.all([
+    readFile(new URL("../../src/App.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/WorkflowPages.jsx", import.meta.url), "utf8"),
+  ]);
+  assert.match(appSource, /const \[authResolved, setAuthResolved\] = useState\(false\)/);
+  assert.match(appSource, /\.finally\(\(\) => setAuthResolved\(true\)\)/);
+  assert.match(appSource, /<ShortDramaPage user=\{user\} authResolved=\{authResolved\} openAuth=\{openAuth\}/);
+  assert.match(workflowSource, /if \(authResolved\) openAuth\(mode\)/);
+  assert.match(workflowSource, /else pendingAuthModeRef\.current = mode/);
+  assert.match(workflowSource, /if \(!authResolved \|\| queryAuthHandledRef\.current\) return/);
+});
+
+test("the primary navigation omits the complaint entry while the feedback page stays reachable", async () => {
   const source = await readFile(new URL("../../src/App.jsx", import.meta.url), "utf8");
-  assert.match(source, /\{ label: "吐槽", href: "\/feedback" \}/);
+  assert.doesNotMatch(source, /\{ label: "吐槽", href: "\/feedback" \}/);
   assert.match(source, /pathname === "\/feedback"\) page = <FeedbackPage/);
   assert.doesNotMatch(source, /className="mobile-feedback"/);
 });

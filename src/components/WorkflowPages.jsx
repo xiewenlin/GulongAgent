@@ -60,9 +60,11 @@ export function WorkflowPage({ navigate }) {
 
 const SHORT_DRAMA_ORIGIN = "https://aipdd-drameclaw-new.vercel.app";
 
-export function ShortDramaPage({ user, openAuth }) {
+export function ShortDramaPage({ user, authResolved, openAuth }) {
   const frameRef = useRef(null);
   const issueInFlightRef = useRef(null);
+  const pendingAuthModeRef = useRef(null);
+  const queryAuthHandledRef = useRef(false);
   const [frameReady, setFrameReady] = useState(false);
   const [error, setError] = useState("");
 
@@ -89,23 +91,38 @@ export function ShortDramaPage({ user, openAuth }) {
         if (user?.id) void sendSso(event.source);
       } else if (event.data?.type === "dramaclaw:auth-request") {
         if (user?.id) void sendSso(event.source);
-        else openAuth(event.data.mode === "register" ? "register" : "login");
+        else {
+          const mode = event.data.mode === "register" ? "register" : "login";
+          if (authResolved) openAuth(mode);
+          else pendingAuthModeRef.current = mode;
+        }
       } else if (event.data?.type === "dramaclaw:sso-error") {
         setError(event.data.message || "短剧账号授权失败，请重试");
       }
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [openAuth, sendSso, user?.id]);
+  }, [authResolved, openAuth, sendSso, user?.id]);
 
   useEffect(() => {
     if (frameReady && user?.id) void sendSso();
   }, [frameReady, sendSso, user?.id]);
 
   useEffect(() => {
+    const pendingMode = pendingAuthModeRef.current;
+    if (!pendingMode) return;
+    if (user?.id) void sendSso();
+    else if (authResolved) openAuth(pendingMode);
+    if (user?.id || authResolved) pendingAuthModeRef.current = null;
+  }, [authResolved, openAuth, sendSso, user?.id]);
+
+  useEffect(() => {
+    if (!authResolved || queryAuthHandledRef.current) return;
     const mode = new URLSearchParams(window.location.search).get("auth");
-    if (!user && (mode === "login" || mode === "register")) openAuth(mode);
-  }, []);
+    if (mode !== "login" && mode !== "register") return;
+    queryAuthHandledRef.current = true;
+    if (!user?.id) openAuth(mode);
+  }, [authResolved, openAuth, user?.id]);
 
   return (
     <main id="main-content" className="short-drama-page">

@@ -15,7 +15,7 @@ import {
   UserCircle,
   X,
 } from "@phosphor-icons/react";
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { apiFetch, trackAnalyticsEvent } from "./api.js";
 import { AccountModal } from "./components/AccountModal.jsx";
 import { AccountDashboard } from "./components/AccountDashboard.jsx";
@@ -47,7 +47,6 @@ const primaryNav = [
   { label: "工作流", href: "/workflows" },
   { label: "定价", href: "/pricing" },
   { label: "下载", href: "/download" },
-  { label: "吐槽", href: "/feedback" },
 ];
 
 const THEME_ICON_VERSION = "20260728-3d-favicon-1";
@@ -63,6 +62,7 @@ function currentRoute() {
 export function App() {
   const [route, setRoute] = useState(currentRoute);
   const [user, setUser] = useState(null);
+  const [authResolved, setAuthResolved] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
   const [authMode, setAuthMode] = useState("login");
   const [themeOpen, setThemeOpen] = useState(false);
@@ -156,7 +156,13 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    apiFetch("/api/auth/me").then((result) => { setUser(result.user); setSubscriptionLifecycle(result.subscriptionLifecycle || null); }).catch(() => setUser(null));
+    apiFetch("/api/auth/me")
+      .then((result) => {
+        setUser(result.user);
+        setSubscriptionLifecycle(result.subscriptionLifecycle || null);
+      })
+      .catch(() => setUser(null))
+      .finally(() => setAuthResolved(true));
   }, []);
 
   useEffect(() => {
@@ -201,10 +207,10 @@ export function App() {
     }
   }
 
-  function openAuth(mode = "login") {
+  const openAuth = useCallback((mode = "login") => {
     setAuthMode(mode);
     setAuthOpen(true);
-  }
+  }, []);
 
   async function logout() {
     await apiFetch("/api/auth/logout", { method: "POST" });
@@ -233,7 +239,7 @@ export function App() {
   else if (pathname === "/brain") page = <SecondBrainPage user={user} openAuth={openAuth} navigate={navigate} />;
   else if (pathname === "/worker") page = <WorkerPage key={route} user={user} openAuth={openAuth} navigate={navigate} />;
   else if (pathname === "/workflows") page = <WorkflowPage navigate={navigate} />;
-  else if (pathname === "/short-drama") page = <ShortDramaPage user={user} openAuth={openAuth} />;
+  else if (pathname === "/short-drama") page = <ShortDramaPage user={user} authResolved={authResolved} openAuth={openAuth} />;
   else if (pathname === "/download") page = <DownloadPage />;
   else if (pathname === "/developer") page = <DeveloperPage user={user} openAuth={openAuth} />;
   else if (pathname === "/pricing") page = <PricingPage user={user} openAuth={openAuth} navigate={navigate} />;
@@ -283,7 +289,7 @@ export function App() {
 
       {pathname !== "/agent" && <button className="floating-feedback" type="button" onClick={() => navigate("/feedback")}><ChatCircleText size={20} /><span>反馈</span></button>}
 
-      <AccountModal open={authOpen} initialMode={authMode} onClose={() => setAuthOpen(false)} onUser={setUser} themeIcon={themeIcon} />
+      <AccountModal open={authOpen} initialMode={authMode} onClose={() => setAuthOpen(false)} onUser={(nextUser) => { setUser(nextUser); setAuthResolved(true); }} themeIcon={themeIcon} />
       {renewalOpen && subscriptionLifecycle && <SubscriptionReminderDialog lifecycle={subscriptionLifecycle} onRenew={() => { setRenewalOpen(false); navigate("/pricing"); }} onClose={() => { window.localStorage.setItem(`gulong-renewal-reminder-${new Date().toISOString().slice(0, 10)}`, "dismissed"); setRenewalOpen(false); }} />}
       {themeOpen && (
         <div className="theme-drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setThemeOpen(false)}>
