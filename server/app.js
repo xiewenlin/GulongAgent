@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, createPrivateKey, randomBytes, sign as signBytes } from "node:crypto";
 import { ObjectId } from "mongodb";
 import { handleUpload } from "@vercel/blob/client";
 import QRCode from "qrcode";
@@ -108,6 +108,8 @@ const WORKFLOW_IMAGE_CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/
 const SUBSCRIPTION_PRICE_MIN_FEN = 100;
 const SUBSCRIPTION_PRICE_MAX_FEN = 5_000_000;
 const CUSTOM_ORDER_MAX_FEN = 10_000_000;
+const ACTIVATION_CODE_MAX_BATCH = 500;
+const ACTIVATION_PRODUCT_DEFAULT = "minimax-h3-universal";
 const RENEWAL_REMINDER_DAYS = 7;
 const ONLINE_PAYMENT_AVAILABILITY = Object.freeze({
   online: true,
@@ -120,6 +122,65 @@ const ONLINE_PAYMENT_AVAILABILITY = Object.freeze({
 });
 let offlinePaymentSyncPromise = null;
 let offlinePaymentSynchronizedAt = 0;
+
+function normalizeActivationCode(value) {
+  return String(value || "").trim().toUpperCase().replace(/\s+/g, "");
+}
+
+function hashActivationCode(value) {
+  return createHash("sha256").update(normalizeActivationCode(value)).digest("hex");
+}
+
+function activationCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = randomBytes(20);
+  const groups = [];
+  for (let group = 0; group < 4; group += 1) {
+    let part = "";
+    for (let index = 0; index < 5; index += 1) {
+      part += alphabet[bytes[group * 5 + index] % alphabet.length];
+    }
+    groups.push(part);
+  }
+  return `H3-${groups.join("-")}`;
+}
+
+function activationReceiptPayload(record) {
+  return {
+    version: 1,
+    licenseId: record._id.toString(),
+    product: record.product,
+    deviceId: record.deviceId,
+    macHint: record.macHint || null,
+    activatedAt: new Date(record.activatedAt).toISOString(),
+    perpetual: true,
+  };
+}
+
+function activationSigningPrivateKey(encodedValue = process.env.ACTIVATION_SIGNING_PRIVATE_KEY_B64) {
+  const encodedKey = String(encodedValue || "").trim();
+  if (!encodedKey) throw new ConfigurationError("授权签名密钥尚未配置");
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encodedKey) || encodedKey.length % 4 !== 0) {
+    throw new ConfigurationError("授权签名密钥格式无效");
+  }
+  try {
+    const privateKey = createPrivateKey(Buffer.from(encodedKey, "base64").toString("utf8"));
+    if (privateKey.asymmetricKeyType !== "rsa" || Number(privateKey.asymmetricKeyDetails?.modulusLength || 0) < 3072) {
+      throw new Error("activation signing key must be RSA-3072 or stronger");
+    }
+    return privateKey;
+  } catch {
+    throw new ConfigurationError("授权签名密钥格式无效");
+  }
+}
+
+function signActivationReceipt(payload, privateKey = activationSigningPrivateKey()) {
+  const canonical = JSON.stringify(payload);
+  return {
+    algorithm: "RS256",
+    signature: signBytes("RSA-SHA256", Buffer.from(canonical), privateKey).toString("base64"),
+  };
+}
 
 const ErrorSchema = z.object({
   code: z.string().openapi({ example: "VALIDATION_ERROR" }),
@@ -166,6 +227,25 @@ const ResetPasswordSchema = z.object({
   email: z.email(),
   code: z.string().trim().min(6).max(2048),
   newPassword: z.string().min(8).max(255),
+});
+
+const ActivationRedeemRequestSchema = z.object({
+  code: z.string().trim().regex(/^H3(?:-[A-HJ-NP-Z2-9]{5}){4}$/).openapi({ example: "H3-ABCDE-FGHJK-MNPQR-STUVW" }),
+  deviceId: z.string().regex(/^[a-f0-9]{64}$/).openapi({ example: "0".repeat(64) }),
+  deviceName: z.string().trim().max(120).optional().openapi({ example: "CREATOR-PC" }),
+  macHint: z.string().trim().max(32).optional().openapi({ example: "A1B2C3" }),
+});
+
+const ActivationReceiptSchema = z.object({
+  version: z.literal(1),
+  licenseId: z.string(),
+  product: z.string(),
+  deviceId: z.string(),
+  macHint: z.string().nullable(),
+  activatedAt: z.string().datetime(),
+  perpetual: z.literal(true),
+  algorithm: z.literal("RS256"),
+  signature: z.string(),
 });
 
 async function requireAdmin(c) {
@@ -2302,6 +2382,151 @@ app.get("/api/auth/me", async (c) => {
     databaseConfigured: isDatabaseConfigured(),
     identityProvider: "chandler",
   });
+});
+
+app.post("/api/licenses/redeem", async (c) => {
+  c.header("Cache-Control", "no-store, max-age=0");
+  c.header("Pragma", "no-cache");
+  const ipKey = fingerprintIp(c.req.header("x-forwarded-for") || "local");
+  const rate = await enforceRateLimit(`activation-redeem:${ipKey}`, { limit: 12, windowMs: 15 * 60_000 });
+  if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "激活尝试过多，请 15 分钟后重试" }, 429);
+
+  const body = await c.req.json().catch(() => ({}));
+  const code = normalizeActivationCode(body.code);
+  const deviceId = String(body.deviceId || "").trim().toLowerCase();
+  const deviceName = String(body.deviceName || "").trim().slice(0, 120);
+  const macHint = String(body.macHint || "").trim().toUpperCase().slice(-8);
+  if (!/^H3(?:-[A-HJ-NP-Z2-9]{5}){4}$/.test(code)) {
+    return c.json({ code: "INVALID_ACTIVATION_CODE", message: "激活码格式不正确" }, 400);
+  }
+  if (!/^[a-f0-9]{64}$/.test(deviceId)) {
+    return c.json({ code: "INVALID_DEVICE", message: "设备指纹不正确" }, 400);
+  }
+
+  const codes = await getCollection("activationCodes");
+  const codeHash = hashActivationCode(code);
+  let record = await codes.findOne({ codeHash });
+  if (!record) return c.json({ code: "INVALID_ACTIVATION_CODE", message: "激活码不存在或已失效" }, 404);
+  if (record.status === "revoked") return c.json({ code: "ACTIVATION_REVOKED", message: "激活码已被停用" }, 403);
+  // Validate the production signing key before binding an unused code. A
+  // deployment configuration error must never consume a customer's license.
+  const privateKey = activationSigningPrivateKey();
+
+  if (record.status === "unused") {
+    try {
+      record = await codes.findOneAndUpdate(
+        { _id: record._id, status: "unused" },
+        {
+          $set: {
+            status: "used",
+            deviceId,
+            deviceName,
+            macHint,
+            activatedAt: new Date(),
+            updatedAt: new Date(),
+          },
+        },
+        { returnDocument: "after" },
+      );
+    } catch (error) {
+      if (error?.code === 11000) {
+        return c.json({ code: "DEVICE_ALREADY_LICENSED", message: "这台电脑已经绑定过同一产品授权" }, 409);
+      }
+      throw error;
+    }
+    if (!record) record = await codes.findOne({ codeHash });
+  }
+
+  if (!record || record.status !== "used" || record.deviceId !== deviceId) {
+    return c.json({ code: "ACTIVATION_ALREADY_USED", message: "激活码已绑定到其他电脑" }, 409);
+  }
+  const payload = activationReceiptPayload(record);
+  return c.json({ ok: true, receipt: { ...payload, ...signActivationReceipt(payload, privateKey) } });
+});
+
+app.get("/api/admin/activation-codes", async (c) => {
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  c.header("Pragma", "no-cache");
+  const auth = await requireAdmin(c);
+  if (auth.error) return auth.error;
+  const status = String(c.req.query("status") || "").trim();
+  const product = String(c.req.query("product") || "").trim();
+  const limit = Math.min(Math.max(Number(c.req.query("limit")) || 100, 1), 500);
+  const filter = {};
+  if (["unused", "used", "revoked"].includes(status)) filter.status = status;
+  if (product) filter.product = product;
+  const collection = await getCollection("activationCodes");
+  const [items, counts] = await Promise.all([
+    collection.find(filter).sort({ createdAt: -1 }).limit(limit).toArray(),
+    collection.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]).toArray(),
+  ]);
+  return c.json({
+    items: items.map((item) => ({
+      id: item._id.toString(),
+      codePreview: item.codePreview,
+      product: item.product,
+      status: item.status,
+      note: item.note || "",
+      deviceName: item.deviceName || null,
+      macHint: item.macHint || null,
+      createdAt: item.createdAt,
+      activatedAt: item.activatedAt || null,
+    })),
+    counts: Object.fromEntries(counts.map((item) => [item._id, item.count])),
+  });
+});
+
+app.post("/api/admin/activation-codes", async (c) => {
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  c.header("Pragma", "no-cache");
+  const originError = requireTrustedMutation(c);
+  if (originError) return originError;
+  const auth = await requireAdmin(c);
+  if (auth.error) return auth.error;
+  const body = await c.req.json().catch(() => ({}));
+  const count = Math.trunc(Number(body.count));
+  const product = String(body.product || ACTIVATION_PRODUCT_DEFAULT).trim().slice(0, 80);
+  const note = String(body.note || "").trim().slice(0, 200);
+  if (!Number.isInteger(count) || count < 1 || count > ACTIVATION_CODE_MAX_BATCH) {
+    return c.json({ code: "INVALID_COUNT", message: `一次可生成 1-${ACTIVATION_CODE_MAX_BATCH} 个激活码` }, 400);
+  }
+  if (!/^[a-z0-9][a-z0-9._-]{2,79}$/i.test(product)) {
+    return c.json({ code: "INVALID_PRODUCT", message: "产品标识格式不正确" }, 400);
+  }
+
+  const now = new Date();
+  const plaintext = Array.from({ length: count }, () => activationCode());
+  const records = plaintext.map((code) => ({
+    codeHash: hashActivationCode(code),
+    codePreview: `${code.slice(0, 8)}...${code.slice(-5)}`,
+    product,
+    note,
+    status: "unused",
+    createdBy: new ObjectId(auth.user.id),
+    createdAt: now,
+    updatedAt: now,
+  }));
+  await (await getCollection("activationCodes")).insertMany(records, { ordered: true });
+  return c.json({ product, count, codes: plaintext, createdAt: now }, 201);
+});
+
+app.post("/api/admin/activation-codes/:id/revoke", async (c) => {
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  c.header("Pragma", "no-cache");
+  const originError = requireTrustedMutation(c);
+  if (originError) return originError;
+  const auth = await requireAdmin(c);
+  if (auth.error) return auth.error;
+  if (!ObjectId.isValid(c.req.param("id"))) {
+    return c.json({ code: "INVALID_ID", message: "授权记录编号不正确" }, 400);
+  }
+  const updated = await (await getCollection("activationCodes")).findOneAndUpdate(
+    { _id: new ObjectId(c.req.param("id")) },
+    { $set: { status: "revoked", revokedAt: new Date(), revokedBy: new ObjectId(auth.user.id), updatedAt: new Date() } },
+    { returnDocument: "after" },
+  );
+  if (!updated) return c.json({ code: "NOT_FOUND", message: "授权记录不存在" }, 404);
+  return c.json({ ok: true, id: updated._id.toString(), status: updated.status });
 });
 
 app.get("/api/account/dashboard", async (c) => {
@@ -6098,6 +6323,25 @@ app.openAPIRegistry.registerPath({
 
 app.openAPIRegistry.registerPath({
   method: "post",
+  path: "/api/licenses/redeem",
+  tags: ["Licensing"],
+  summary: "兑换设备永久离线授权",
+  description: "安装器首次联网时提交一次性激活码与设备指纹。激活码原子绑定首台设备；同一设备可幂等恢复回执，其他设备会被拒绝。成功回执使用 RSA-3072 / SHA-256（RS256）签名，客户端随后可永久离线验签。",
+  security: [],
+  request: { body: { required: true, content: { "application/json": { schema: ActivationRedeemRequestSchema } } } },
+  responses: {
+    200: { description: "激活成功或同设备恢复成功", content: { "application/json": { schema: z.object({ ok: z.literal(true), receipt: ActivationReceiptSchema }) } } },
+    400: { description: "激活码或设备指纹格式不正确", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "激活码已停用", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "激活码不存在", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "激活码已绑定其他设备或设备已有授权", content: { "application/json": { schema: ErrorSchema } } },
+    429: { description: "激活尝试过于频繁", content: { "application/json": { schema: ErrorSchema } } },
+    503: { description: "生产签名密钥尚未正确配置", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openAPIRegistry.registerPath({
+  method: "post",
   path: "/api/admin/workflows",
   tags: ["Administration"],
   summary: "管理员创建工作流",
@@ -6109,8 +6353,8 @@ app.doc("/api/openapi.json", {
   openapi: "3.1.0",
   info: {
     title: "古龙 Gulong Agent Engine API",
-    version: "1.8.0",
-    description: "已按 Chandler v3.2 与 PearAPI 统一接入升级：服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费。另提供任务、第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
+    version: "1.9.0",
+    description: "已按 Chandler v3.2 与 PearAPI 统一接入升级：服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费。新增 MiniMax H3 一次联网、设备绑定、RSA 签名的永久离线授权兑换接口。另提供任务、第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
   },
   servers: [
     { url: "/", description: "当前环境" },
@@ -6129,4 +6373,5 @@ app.get(
   }),
 );
 
+export { activationReceiptPayload, activationSigningPrivateKey, signActivationReceipt };
 export default app;

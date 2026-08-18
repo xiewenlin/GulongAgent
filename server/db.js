@@ -353,6 +353,22 @@ export async function ensureIndexes() {
           { ownerId: 1, provider: 1 },
           { unique: true, name: "uniq_user_provider_configuration" },
         ),
+        db.collection("activationCodes").createIndex(
+          { codeHash: 1 },
+          { unique: true, name: "uniq_activation_code_hash" },
+        ),
+        db.collection("activationCodes").createIndex(
+          { status: 1, createdAt: -1 },
+          { name: "activation_codes_by_status" },
+        ),
+        db.collection("activationCodes").createIndex(
+          { deviceId: 1, product: 1 },
+          {
+            unique: true,
+            partialFilterExpression: { deviceId: { $type: "string" } },
+            name: "uniq_activation_device_product",
+          },
+        ),
       ]);
     })().catch((error) => {
       indexPromise = undefined;

@@ -29,6 +29,18 @@
       "destination": "/api/platform?_platform_path=admin/pearapi/:path*"
     },
     {
+      "source": "/api/licenses/:path*",
+      "destination": "/api/platform?_platform_path=licenses/:path*"
+    },
+    {
+      "source": "/api/admin/activation-codes/:path*",
+      "destination": "/api/platform?_platform_path=admin/activation-codes/:path*"
+    },
+    {
+      "source": "/api/admin/activation-codes",
+      "destination": "/api/platform?_platform_path=admin/activation-codes"
+    },
+    {
       "source": "/api/workflows/:path*",
       "destination": "/api/platform?_platform_path=workflows/:path*"
     },

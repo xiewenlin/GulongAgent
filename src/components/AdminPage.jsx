@@ -11,6 +11,7 @@ import {
   CloudArrowUp,
   Cube,
   CurrencyCny,
+  Copy,
   DownloadSimple,
   FileZip,
   FlowArrow,
@@ -20,6 +21,7 @@ import {
   ImageSquare,
   Lightning,
   LockKey,
+  Key,
   MagnifyingGlass,
   Package,
   PencilSimple,
@@ -41,6 +43,7 @@ const menu = [
   { id: "users", label: "订阅用户", icon: UsersThree },
   { id: "prices", label: "订阅价格", icon: Cube },
   { id: "tokens", label: "令牌配置", icon: LockKey },
+  { id: "activations", label: "授权管理", icon: Key },
   { id: "partners", label: "合作伙伴", icon: Handshake },
   { id: "workflows", label: "工作流管理", icon: FlowArrow },
   { id: "brain", label: "第二大脑", icon: FileZip },
@@ -886,9 +889,80 @@ function PearTokenManager() {
   </section>;
 }
 
+function ActivationCodeManager() {
+  const confirmAction = useConfirmDialog();
+  const [items, setItems] = useState([]);
+  const [counts, setCounts] = useState({});
+  const [status, setStatus] = useState("");
+  const [count, setCount] = useState(10);
+  const [note, setNote] = useState("");
+  const [generated, setGenerated] = useState([]);
+  const [busy, setBusy] = useState("");
+  const [message, setMessage] = useState("");
+
+  async function load(nextStatus = status) {
+    setBusy("load"); setMessage("");
+    try {
+      const query = nextStatus ? `?status=${encodeURIComponent(nextStatus)}` : "";
+      const result = await apiFetch(`/api/admin/activation-codes${query}`);
+      setItems(result.items || []); setCounts(result.counts || {});
+    } catch (error) { setMessage(error.message); }
+    finally { setBusy(""); }
+  }
+
+  useEffect(() => { load(); }, []);
+
+  async function generate(event) {
+    event.preventDefault(); setBusy("generate"); setMessage(""); setGenerated([]);
+    try {
+      const result = await apiFetch("/api/admin/activation-codes", {
+        method: "POST",
+        body: JSON.stringify({ count: Number(count), product: "minimax-h3-universal", note }),
+      });
+      setGenerated(result.codes || []);
+      setMessage(`已生成 ${result.count} 个 MiniMax H3 永久激活码；明文只在本窗口显示一次。`);
+      await load(status);
+    } catch (error) { setMessage(error.message); }
+    finally { setBusy(""); }
+  }
+
+  async function copyCodes() {
+    await navigator.clipboard.writeText(generated.join("\n"));
+    setMessage(`已复制 ${generated.length} 个激活码。`);
+  }
+
+  async function revoke(item) {
+    if (!await confirmAction({
+      tone: "danger",
+      eyebrow: "REVOKE ACTIVATION",
+      title: "停用这个永久授权？",
+      message: "停用后该设备保留的离线回执不会被远程删除，但后续重新激活和在线校验会被拒绝。",
+      detail: `${item.codePreview}${item.deviceName ? ` · ${item.deviceName}` : ""}`,
+      detailLabel: "授权记录",
+      confirmLabel: "确认停用",
+    })) return;
+    setBusy(item.id); setMessage("");
+    try {
+      await apiFetch(`/api/admin/activation-codes/${item.id}/revoke`, { method: "POST", body: "{}" });
+      setMessage("授权记录已停用。"); await load(status);
+    } catch (error) { setMessage(error.message); }
+    finally { setBusy(""); }
+  }
+
+  return <section className="admin-module activation-manager">
+    <header className="admin-module-head"><div><span>DEVICE-BOUND OFFLINE LICENSES</span><h2>授权管理</h2><p>批量生成安装激活码。首次使用后绑定设备物理网卡指纹，同一台电脑可永久离线使用。</p></div><button className="button secondary" disabled={Boolean(busy)} onClick={() => load()}><ArrowClockwise size={17} />刷新</button></header>
+    {message && <AdminNotice tone={message.includes("已") ? "success" : "error"}>{message}</AdminNotice>}
+    <div className="activation-summary"><button className={!status ? "active" : ""} onClick={() => { setStatus(""); load(""); }}><strong>{(counts.unused || 0) + (counts.used || 0) + (counts.revoked || 0)}</strong><span>全部</span></button><button className={status === "unused" ? "active" : ""} onClick={() => { setStatus("unused"); load("unused"); }}><strong>{counts.unused || 0}</strong><span>未使用</span></button><button className={status === "used" ? "active" : ""} onClick={() => { setStatus("used"); load("used"); }}><strong>{counts.used || 0}</strong><span>已使用</span></button><button className={status === "revoked" ? "active" : ""} onClick={() => { setStatus("revoked"); load("revoked"); }}><strong>{counts.revoked || 0}</strong><span>已停用</span></button></div>
+    <form className="activation-generator" onSubmit={generate}><div><label><span>生成数量</span><input type="number" min="1" max="500" value={count} onChange={(event) => setCount(event.target.value)} /></label><label className="wide"><span>批次备注</span><input maxLength="200" value={note} onChange={(event) => setNote(event.target.value)} placeholder="例如：2026 年 8 月创作者内测" /></label></div><button className="button primary" disabled={Boolean(busy)}><Key size={18} weight="fill" />{busy === "generate" ? "正在生成" : "批量生成激活码"}</button></form>
+    {generated.length > 0 && <section className="activation-generated"><header><div><strong>本批次激活码</strong><span>请立即复制并妥善保存，刷新后不再显示明文。</span></div><button className="button secondary small" onClick={copyCodes}><Copy size={16} />复制全部</button></header><textarea readOnly value={generated.join("\n")} rows={Math.min(generated.length + 1, 12)} /></section>}
+    <div className="activation-table"><div className="activation-table-head"><span>激活码</span><span>状态</span><span>绑定设备</span><span>生成 / 激活时间</span><span>操作</span></div>{items.map((item) => <article key={item.id}><div><strong>{item.codePreview}</strong><small>{item.note || item.product}</small></div><em className={`status-pill ${item.status}`}>{item.status === "unused" ? "未使用" : item.status === "used" ? "已使用" : "已停用"}</em><div><strong>{item.deviceName || "尚未绑定"}</strong><small>{item.macHint ? `MAC 尾号 ${item.macHint}` : "首次安装时绑定"}</small></div><div><time>{item.createdAt ? new Date(item.createdAt).toLocaleString("zh-CN") : "-"}</time><small>{item.activatedAt ? `激活 ${new Date(item.activatedAt).toLocaleString("zh-CN")}` : "等待使用"}</small></div><button className="button small danger" disabled={Boolean(busy) || item.status === "revoked"} onClick={() => revoke(item)}>停用</button></article>)}</div>
+    {!items.length && <EmptyState icon={Key} title={busy === "load" ? "正在读取授权" : "暂无授权记录"} text="在上方输入数量，生成第一批设备激活码。" />}
+  </section>;
+}
+
 export function AdminPage({ user, openAuth }) {
   const [active, setActive] = useState("dashboard");
   if (!user) return <main id="main-content" className="admin-gate section-shell"><LockKey size={38} /><h1>登录管理员账号</h1><p>管理员后台已接入 Chandler 统一身份，只接受 Chandler 返回的管理员角色。</p><button className="button primary" onClick={() => openAuth("login")}>登录继续</button></main>;
   if (user.role !== "admin") return <main id="main-content" className="admin-gate section-shell"><ShieldCheck size={38} /><h1>当前账号没有后台权限</h1><p>请让 Chandler 平台管理员授予此账号管理员角色后重新登录。</p></main>;
-  return <main id="main-content" className="admin-page"><aside className="admin-sidebar"><div><span>GULONG CONSOLE</span><h1>管理员后台</h1><p>{user.displayName || user.username || user.email}</p></div><nav>{menu.map((item) => { const Icon = item.icon; return <button key={item.id} className={active === item.id ? "active" : ""} onClick={() => setActive(item.id)}><Icon size={19} weight={active === item.id ? "fill" : "regular"} /> {item.label}</button>; })}</nav><footer><UsersThree size={18} /><span>Chandler 统一账号</span></footer></aside><div className="admin-content">{active === "dashboard" && <AdminDashboard />}{active === "users" && <ChandlerUserManager />}{active === "prices" && <ChandlerPriceManager />}{active === "tokens" && <PearTokenManager />}{active === "partners" && <PartnerManager />}{active === "workflows" && <WorkflowManager />}{active === "brain" && <BrainAttachmentManager />}{active === "versions" && <VersionManager />}{active === "payments" && <PaymentManager />}{active === "worker" && <WorkerReviewManager />}{active === "feedback" && <FeedbackManager />}</div></main>;
+  return <main id="main-content" className="admin-page"><aside className="admin-sidebar"><div><span>GULONG CONSOLE</span><h1>管理员后台</h1><p>{user.displayName || user.username || user.email}</p></div><nav>{menu.map((item) => { const Icon = item.icon; return <button key={item.id} className={active === item.id ? "active" : ""} onClick={() => setActive(item.id)}><Icon size={19} weight={active === item.id ? "fill" : "regular"} /> {item.label}</button>; })}</nav><footer><UsersThree size={18} /><span>Chandler 统一账号</span></footer></aside><div className="admin-content">{active === "dashboard" && <AdminDashboard />}{active === "users" && <ChandlerUserManager />}{active === "prices" && <ChandlerPriceManager />}{active === "tokens" && <PearTokenManager />}{active === "activations" && <ActivationCodeManager />}{active === "partners" && <PartnerManager />}{active === "workflows" && <WorkflowManager />}{active === "brain" && <BrainAttachmentManager />}{active === "versions" && <VersionManager />}{active === "payments" && <PaymentManager />}{active === "worker" && <WorkerReviewManager />}{active === "feedback" && <FeedbackManager />}</div></main>;
 }
