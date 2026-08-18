@@ -324,6 +324,18 @@ function chargedFenForModel(model, modality, duration = 5) {
   return Math.max(1, Math.ceil((Number(model.baseCostMilliFen || 0) * durationFactor * (1 + PEAR_API_MARKUP_RATE)) / 1000));
 }
 
+export async function reservePearMediaWallet({ wallets, ownerId, amountFen, ledgerKey, requestId, mediaJobId, now = new Date() }) {
+  const entry = { key: ledgerKey, kind: "pear_media_reservation", amountFen: -amountFen, requestId, mediaJobId, createdAt: now };
+  const wallet = await wallets.findOneAndUpdate(
+    { ownerId, balanceFen: { $gte: amountFen }, ledgerKeys: { $ne: ledgerKey } },
+    { $inc: { balanceFen: -amountFen }, $push: { ledgerKeys: { $each: [ledgerKey], $slice: -600 }, ledgerEntries: { $each: [entry], $slice: -600 } }, $set: { updatedAt: now } },
+    { returnDocument: "after" },
+  );
+  if (wallet) return { wallet, idempotent: false };
+  const existing = await wallets.findOne({ ownerId, ledgerKeys: ledgerKey });
+  return existing ? { wallet: existing, idempotent: true } : null;
+}
+
 function mediaPublicView(job) {
   return {
     id: job._id.toString(),
@@ -363,7 +375,11 @@ async function refundMediaJob(job, error) {
     { returnDocument: "after" },
   );
   if (!claimed) return jobs.findOne({ _id: job._id });
-  await (await getCollection("wallets")).updateOne({ ownerId: job.ownerId }, { $inc: { balanceFen: job.chargedFen }, $set: { updatedAt: now } });
+  const refundKey = `refund:${job.chargeLedgerKey || job.requestId}`;
+  await (await getCollection("wallets")).updateOne(
+    { ownerId: job.ownerId, ledgerKeys: { $ne: refundKey } },
+    { $inc: { balanceFen: job.chargedFen }, $push: { ledgerKeys: { $each: [refundKey], $slice: -600 }, ledgerEntries: { $each: [{ key: refundKey, kind: "pear_media_refund", amountFen: job.chargedFen, requestId: job.requestId, mediaJobId: job._id, createdAt: now }], $slice: -600 } }, $set: { updatedAt: now } },
+  );
   await Promise.all([
     jobs.updateOne({ _id: job._id, chargeStatus: "refunding" }, { $set: { chargeStatus: "refunded", refundedAt: now, updatedAt: now } }),
     (await getCollection("agentUsage")).updateOne({ requestId: job.requestId }, { $set: { status: "failed", refundedFen: job.chargedFen, errorCode: "MEDIA_GENERATION_FAILED", failedAt: now, updatedAt: now } }),
@@ -519,7 +535,7 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
       referenceImages: z.array(ReferenceImageSchema).max(16).default([]), imageSize: z.enum(PEAR_IMAGE_SIZES).default("1:1"),
       aspectRatio: z.enum(["16:9", "9:16"]).default("16:9"), duration: z.number().int().refine((value) => PEAR_VIDEO_DURATIONS.includes(value), "不支持的视频时长").default(5),
     }) } } } },
-    responses: { 201: { description: "媒体任务已提交" }, 400: { description: "模型或参数无效", content: { "application/json": { schema: ErrorSchema } } }, 402: { description: "余额或订阅不足", content: { "application/json": { schema: ErrorSchema } } } },
+    responses: { 201: { description: "媒体任务已提交；返回预扣金额与剩余余额" }, 400: { description: "模型、参数或 Idempotency-Key 无效", content: { "application/json": { schema: ErrorSchema } } }, 402: { description: "余额或订阅不足", content: { "application/json": { schema: ErrorSchema } } } },
   });
   const mediaStatusRoute = createRoute({
     method: "get", path: "/api/agent/media/{id}", tags: ["Web Agent"], summary: "查询并推进 PearAPI 媒体任务",
@@ -664,6 +680,8 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     const rate = await enforceRateLimit(`pear-media:${auth.user.id}`, { limit: 12, windowMs: 10 * 60_000 });
     if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "媒体生成请求过于频繁，请稍后再试" }, 429);
     const input = c.req.valid("json");
+    const idempotencyKey = String(c.req.header("Idempotency-Key") || "").trim();
+    if (idempotencyKey.length < 8 || idempotencyKey.length > 160) return c.json({ code: "IDEMPOTENCY_KEY_REQUIRED", message: "请提供 8–160 字符的 Idempotency-Key" }, 400);
     const requested = PEAR_API_MEDIA_MODEL_MAP.get(input.model);
     if (!requested || requested.modality !== input.modality) return c.json({ code: "MODEL_NOT_ALLOWED", message: "请选择当前创作类型对应的 PearAPI 模型" }, 400);
     const ownerId = new ObjectId(auth.user.id);
@@ -683,26 +701,63 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     const referenceImages = input.referenceImages.slice(0, actual.referenceImages);
     if (input.referenceImages.length > actual.referenceImages) return c.json({ code: "TOO_MANY_REFERENCE_IMAGES", message: `${actual.name} 最多支持 ${actual.referenceImages} 张参考图` }, 400);
     const chargedFen = unlimited ? 0 : chargedFenForModel(actual, input.modality, input.duration);
-    if (!unlimited) {
-      const wallets = await getCollection("wallets");
-      const debited = await wallets.findOneAndUpdate(
-        { ownerId, balanceFen: { $gte: chargedFen } },
-        { $inc: { balanceFen: -chargedFen }, $set: { updatedAt: now } },
-        { returnDocument: "after" },
-      );
-      if (!debited) return c.json({ code: "INSUFFICIENT_BALANCE", message: `可用额度不足，本次预计需要 ${chargedFen / 100} 元` }, 402);
-    }
     const conversationId = ObjectId.isValid(input.conversationId) ? new ObjectId(input.conversationId) : new ObjectId();
     const requestId = `pear_media_${Date.now().toString(36)}_${randomBytes(6).toString("hex")}`;
     const jobs = await getCollection("agentMediaJobs");
-    const inserted = await jobs.insertOne({
-      ownerId, conversationId, requestId, modality: input.modality, requestedModel: requested.id, model: actual.id, modelName: actual.name,
-      prompt: input.prompt, referenceCount: referenceImages.length, imageSize: input.imageSize, aspectRatio: input.aspectRatio, duration: input.duration,
-      baseCostMilliFen: actual.baseCostMilliFen, chargedFen, markupRate: PEAR_API_MARKUP_RATE, chargeStatus: unlimited ? "exempt" : "reserved", status: "submitting", createdAt: now, updatedAt: now,
-    });
-    const job = await jobs.findOne({ _id: inserted.insertedId });
-    await (await getCollection("agentUsage")).insertOne({ ownerId, conversationId, requestId, mediaJobId: job._id, modality: input.modality, model: actual.id, requestedModel: requested.id, baseCostMilliFen: actual.baseCostMilliFen, chargedFen, markupRate: PEAR_API_MARKUP_RATE, status: "started", createdAt: now, updatedAt: now });
+    let job = await jobs.findOne({ ownerId, idempotencyKey });
+    if (job && (job.modality !== input.modality || job.requestedModel !== requested.id || job.prompt !== input.prompt)) return c.json({ code: "IDEMPOTENCY_KEY_CONFLICT", message: "这个 Idempotency-Key 已用于另一项媒体任务" }, 409);
+    if (job && job.status !== "reserving") {
+      const wallet = await (await getCollection("wallets")).findOne({ ownerId });
+      if (job.status === "rejected") return c.json({ code: "INSUFFICIENT_BALANCE", message: job.error || `可用额度不足，本次预计需要 ${chargedFen / 100} 元` }, 402);
+      return c.json({ job: mediaPublicView(job), billing: { chargedFen: job.chargedFen, remainingBalanceFen: Number(wallet?.balanceFen || 0), exempt: job.chargeStatus === "exempt" }, idempotent: true }, 201);
+    }
+    if (!job) {
+      const jobId = new ObjectId();
+      try {
+        await jobs.insertOne({
+          _id: jobId, ownerId, conversationId, requestId, idempotencyKey, modality: input.modality, requestedModel: requested.id, model: actual.id, modelName: actual.name,
+          prompt: input.prompt, referenceCount: referenceImages.length, imageSize: input.imageSize, aspectRatio: input.aspectRatio, duration: input.duration,
+          baseCostMilliFen: actual.baseCostMilliFen, chargedFen, markupRate: PEAR_API_MARKUP_RATE, chargeStatus: unlimited ? "exempt" : "pending", status: "reserving", createdAt: now, updatedAt: now,
+        });
+        job = await jobs.findOne({ _id: jobId });
+      } catch (error) {
+        if (error?.code !== 11000) throw error;
+        job = await jobs.findOne({ ownerId, idempotencyKey });
+        if (!job) throw error;
+      }
+    }
+    const wallets = await getCollection("wallets");
+    let remainingBalanceFen = Number((await wallets.findOne({ ownerId }))?.balanceFen || 0);
+    if (!unlimited) {
+      const chargeLedgerKey = job.chargeLedgerKey || `pear-media:${job._id}`;
+      const reservation = await reservePearMediaWallet({ wallets, ownerId, amountFen: chargedFen, ledgerKey: chargeLedgerKey, requestId: job.requestId, mediaJobId: job._id, now });
+      if (!reservation) {
+        const error = `可用额度不足，本次预计需要 ${chargedFen / 100} 元`;
+        await jobs.updateOne({ _id: job._id, status: "reserving" }, { $set: { status: "rejected", chargeStatus: "rejected", error, failedAt: now, updatedAt: now } });
+        return c.json({ code: "INSUFFICIENT_BALANCE", message: error }, 402);
+      }
+      remainingBalanceFen = Number(reservation.wallet.balanceFen || 0);
+      const claimed = await jobs.findOneAndUpdate(
+        { _id: job._id, status: "reserving" },
+        { $set: { chargeLedgerKey, chargeStatus: "reserved", status: "submitting", updatedAt: new Date() } },
+        { returnDocument: "after" },
+      );
+      if (!claimed) {
+        const current = await jobs.findOne({ _id: job._id });
+        return c.json({ job: mediaPublicView(current), billing: { chargedFen: current.chargedFen, remainingBalanceFen, exempt: false }, idempotent: true }, 201);
+      }
+      job = claimed;
+    } else {
+      const claimed = await jobs.findOneAndUpdate({ _id: job._id, status: "reserving" }, { $set: { status: "submitting", updatedAt: new Date() } }, { returnDocument: "after" });
+      if (!claimed) return c.json({ job: mediaPublicView(await jobs.findOne({ _id: job._id })), billing: { chargedFen: 0, remainingBalanceFen, exempt: true }, idempotent: true }, 201);
+      job = claimed;
+    }
     try {
+      await (await getCollection("agentUsage")).updateOne(
+        { requestId: job.requestId },
+        { $setOnInsert: { ownerId, conversationId: job.conversationId, requestId: job.requestId, mediaJobId: job._id, modality: input.modality, model: actual.id, requestedModel: requested.id, baseCostMilliFen: actual.baseCostMilliFen, chargedFen, markupRate: PEAR_API_MARKUP_RATE, status: "started", createdAt: now, updatedAt: now } },
+        { upsert: true },
+      );
       const payload = await submitPearMedia({ key, modality: input.modality, model: actual.id, prompt: input.prompt, referenceImages, imageSize: input.imageSize, aspectRatio: input.aspectRatio, duration: input.duration });
       const parsed = mediaStatus(payload, input.modality);
       const upstreamTaskId = mediaTaskId(payload);
@@ -727,7 +782,7 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
       ]);
       const current = await jobs.findOne({ _id: job._id });
       c.header("Cache-Control", "private, no-store, max-age=0");
-      return c.json({ job: mediaPublicView(current) }, 201);
+      return c.json({ job: mediaPublicView(current), billing: { chargedFen, remainingBalanceFen, exempt: unlimited }, idempotent: false }, 201);
     } catch (error) {
       const failed = await refundMediaJob(job, error.message || "PearAPI 媒体任务提交失败");
       return c.json({ code: error.code || "PEAR_API_ERROR", message: failed.error }, error.status || 502);

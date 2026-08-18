@@ -414,8 +414,10 @@ test("activation management prioritizes unused codes and exposes encrypted copya
   assert.match(serverSource, /\$eq: \["\$status", "used"\][^\n]+then: 2/);
   assert.match(serverSource, /codeEncrypted: sealUserSecret\(code, "activation-code"\)/);
   assert.match(serverSource, /readUserSecret\(item\.codeEncrypted, "activation-code"\)/);
-  assert.match(adminSource, /navigator\.clipboard\.writeText\(item\.code\)/);
-  assert.match(adminSource, /<Copy size=\{16\} \/>复制/);
+  assert.match(adminSource, /navigator\.clipboard\?\.writeText/);
+  assert.match(adminSource, /copyCode\(item\)/);
+  assert.match(adminSource, /\/api\/admin\/activation-codes\/\$\{item\.id\}\/reissue/);
+  assert.match(adminSource, /<Copy size=\{16\} \/>\{busy === item\.id \? "复制中" : "复制"\}/);
   assert.match(cssSource, /\.activation-table \.activation-code-value/);
 });
 

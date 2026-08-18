@@ -150,6 +150,10 @@ export async function ensureIndexes() {
           { name: "agent_media_by_owner" },
         ),
         db.collection("agentMediaJobs").createIndex(
+          { ownerId: 1, idempotencyKey: 1 },
+          { unique: true, partialFilterExpression: { idempotencyKey: { $type: "string" } }, name: "uniq_agent_media_idempotency" },
+        ),
+        db.collection("agentMediaJobs").createIndex(
           { status: 1, nextPollAt: 1 },
           { name: "agent_media_polling" },
         ),

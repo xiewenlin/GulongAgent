@@ -984,22 +984,52 @@ function ActivationCodeManager() {
     finally { setBusy(""); }
   }
 
-  async function copyCodes() {
-    await navigator.clipboard.writeText(generated.join("\n"));
-    setMessage(`已复制 ${generated.length} 个激活码。`);
-  }
-
-  async function copyCode(item) {
-    if (!item.code) {
-      setMessage("这条旧激活码生成时只保存了安全摘要，无法恢复完整明文；请生成新的激活码发送给用户。");
+  async function writeClipboard(value) {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
       return;
     }
+    const textarea = document.createElement("textarea");
+    textarea.value = value;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    if (!copied) throw new Error("COPY_FAILED");
+  }
+
+  async function copyCodes() {
     try {
-      await navigator.clipboard.writeText(item.code);
-      setMessage(`激活码 ${item.code} 已复制。`);
+      await writeClipboard(generated.join("\n"));
+      setMessage(`已复制 ${generated.length} 个激活码。`);
     } catch {
       setMessage("浏览器未允许写入剪贴板，请选中激活码后手动复制。");
     }
+  }
+
+  async function copyCode(item) {
+    setBusy(item.id); setMessage("");
+    try {
+      let code = item.code;
+      let reissued = false;
+      if (!code && item.status === "unused") {
+        const result = await apiFetch(`/api/admin/activation-codes/${item.id}/reissue`, { method: "POST", body: "{}" });
+        code = result.code;
+        reissued = Boolean(result.reissued);
+        setItems((current) => current.map((record) => record.id === item.id ? { ...record, code, codePreview: result.codePreview || record.codePreview } : record));
+      }
+      if (!code) {
+        setMessage("这条已使用或已停用的旧授权只保留安全摘要，不能再次发送给用户。");
+        return;
+      }
+      await writeClipboard(code);
+      setMessage(reissued ? `旧密文无法恢复，已重新生成并复制激活码 ${code}。` : `激活码 ${code} 已复制。`);
+    } catch (error) {
+      setMessage(error?.code || error?.status ? error.message : "浏览器未允许写入剪贴板，请选中激活码后手动复制。");
+    } finally { setBusy(""); }
   }
 
   async function revoke(item) {
@@ -1026,7 +1056,7 @@ function ActivationCodeManager() {
     <div className="activation-summary"><button className={!status ? "active" : ""} onClick={() => { setStatus(""); load(""); }}><strong>{(counts.unused || 0) + (counts.used || 0) + (counts.revoked || 0)}</strong><span>全部</span></button><button className={status === "unused" ? "active" : ""} onClick={() => { setStatus("unused"); load("unused"); }}><strong>{counts.unused || 0}</strong><span>未使用</span></button><button className={status === "used" ? "active" : ""} onClick={() => { setStatus("used"); load("used"); }}><strong>{counts.used || 0}</strong><span>已使用</span></button><button className={status === "revoked" ? "active" : ""} onClick={() => { setStatus("revoked"); load("revoked"); }}><strong>{counts.revoked || 0}</strong><span>已停用</span></button></div>
     <form className="activation-generator" onSubmit={generate}><div><label><span>生成数量</span><input type="number" min="1" max="500" value={count} onChange={(event) => setCount(event.target.value)} /></label><label className="wide"><span>批次备注</span><input maxLength="200" value={note} onChange={(event) => setNote(event.target.value)} placeholder="例如：2026 年 8 月创作者内测" /></label></div><button className="button primary" disabled={Boolean(busy)}><Key size={18} weight="fill" />{busy === "generate" ? "正在生成" : "批量生成激活码"}</button></form>
     {generated.length > 0 && <section className="activation-generated"><header><div><strong>本批次激活码</strong><span>激活码已加密保存，管理员可随时从下方列表复制。</span></div><button type="button" className="button secondary small" onClick={copyCodes}><Copy size={16} />复制全部</button></header><textarea readOnly value={generated.join("\n")} rows={Math.min(generated.length + 1, 12)} /></section>}
-    <div className="activation-table"><div className="activation-table-head"><span>激活码</span><span>状态</span><span>绑定设备</span><span>生成 / 激活时间</span><span>操作</span></div>{items.map((item) => <article key={item.id}><div><strong className="activation-code-value" title={item.code || item.codePreview}>{item.code || item.codePreview}</strong><small>{item.note || item.product}{!item.code ? " · 旧记录仅保留安全摘要" : ""}</small></div><em className={`status-pill ${item.status}`}>{item.status === "unused" ? "未使用" : item.status === "used" ? "已使用" : "已停用"}</em><div><strong>{item.deviceName || "尚未绑定"}</strong><small>{item.macHint ? `MAC 尾号 ${item.macHint}` : "首次安装时绑定"}</small></div><div><time>{item.createdAt ? new Date(item.createdAt).toLocaleString("zh-CN") : "-"}</time><small>{item.activatedAt ? `激活 ${new Date(item.activatedAt).toLocaleString("zh-CN")}` : "等待使用"}</small></div><div className="activation-row-actions"><button type="button" className="button small secondary" disabled={Boolean(busy) || !item.code} onClick={() => copyCode(item)} title={item.code ? "复制完整激活码" : "旧记录无法恢复完整明文"}><Copy size={16} />复制</button><button type="button" className="button small danger" disabled={Boolean(busy) || item.status === "revoked"} onClick={() => revoke(item)}>停用</button></div></article>)}</div>
+    <div className="activation-table"><div className="activation-table-head"><span>激活码</span><span>状态</span><span>绑定设备</span><span>生成 / 激活时间</span><span>操作</span></div>{items.map((item) => <article key={item.id}><div><strong className="activation-code-value" title={item.code || item.codePreview}>{item.code || item.codePreview}</strong><small>{item.note || item.product}{!item.code ? " · 旧记录仅保留安全摘要" : ""}</small></div><em className={`status-pill ${item.status}`}>{item.status === "unused" ? "未使用" : item.status === "used" ? "已使用" : "已停用"}</em><div><strong>{item.deviceName || "尚未绑定"}</strong><small>{item.macHint ? `MAC 尾号 ${item.macHint}` : "首次安装时绑定"}</small></div><div><time>{item.createdAt ? new Date(item.createdAt).toLocaleString("zh-CN") : "-"}</time><small>{item.activatedAt ? `激活 ${new Date(item.activatedAt).toLocaleString("zh-CN")}` : "等待使用"}</small></div><div className="activation-row-actions"><button type="button" className="button small secondary" disabled={Boolean(busy)} onClick={() => copyCode(item)} title={item.code ? "复制完整激活码" : item.status === "unused" ? "重新生成旧激活码并复制" : "查看旧授权复制说明"}><Copy size={16} />{busy === item.id ? "复制中" : "复制"}</button><button type="button" className="button small danger" disabled={Boolean(busy) || item.status === "revoked"} onClick={() => revoke(item)}>停用</button></div></article>)}</div>
     {!items.length && <EmptyState icon={Key} title={busy === "load" ? "正在读取授权" : "暂无授权记录"} text="在上方输入数量，生成第一批设备激活码。" />}
   </section>;
 }

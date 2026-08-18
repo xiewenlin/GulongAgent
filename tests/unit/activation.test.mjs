@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createPublicKey, generateKeyPairSync, verify } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import app, {
   activationReceiptPayload,
@@ -56,4 +57,17 @@ test("public redeem validation is uncached and documented without bearer authent
   assert.ok(route.responses[200]);
   assert.ok(route.responses[409]);
   assert.ok(route.responses[503]);
+});
+
+test("administrator activation copy stays enabled and can reissue unreadable unused legacy codes", async () => {
+  const [adminSource, serverSource] = await Promise.all([
+    readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(adminSource, /disabled=\{Boolean\(busy\)\} onClick=\{\(\) => copyCode\(item\)\}/);
+  assert.match(adminSource, /\/api\/admin\/activation-codes\/\$\{item\.id\}\/reissue/);
+  assert.match(adminSource, /document\.execCommand\("copy"\)/);
+  assert.match(serverSource, /\/api\/admin\/activation-codes\/:id\/reissue/);
+  assert.match(serverSource, /status !== "unused"/);
+  assert.match(serverSource, /codeEncrypted: sealUserSecret\(code, "activation-code"\)/);
 });

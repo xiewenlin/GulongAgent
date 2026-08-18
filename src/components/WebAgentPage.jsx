@@ -26,7 +26,8 @@ const MAX_ATTACHMENT_BYTES = 192 * 1024 * 1024;
 const TEXT_ATTACHMENT_BYTES = 128 * 1024;
 const TEXT_EXTENSIONS = new Set(["txt", "md", "csv", "json"]);
 const MAX_MEDIA_REFERENCE_BYTES = 600 * 1024;
-const H3_SHARED_MODEL = { id: "minimax_h3_shared", name: "MiniMax H3 共享节点", priceLabel: "0.20 元/秒 · 素材按量" };
+const H3_SHARED_MODEL = { id: "minimax_h3_shared", name: "MiniMaxH3共享节点", priceLabel: "0.20 元/秒 + 0.05 元/图 + 0.20 元/视频；音频免费" };
+const H3_VIDEO_DURATIONS = [5, 10, 15, 30, 60];
 
 const starterPrompts = [
   "帮我把这段想法整理成可执行计划",
@@ -228,13 +229,30 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
     return () => { cancelled = true; clearInterval(timer); };
   }, [sending, liveWorkflow?.operationId]);
 
-  const availableModels = useMemo(() => creationType === "text" ? (bootstrap?.models || []) : creationType === "shared" ? [H3_SHARED_MODEL] : (bootstrap?.mediaModels?.[creationType] || []), [bootstrap, creationType]);
+  const availableModels = useMemo(() => {
+    if (creationType === "text") return bootstrap?.models || [];
+    if (creationType === "video") return [H3_SHARED_MODEL, ...(bootstrap?.mediaModels?.video || []).filter((item) => item.id !== H3_SHARED_MODEL.id)];
+    return bootstrap?.mediaModels?.[creationType] || [];
+  }, [bootstrap, creationType]);
   const selectedModel = useMemo(() => availableModels.find((item) => item.id === model), [availableModels, model]);
+  const isH3Video = creationType === "video" && model === H3_SHARED_MODEL.id;
 
   function changeCreationType(nextType) {
     setCreationType(nextType);
-    setModel(nextType === "text" ? (bootstrap?.defaultModel || "glm-4-flash-250414") : nextType === "shared" ? H3_SHARED_MODEL.id : (bootstrap?.mediaDefaults?.[nextType] || `auto-${nextType}`));
+    setModel(nextType === "text" ? (bootstrap?.defaultModel || "glm-4-flash-250414") : nextType === "video" ? H3_SHARED_MODEL.id : (bootstrap?.mediaDefaults?.[nextType] || `auto-${nextType}`));
+    if (nextType === "video") setDuration(5);
     setAttachments((current) => nextType === "text" ? current : current.filter((file) => file.type.startsWith("image/")));
+    setMessage("");
+  }
+
+  function changeModel(nextModel) {
+    setModel(nextModel);
+    if (creationType === "video") {
+      if (nextModel === H3_SHARED_MODEL.id) {
+        if (!H3_VIDEO_DURATIONS.includes(duration)) setDuration(5);
+        setAttachments([]);
+      } else if (!(bootstrap?.mediaOptions?.videoDurations || [5]).includes(duration)) setDuration(5);
+    }
     setMessage("");
   }
 
@@ -260,7 +278,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
   function pickAttachments(event) {
     const files = [...(event.target.files || [])];
     event.target.value = "";
-    if (creationType === "shared") { setMessage("共享节点素材需要先保存为可访问的资产清单；当前网页入口先支持纯提示词视频任务，桌面 Agent 可提交完整素材。"); return; }
+    if (isH3Video) { setMessage("MiniMaxH3共享节点素材需要先保存为可访问的资产清单；当前网页入口先支持纯提示词视频任务，桌面 Agent 可提交完整素材。"); return; }
     if (creationType !== "text") {
       if (files.some((file) => !file.type.match(/^image\/(jpeg|png|webp)$/i))) { setMessage("参考图仅支持 JPEG、PNG 或 WebP 格式"); return; }
       if (files.some((file) => file.size > MAX_MEDIA_REFERENCE_BYTES)) { setMessage("单张参考图不能超过 600 KB，请压缩后重试"); return; }
@@ -283,11 +301,11 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
     if (creationType !== "text" && user.role !== "admin") {
       const balanceFen = Number(bootstrap?.quota?.balanceFen || 0);
       const durationFactor = creationType === "video" ? Math.max(1, Number(duration || 5) / 5) : 1;
-      const expectedFen = creationType === "shared" ? Number(duration || 5) * 20 : selectedModel?.chargedFen == null ? 0 : Math.ceil(Number(selectedModel.chargedFen) * durationFactor);
+      const expectedFen = isH3Video ? Number(duration || 5) * 20 : selectedModel?.chargedFen == null ? 0 : Math.ceil(Number(selectedModel.chargedFen) * durationFactor);
       if (balanceFen <= 0 || (expectedFen > 0 && balanceFen < expectedFen)) { setQuotaPrompt("recharge"); return; }
     }
     if (creationType === "text" && !bootstrap?.configured) { setMessage("管理员尚未完成 PearAPI 免费渠道令牌配置，请稍后再试。"); return; }
-    if (!["text", "shared"].includes(creationType) && !bootstrap?.mediaConfigured) { setMessage("管理员尚未完成 PearAPI Key 配置，请稍后再试。"); return; }
+    if (creationType !== "text" && !isH3Video && !bootstrap?.mediaConfigured) { setMessage("管理员尚未完成 PearAPI Key 配置，请稍后再试。"); return; }
     setSending(true); setMessage("");
     const operationId = creationType === "text" ? `pearop_${Date.now().toString(36)}_${crypto.getRandomValues(new Uint32Array(2)).join("_")}` : null;
     const workflowNodes = [
@@ -302,21 +320,21 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
     const nextMessages = [...messages, visibleUser];
     setMessages(nextMessages); setDraft(""); setAttachments([]);
     try {
-      if (creationType === "shared") {
+      if (isH3Video) {
         const idempotencyKey = crypto.randomUUID();
         const result = await apiFetch("/api/h3/tasks", { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ source_channel: "website", model: H3_SHARED_MODEL.id, prompt: content, aspect_ratio: aspectRatio, duration_seconds: duration, profile: "balanced", assets: { images: [], videos: [], audio: [] } }) });
-        setMessages((current) => [...current, { role: "assistant", content: `共享节点任务已创建。\n\n订单号：${result.task.orderNo}\n\n预扣金额：${formatMoney(result.task.priceFen)}\n\n状态：等待桌面节点领取。完成或失败后可在任务记录中查看结果；最终失败会自动退款。`, createdAt: new Date().toISOString(), model: H3_SHARED_MODEL.id }]);
+        setMessages((current) => [...current, { role: "assistant", content: `MiniMaxH3共享节点任务已创建。\n\n订单号：${result.task.orderNo}\n\n已从余额预扣：${formatMoney(result.billing?.chargedFen ?? result.task.priceFen)}\n\n剩余余额：${formatMoney(result.billing?.remainingBalanceFen || 0)}\n\n状态：等待桌面节点领取。完成或失败后可在任务记录中查看结果；最终失败会自动退款。`, createdAt: new Date().toISOString(), model: H3_SHARED_MODEL.id }]);
         apiFetch("/api/agent/bootstrap").then(setBootstrap).catch(() => {});
         return;
       }
       if (creationType !== "text") {
         const referenceImages = await Promise.all(attachments.filter((file) => file.type.startsWith("image/")).map(imageDataUrl));
-        const result = await apiFetch("/api/agent/media", { method: "POST", body: JSON.stringify({
+        const result = await apiFetch("/api/agent/media", { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({
           modality: creationType, model, prompt: content, conversationId: conversationId || undefined, referenceImages, imageSize, aspectRatio, duration,
         }) });
         setConversationId(result.job.conversationId);
         setMessages((current) => [...current, {
-          role: "assistant", content: `${result.job.modelName} 已接收创作任务`, createdAt: new Date().toISOString(),
+          role: "assistant", content: `${result.job.modelName} 已接收创作任务${user.role === "admin" ? " · 管理员免扣额度" : ` · 已从余额预扣 ${formatMoney(result.billing?.chargedFen ?? result.job.chargedFen)}`}`, createdAt: new Date().toISOString(),
           jobId: result.job.id, modality: creationType, status: result.job.status, urls: result.job.urls, error: result.job.error,
         }]);
         if (!["succeeded", "failed"].includes(result.job.status)) pollMedia(result.job.id);
@@ -357,22 +375,22 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
         <div className="agent-chat-stream" aria-live="polite">
           {!messages.length && <div className="agent-empty-chat"><div className="agent-empty-mark"><Sparkle size={35} weight="duotone" /></div><h2>把目标交给古龙</h2><p>选择文字、图片或视频，挑选模型并描述你想完成的结果。</p><div>{starterPrompts.map((prompt) => <button key={prompt} type="button" onClick={() => { setDraft(prompt); inputRef.current?.focus(); }}>{prompt}<ArrowRight size={16} /></button>)}</div></div>}
           {messages.map((item, index) => <article className={`agent-message ${item.role}`} key={`${item.createdAt}-${index}`}><div className="agent-message-avatar">{item.role === "assistant" ? <img src={themeIcon} alt="古龙" /> : (user.displayName || user.username || "我").slice(0, 1)}</div><div><header><strong>{item.role === "assistant" ? "古龙" : "你"}</strong><time>{new Date(item.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time>{item.free && <em>免费</em>}{item.fallback && <em>已切换备用模型</em>}</header>{item.role === "assistant" ? <MarkdownMessage>{item.content}</MarkdownMessage> : <p>{item.content}</p>}<WorkflowTrace workflow={item.workflow} /><MediaResult item={item} />{item.attachments?.length > 0 && <div className="agent-message-files">{item.attachments.map((file) => <span key={file.name}><File size={15} />{file.name}</span>)}</div>}</div></article>)}
-          {sending && <article className="agent-message assistant pending"><div className="agent-message-avatar"><img src={themeIcon} alt="" /></div><div><header><strong>古龙</strong><em>{creationType === "text" ? "文字" : creationType === "image" ? "图片" : creationType === "shared" ? "共享节点" : "视频"}</em></header>{creationType === "text" && <WorkflowTrace workflow={liveWorkflow} live />}<p><SpinnerGap size={20} className="agent-spin" /> 正在通过 {selectedModel?.name || model} 处理任务…</p></div></article>}
+          {sending && <article className="agent-message assistant pending"><div className="agent-message-avatar"><img src={themeIcon} alt="" /></div><div><header><strong>古龙</strong><em>{creationType === "text" ? "文字" : creationType === "image" ? "图片" : "视频"}</em></header>{creationType === "text" && <WorkflowTrace workflow={liveWorkflow} live />}<p><SpinnerGap size={20} className="agent-spin" /> 正在通过 {selectedModel?.name || model} 处理任务…</p></div></article>}
           <div ref={endRef} />
         </div>
 
         <div className="agent-composer-wrap">
           {message && <div className="agent-inline-alert"><LockKey size={18} /><span>{message}</span><button type="button" onClick={() => setMessage("")}><X size={16} /></button></div>}
           {!bootstrap?.subscription?.active && !loading && <div className="agent-membership-gate"><div><Coins size={24} weight="duotone" /><span><strong>会员订阅尚未生效</strong><small>开通月度或年度会员后使用网页版 Agent。</small></span></div><button type="button" onClick={() => navigate("/pricing")}>查看会员 <ArrowRight size={16} /></button></div>}
-          <div className="agent-mode-row"><div className="agent-creation-hint">{creationType === "text" ? "免费文字对话" : creationType === "shared" ? `${formatMoney(Number(duration || 0) * 20)} · 本地共享节点价` : (selectedModel?.priceLabel || "按实际模型计费")}</div><span>{draft.length} / 4096</span></div>
+          <div className="agent-mode-row"><div className="agent-creation-hint">{creationType === "text" ? "免费文字对话" : isH3Video ? `${formatMoney(Number(duration || 0) * 20)} · MiniMaxH3共享节点预估价` : (selectedModel?.priceLabel || "按实际模型计费")}</div><span>{draft.length} / 4096</span></div>
           {attachments.length > 0 && <div className="agent-attachment-row">{attachments.map((file, index) => <span key={`${file.name}-${index}`}><File size={16} /><b>{file.name}</b><small>{byteText(file.size)}</small><button type="button" aria-label={`移除 ${file.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button></span>)}</div>}
           <textarea ref={inputRef} maxLength={4096} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keyDown} placeholder="描述任务；上传附件后输入你的要求。Enter 发送，Shift + Enter 换行" />
           <footer>
-            <label className="agent-attach-button" title={creationType === "text" ? "最多 12 个附件" : creationType === "shared" ? "完整素材请从桌面 Agent 提交" : "上传参考图，每张不超过 600 KB"}><Paperclip size={20} /><span>{creationType === "text" ? "附件" : creationType === "shared" ? "桌面素材" : "参考图"}</span><input type="file" multiple accept={creationType === "text" ? "image/*,video/*,.txt,.md,.csv,.json,.pdf,.docx,.xlsx,.pptx" : "image/jpeg,image/png,image/webp"} onChange={pickAttachments} /></label>
-            <div className="agent-type-select"><span>{creationType === "text" ? <TextT size={18} /> : creationType === "image" ? <ImageSquare size={18} /> : <VideoCamera size={18} />}</span><select value={creationType} onChange={(event) => changeCreationType(event.target.value)}><option value="text">文字</option><option value="image">图片</option><option value="video">视频</option><option value="shared">H3 共享节点</option></select></div>
+            <label className="agent-attach-button" title={creationType === "text" ? "最多 12 个附件" : isH3Video ? "完整素材请从桌面 Agent 提交" : "上传参考图，每张不超过 600 KB"}><Paperclip size={20} /><span>{creationType === "text" ? "附件" : isH3Video ? "桌面素材" : "参考图"}</span><input type="file" multiple accept={creationType === "text" ? "image/*,video/*,.txt,.md,.csv,.json,.pdf,.docx,.xlsx,.pptx" : "image/jpeg,image/png,image/webp"} onChange={pickAttachments} /></label>
+            <div className="agent-type-select"><span>{creationType === "text" ? <TextT size={18} /> : creationType === "image" ? <ImageSquare size={18} /> : <VideoCamera size={18} />}</span><select value={creationType} onChange={(event) => changeCreationType(event.target.value)}><option value="text">文字</option><option value="image">图片</option><option value="video">视频</option></select></div>
             {creationType === "image" && <div className="agent-parameter-select"><select value={imageSize} onChange={(event) => setImageSize(event.target.value)}>{(bootstrap?.mediaOptions?.imageSizes || ["1:1"]).map((value) => <option key={value} value={value}>{value}</option>)}</select></div>}
-            {["video", "shared"].includes(creationType) && <><div className="agent-parameter-select"><select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)}><option value="16:9">16:9 横屏</option><option value="9:16">9:16 竖屏</option></select></div><div className="agent-parameter-select"><select value={duration} onChange={(event) => setDuration(Number(event.target.value))}>{(creationType === "shared" ? [5, 10, 15, 30, 60] : bootstrap?.mediaOptions?.videoDurations || [5]).map((value) => <option key={value} value={value}>{value} 秒</option>)}</select></div></>}
-            <div className="agent-model-select"><select value={model} onChange={(event) => setModel(event.target.value)}>{availableModels.map((item) => <option value={item.id} key={item.id}>{item.name}{creationType === "text" ? " · 免费" : ` · ${item.priceLabel}`}</option>)}</select><Check size={15} weight="bold" /></div>
+            {creationType === "video" && <><div className="agent-parameter-select"><select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)}><option value="16:9">16:9 横屏</option><option value="9:16">9:16 竖屏</option></select></div><div className="agent-parameter-select"><select value={duration} onChange={(event) => setDuration(Number(event.target.value))}>{(isH3Video ? H3_VIDEO_DURATIONS : bootstrap?.mediaOptions?.videoDurations || [5]).map((value) => <option key={value} value={value}>{value} 秒</option>)}</select></div></>}
+            <div className="agent-model-select"><select value={model} onChange={(event) => changeModel(event.target.value)}>{availableModels.map((item) => <option value={item.id} key={item.id}>{item.name}{creationType === "text" ? " · 免费" : ` · ${item.priceLabel}`}</option>)}</select><Check size={15} weight="bold" /></div>
             <button className="agent-send-button" type="button" aria-label="发送" disabled={!draft.trim() || sending || loading} onClick={send}>{sending ? <SpinnerGap size={22} className="agent-spin" /> : <PaperPlaneRight size={22} weight="fill" />}</button>
           </footer>
         </div>

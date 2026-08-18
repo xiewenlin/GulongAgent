@@ -12,6 +12,7 @@ import {
   pearApiMarkedUpFen,
   pearApiOutputRange,
   registerPearApiRoutes,
+  reservePearMediaWallet,
 } from "../../server/pearapi.js";
 import { PEAR_API_IMAGE_MODELS, PEAR_API_VIDEO_MODELS, publicPearMediaModel, resolvePearAutoModel } from "../../server/pearapi-models.js";
 
@@ -49,6 +50,28 @@ test("paid media estimates apply the required 30 percent markup", () => {
   assert.equal(image.priceLabel, "¥0.13");
   assert.equal(video.chargedFen, 60);
   assert.equal(video.priceLabel, "按时长 · 首档 ¥0.60");
+});
+
+test("paid PearAPI media reserves wallet balance once and records an auditable ledger", async () => {
+  const state = { balanceFen: 1_000, ledgerKeys: [], ledgerEntries: [] };
+  const wallets = {
+    findOneAndUpdate: async (filter, update) => {
+      if (state.balanceFen < filter.balanceFen.$gte || state.ledgerKeys.includes(filter.ledgerKeys.$ne)) return null;
+      state.balanceFen += update.$inc.balanceFen;
+      state.ledgerKeys.push(...update.$push.ledgerKeys.$each);
+      state.ledgerEntries.push(...update.$push.ledgerEntries.$each);
+      return { ...state };
+    },
+    findOne: async (filter) => state.ledgerKeys.includes(filter.ledgerKeys) ? { ...state } : null,
+  };
+  const input = { wallets, ownerId: "user-1", amountFen: 260, ledgerKey: "pear-media:job-1", requestId: "request-1", mediaJobId: "job-1" };
+  const first = await reservePearMediaWallet(input);
+  const duplicate = await reservePearMediaWallet(input);
+  assert.equal(first.idempotent, false);
+  assert.equal(duplicate.idempotent, true);
+  assert.equal(state.balanceFen, 740);
+  assert.equal(state.ledgerKeys.length, 1);
+  assert.equal(state.ledgerEntries[0].amountFen, -260);
 });
 
 test("desktop PearAPI media catalog and automatic routing are available on web", () => {
@@ -150,6 +173,12 @@ test("website exposes the simplified agent while user settings no longer expose 
   assert.doesNotMatch(agentSource, /深度思考/);
   assert.match(agentSource, /<option value="image">图片<\/option>/);
   assert.match(agentSource, /<option value="video">视频<\/option>/);
+  assert.doesNotMatch(agentSource, /<option value="shared">/);
+  assert.match(agentSource, /name: "MiniMaxH3共享节点"/);
+  assert.match(agentSource, /nextType === "video" \? H3_SHARED_MODEL\.id/);
+  assert.match(agentSource, /\[H3_SHARED_MODEL, \.\.\.\(bootstrap\?\.mediaModels\?\.video/);
+  assert.match(agentSource, /Idempotency-Key/);
+  assert.match(agentSource, /已从余额预扣/);
   assert.match(agentSource, /\/api\/agent\/media/);
   assert.match(agentSource, /import ReactMarkdown from "react-markdown"/);
   assert.match(agentSource, /remarkPlugins=\{\[remarkGfm\]\}/);
@@ -180,6 +209,11 @@ test("monthly subscription payments credit the wallet once and PearAPI routes ar
   assert.match(pearSource, /"credits\.key": \{ \$ne: key \}/);
   assert.match(pearSource, /limit: 30, windowMs: 5 \* 60_000/);
   assert.match(pearSource, /const unlimited = auth\.user\.role === "admin"/);
+  assert.match(pearSource, /reservePearMediaWallet/);
+  assert.match(pearSource, /pear_media_reservation/);
+  assert.match(pearSource, /IDEMPOTENCY_KEY_REQUIRED/);
+  assert.match(pearSource, /findOneAndUpdate\(\s*\{ _id: job\._id, status: "reserving" \}/);
+  assert.match(dbSource, /uniq_agent_media_idempotency/);
   assert.match(pearSource, /configured: Boolean\(credentialSecrets\(credential\)\.token\)/);
   assert.match(pearSource, /callPearApiChat\(\{ token/);
   assert.match(pearSource, /WORKFLOW_ID_CONFLICT/);

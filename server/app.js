@@ -2552,6 +2552,32 @@ app.post("/api/admin/activation-codes", async (c) => {
   return c.json({ product, count, codes: plaintext, createdAt: now }, 201);
 });
 
+app.post("/api/admin/activation-codes/:id/reissue", async (c) => {
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  c.header("Pragma", "no-cache");
+  const originError = requireTrustedMutation(c);
+  if (originError) return originError;
+  const auth = await requireAdmin(c);
+  if (auth.error) return auth.error;
+  const id = c.req.param("id");
+  if (!ObjectId.isValid(id)) return c.json({ code: "NOT_FOUND", message: "授权记录不存在" }, 404);
+  const collection = await getCollection("activationCodes");
+  const existing = await collection.findOne({ _id: new ObjectId(id) });
+  if (!existing) return c.json({ code: "NOT_FOUND", message: "授权记录不存在" }, 404);
+  if (existing.status !== "unused") return c.json({ code: "ACTIVATION_NOT_REISSUABLE", message: "只有未使用的旧激活码可以重新生成" }, 409);
+  const readable = existing.codeEncrypted ? readUserSecret(existing.codeEncrypted, "activation-code") : null;
+  if (readable) return c.json({ ok: true, code: readable, reissued: false });
+  const code = activationCode();
+  const now = new Date();
+  const updated = await collection.findOneAndUpdate(
+    { _id: existing._id, status: "unused" },
+    { $set: { codeHash: hashActivationCode(code), codeEncrypted: sealUserSecret(code, "activation-code"), codePreview: `${code.slice(0, 8)}...${code.slice(-5)}`, reissuedAt: now, reissuedBy: new ObjectId(auth.user.id), updatedAt: now }, $unset: { code: "" } },
+    { returnDocument: "after" },
+  );
+  if (!updated) return c.json({ code: "ACTIVATION_CHANGED", message: "授权状态刚刚发生变化，请刷新后重试" }, 409);
+  return c.json({ ok: true, code, reissued: true, codePreview: updated.codePreview });
+});
+
 app.post("/api/admin/activation-codes/:id/revoke", async (c) => {
   c.header("Cache-Control", "private, no-store, max-age=0");
   c.header("Pragma", "no-cache");
