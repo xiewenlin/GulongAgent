@@ -113,6 +113,10 @@ export async function ensureIndexes() {
           { ownerId: 1, createdAt: -1 },
           { name: "payments_by_owner_and_date" },
         ),
+        db.collection("payments").createIndex(
+          { taskId: 1 },
+          { unique: true, partialFilterExpression: { kind: "worker_task" }, name: "uniq_worker_task_online_payment" },
+        ),
         db.collection("wallets").createIndex(
           { ownerId: 1 },
           { unique: true, name: "uniq_wallet_owner" },
@@ -256,6 +260,10 @@ export async function ensureIndexes() {
         db.collection("publicWorkflows").createIndex(
           { status: 1, sort: 1, createdAt: -1 },
           { name: "public_workflows_listing" },
+        ),
+        db.collection("publicWorkflowTombstones").createIndex(
+          { deletedAt: -1 },
+          { name: "public_workflow_tombstones_by_date" },
         ),
         db.collection("workflowImageUploads").createIndex(
           { expiresAt: 1 },

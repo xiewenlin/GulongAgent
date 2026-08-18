@@ -323,14 +323,15 @@ test("worker assignment search, visibility, notifications and publishing control
   assert.match(adminPageSource, /item\.assignment\?\.label/);
 });
 
-test("primary navigation keeps the short-drama app embedded without exposing the Worker route", async () => {
+test("primary navigation keeps short drama embedded and restores Worker immediately after it", async () => {
   const source = await readFile(new URL("../../src/App.jsx", import.meta.url), "utf8");
   assert.match(source, /\{ label: "工作流", href: "\/workflows" \}/);
   assert.match(source, /const SHORT_DRAMA_ROUTE = "\/short-drama"/);
   assert.match(source, /\{ label: "短剧", href: SHORT_DRAMA_ROUTE \}/);
+  assert.match(source, /\{ label: "短剧", href: SHORT_DRAMA_ROUTE \},\s*\{ label: "威客", href: "\/worker" \}/);
   assert.match(source, /navigate\(SHORT_DRAMA_ROUTE\)\}>短剧/);
+  assert.match(source, /navigate\("\/worker"\)\}>威客/);
   assert.match(source, /<ShortDramaPage user=\{user\} authResolved=\{authResolved\} openAuth=\{openAuth\}/);
-  assert.doesNotMatch(source, /\{ label: "威客", href:/);
 });
 
 test("short-drama authentication waits for the official session before opening login", async () => {
@@ -364,14 +365,16 @@ test("email verification-code password recovery is wired end to end", async () =
   assert.match(modalSource, /\/api\/auth\/reset-password/);
   assert.match(modalSource, /autoComplete="one-time-code"/);
   assert.match(modalSource, /两次输入的新密码不一致/);
-  assert.match(modalSource, /const MIN_PASSWORD_LENGTH = 8/);
+  assert.match(modalSource, /const RESET_MIN_PASSWORD_LENGTH = 8/);
   assert.match(modalSource, /function PasswordVisibilityButton/);
   assert.match(modalSource, /event\.preventDefault\(\)/);
   assert.match(modalSource, /event\.stopPropagation\(\)/);
   assert.match(modalSource, /className="account-password-field"/);
   assert.doesNotMatch(modalSource, /<label><span className="account-label-row"/);
   assert.doesNotMatch(modalSource, /minLength=\{10\}|至少 10 位/);
-  assert.match(serverSource, /password: z\.string\(\)\.min\(8\)\.max\(128\)/);
+  assert.match(modalSource, /minLength=\{1\}/);
+  assert.match(modalSource, /可输入任意字符/);
+  assert.match(serverSource, /password: z\.string\(\)\.min\(1\)\.max\(128\)/);
   assert.match(serverSource, /newPassword: z\.string\(\)\.min\(8\)\.max\(255\)/);
   assert.match(serverSource, /password-forgot-email:/);
   assert.match(serverSource, /password-reset-code:/);
@@ -379,6 +382,41 @@ test("email verification-code password recovery is wired end to end", async () =
   assert.match(serverSource, /Cache-Control", "no-store, max-age=0/);
   assert.match(css, /\.reset-code-actions\s*\{/);
   assert.match(css, /\.account-label-row\s*\{/);
+});
+
+test("system workflows remain deleted and Worker online escrow uses the server-side task budget", async () => {
+  const [serverSource, workerSource, adminSource] = await Promise.all([
+    readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/WorkerPages.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
+  ]);
+  assert.match(serverSource, /getCollection\("publicWorkflowTombstones"\)/);
+  assert.match(serverSource, /if \(deleted\) return/);
+  assert.match(serverSource, /deletedSystemKey: workflow\.systemKey \|\| null/);
+  assert.match(adminSource, /type="button" className="button small danger"[^>]+onClick=\{\(\) => remove\(workflow\)\}/);
+  assert.match(serverSource, /body\.kind === "worker_task"/);
+  assert.match(serverSource, /amountFen = kind === "worker_task"\s*\? Number\(workerTask\.budgetFen\)/);
+  assert.match(serverSource, /source: "gulong-web-worker-task"/);
+  assert.match(serverSource, /paymentStatus: "pending_online"/);
+  assert.match(serverSource, /notifyWorkerTaskReady\(task, \{ online: true \}\)/);
+  assert.match(workerSource, /kind: "worker_task", provider: "wechat", taskId: payment\.task\.id/);
+  assert.match(workerSource, /微信在线支付/);
+  assert.match(workerSource, /本次为一次性付款，不会自动续费或自动扣款/);
+});
+
+test("activation management prioritizes unused codes and exposes encrypted copyable plaintext to administrators", async () => {
+  const [serverSource, adminSource, cssSource] = await Promise.all([
+    readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/styles.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(serverSource, /\$eq: \["\$status", "unused"\][^\n]+then: 0/);
+  assert.match(serverSource, /\$eq: \["\$status", "used"\][^\n]+then: 2/);
+  assert.match(serverSource, /codeEncrypted: sealUserSecret\(code, "activation-code"\)/);
+  assert.match(serverSource, /readUserSecret\(item\.codeEncrypted, "activation-code"\)/);
+  assert.match(adminSource, /navigator\.clipboard\.writeText\(item\.code\)/);
+  assert.match(adminSource, /<Copy size=\{16\} \/>复制/);
+  assert.match(cssSource, /\.activation-table \.activation-code-value/);
 });
 
 test("deep customization opens the supplied WeChat QR dialog without requiring login", async () => {

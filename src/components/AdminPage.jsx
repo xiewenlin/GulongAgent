@@ -724,16 +724,16 @@ function WorkflowManager() {
 
   async function remove(workflow) {
     if (!await confirmAction({ tone: "danger", eyebrow: "DELETE WORKFLOW", title: `删除“${workflow.name}”？`, message: "删除后官网工作流列表将立即移除该入口；如果图片存储在 COS，也会同步删除。", confirmLabel: "确认删除" })) return;
-    setBusy(workflow.id);
+    setBusy(workflow.id); setMessage("");
     try { await apiFetch(`/api/admin/workflows/${workflow.id}`, { method: "DELETE" }); setMessage("工作流已删除。"); await load(); }
     catch (error) { setMessage(error.message); }
     finally { setBusy(""); }
   }
 
   return <section className="admin-module workflow-manager">
-    <header className="admin-module-head"><div><span>PUBLIC WORKFLOW CATALOG</span><h2>工作流管理</h2><p>配置官网可搜索的工作流入口；图片直传腾讯云 COS，名称与跳转地址实时生效。</p></div><button className="button primary" onClick={() => openEditor()}><Plus size={18} />新建工作流</button></header>
+    <header className="admin-module-head"><div><span>PUBLIC WORKFLOW CATALOG</span><h2>工作流管理</h2><p>配置官网可搜索的工作流入口；图片直传腾讯云 COS，名称与跳转地址实时生效。</p></div><button type="button" className="button primary" onClick={() => openEditor()}><Plus size={18} />新建工作流</button></header>
     {message && <AdminNotice tone={message.includes("已") ? "success" : "error"}>{message}</AdminNotice>}
-    {workflows.length ? <div className="admin-workflow-grid">{workflows.map((workflow) => <article key={workflow.id}><img src={workflow.imageUrl} alt={`${workflow.name}图标`} /><div><span>{workflow.status === "active" ? "官网展示中" : "已停用"}</span><h3>{workflow.name}</h3><p>{workflow.description}</p><code>{workflow.url}</code></div><div><button className="button small secondary" onClick={() => openEditor(workflow)}><PencilSimple size={16} />修改</button><button className="button small danger" disabled={busy === workflow.id} onClick={() => remove(workflow)}><Trash size={16} />删除</button></div></article>)}</div> : <EmptyState icon={FlowArrow} title={busy === "load" ? "正在读取工作流" : "还没有工作流"} text="点击右上角新建第一个官网工作流。" />}
+    {workflows.length ? <div className="admin-workflow-grid">{workflows.map((workflow) => <article key={workflow.id}><img src={workflow.imageUrl} alt={`${workflow.name}图标`} /><div><span>{workflow.status === "active" ? "官网展示中" : "已停用"}</span><h3>{workflow.name}</h3><p>{workflow.description}</p><code>{workflow.url}</code></div><div><button type="button" className="button small secondary" onClick={() => openEditor(workflow)}><PencilSimple size={16} />修改</button><button type="button" className="button small danger" disabled={busy === workflow.id} onClick={() => remove(workflow)}><Trash size={16} />删除</button></div></article>)}</div> : <EmptyState icon={FlowArrow} title={busy === "load" ? "正在读取工作流" : "还没有工作流"} text="点击右上角新建第一个官网工作流。" />}
     {editing && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && setEditing(null)}><form className="admin-form-modal workflow-editor-modal" onSubmit={save}><button className="modal-close" type="button" disabled={Boolean(busy)} onClick={() => setEditing(null)}><X size={18} /></button><span>WORKFLOW EDITOR</span><h2>{editing.id ? "修改工作流" : "新建工作流"}</h2><p>上传一张清晰图标，填写名称与网址。站内功能可直接使用 / 开头的路径。</p><div className="workflow-editor-layout"><label className="workflow-image-picker"><span>工作流图片</span><div>{editing.file ? <img src={URL.createObjectURL(editing.file)} alt="新图片预览" /> : editing.imageUrl ? <img src={editing.imageUrl} alt="当前图片" /> : <ImageSquare size={46} />}</div><strong>{editing.file ? editing.file.name : "选择图片"}</strong><input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => setEditing({ ...editing, file: event.target.files?.[0] || null })} /></label><div className="workflow-editor-fields"><label><span>名称</span><input required minLength={2} maxLength={60} value={editing.name} onChange={(event) => setEditing({ ...editing, name: event.target.value })} placeholder="例如：威客" /></label><label><span>跳转 URL</span><input required value={editing.url} onChange={(event) => setEditing({ ...editing, url: event.target.value })} placeholder="/worker?tab=publish 或 https://..." /></label><label><span>功能说明</span><textarea maxLength={300} rows={4} value={editing.description} onChange={(event) => setEditing({ ...editing, description: event.target.value })} placeholder="用一句通俗的话告诉用户这个工作流能解决什么问题。" /></label><div className="workflow-editor-row"><label><span>排序</span><input type="number" value={editing.sort} onChange={(event) => setEditing({ ...editing, sort: event.target.value })} /></label><label><span>状态</span><select value={editing.status} onChange={(event) => setEditing({ ...editing, status: event.target.value })}><option value="active">官网展示</option><option value="disabled">暂时停用</option></select></label></div></div></div><button className="button primary full" disabled={Boolean(busy)}>{busy === "save" ? "正在保存" : editing.id ? "保存工作流" : "创建并加入官网"}</button></form></div>}
   </section>;
 }
@@ -931,6 +931,19 @@ function ActivationCodeManager() {
     setMessage(`已复制 ${generated.length} 个激活码。`);
   }
 
+  async function copyCode(item) {
+    if (!item.code) {
+      setMessage("这条旧激活码生成时只保存了安全摘要，无法恢复完整明文；请生成新的激活码发送给用户。");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(item.code);
+      setMessage(`激活码 ${item.code} 已复制。`);
+    } catch {
+      setMessage("浏览器未允许写入剪贴板，请选中激活码后手动复制。");
+    }
+  }
+
   async function revoke(item) {
     if (!await confirmAction({
       tone: "danger",
@@ -954,8 +967,8 @@ function ActivationCodeManager() {
     {message && <AdminNotice tone={message.includes("已") ? "success" : "error"}>{message}</AdminNotice>}
     <div className="activation-summary"><button className={!status ? "active" : ""} onClick={() => { setStatus(""); load(""); }}><strong>{(counts.unused || 0) + (counts.used || 0) + (counts.revoked || 0)}</strong><span>全部</span></button><button className={status === "unused" ? "active" : ""} onClick={() => { setStatus("unused"); load("unused"); }}><strong>{counts.unused || 0}</strong><span>未使用</span></button><button className={status === "used" ? "active" : ""} onClick={() => { setStatus("used"); load("used"); }}><strong>{counts.used || 0}</strong><span>已使用</span></button><button className={status === "revoked" ? "active" : ""} onClick={() => { setStatus("revoked"); load("revoked"); }}><strong>{counts.revoked || 0}</strong><span>已停用</span></button></div>
     <form className="activation-generator" onSubmit={generate}><div><label><span>生成数量</span><input type="number" min="1" max="500" value={count} onChange={(event) => setCount(event.target.value)} /></label><label className="wide"><span>批次备注</span><input maxLength="200" value={note} onChange={(event) => setNote(event.target.value)} placeholder="例如：2026 年 8 月创作者内测" /></label></div><button className="button primary" disabled={Boolean(busy)}><Key size={18} weight="fill" />{busy === "generate" ? "正在生成" : "批量生成激活码"}</button></form>
-    {generated.length > 0 && <section className="activation-generated"><header><div><strong>本批次激活码</strong><span>请立即复制并妥善保存，刷新后不再显示明文。</span></div><button className="button secondary small" onClick={copyCodes}><Copy size={16} />复制全部</button></header><textarea readOnly value={generated.join("\n")} rows={Math.min(generated.length + 1, 12)} /></section>}
-    <div className="activation-table"><div className="activation-table-head"><span>激活码</span><span>状态</span><span>绑定设备</span><span>生成 / 激活时间</span><span>操作</span></div>{items.map((item) => <article key={item.id}><div><strong>{item.codePreview}</strong><small>{item.note || item.product}</small></div><em className={`status-pill ${item.status}`}>{item.status === "unused" ? "未使用" : item.status === "used" ? "已使用" : "已停用"}</em><div><strong>{item.deviceName || "尚未绑定"}</strong><small>{item.macHint ? `MAC 尾号 ${item.macHint}` : "首次安装时绑定"}</small></div><div><time>{item.createdAt ? new Date(item.createdAt).toLocaleString("zh-CN") : "-"}</time><small>{item.activatedAt ? `激活 ${new Date(item.activatedAt).toLocaleString("zh-CN")}` : "等待使用"}</small></div><button className="button small danger" disabled={Boolean(busy) || item.status === "revoked"} onClick={() => revoke(item)}>停用</button></article>)}</div>
+    {generated.length > 0 && <section className="activation-generated"><header><div><strong>本批次激活码</strong><span>激活码已加密保存，管理员可随时从下方列表复制。</span></div><button type="button" className="button secondary small" onClick={copyCodes}><Copy size={16} />复制全部</button></header><textarea readOnly value={generated.join("\n")} rows={Math.min(generated.length + 1, 12)} /></section>}
+    <div className="activation-table"><div className="activation-table-head"><span>激活码</span><span>状态</span><span>绑定设备</span><span>生成 / 激活时间</span><span>操作</span></div>{items.map((item) => <article key={item.id}><div><strong className="activation-code-value" title={item.code || item.codePreview}>{item.code || item.codePreview}</strong><small>{item.note || item.product}{!item.code ? " · 旧记录仅保留安全摘要" : ""}</small></div><em className={`status-pill ${item.status}`}>{item.status === "unused" ? "未使用" : item.status === "used" ? "已使用" : "已停用"}</em><div><strong>{item.deviceName || "尚未绑定"}</strong><small>{item.macHint ? `MAC 尾号 ${item.macHint}` : "首次安装时绑定"}</small></div><div><time>{item.createdAt ? new Date(item.createdAt).toLocaleString("zh-CN") : "-"}</time><small>{item.activatedAt ? `激活 ${new Date(item.activatedAt).toLocaleString("zh-CN")}` : "等待使用"}</small></div><div className="activation-row-actions"><button type="button" className="button small secondary" disabled={Boolean(busy) || !item.code} onClick={() => copyCode(item)} title={item.code ? "复制完整激活码" : "旧记录无法恢复完整明文"}><Copy size={16} />复制</button><button type="button" className="button small danger" disabled={Boolean(busy) || item.status === "revoked"} onClick={() => revoke(item)}>停用</button></div></article>)}</div>
     {!items.length && <EmptyState icon={Key} title={busy === "load" ? "正在读取授权" : "暂无授权记录"} text="在上方输入数量，生成第一批设备激活码。" />}
   </section>;
 }

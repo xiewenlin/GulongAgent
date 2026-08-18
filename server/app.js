@@ -206,7 +206,7 @@ const RegisterSchema = z
     email: z.email(),
     displayName: z.string().trim().min(1).max(64).optional(),
     inviteCode: z.string().trim().max(64).optional(),
-    password: z.string().min(8).max(128),
+    password: z.string().min(1).max(128),
   });
 
 const LoginSchema = z.object({
@@ -400,6 +400,9 @@ function workflowJson(workflow) {
 }
 
 async function ensureDefaultPublicWorkflows() {
+  const tombstones = await getCollection("publicWorkflowTombstones");
+  const deleted = await tombstones.findOne({ _id: "worker-market" }, { projection: { _id: 1 } });
+  if (deleted) return;
   const workflows = await getCollection("publicWorkflows");
   const now = new Date();
   await workflows.updateOne(
@@ -2457,12 +2460,18 @@ app.get("/api/admin/activation-codes", async (c) => {
   if (product) filter.product = product;
   const collection = await getCollection("activationCodes");
   const [items, counts] = await Promise.all([
-    collection.find(filter).sort({ createdAt: -1 }).limit(limit).toArray(),
+    collection.aggregate([
+      { $match: filter },
+      { $addFields: { _statusOrder: { $switch: { branches: [{ case: { $eq: ["$status", "unused"] }, then: 0 }, { case: { $eq: ["$status", "revoked"] }, then: 1 }, { case: { $eq: ["$status", "used"] }, then: 2 }], default: 3 } } } },
+      { $sort: { _statusOrder: 1, createdAt: -1 } },
+      { $limit: limit },
+    ]).toArray(),
     collection.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]).toArray(),
   ]);
   return c.json({
     items: items.map((item) => ({
       id: item._id.toString(),
+      code: item.codeEncrypted ? readUserSecret(item.codeEncrypted, "activation-code") : null,
       codePreview: item.codePreview,
       product: item.product,
       status: item.status,
@@ -2497,7 +2506,9 @@ app.post("/api/admin/activation-codes", async (c) => {
   const now = new Date();
   const plaintext = Array.from({ length: count }, () => activationCode());
   const records = plaintext.map((code) => ({
+    _id: new ObjectId(),
     codeHash: hashActivationCode(code),
+    codeEncrypted: sealUserSecret(code, "activation-code"),
     codePreview: `${code.slice(0, 8)}...${code.slice(-5)}`,
     product,
     note,
@@ -4644,7 +4655,7 @@ app.openapi(workerSubmitPaymentRoute, async (c) => {
   const now = new Date();
   const paymentOrderNo = `WK${Date.now()}${randomBytes(4).toString("hex").toUpperCase()}`;
   const task = await (await getCollection("workerTasks")).findOneAndUpdate(
-    { _id: taskId, publisherId: ownerId, status: { $in: ["awaiting_payment", "payment_rejected"] } },
+    { _id: taskId, publisherId: ownerId, status: { $in: ["awaiting_payment", "payment_rejected"] }, paymentStatus: { $in: ["awaiting_payment", "rejected"] } },
     { $set: { status: "pending_payment_review", paymentStatus: "pending", paymentOrderNo, paymentSubmittedAt: now, updatedAt: now }, $unset: { paymentReviewReason: "", paymentReviewedAt: "", paymentReviewedBy: "" }, $inc: { paymentSubmissionCount: 1 } },
     { returnDocument: "after" },
   );
@@ -4869,6 +4880,33 @@ app.get("/api/admin/worker-payments", async (c) => {
   return c.json({ tasks: await Promise.all(items.map(workerTaskDetails)), summary: { pending, reviewed: approved + rejectedCount, approved, rejected: rejectedCount } });
 });
 
+async function notifyWorkerTaskReady(task, { online = false } = {}) {
+  const assignmentType = task.assignmentType || "open";
+  const publisherMessage = assignmentType === "platform_team"
+    ? `“${task.title}”已进入平台团队任务池，管理员现在可以接单处理。`
+    : assignmentType === "user"
+      ? `“${task.title}”已通知你指定的用户接单。`
+      : `“${task.title}”已进入接单大厅，任何用户现在都可以接单。`;
+  const assignmentNotifications = [];
+  if (assignmentType === "user" && task.designatedAssigneeId) {
+    assignmentNotifications.push(notifyUserOnce(task.designatedAssigneeId, "worker_task_designated", "你收到一项指定威客任务", `“${task.title}”已完成付款，发单人指定由你接单处理。`, { taskId: task._id }));
+  }
+  if (assignmentType === "platform_team") {
+    const administrators = await (await getCollection("users")).find({ role: "admin", status: { $nin: ["disabled", "deleted"] } }, { projection: { _id: 1 } }).toArray();
+    assignmentNotifications.push(...administrators.map((administrator) => notifyUserOnce(administrator._id, "worker_platform_task_ready", "平台团队收到新任务", `“${task.title}”已完成付款，请管理员统一接单处理。`, { taskId: task._id })));
+  }
+  await Promise.all([
+    notifyUserOnce(
+      task.publisherId,
+      online ? "worker_online_payment_succeeded" : "worker_payment_approved",
+      online ? "威客任务微信支付成功" : "威客任务付款审核已通过",
+      publisherMessage,
+      { taskId: task._id, orderNo: task.paymentOrderNo },
+    ),
+    ...assignmentNotifications,
+  ]);
+}
+
 app.post("/api/admin/worker-payments/:id/approve", async (c) => {
   const rejected = requireTrustedMutation(c); if (rejected) return rejected;
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
@@ -4880,24 +4918,7 @@ app.post("/api/admin/worker-payments/:id/approve", async (c) => {
     { returnDocument: "after" },
   );
   if (!task) return c.json({ code: "TASK_STATE_CHANGED", message: "该任务付款已处理或状态已变化" }, 409);
-  const assignmentType = task.assignmentType || "open";
-  const publisherMessage = assignmentType === "platform_team"
-    ? `“${task.title}”已进入平台团队任务池，管理员现在可以接单处理。`
-    : assignmentType === "user"
-      ? `“${task.title}”已通知你指定的用户接单。`
-      : `“${task.title}”已进入接单大厅，任何用户现在都可以接单。`;
-  const assignmentNotifications = [];
-  if (assignmentType === "user" && task.designatedAssigneeId) {
-    assignmentNotifications.push(notifyUser(task.designatedAssigneeId, "worker_task_designated", "你收到一项指定威客任务", `“${task.title}”已通过付款审核，发单人指定由你接单处理。`, { taskId: task._id }));
-  }
-  if (assignmentType === "platform_team") {
-    const administrators = await (await getCollection("users")).find({ role: "admin", status: { $nin: ["disabled", "deleted"] } }, { projection: { _id: 1 } }).toArray();
-    assignmentNotifications.push(...administrators.map((administrator) => notifyUserOnce(administrator._id, "worker_platform_task_ready", "平台团队收到新任务", `“${task.title}”已通过付款审核，请管理员统一接单处理。`, { taskId: task._id })));
-  }
-  await Promise.all([
-    notifyUser(task.publisherId, "worker_payment_approved", "威客任务付款审核已通过", publisherMessage, { taskId: task._id, orderNo: task.paymentOrderNo }),
-    ...assignmentNotifications,
-  ]);
+  await notifyWorkerTaskReady(task);
   return c.json({ task: await workerTaskDetails(task) });
 });
 
@@ -5124,9 +5145,19 @@ app.delete("/api/admin/workflows/:id", async (c) => {
   const workflows = await getCollection("publicWorkflows");
   const workflow = await workflows.findOne({ _id: new ObjectId(c.req.param("id")) });
   if (!workflow) return c.json({ code: "WORKFLOW_NOT_FOUND", message: "工作流不存在" }, 404);
+  if (workflow.systemKey) {
+    await (await getCollection("publicWorkflowTombstones")).updateOne(
+      { _id: workflow.systemKey },
+      {
+        $set: { deletedAt: new Date(), deletedBy: new ObjectId(auth.user.id), workflowId: workflow._id },
+        $setOnInsert: { createdAt: new Date() },
+      },
+      { upsert: true },
+    );
+  }
   await workflows.deleteOne({ _id: workflow._id });
   if (workflow.imageMode === "cos" && workflow.imageObjectKey) await deleteObject(workflow.imageObjectKey).catch(() => null);
-  return c.json({ ok: true });
+  return c.json({ ok: true, deletedSystemKey: workflow.systemKey || null });
 });
 
 app.get("/api/billing/plans", async (c) => {
@@ -5166,11 +5197,52 @@ app.post("/api/billing/orders", async (c) => {
   const body = await c.req.json();
   const provider = ["wechat", "offline"].includes(body.provider) ? body.provider : null;
   const cycle = body.cycle === "year" ? "year" : body.cycle === "month" ? "month" : null;
-  const kind = body.kind === "recharge" ? "recharge" : body.kind === "custom" ? "custom" : "subscription";
+  const kind = body.kind === "recharge"
+    ? "recharge"
+    : body.kind === "custom"
+      ? "custom"
+      : body.kind === "worker_task"
+        ? "worker_task"
+        : "subscription";
   const now = new Date();
+  const ownerId = new ObjectId(auth.user.id);
   const pricing = kind === "subscription" ? await currentSubscriptionPricing(now) : null;
-  let amountFen = kind === "recharge" || kind === "custom" ? Number(body.amountFen) : cycle === "year" ? pricing.yearly.amountFen : pricing.monthly.amountFen;
-  const maxAmountFen = kind === "custom" ? CUSTOM_ORDER_MAX_FEN : SUBSCRIPTION_PRICE_MAX_FEN;
+  let workerTask = null;
+  if (kind === "worker_task") {
+    if (!ObjectId.isValid(body.taskId)) return c.json({ code: "TASK_NOT_FOUND", message: "威客任务不存在" }, 404);
+    const taskId = new ObjectId(body.taskId);
+    workerTask = await (await getCollection("workerTasks")).findOne({ _id: taskId, publisherId: ownerId });
+    if (!workerTask) return c.json({ code: "TASK_NOT_FOUND", message: "威客任务不存在或不属于当前账号" }, 404);
+    const existingPayment = await (await getCollection("payments")).findOne({ taskId, ownerId, kind: "worker_task", status: "pending" }, { sort: { createdAt: -1 } });
+    if (existingPayment) {
+      c.header("Cache-Control", "private, no-store, max-age=0");
+      return c.json({
+        orderNo: existingPayment.orderNo,
+        status: existingPayment.status,
+        paymentUrl: existingPayment.paymentUrl || null,
+        qrCodeDataUrl: existingPayment.qrCodeDataUrl || null,
+        mode: "chandler",
+        provider: existingPayment.provider,
+        amountFen: existingPayment.amountFen,
+        taskId: taskId.toString(),
+      });
+    }
+    if (!["awaiting_payment", "payment_rejected"].includes(workerTask.status) || !["awaiting_payment", "rejected"].includes(workerTask.paymentStatus)) {
+      return c.json({ code: "TASK_STATE_CHANGED", message: "该任务已提交付款、已发布或状态已变化" }, 409);
+    }
+  }
+  let amountFen = kind === "worker_task"
+    ? Number(workerTask.budgetFen)
+    : kind === "recharge" || kind === "custom"
+      ? Number(body.amountFen)
+      : cycle === "year"
+        ? pricing.yearly.amountFen
+        : pricing.monthly.amountFen;
+  const maxAmountFen = kind === "custom"
+    ? CUSTOM_ORDER_MAX_FEN
+    : kind === "worker_task"
+      ? 5_000_000
+      : SUBSCRIPTION_PRICE_MAX_FEN;
   if (!provider || !Number.isInteger(amountFen) || amountFen < 100 || amountFen > maxAmountFen) {
     return c.json({ code: "VALIDATION_ERROR", message: "支付方式、周期或金额不正确" }, 400);
   }
@@ -5178,7 +5250,6 @@ app.post("/api/billing/orders", async (c) => {
   if (provider === "offline" && kind !== "subscription") return c.json({ code: "VALIDATION_ERROR", message: "线下支付仅用于会员订阅审核" }, 400);
   const orderNo = `GL${Date.now()}${randomBytes(4).toString("hex").toUpperCase()}`;
   const autoRenewRequested = kind === "subscription" && Boolean(body.autoRenew);
-  const ownerId = new ObjectId(auth.user.id);
   const activeSubscription = kind === "subscription" && cycle === "year"
     ? await (await getCollection("subscriptions")).findOne({
       ownerId,
@@ -5299,6 +5370,22 @@ app.post("/api/billing/orders", async (c) => {
       source: "gulong-web-subscription-upgrade",
       partnerData: { schema_version: 2, kind: "subscription_upgrade", cycle: "year", upgrade_from: "month", upgrade_credit_fen: upgradeCreditFen, upgrade_base_start: upgradeBaseStart.toISOString(), amount_fen: amountFen },
     });
+  } else if (kind === "worker_task") {
+    result = await createDirectPaymentOrder(accessToken, {
+      merchantOrderNo: orderNo,
+      channel: provider,
+      amountFen,
+      subject: `威客任务预算 · ${workerTask.title}`.slice(0, 80),
+      source: "gulong-web-worker-task",
+      partnerData: {
+        schema_version: 3,
+        kind: "worker_task_escrow",
+        task_id: workerTask._id.toString(),
+        amount_fen: amountFen,
+        user_id: auth.user.id,
+        user_email: auth.user.email,
+      },
+    });
   } else {
     result = await createDirectPaymentOrder(accessToken, {
       merchantOrderNo: orderNo,
@@ -5323,14 +5410,37 @@ app.post("/api/billing/orders", async (c) => {
     kind,
     cycle,
     amountFen,
+    ...(workerTask ? { taskId: workerTask._id } : {}),
     autoRenew,
     chandler: true,
     status: "pending",
+    paymentUrl: paymentUrl || null,
+    qrCodeDataUrl: qrCodeDataUrl || null,
     ...(isMonthlyUpgrade ? { upgradeFrom: "month", upgradeCreditFen, upgradeBaseStart } : {}),
     ...(localPriceVersion ? { localPriceVersionId: localPriceVersion._id } : {}),
     createdAt: now,
     updatedAt: now,
   });
+  if (workerTask) {
+    const linked = await (await getCollection("workerTasks")).updateOne(
+      { _id: workerTask._id, publisherId: ownerId, status: { $in: ["awaiting_payment", "payment_rejected"] }, paymentStatus: { $in: ["awaiting_payment", "rejected"] } },
+      {
+        $set: {
+          paymentStatus: "pending_online",
+          paymentMethod: "wechat",
+          paymentOrderNo: actualOrderNo,
+          paymentSubmittedAt: now,
+          updatedAt: now,
+        },
+        $unset: { paymentReviewReason: "", paymentReviewedAt: "", paymentReviewedBy: "" },
+        $inc: { paymentSubmissionCount: 1 },
+      },
+    );
+    if (!linked.matchedCount) {
+      await (await getCollection("payments")).updateOne({ orderNo: actualOrderNo }, { $set: { status: "failed", failureCode: "TASK_STATE_CHANGED", updatedAt: new Date() } });
+      return c.json({ code: "TASK_STATE_CHANGED", message: "任务状态已变化，请刷新后重试" }, 409);
+    }
+  }
   return c.json({
     orderNo: actualOrderNo,
     status: "pending",
@@ -5343,17 +5453,22 @@ app.post("/api/billing/orders", async (c) => {
     autoRenewRequested,
     autoRenewAvailable: !isMonthlyUpgrade,
     priceSource: kind === "subscription" ? "website-membership-ledger" : "chandler",
+    ...(workerTask ? { taskId: workerTask._id.toString() } : {}),
   }, 201);
 });
 
 async function activatePayment(orderNo, providerTransactionId) {
   const payments = await getCollection("payments");
-  const payment = await payments.findOneAndUpdate(
+  let payment = await payments.findOneAndUpdate(
     { orderNo, status: "pending" },
     { $set: { status: "paid", providerTransactionId, paidAt: new Date(), updatedAt: new Date() } },
     { returnDocument: "after" },
   );
-  if (!payment) return;
+  if (!payment) {
+    const completed = await payments.findOne({ orderNo, status: "paid" });
+    if (!completed || completed.kind !== "worker_task") return;
+    payment = completed;
+  }
   if (payment.kind === "subscription") {
     const existingSubscription = await (await getCollection("subscriptions")).findOne({ ownerId: payment.ownerId });
     const now = new Date();
@@ -5395,6 +5510,33 @@ async function activatePayment(orderNo, providerTransactionId) {
     );
   } else if (payment.kind === "custom") {
     await notifyUserOnce(payment.ownerId, "custom_order_paid", "深度定制订单支付成功", "微信支付已到账，我们会根据订单信息与你联系并推进交付。", { orderNo: payment.orderNo });
+  } else if (payment.kind === "worker_task" && payment.taskId) {
+    const now = new Date();
+    const tasks = await getCollection("workerTasks");
+    let task = await tasks.findOneAndUpdate(
+      {
+        _id: payment.taskId,
+        publisherId: payment.ownerId,
+        paymentOrderNo: payment.orderNo,
+        status: { $in: ["awaiting_payment", "payment_rejected"] },
+        paymentStatus: "pending_online",
+      },
+      {
+        $set: {
+          status: "open",
+          paymentStatus: "approved",
+          paymentMethod: "wechat",
+          paymentReviewedAt: now,
+          onlinePaidAt: now,
+          escrowStatus: "locked",
+          updatedAt: now,
+        },
+        $unset: { paymentReviewReason: "", paymentReviewedBy: "" },
+      },
+      { returnDocument: "after" },
+    );
+    if (!task) task = await tasks.findOne({ _id: payment.taskId, publisherId: payment.ownerId, paymentOrderNo: payment.orderNo, status: "open", paymentStatus: "approved" });
+    if (task) await notifyWorkerTaskReady(task, { online: true });
   }
 }
 
@@ -5405,7 +5547,10 @@ function chandlerOrderPaid(order = {}) {
 async function reconcileChandlerPayment(orderNo) {
   const payment = await (await getCollection("payments")).findOne({ orderNo });
   if (!payment) return null;
-  if (payment.status === "paid") return payment;
+  if (payment.status === "paid") {
+    if (payment.kind === "worker_task") await activatePayment(orderNo, payment.providerTransactionId || orderNo);
+    return payment;
+  }
   const order = await getDirectPaymentOrder(orderNo);
   const remoteAmount = Number(order.amount);
   if (Number.isSafeInteger(remoteAmount) && remoteAmount !== payment.amountFen) {
@@ -6290,8 +6435,8 @@ app.openAPIRegistry.registerPath({
   path: "/api/billing/orders",
   tags: ["Billing"],
   summary: "创建微信支付订单",
-  description: "仅支持微信。subscription 创建月/年手动续费订单；recharge 创建充值订单；custom 创建自定义金额深度定制订单。金额单位为分。",
-  request: { body: { content: { "application/json": { schema: z.object({ kind: z.enum(["subscription", "recharge", "custom"]), provider: z.literal("wechat"), cycle: z.enum(["month", "year"]).optional(), amountFen: z.number().int().min(100).optional(), subject: z.string().max(80).optional() }) } } } },
+  description: "仅支持微信。subscription 创建月/年手动续费订单；recharge 创建充值订单；custom 创建自定义金额深度定制订单；worker_task 按服务端任务预算创建一次性托管订单。金额单位为分。",
+  request: { body: { content: { "application/json": { schema: z.object({ kind: z.enum(["subscription", "recharge", "custom", "worker_task"]), provider: z.literal("wechat"), cycle: z.enum(["month", "year"]).optional(), amountFen: z.number().int().min(100).optional(), subject: z.string().max(80).optional(), taskId: z.string().optional() }) } } } },
   responses: { 201: { description: "Chandler 订单和微信预支付信息" }, 400: { description: "参数或渠道不受支持" }, 401: { description: "未登录" } },
 });
 

@@ -4461,11 +4461,14 @@ textarea:focus {
 .activation-generated header span { margin-top: 3px; color: var(--muted); font-size: 18px; }
 .activation-generated textarea { width: 100%; padding: 12px; resize: vertical; color: var(--ink); border: 1px solid var(--line); border-radius: 9px; background: var(--surface); font: 600 16px/1.65 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .activation-table { overflow: hidden; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); }
-.activation-table-head, .activation-table article { min-height: 66px; padding: 10px 14px; display: grid; grid-template-columns: minmax(190px, 1fr) 90px minmax(190px, 1fr) minmax(220px, 1.15fr) 76px; align-items: center; gap: 12px; }
+.activation-table-head, .activation-table article { min-height: 66px; padding: 10px 14px; display: grid; grid-template-columns: minmax(290px, 1.35fr) 90px minmax(180px, 1fr) minmax(210px, 1.1fr) minmax(174px, .8fr); align-items: center; gap: 12px; }
 .activation-table-head { color: var(--muted); border-bottom: 1px solid var(--line); background: var(--bg-soft); font-size: 18px; font-weight: 850; }
 .activation-table article + article { border-top: 1px solid var(--line); }
 .activation-table article > div { min-width: 0; }
 .activation-table strong, .activation-table small, .activation-table time { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activation-table .activation-code-value { overflow: visible; text-overflow: clip; white-space: nowrap; font: 750 17px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .025em; user-select: all; }
+.activation-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.activation-row-actions .button { min-width: 78px; }
 .activation-table small, .activation-table time { margin-top: 3px; color: var(--muted); font-size: 18px; }
 .activation-table .status-pill.unused { color: #756019; background: #fff8d9; }
 .activation-table .status-pill.used { color: #2f7659; background: #edf8f1; }
