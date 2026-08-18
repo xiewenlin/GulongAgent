@@ -293,3 +293,13 @@ test("H3 implementation keeps identity, capability, COS ownership and ledger gat
   assert.match(vercel, /"source": "\/api\/h3\/:path\*"/);
   assert.match(vercel, /"source": "\/api\/admin\/h3\/:path\*"/);
 });
+
+test("H3 admin filters keep search and pricing copy visible across responsive rows", async () => {
+  const styles = await readFile(new URL("../../src/styles.css", import.meta.url), "utf8");
+  assert.match(styles, /\.h3-task-filters \{[^}]*grid-template-columns: repeat\(6, minmax\(0, 1fr\)\)/);
+  assert.match(styles, /\.h3-task-filters > \.button \{[^}]*grid-column: 5 \/ 7;[^}]*white-space: nowrap/);
+  assert.match(styles, /\.h3-task-summary \{[^}]*grid-template-columns: max-content minmax\(0, 1fr\)/);
+  assert.match(styles, /\.h3-task-summary em \{[^}]*overflow-wrap: anywhere/);
+  assert.match(styles, /@media \(max-width: 1100px\) \{[\s\S]*?\.h3-task-filters \{ grid-template-columns: 1fr 1fr; \}/);
+  assert.match(styles, /@media \(max-width: 680px\) \{[\s\S]*?\.h3-task-filters \{ grid-template-columns: 1fr; \}/);
+});
