@@ -80,6 +80,7 @@ npm run dev
 
 - `/api/docs`：交互式 Scalar 文档
 - `/api/openapi.json`：OpenAPI 3.1 规范
+- [MiniMax H3 共享节点接入合同](docs/minimax-h3-shared-nodes.md)：桌面账号绑定、能力领取、COS 直传、回调与余额账本
 - 开放接口认证：`Authorization: Bearer gla_live_...`
 - 按日期下载附件：`GET /api/v1/brain/attachments/latest?date=YYYY-MM-DD`
 - 桌面端用户配置：`GET /api/v1/configuration/minimax`（需要 `configuration:read`）

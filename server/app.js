@@ -1,4 +1,4 @@
-import { createHash, createPrivateKey, randomBytes, sign as signBytes } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, randomBytes, sign as signBytes, verify as verifyBytes } from "node:crypto";
 import { ObjectId } from "mongodb";
 import { handleUpload } from "@vercel/blob/client";
 import QRCode from "qrcode";
@@ -77,6 +77,7 @@ import {
 import { buildAdminAnalyticsDashboard, recordAnalyticsEvent } from "./analytics.js";
 import { recoverExpiredDirectReleaseLock } from "./release-lock.js";
 import { creditMonthlySubscriptionBalance, registerPearApiRoutes } from "./pearapi.js";
+import { registerH3SharedRoutes } from "./h3-shared.js";
 import {
   OFFLINE_REVIEW_REJECTION_REASON,
   chandlerOrderItems,
@@ -180,6 +181,34 @@ function signActivationReceipt(payload, privateKey = activationSigningPrivateKey
     algorithm: "RS256",
     signature: signBytes("RSA-SHA256", Buffer.from(canonical), privateKey).toString("base64"),
   };
+}
+
+async function verifyActivationReceipt(receiptValue) {
+  let receipt;
+  try { receipt = typeof receiptValue === "string" ? JSON.parse(receiptValue) : receiptValue; }
+  catch { throw Object.assign(new Error("激活回执不是有效 JSON"), { code: "INVALID_ACTIVATION_PROOF", status: 403 }); }
+  if (!receipt || typeof receipt !== "object" || receipt.version !== 1 || receipt.algorithm !== "RS256" || !ObjectId.isValid(receipt.licenseId) || !/^[a-f0-9]{64}$/.test(String(receipt.deviceId || "")) || typeof receipt.signature !== "string") {
+    throw Object.assign(new Error("激活回执格式无效"), { code: "INVALID_ACTIVATION_PROOF", status: 403 });
+  }
+  const payload = {
+    version: 1,
+    licenseId: String(receipt.licenseId),
+    product: String(receipt.product || ""),
+    deviceId: String(receipt.deviceId),
+    macHint: receipt.macHint == null ? null : String(receipt.macHint),
+    activatedAt: String(receipt.activatedAt || ""),
+    perpetual: receipt.perpetual === true,
+  };
+  let signatureValid = false;
+  try {
+    signatureValid = verifyBytes("RSA-SHA256", Buffer.from(JSON.stringify(payload)), createPublicKey(activationSigningPrivateKey()), Buffer.from(receipt.signature, "base64"));
+  } catch { signatureValid = false; }
+  if (!signatureValid) throw Object.assign(new Error("激活回执签名无效"), { code: "INVALID_ACTIVATION_PROOF", status: 403 });
+  const record = await (await getCollection("activationCodes")).findOne({ _id: new ObjectId(payload.licenseId), status: "used" });
+  if (!record || record.product !== payload.product || record.deviceId !== payload.deviceId || new Date(record.activatedAt).toISOString() !== payload.activatedAt) {
+    throw Object.assign(new Error("激活授权不存在、已停用或与设备不匹配"), { code: "INVALID_ACTIVATION_PROOF", status: 403 });
+  }
+  return { record, payload };
 }
 
 const ErrorSchema = z.object({
@@ -1240,6 +1269,7 @@ async function approveOfflinePayment({ orderId, actorUserId, actorChandlerUserId
   const order = await orders.findOne({ _id: new ObjectId(orderId) });
   if (!order || !["pending", "approved"].includes(order.status)) return { error: { code: "ORDER_STATE_CHANGED", message: "申请不存在或已经被拒绝", status: 409 } };
   const alreadyApproved = order.status === "approved";
+  const isRecharge = order.kind === "recharge";
   const storedStart = alreadyApproved ? new Date(order.validFrom) : null;
   const storedEnd = alreadyApproved ? new Date(order.validUntil) : null;
   const start = storedStart && !Number.isNaN(storedStart.getTime())
@@ -1252,7 +1282,7 @@ async function approveOfflinePayment({ orderId, actorUserId, actorChandlerUserId
     if (order.cycle === "year") end.setFullYear(end.getFullYear() + 1);
     else end.setMonth(end.getMonth() + 1);
   }
-  if (end <= start) return { error: { code: "VALIDATION_ERROR", message: "订阅截止日期必须晚于生效日期", status: 400 } };
+  if (!isRecharge && end <= start) return { error: { code: "VALIDATION_ERROR", message: "订阅截止日期必须晚于生效日期", status: 400 } };
   const now = new Date();
   const partnerData = { ...order.partnerData, review_status: "approved", business_payment_status: "paid_offline", reviewed_by: actorChandlerUserId || null, reviewed_at: now.toISOString(), valid_from: start.toISOString(), valid_until: end.toISOString() };
   if (!alreadyApproved) {
@@ -1263,23 +1293,23 @@ async function approveOfflinePayment({ orderId, actorUserId, actorChandlerUserId
     if (!changed.modifiedCount) return { error: { code: "ORDER_STATE_CHANGED", message: "订单状态已变化，请刷新后重试", status: 409 } };
   }
   await Promise.all([
-    (await getCollection("subscriptions")).updateOne(
+    ...(!isRecharge ? [(await getCollection("subscriptions")).updateOne(
       { ownerId: order.ownerId },
       { $set: { plan: "member", cycle: order.cycle, provider: "offline", status: "active", currentPeriodStart: start, currentPeriodEnd: end, autoRenew: false, updatedAt: now }, $setOnInsert: { createdAt: now } },
       { upsert: true },
-    ),
+    )] : []),
     (await getCollection("notifications")).updateOne(
       { ownerId: order.ownerId, type: "offline_payment_approved", orderId: order._id },
-      { $set: { title: "线下支付审核已通过", message: `订单 ${order.orderNo} 已确认到账，会员权益已经生效。`, orderNo: order.orderNo, readAt: null, updatedAt: now }, $setOnInsert: { createdAt: now } },
+      { $set: { title: "线下支付审核已通过", message: isRecharge ? `订单 ${order.orderNo} 已确认到账，充值余额已经入账。` : `订单 ${order.orderNo} 已确认到账，会员权益已经生效。`, orderNo: order.orderNo, readAt: null, updatedAt: now }, $setOnInsert: { createdAt: now } },
       { upsert: true },
     ),
-    ...(order.cycle === "month" ? [creditMonthlySubscriptionBalance({ ownerId: order.ownerId, amountFen: order.amountFen, source: "offline_subscription", sourceId: order.orderNo })] : []),
+    ...(isRecharge ? [creditMonthlySubscriptionBalance({ ownerId: order.ownerId, amountFen: order.amountFen, source: "offline_recharge", sourceId: order.orderNo, kind: "recharge" })] : [creditMonthlySubscriptionBalance({ ownerId: order.ownerId, amountFen: order.amountFen, source: "offline_subscription", sourceId: order.orderNo, kind: "subscription_payment" })]),
   ]);
   if (accessToken && order.chandlerOrderNo) {
     const applicationId = order.applicationId || chandlerConfig().applicationId;
     await chandlerRequest(`/v1/me/orders/${encodeURIComponent(order.chandlerOrderNo)}/partner-data?client_id=${encodeURIComponent(applicationId)}`, { method: "PUT", accessToken, body: { partner_data: partnerData } }).catch(() => null);
   }
-  if (accessToken && order.chandlerUserId) {
+  if (!isRecharge && accessToken && order.chandlerUserId) {
     try {
       const applicationId = order.applicationId || chandlerConfig().applicationId;
       const path = `/v1/me/oauth/clients/${encodeURIComponent(applicationId)}/users/${encodeURIComponent(order.chandlerUserId)}/attributes`;
@@ -1288,7 +1318,7 @@ async function approveOfflinePayment({ orderId, actorUserId, actorChandlerUserId
       await chandlerRequest(path, { method: "PUT", accessToken, body: { attributes: { ...attributes, subscription_status: "active", subscription_source: "offline_review", subscription_order_no: order.orderNo, subscription_valid_from: start.toISOString(), subscription_valid_until: end.toISOString(), subscription_valid_from_unix_ms: start.getTime(), subscription_valid_until_unix_ms: end.getTime(), subscription_reviewed_at_unix_ms: now.getTime() } } });
     } catch { /* Website MongoDB remains authoritative and desktop reads it directly. */ }
   }
-  return { ok: true, orderNo: order.orderNo, status: "approved", validFrom: start, validUntil: end, message: "审核已通过，会员权益已经生效并可由桌面端立即同步" };
+  return { ok: true, orderNo: order.orderNo, status: "approved", ...(isRecharge ? {} : { validFrom: start, validUntil: end }), message: isRecharge ? "审核已通过，充值余额已经入账并可由桌面端立即同步" : "审核已通过，会员权益已经生效并可由桌面端立即同步" };
 }
 
 async function rejectOfflinePayment({ orderId, actorUserId, actorChandlerUserId, accessToken, reason }) {
@@ -2191,6 +2221,7 @@ app.notFound((c) =>
 );
 
 registerPearApiRoutes(app, { authenticate, requireAdmin, requireTrustedMutation });
+registerH3SharedRoutes(app, { authenticate, requireAdmin, requireTrustedMutation, verifyActivationReceipt });
 
 app.openapi(healthRoute, async (c) => {
   const database = await pingDatabase();
@@ -2668,7 +2699,7 @@ app.get("/api/account/dashboard", async (c) => {
       ...offlineOrders.map((item) => ({
         id: item._id.toString(),
         orderNo: item.orderNo,
-        kind: "subscription",
+        kind: item.kind || "subscription",
         cycle: item.cycle,
         provider: "offline",
         amountFen: item.amountFen,
@@ -5247,7 +5278,7 @@ app.post("/api/billing/orders", async (c) => {
     return c.json({ code: "VALIDATION_ERROR", message: "支付方式、周期或金额不正确" }, 400);
   }
   if (!cycle && kind === "subscription") return c.json({ code: "VALIDATION_ERROR", message: "订阅周期不正确" }, 400);
-  if (provider === "offline" && kind !== "subscription") return c.json({ code: "VALIDATION_ERROR", message: "线下支付仅用于会员订阅审核" }, 400);
+  if (provider === "offline" && !["subscription", "recharge"].includes(kind)) return c.json({ code: "VALIDATION_ERROR", message: "线下支付仅用于会员订阅或账户充值审核" }, 400);
   const orderNo = `GL${Date.now()}${randomBytes(4).toString("hex").toUpperCase()}`;
   const autoRenewRequested = kind === "subscription" && Boolean(body.autoRenew);
   const activeSubscription = kind === "subscription" && cycle === "year"
@@ -5280,7 +5311,16 @@ app.post("/api/billing/orders", async (c) => {
     }
     catch { /* The website keeps accepting offline review orders while Chandler catalog access is unavailable. */ }
     const marker = cycle === "year" ? "year" : "month";
-    const plan = plans.find((item) => `${item.skuType} ${item.billingInterval}`.toLowerCase().includes(marker)) || {
+    const plan = kind === "recharge" ? {
+      productId: "gulong-wallet-recharge",
+      productName: "古龙账户余额充值",
+      skuId: "gulong-wallet-offline-recharge",
+      skuName: "线下余额充值",
+      skuType: "recharge",
+      billingInterval: "one_time",
+      amountFen,
+      source: "website-offline-recharge",
+    } : plans.find((item) => `${item.skuType} ${item.billingInterval}`.toLowerCase().includes(marker)) || {
       productId: "gulong-member",
       productName: "古龙会员",
       skuId: cycle === "year" ? "gulong-member-year" : "gulong-member-month",
@@ -5300,7 +5340,8 @@ app.post("/api/billing/orders", async (c) => {
       product_name: plan.productName,
       sku_id: plan.skuId,
       sku_name: plan.skuName,
-      plan_kind: cycle === "year" ? "yearly" : "monthly",
+      kind,
+      plan_kind: kind === "recharge" ? "recharge" : cycle === "year" ? "yearly" : "monthly",
       amount_fen: amountFen,
       payment_method: "offline",
       platform_service_fee: false,
@@ -5317,7 +5358,7 @@ app.post("/api/billing/orders", async (c) => {
         channel: "wechat",
         amountFen,
         ...(plan.priceId && !isMonthlyUpgrade ? { skuId: plan.skuId } : {}),
-        subject: cycle === "year" ? "年度订阅会员（线下审核）" : "月度订阅会员（线下审核）",
+        subject: kind === "recharge" ? "古龙账户余额充值（线下审核）" : cycle === "year" ? "年度订阅会员（线下审核）" : "月度订阅会员（线下审核）",
         source: "gulong-web-offline-review",
         partnerData,
         prepay: false,
@@ -5330,6 +5371,7 @@ app.post("/api/billing/orders", async (c) => {
       ownerId,
       chandlerUserId: partnerData.chandler_user_id,
       userEmail: auth.user.email,
+      kind,
       cycle,
       amountFen,
       plan,
@@ -5498,16 +5540,10 @@ async function activatePayment(orderNo, providerTransactionId) {
       },
       { upsert: true },
     );
-    if (payment.cycle === "month") {
-      await creditMonthlySubscriptionBalance({ ownerId: payment.ownerId, amountFen: payment.amountFen, source: "online_subscription", sourceId: payment.orderNo });
-    }
+    await creditMonthlySubscriptionBalance({ ownerId: payment.ownerId, amountFen: payment.amountFen, source: "online_subscription", sourceId: payment.orderNo, kind: "subscription_payment" });
     await notifyUserOnce(payment.ownerId, "subscription_payment_succeeded", "会员续费已生效", `微信支付已到账，${payment.cycle === "year" ? "年度" : "月度"}会员权益已同步到官网与桌面端。`, { orderNo: payment.orderNo });
   } else if (payment.kind === "recharge") {
-    await (await getCollection("wallets")).updateOne(
-      { ownerId: payment.ownerId },
-      { $inc: { balanceFen: payment.amountFen }, $set: { updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } },
-      { upsert: true },
-    );
+    await creditMonthlySubscriptionBalance({ ownerId: payment.ownerId, amountFen: payment.amountFen, source: "online_recharge", sourceId: payment.orderNo, kind: "recharge" });
   } else if (payment.kind === "custom") {
     await notifyUserOnce(payment.ownerId, "custom_order_paid", "深度定制订单支付成功", "微信支付已到账，我们会根据订单信息与你联系并推进交付。", { orderNo: payment.orderNo });
   } else if (payment.kind === "worker_task" && payment.taskId) {
@@ -6434,10 +6470,10 @@ app.openAPIRegistry.registerPath({
   method: "post",
   path: "/api/billing/orders",
   tags: ["Billing"],
-  summary: "创建微信支付订单",
-  description: "仅支持微信。subscription 创建月/年手动续费订单；recharge 创建充值订单；custom 创建自定义金额深度定制订单；worker_task 按服务端任务预算创建一次性托管订单。金额单位为分。",
-  request: { body: { content: { "application/json": { schema: z.object({ kind: z.enum(["subscription", "recharge", "custom", "worker_task"]), provider: z.literal("wechat"), cycle: z.enum(["month", "year"]).optional(), amountFen: z.number().int().min(100).optional(), subject: z.string().max(80).optional(), taskId: z.string().optional() }) } } } },
-  responses: { 201: { description: "Chandler 订单和微信预支付信息" }, 400: { description: "参数或渠道不受支持" }, 401: { description: "未登录" } },
+  summary: "创建微信支付或线下审核订单",
+  description: "线上仅支持微信。subscription 创建月/年手动续费订单；recharge 创建自定义金额充值订单，其中 provider=offline 会进入管理员到账审核，审核通过后原额计入钱包；custom 创建自定义金额深度定制订单；worker_task 按服务端任务预算创建一次性托管订单。线下渠道只允许 subscription 和 recharge。金额单位为分。",
+  request: { body: { content: { "application/json": { schema: z.object({ kind: z.enum(["subscription", "recharge", "custom", "worker_task"]), provider: z.enum(["wechat", "offline"]), cycle: z.enum(["month", "year"]).optional(), amountFen: z.number().int().min(100).optional(), subject: z.string().max(80).optional(), taskId: z.string().optional() }) } } } },
+  responses: { 201: { description: "Chandler 微信预支付信息，或线下待审核订单" }, 400: { description: "参数或渠道不受支持" }, 401: { description: "未登录" } },
 });
 
 app.openAPIRegistry.registerPath({
@@ -6498,8 +6534,8 @@ app.doc("/api/openapi.json", {
   openapi: "3.1.0",
   info: {
     title: "古龙 Gulong Agent Engine API",
-    version: "1.9.0",
-    description: "已按 Chandler v3.2 与 PearAPI 统一接入升级：服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费。新增 MiniMax H3 一次联网、设备绑定、RSA 签名的永久离线授权兑换接口。另提供任务、第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
+    version: "2.0.0",
+    description: "已按 Chandler v3.2 与 PearAPI 统一接入升级：服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费。新增 MiniMax H3 共享节点订单、钱包预扣与幂等退款、激活设备账号绑定、按能力原子领取、腾讯云 COS 输入下载和输出直传票据，以及管理员任务派单接口；工作器领取 DTO 不含需求用户身份和内部计费信息。另提供永久离线授权兑换、第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
   },
   servers: [
     { url: "/", description: "当前环境" },
@@ -6518,5 +6554,5 @@ app.get(
   }),
 );
 
-export { activationReceiptPayload, activationSigningPrivateKey, signActivationReceipt };
+export { activationReceiptPayload, activationSigningPrivateKey, signActivationReceipt, verifyActivationReceipt };
 export default app;

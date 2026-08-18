@@ -377,6 +377,78 @@ export async function ensureIndexes() {
             name: "uniq_activation_device_product",
           },
         ),
+        db.collection("nodeAccountBindings").createIndex(
+          { tokenHash: 1 },
+          { unique: true, partialFilterExpression: { tokenHash: { $type: "string" } }, name: "uniq_node_account_binding_token" },
+        ),
+        db.collection("nodeAccountBindings").createIndex(
+          { activationLicenseId: 1, nodeId: 1 },
+          { unique: true, name: "uniq_activation_node_binding" },
+        ),
+        db.collection("nodeAccountBindingAudits").createIndex(
+          { bindingId: 1, createdAt: -1 },
+          { name: "node_binding_audit_history" },
+        ),
+        db.collection("h3SharedTasks").createIndex(
+          { orderNo: 1 },
+          { unique: true, name: "uniq_h3_order_no" },
+        ),
+        db.collection("h3SharedTasks").createIndex(
+          { idempotencyKey: 1 },
+          { unique: true, name: "uniq_h3_idempotency_key" },
+        ),
+        db.collection("h3SharedTasks").createIndex(
+          { status: 1, createdAt: 1 },
+          { name: "h3_claim_queue" },
+        ),
+        db.collection("h3SharedTasks").createIndex(
+          { requesterUserId: 1, createdAt: -1 },
+          { name: "h3_tasks_by_requester" },
+        ),
+        db.collection("h3SharedTasks").createIndex(
+          { assigneeUserId: 1, completedAt: -1 },
+          { name: "h3_tasks_by_assignee" },
+        ),
+        db.collection("h3TaskCallbacks").createIndex(
+          { eventKey: 1 },
+          { unique: true, name: "uniq_h3_callback_event" },
+        ),
+        db.collection("h3TaskCallbacks").createIndex(
+          { taskId: 1, createdAt: 1 },
+          { name: "h3_callbacks_by_task" },
+        ),
+        db.collection("h3OutputUploads").createIndex(
+          { grantId: 1 },
+          { unique: true, name: "uniq_h3_output_upload_grant" },
+        ),
+        db.collection("h3OutputUploads").createIndex(
+          { objectKey: 1 },
+          { unique: true, name: "uniq_h3_output_object" },
+        ),
+        db.collection("h3OutputUploads").createIndex(
+          { taskId: 1, status: 1, createdAt: -1 },
+          { name: "h3_output_uploads_by_task" },
+        ),
+        db.collection("h3AssetUploads").createIndex(
+          { objectKey: 1 },
+          { unique: true, name: "uniq_h3_asset_object" },
+        ),
+        db.collection("h3AssetUploads").createIndex(
+          { ownerId: 1, status: 1, createdAt: -1 },
+          { name: "h3_assets_by_owner" },
+        ),
+        db.collection("h3WalletLedger").createIndex(
+          { ledgerKey: 1 },
+          { unique: true, name: "uniq_h3_wallet_ledger" },
+        ),
+        db.collection("h3WalletLedger").createIndex(
+          { ownerId: 1, createdAt: -1 },
+          { name: "h3_wallet_ledger_by_owner" },
+        ),
+        db.collection("h3TaskAudits").createIndex(
+          { taskId: 1, createdAt: 1 },
+          { name: "h3_task_audit_history" },
+        ),
       ]);
     })().catch((error) => {
       indexPromise = undefined;

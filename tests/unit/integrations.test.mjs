@@ -1041,7 +1041,7 @@ test("all consequential actions use the shared themed confirmation dialog", asyn
   for (const source of [adminSource, accountSource, workerSource]) {
     assert.doesNotMatch(source, /window\.(alert|confirm|prompt)\s*\(/);
   }
-  assert.equal((adminSource.match(/useConfirmDialog\(\)/g) || []).length, 7);
+  assert.equal((adminSource.match(/useConfirmDialog\(\)/g) || []).length, 8);
   assert.equal((accountSource.match(/useConfirmDialog\(\)/g) || []).length, 1);
   assert.equal((workerSource.match(/useConfirmDialog\(\)/g) || []).length, 1);
 });

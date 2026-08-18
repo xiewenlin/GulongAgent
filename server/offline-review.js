@@ -2,7 +2,7 @@ export const OFFLINE_REVIEW_REJECTION_REASON = "管理员通过微信端拒绝�
 
 export function offlineReviewWechatMessage(order) {
   const amount = `¥${(Number(order.amountFen || 0) / 100).toFixed(2)}`;
-  const cycle = order.cycle === "year" ? "年度会员" : "月度会员";
+  const cycle = order.kind === "recharge" ? "账户余额充值" : order.cycle === "year" ? "年度会员" : "月度会员";
   const lines = [
     "【古龙官网 · 新的线下支付待审核订单】",
     `订单号：${order.orderNo}`,

@@ -1,0 +1,291 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+import { OpenAPIHono } from "@hono/zod-openapi";
+import { ObjectId } from "mongodb";
+import app from "../../server/app.js";
+import {
+  H3_ACCOUNT_BINDING_HEADER,
+  calculateH3SharedPrice,
+  h3CallbackEventKey,
+  normalizeH3TaskInput,
+  registerH3SharedRoutes,
+  reserveH3Wallet,
+  toH3WorkerTask,
+} from "../../server/h3-shared.js";
+
+test("H3 shared pricing uses integer fen and keeps audio free", () => {
+  assert.equal(calculateH3SharedPrice({ durationSeconds: 15, imageCount: 2, videoCount: 1 }), 330);
+  const normalized = normalizeH3TaskInput({
+    source_channel: "desktop_agent",
+    model: "minimax_h3_shared",
+    prompt: "render",
+    duration_seconds: 10,
+    profile: "QUALITY",
+    priceFen: 1,
+    image_count: 99,
+    assets: {
+      images: [{ asset_id: "66c000000000000000000001", object_key: "h3/requesters/u/assets/a.png" }],
+      videos: [],
+      audio: [{ asset_id: "66c000000000000000000002", object_key: "h3/requesters/u/assets/a.mp3" }],
+    },
+  });
+  assert.equal(normalized.sourceChannel, "desktop_agent");
+  assert.equal(normalized.profile, "quality");
+  assert.equal(normalized.imageCount, 1);
+  assert.equal(normalized.audioCount, 1);
+  assert.equal(normalized.priceFen, 205);
+});
+
+test("H3 pricing rejects unsupported duration and material counts", () => {
+  assert.throws(() => calculateH3SharedPrice({ durationSeconds: 0, imageCount: 0, videoCount: 0 }), /时长或素材数量/);
+  assert.throws(() => calculateH3SharedPrice({ durationSeconds: 15, imageCount: 10, videoCount: 0 }), /时长或素材数量/);
+  assert.throws(() => normalizeH3TaskInput({ prompt: "x", duration_seconds: 15, assets: { images: [], videos: Array(4).fill({ object_key: "x" }), audio: [] } }), /不能超过 3/);
+});
+
+test("H3 callback idempotency is stable per task event status and local job", () => {
+  const metadata = { event: "render-completed", status: "completed", local_job_id: "local-1" };
+  assert.equal(h3CallbackEventKey("task-1", metadata), h3CallbackEventKey("task-1", { ...metadata }));
+  assert.notEqual(h3CallbackEventKey("task-1", metadata), h3CallbackEventKey("task-1", { ...metadata, local_job_id: "local-2" }));
+  assert.equal(H3_ACCOUNT_BINDING_HEADER, "X-Gulong-Account-Binding");
+});
+
+test("H3 worker task DTO excludes requester and billing identity", () => {
+  const task = toH3WorkerTask({
+    _id: new ObjectId("66c000000000000000000010"),
+    orderNo: "GLH3TEST",
+    model: "minimax_h3_shared",
+    prompt: "render safely",
+    aspectRatio: "16:9",
+    durationSeconds: 15,
+    profile: "balanced",
+    imageCount: 1,
+    videoCount: 0,
+    audioCount: 0,
+    requesterUserId: new ObjectId("66c000000000000000000011"),
+    requesterEmailSnapshot: "private@example.com",
+    priceFen: 305,
+    walletLedgerId: "h3:charge:secret",
+    claimedByNode: { bindingId: new ObjectId("66c000000000000000000012") },
+  }, {
+    assets: [{ type: "image", download_url: "https://example.invalid/signed" }],
+    outputUpload: { url: "https://example.invalid/upload", object_key: "h3/tasks/test/output.mp4" },
+  });
+  assert.deepEqual(Object.keys(task), ["id", "orderNo", "model", "prompt", "aspectRatio", "durationSeconds", "profile", "imageCount", "videoCount", "audioCount", "assets", "output_upload"]);
+  const serialized = JSON.stringify(task);
+  assert.doesNotMatch(serialized, /requester|private@example\.com|priceFen|walletLedger|bindingId/);
+});
+
+test("H3 desktop account binding does not enumerate users before activation verification", async () => {
+  const isolated = new OpenAPIHono();
+  let userLookups = 0;
+  const audits = [];
+  registerH3SharedRoutes(isolated, {
+    getCollection: async (name) => name === "users"
+      ? { findOne: async () => { userLookups += 1; return null; } }
+      : { insertOne: async (record) => { audits.push(record); return { insertedId: new ObjectId() }; }, findOne: async () => null, updateOne: async () => ({}) },
+    enforceRateLimit: async () => ({ allowed: true }),
+    authenticate: async () => ({ error: new Error("not used") }),
+    requireAdmin: async () => ({ error: new Error("not used") }),
+    requireTrustedMutation: () => null,
+    verifyActivationReceipt: async () => { throw Object.assign(new Error("invalid"), { code: "INVALID_ACTIVATION_PROOF" }); },
+  });
+  const response = await isolated.request("http://localhost/api/desktop/account-bindings/verify", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: "unknown@example.com", node_id: "stable-node-0001", node_name: "worker", app_version: "2.1.0", activation_receipt: "forged" }),
+  });
+  assert.equal(response.status, 403);
+  assert.equal((await response.json()).code, "INVALID_ACTIVATION_PROOF");
+  assert.equal(userLookups, 0);
+  assert.equal(audits[0].event, "activation_rejected");
+});
+
+test("H3 desktop account binding returns the documented unknown-user response after activation", async () => {
+  const isolated = new OpenAPIHono();
+  const licenseId = new ObjectId();
+  registerH3SharedRoutes(isolated, {
+    getCollection: async (name) => name === "users"
+      ? { findOne: async () => null }
+      : { insertOne: async () => ({ insertedId: new ObjectId() }), findOne: async () => null, updateOne: async () => ({}) },
+    enforceRateLimit: async () => ({ allowed: true }),
+    authenticate: async () => ({ error: new Error("not used") }),
+    requireAdmin: async () => ({ error: new Error("not used") }),
+    requireTrustedMutation: () => null,
+    verifyActivationReceipt: async () => ({ record: { _id: licenseId }, payload: { deviceId: "device-proof" } }),
+  });
+  const response = await isolated.request("http://localhost/api/desktop/account-bindings/verify", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: "unknown@example.com", node_id: "stable-node-0001", node_name: "worker", app_version: "2.1.0", activation_receipt: "valid" }),
+  });
+  assert.equal(response.status, 404);
+  assert.deepEqual(await response.json(), { code: "USER_NOT_FOUND", message: "该邮箱尚未注册古龙账户", register_url: "https://www.sologle.com/" });
+});
+
+test("H3 desktop account binding returns a high-entropy token but only persists its hash", async () => {
+  const isolated = new OpenAPIHono();
+  const licenseId = new ObjectId();
+  const userId = new ObjectId();
+  const bindingId = new ObjectId();
+  let persistedSet = null;
+  const collections = {
+    users: { findOne: async () => ({ _id: userId, email: "member@example.com", displayName: "Member", status: "active" }) },
+    nodeAccountBindings: {
+      findOne: async () => null,
+      findOneAndUpdate: async (_filter, update) => { persistedSet = update.$set; return { _id: bindingId, userId, nodeId: "stable-node-0001" }; },
+    },
+  };
+  registerH3SharedRoutes(isolated, {
+    getCollection: async (name) => collections[name] || { insertOne: async () => ({ insertedId: new ObjectId() }), findOne: async () => null, updateOne: async () => ({}) },
+    enforceRateLimit: async () => ({ allowed: true }),
+    authenticate: async () => ({ error: new Error("not used") }),
+    requireAdmin: async () => ({ error: new Error("not used") }),
+    requireTrustedMutation: () => null,
+    verifyActivationReceipt: async () => ({ record: { _id: licenseId }, payload: { deviceId: "device-proof" } }),
+  });
+  const response = await isolated.request("http://localhost/api/desktop/account-bindings/verify", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: "MEMBER@example.com", node_id: "stable-node-0001", node_name: "worker", app_version: "2.1.0", activation_receipt: "valid" }),
+  });
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.match(payload.binding_token, /^gab_[A-Za-z0-9_-]{40,}$/);
+  assert.equal(payload.binding.user_id, userId.toString());
+  assert.match(persistedSet.tokenHash, /^[a-f0-9]{64}$/);
+  assert.notEqual(persistedSet.tokenHash, payload.binding_token);
+  assert.equal(Object.values(persistedSet).includes(payload.binding_token), false);
+});
+
+test("H3 forged binding token is rejected before any queue access", async () => {
+  const isolated = new OpenAPIHono();
+  let queueReadsOrWrites = 0;
+  registerH3SharedRoutes(isolated, {
+    getCollection: async (name) => name === "nodeAccountBindings"
+      ? { findOne: async () => null }
+      : name === "h3SharedTasks"
+        ? { findOne: async () => { queueReadsOrWrites += 1; return null; }, findOneAndUpdate: async () => { queueReadsOrWrites += 1; return null; } }
+        : { insertOne: async () => ({}), updateOne: async () => ({}), findOne: async () => null },
+    enforceRateLimit: async () => ({ allowed: true }),
+    authenticate: async () => ({ error: new Error("not used") }),
+    requireAdmin: async () => ({ error: new Error("not used") }),
+    requireTrustedMutation: () => null,
+    verifyActivationReceipt: async () => { throw new Error("not used"); },
+  });
+  const response = await isolated.request("http://localhost/api/h3/tasks/claim", {
+    method: "POST",
+    headers: { "content-type": "application/json", [H3_ACCOUNT_BINDING_HEADER]: `gab_${"z".repeat(48)}` },
+    body: JSON.stringify({ node_id: "stable-node-0001", node_name: "worker", dry_run: false, capabilities: { max_duration_seconds: 15, profiles: ["balanced"], max_image_count: 9, max_video_count: 3, max_audio_count: 3 } }),
+  });
+  assert.equal(response.status, 401);
+  assert.equal((await response.json()).code, "INVALID_ACCOUNT_BINDING");
+  assert.equal(queueReadsOrWrites, 0);
+});
+
+test("H3 wallet reservation is atomic under concurrent different orders", async () => {
+  const ownerId = new ObjectId();
+  const state = { ownerId, balanceFen: 305, ledgerKeys: [], ledgerEntries: [] };
+  const ledgers = new Map();
+  const wallets = {
+    findOneAndUpdate: async (filter, update) => {
+      if (filter.ownerId.toString() !== state.ownerId.toString() || state.balanceFen < filter.balanceFen.$gte || state.ledgerKeys.includes(filter.ledgerKeys.$ne)) return null;
+      state.balanceFen += update.$inc.balanceFen;
+      state.ledgerKeys.push(...update.$push.ledgerKeys.$each);
+      state.ledgerEntries.push(...update.$push.ledgerEntries.$each);
+      return { ...state };
+    },
+    findOne: async (filter) => filter.ledgerKeys && state.ledgerKeys.includes(filter.ledgerKeys) ? { ...state } : null,
+  };
+  const h3WalletLedger = {
+    updateOne: async (filter, update) => {
+      if (!ledgers.has(filter.ledgerKey)) ledgers.set(filter.ledgerKey, { ...update.$setOnInsert });
+      return { acknowledged: true };
+    },
+  };
+  const getCollection = async (name) => name === "wallets" ? wallets : h3WalletLedger;
+  const results = await Promise.all([
+    reserveH3Wallet({ getCollection, ownerId, amountFen: 305, ledgerKey: "h3:charge:one", orderNo: "ONE", taskId: new ObjectId() }),
+    reserveH3Wallet({ getCollection, ownerId, amountFen: 305, ledgerKey: "h3:charge:two", orderNo: "TWO", taskId: new ObjectId() }),
+  ]);
+  assert.equal(results.filter(Boolean).length, 1);
+  assert.equal(state.balanceFen, 0);
+  assert.equal(state.ledgerKeys.length, 1);
+  assert.equal(ledgers.size, 1);
+});
+
+test("H3 claim dry-run validates identity and capabilities without touching the queue", async () => {
+  const isolated = new OpenAPIHono();
+  const bindingId = new ObjectId();
+  const userId = new ObjectId();
+  let queueReadsOrWrites = 0;
+  const collections = {
+    nodeAccountBindings: { findOne: async () => ({ _id: bindingId, userId, nodeId: "stable-node-0001", nodeName: "test", status: "active", revokedAt: null }), updateOne: async () => ({ modifiedCount: 1 }) },
+    users: { findOne: async () => ({ _id: userId, email: "test@example.com", displayName: "Test", status: "active" }) },
+    h3SharedTasks: { findOneAndUpdate: async () => { queueReadsOrWrites += 1; return null; }, findOne: async () => { queueReadsOrWrites += 1; return null; } },
+  };
+  registerH3SharedRoutes(isolated, {
+    getCollection: async (name) => collections[name] || { insertOne: async () => ({}), updateOne: async () => ({}), findOne: async () => null },
+    enforceRateLimit: async () => ({ allowed: true }),
+    authenticate: async () => ({ user: { id: userId.toString() } }),
+    requireAdmin: async () => ({ user: { id: userId.toString(), role: "admin" } }),
+    requireTrustedMutation: () => null,
+    verifyActivationReceipt: async () => { throw new Error("not used"); },
+  });
+  const response = await isolated.request("http://localhost/api/h3/tasks/claim", {
+    method: "POST",
+    headers: { "content-type": "application/json", [H3_ACCOUNT_BINDING_HEADER]: `gab_${"a".repeat(48)}` },
+    body: JSON.stringify({ node_id: "stable-node-0001", node_name: "test", dry_run: true, capabilities: { max_duration_seconds: 15, profiles: ["balanced"], vram_mb: 24_576, max_image_count: 9, max_video_count: 3, max_audio_count: 3 } }),
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, service: "gulong-h3-shared", queue: "reachable" });
+  assert.equal(queueReadsOrWrites, 0);
+});
+
+test("H3 OpenAPI publishes binding, assets, desktop tool, claim and callback contracts", () => {
+  const document = app.getOpenAPIDocument({ openapi: "3.1.0", info: { title: "test", version: "1" } });
+  for (const path of [
+    "/api/desktop/account-bindings/verify",
+    "/api/desktop/account-bindings/unbind",
+    "/api/h3/assets/presign",
+    "/api/h3/assets/{id}/complete",
+    "/api/h3/tasks",
+    "/api/h3/tasks/{id}",
+    "/api/h3/tasks/claim",
+    "/api/h3/tasks/callback",
+    "/api/v1/desktop/agent/tools/minimax-h3-shared",
+    "/api/admin/h3/tasks",
+    "/api/admin/h3/tasks/{id}",
+    "/api/admin/h3/tasks/{id}/cancel",
+    "/api/admin/h3/tasks/{id}/retry",
+  ]) assert.ok(document.paths[path], `${path} should be documented`);
+  assert.equal(document.components.securitySchemes.accountBinding.name, H3_ACCOUNT_BINDING_HEADER);
+  assert.match(document.paths["/api/h3/tasks/claim"].post.description, /max_duration_seconds/);
+  assert.match(document.paths["/api/h3/tasks/callback"].post.description, /HEAD/);
+});
+
+test("H3 implementation keeps identity, capability, COS ownership and ledger gates together", async () => {
+  const [source, db, account, agent, review] = await Promise.all([
+    readFile(new URL("../../server/h3-shared.js", import.meta.url), "utf8"),
+    readFile(new URL("../../server/db.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/AccountDashboard.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/WebAgentPage.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../server/offline-review.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(source, /verifyActivationReceipt\(body\.activation_receipt\)[\s\S]+users[\s\S]+USER_NOT_FOUND/);
+  assert.match(source, /findOneAndUpdate\(\{ status: "queued", model: H3_SHARED_MODEL, durationSeconds: \{ \$lte: maxDurationSeconds \}/);
+  const dryRunBranch = source.indexOf('if (body.dry_run === true) return c.json({ ok: true, service: "gulong-h3-shared", queue: "reachable" });');
+  const queueMutation = source.indexOf('findOneAndUpdate({ status: "queued", model: H3_SHARED_MODEL');
+  assert.ok(dryRunBranch > -1 && queueMutation > dryRunBranch, "dry-run returns before the first queue mutation so the queue cannot decrease");
+  assert.match(source, /imageCount: \{ \$lte: maxImageCount \}[\s\S]+videoCount: \{ \$lte: maxVideoCount \}[\s\S]+audioCount: \{ \$lte: maxAudioCount \}/);
+  assert.match(source, /OUTPUT_OBJECT_FORBIDDEN[\s\S]+headObject\(objectKey\)[\s\S]+x-cos-meta-sha256/);
+  assert.match(source, /ledgerKeys: \{ \$ne: ledgerKey \}[\s\S]+balanceFen: -amountFen/);
+  assert.match(source, /assigneeUserId: auth\.user\._id/);
+  assert.match(source, /workerCallbackTask\(task\)/);
+  assert.match(db, /uniq_h3_order_no[\s\S]+uniq_h3_idempotency_key[\s\S]+uniq_h3_callback_event[\s\S]+uniq_h3_wallet_ledger/);
+  assert.match(account, /WarningCircle/);
+  assert.match(account, /kind: "recharge", provider: "offline"/);
+  assert.match(agent, /source_channel: "website"/);
+  assert.match(agent, /minimax_h3_shared/);
+  assert.match(review, /账户余额充值/);
+});

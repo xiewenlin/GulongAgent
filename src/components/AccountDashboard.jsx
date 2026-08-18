@@ -17,6 +17,7 @@ import {
   UploadSimple,
   UserCircle,
   Wallet,
+  WarningCircle,
   X,
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
@@ -91,6 +92,8 @@ export function AccountDashboard({ user, openAuth, navigate, onUser }) {
   const [profile, setProfile] = useState({ displayName: "", username: "", bio: "", wechatId: "" });
   const [busy, setBusy] = useState("");
   const [resubmission, setResubmission] = useState(null);
+  const [recharge, setRecharge] = useState(null);
+  const [rechargeAmount, setRechargeAmount] = useState("100");
 
   async function load() {
     if (!user) { setLoading(false); return; }
@@ -173,6 +176,23 @@ export function AccountDashboard({ user, openAuth, navigate, onUser }) {
     catch (error) { setMessage(error.message); }
   }
 
+  async function submitOfflineRecharge(event) {
+    event.preventDefault();
+    const amountFen = Math.round(Number(rechargeAmount) * 100);
+    if (!Number.isSafeInteger(amountFen) || amountFen < 100 || amountFen > 5_000_000) {
+      setMessage("请输入 1–50000 元的有效充值金额。");
+      return;
+    }
+    setBusy("offline-recharge"); setMessage("");
+    try {
+      const result = await apiFetch("/api/billing/orders", { method: "POST", body: JSON.stringify({ kind: "recharge", provider: "offline", amountFen }) });
+      setRecharge(result);
+      await load();
+      setActive("billing");
+    } catch (error) { setMessage(error.message); }
+    finally { setBusy(""); }
+  }
+
   if (!user) return <main id="main-content" className="account-gate section-shell"><LockKey size={42} weight="duotone" /><span>GULONG ACCOUNT</span><h1>登录你的古龙后台</h1><p>在一个地方查看第二大脑处理结果、会员、余额和网页版使用额度。</p><button className="button primary" onClick={() => openAuth("login")}>登录继续</button></main>;
   if (loading) return <main id="main-content" className="account-loading section-shell"><span /><strong>正在装载你的古龙工作空间</strong></main>;
 
@@ -208,13 +228,14 @@ export function AccountDashboard({ user, openAuth, navigate, onUser }) {
 
       {active === "billing" && <section className="account-module">
         <header><div><span>MEMBERSHIP & WALLET</span><h2>会员、余额与订单</h2><p>线上支付即将开通，微信支付将优先上线；当前会员订阅可使用线下支付并等待管理员审核。</p></div></header>
-        <div className="account-billing-grid"><article className={isMember || isAdmin ? "member active" : "member"}><ShieldCheck size={27} weight="duotone" /><span>当前身份 · {editionName}</span><h3>{identityLabel}</h3><p>{isAdmin ? "管理员拥有古龙官网全部后台权限，会员订阅状态不会覆盖管理员身份。" : isMember ? `会员权益有效至 ${new Date(subscription.currentPeriodEnd).toLocaleString("zh-CN")}` : "升级后解锁第二大脑、完整工作流和本地模型能力。"}</p><button className="button primary full" onClick={() => isAdmin ? navigate("/admin") : navigate("/pricing")}>{isAdmin ? "进入管理员后台" : isMember ? "查看会员方案" : "立即订阅会员"}</button>{!isAdmin && isMember && subscription.autoRenew && !subscription.cancelAtPeriodEnd && <button className="text-button" onClick={cancelSubscription}>关闭到期自动续订</button>}</article><article className="wallet"><Wallet size={27} weight="duotone" /><span>可用余额</span><h3>{formatMoney(data?.balanceFen || 0)}</h3><p>余额可用于后续按量调用模型、技能和工作流。</p><button className="button secondary full" onClick={() => navigate("/pricing#recharge")}><CreditCard size={17} /> 单次充值</button></article></div>
+        <div className="account-billing-grid"><article className={isMember || isAdmin ? "member active" : "member"}><ShieldCheck size={27} weight="duotone" /><span>当前身份 · {editionName}</span><h3>{identityLabel}</h3><p>{isAdmin ? "管理员拥有古龙官网全部后台权限，会员订阅状态不会覆盖管理员身份。" : isMember ? `会员权益有效至 ${new Date(subscription.currentPeriodEnd).toLocaleString("zh-CN")}` : "升级后解锁第二大脑、完整工作流和本地模型能力。"}</p><button className="button primary full" onClick={() => isAdmin ? navigate("/admin") : navigate("/pricing")}>{isAdmin ? "进入管理员后台" : isMember ? "查看会员方案" : "立即订阅会员"}</button>{!isAdmin && isMember && subscription.autoRenew && !subscription.cancelAtPeriodEnd && <button className="text-button" onClick={cancelSubscription}>关闭到期自动续订</button>}</article><article className="wallet"><Wallet size={27} weight="duotone" /><span>可用余额</span><h3>{formatMoney(data?.balanceFen || 0)}</h3><p>输入充值金额并使用线下支付；管理员确认到账后，余额会同步到网页端与桌面端。</p><button className="button secondary full" onClick={() => { setRecharge({ mode: "cashier" }); setMessage(""); }}><CreditCard size={17} /> 输入金额，线下充值</button></article></div>
         <div className="account-order-list"><h3><Receipt size={20} /> 最近订单</h3>{data?.orders?.length ? data.orders.map((order) => <article className={order.status === "rejected" ? "rejected" : ""} key={`${order.provider}-${order.id}`}><div className="account-order-main"><div><strong>{order.kind === "recharge" ? "账户充值" : order.cycle === "year" ? "年度会员" : "月度会员"}<small>{order.orderNo}</small></strong></div><span>{order.provider === "wechat" ? "微信" : order.provider === "alipay" ? "支付宝" : "线下支付"}</span><strong>{formatMoney(order.amountFen)}</strong><em>{order.provider === "offline" && order.status === "pending" ? "待审核" : statusText[order.status] || order.status}</em><time>{new Date(order.createdAt).toLocaleDateString("zh-CN")}</time></div>{order.status === "rejected" && <div className="account-order-rejection"><WarningCircle size={22} weight="fill" /><div><strong>审核未通过</strong><p>{order.reviewReason || "管理员暂未填写原因，请联系客服确认。"}</p></div><button className="button small primary" onClick={() => setResubmission({ order, note: "" })}>调整后重新申请</button></div>}{order.status === "pending" && order.resubmissionNote && <div className="account-order-resubmitted"><CheckCircle size={18} /> 已重新提交：{order.resubmissionNote}</div>}</article>) : <EmptyPanel icon={Receipt} title="还没有订单" text="订阅或充值完成后，交易记录会显示在这里。" />}</div>
       </section>}
 
       {active === "profile" && <section className="account-module"><header><div><span>PROFILE</span><h2>个人基本信息</h2><p>昵称会显示在网站右上角；头像保存到腾讯云 COS，并可同步到古龙桌面端。</p></div></header><form className="account-form" onSubmit={saveProfile}><label className="account-avatar-uploader"><div className="account-avatar-preview">{avatar ? <img src={avatar} alt="个人头像预览" /> : (profile.displayName || profile.username || "古").slice(0, 1).toUpperCase()}<span><Camera size={20} /></span></div><strong>{busy === "avatar" ? "正在上传" : "更换头像"}</strong><small>JPG / PNG / WebP / GIF，最大 10MB</small><input type="file" accept="image/jpeg,image/png,image/webp,image/gif" disabled={busy === "avatar"} onChange={uploadAvatar} /></label><div className="account-form-fields"><label><span>昵称</span><input required maxLength={64} value={profile.displayName} onChange={(event) => setProfile({ ...profile, displayName: event.target.value })} placeholder="你希望大家如何称呼你" /></label><label><span>用户名</span><input minLength={3} maxLength={32} value={profile.username} onChange={(event) => setProfile({ ...profile, username: event.target.value })} placeholder="用于账户识别" /></label><label><span>邮箱</span><input value={data?.profile.email || ""} disabled /><small>邮箱由 Chandler 账号中心维护，官网不会绕过统一身份修改。</small></label><label><span>微信号</span><input minLength={5} maxLength={64} value={profile.wechatId} onChange={(event) => setProfile({ ...profile, wechatId: event.target.value })} placeholder="发单或接单前必须填写" /><small>默认保密；任务另一方需支付 2 元并审核通过后才能查看。</small></label><label><span>个人简介</span><textarea maxLength={240} value={profile.bio} onChange={(event) => setProfile({ ...profile, bio: event.target.value })} placeholder="简单介绍你的工作与希望古龙帮助你的方向" /></label><button className="button primary" disabled={busy === "profile"}><FloppyDisk size={17} /> {busy === "profile" ? "正在保存" : "保存个人资料"}</button></div></form></section>}
 
     </section>
+    {recharge && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && setRecharge(null)}><section className="payment-modal offline-payment-modal" role="dialog" aria-modal="true" aria-labelledby="offline-recharge-title"><button className="modal-close" type="button" disabled={Boolean(busy)} onClick={() => setRecharge(null)}><X size={19} /></button><div className="payment-logo"><Wallet size={30} weight="duotone" /></div><span className="payment-eyebrow">OFFLINE WALLET RECHARGE</span><h2 id="offline-recharge-title">{recharge.mode === "cashier" ? "输入金额，线下充值" : "已提交，等待管理员审核"}</h2>{recharge.mode === "cashier" ? <form onSubmit={submitOfflineRecharge}><p>填写充值金额后扫描企业收款码付款，再点击“我已支付”。管理员确认到账后，金额会原额计入可用余额。</p><label><span>充值金额（元）</span><input type="number" min="1" max="50000" step="0.01" required autoFocus value={rechargeAmount} onChange={(event) => setRechargeAmount(event.target.value)} /></label><img className="payment-qr enterprise-qr" src="/assets/enterprise-payment-qr.jpg" alt="古龙企业微信收款码" /><div className="offline-payment-summary"><span>账户余额充值</span><strong>{formatMoney(Math.round(Number(rechargeAmount || 0) * 100))}</strong></div><div className="payment-dialog-actions"><button type="button" className="button secondary" disabled={Boolean(busy)} onClick={() => setRecharge(null)}>稍后充值</button><button className="button primary" disabled={Boolean(busy)}>{busy ? "正在提交" : "我已支付"}</button></div></form> : <><p>订单 <strong>{recharge.orderNo}</strong> 已进入线下审核队列。管理员确认到账后，充值余额会自动入账。</p><div className="form-success">待审核 · {formatMoney(recharge.amountFen)}</div><p className="offline-payment-urgent">请尽快添加客服微信并发送支付截图，以加速审核进度。</p><img className="payment-qr service-qr" src="/assets/customer-service-wechat.jpg" alt="古龙客服微信二维码" /><button className="button primary full" type="button" onClick={() => setRecharge(null)}>我知道了</button></>}</section></div>}
     {resubmission && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && busy !== "resubmit" && setResubmission(null)}><form className="account-resubmit-modal" onSubmit={resubmitOffline}><button className="modal-close" type="button" disabled={busy === "resubmit"} onClick={() => setResubmission(null)}><X size={19} /></button><span>RESUBMIT OFFLINE PAYMENT</span><h2>调整后重新申请</h2><p>管理员拒绝原因：<strong>{resubmission.order.reviewReason}</strong></p><label><span>本次调整说明</span><textarea required minLength={2} maxLength={500} value={resubmission.note} onChange={(event) => setResubmission({ ...resubmission, note: event.target.value })} placeholder="例如：已补发付款截图，并核对了付款金额与订单号。" /></label><div className="account-resubmit-actions"><button className="button secondary" type="button" disabled={busy === "resubmit"} onClick={() => setResubmission(null)}>取消</button><button className="button primary" disabled={busy === "resubmit"}><PaperPlaneRight size={18} /> {busy === "resubmit" ? "正在提交" : "保存并重新申请"}</button></div></form></div>}
   </main>;
 }

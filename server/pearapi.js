@@ -458,13 +458,13 @@ export async function checkPearApiFreeModels({ token, tokenChannel = "免费", f
   return { healthy, total: models.length, allAvailable: healthy === models.length, models };
 }
 
-export async function creditMonthlySubscriptionBalance({ ownerId, amountFen, source, sourceId }) {
+export async function creditMonthlySubscriptionBalance({ ownerId, amountFen, source, sourceId, kind = "monthly_subscription" }) {
   const creditFen = safeFen(amountFen);
   if (!creditFen || !ownerId || !sourceId) return { applied: false, reason: "invalid" };
   const key = `${source}:${sourceId}`;
   const wallets = await getCollection("wallets");
   const now = new Date();
-  const credit = { key, kind: "monthly_subscription", amountFen: creditFen, createdAt: now };
+  const credit = { key, kind, amountFen: creditFen, createdAt: now };
   const current = await wallets.findOne({ ownerId }, { projection: { credits: 1 } });
   if (current?.credits?.some((item) => item.key === key)) return { applied: false, reason: "already_applied" };
   let updated = current
