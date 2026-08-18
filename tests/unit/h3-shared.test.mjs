@@ -265,12 +265,13 @@ test("H3 OpenAPI publishes binding, assets, desktop tool, claim and callback con
 });
 
 test("H3 implementation keeps identity, capability, COS ownership and ledger gates together", async () => {
-  const [source, db, account, agent, review] = await Promise.all([
+  const [source, db, account, agent, review, vercel] = await Promise.all([
     readFile(new URL("../../server/h3-shared.js", import.meta.url), "utf8"),
     readFile(new URL("../../server/db.js", import.meta.url), "utf8"),
     readFile(new URL("../../src/components/AccountDashboard.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../src/components/WebAgentPage.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../server/offline-review.js", import.meta.url), "utf8"),
+    readFile(new URL("../../vercel.json", import.meta.url), "utf8"),
   ]);
   assert.match(source, /verifyActivationReceipt\(body\.activation_receipt\)[\s\S]+users[\s\S]+USER_NOT_FOUND/);
   assert.match(source, /findOneAndUpdate\(\{ status: "queued", model: H3_SHARED_MODEL, durationSeconds: \{ \$lte: maxDurationSeconds \}/);
@@ -288,4 +289,7 @@ test("H3 implementation keeps identity, capability, COS ownership and ledger gat
   assert.match(agent, /source_channel: "website"/);
   assert.match(agent, /minimax_h3_shared/);
   assert.match(review, /账户余额充值/);
+  assert.match(vercel, /"source": "\/api\/desktop\/account-bindings\/:path\*"/);
+  assert.match(vercel, /"source": "\/api\/h3\/:path\*"/);
+  assert.match(vercel, /"source": "\/api\/admin\/h3\/:path\*"/);
 });

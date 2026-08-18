@@ -33,6 +33,18 @@
       "destination": "/api/platform?_platform_path=licenses/:path*"
     },
     {
+      "source": "/api/desktop/account-bindings/:path*",
+      "destination": "/api/platform?_platform_path=desktop/account-bindings/:path*"
+    },
+    {
+      "source": "/api/h3/:path*",
+      "destination": "/api/platform?_platform_path=h3/:path*"
+    },
+    {
+      "source": "/api/admin/h3/:path*",
+      "destination": "/api/platform?_platform_path=admin/h3/:path*"
+    },
+    {
       "source": "/api/admin/activation-codes/:path*",
       "destination": "/api/platform?_platform_path=admin/activation-codes/:path*"
     },
