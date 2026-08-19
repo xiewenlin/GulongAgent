@@ -133,6 +133,25 @@ export function h3OutputExpiresAt(completedAt) {
   return new Date(completed.getTime() + H3_OUTPUT_RETENTION_MS);
 }
 
+export function normalizeH3ProgressCallback(task, metadata = {}) {
+  const progress = Math.min(99, Math.max(0, integer(metadata.progress)));
+  const reportedEstimate = Math.max(0, integer(metadata.estimated_total_seconds ?? metadata.estimatedTotalSeconds));
+  const estimatedTotalSeconds = reportedEstimate || Math.max(0, integer(task?.estimatedTotalSeconds));
+  if (estimatedTotalSeconds < 1) {
+    return {
+      error: {
+        code: "ESTIMATED_DURATION_REQUIRED",
+        message: "节点首次进度回调必须提供预计总耗时 estimated_total_seconds",
+      },
+    };
+  }
+  const reportedRemainingSeconds = integer(metadata.remaining_seconds ?? metadata.remainingSeconds, -1);
+  const remainingSeconds = reportedRemainingSeconds >= 0
+    ? reportedRemainingSeconds
+    : Math.ceil(estimatedTotalSeconds * (100 - progress) / 100);
+  return { progress, estimatedTotalSeconds, remainingSeconds };
+}
+
 function h3OutputState(task, now = new Date()) {
   if (!task?.output?.objectKey) return null;
   const expiresAt = task.output.expiresAt ? new Date(task.output.expiresAt) : h3OutputExpiresAt(task.completedAt);
@@ -1220,10 +1239,9 @@ export function registerH3SharedRoutes(app, dependencies) {
       return c.json({ ok: true, idempotent: true, task: workerCallbackTask(task) });
     }
     if (["started", "processing", "progress"].includes(status)) {
-      const progress = Math.min(99, Math.max(0, integer(metadata.progress)));
-      const estimatedTotalSeconds = Math.max(0, integer(metadata.estimated_total_seconds ?? metadata.estimatedTotalSeconds));
-      const reportedRemainingSeconds = integer(metadata.remaining_seconds ?? metadata.remainingSeconds, -1);
-      const remainingSeconds = reportedRemainingSeconds >= 0 ? reportedRemainingSeconds : estimatedTotalSeconds > 0 ? Math.ceil(estimatedTotalSeconds * (100 - progress) / 100) : 0;
+      const normalizedProgress = normalizeH3ProgressCallback(task, metadata);
+      if (normalizedProgress.error) return c.json(normalizedProgress.error, 400);
+      const { progress, estimatedTotalSeconds, remainingSeconds } = normalizedProgress;
       task = await tasks.findOneAndUpdate(
         { _id: task._id, status: { $in: ["claimed", "processing"] } },
         { $set: { status: "processing", executedByNode: executionNode, progress, ...(estimatedTotalSeconds > 0 ? { estimatedTotalSeconds } : {}), ...(remainingSeconds > 0 ? { remainingSeconds, expectedCompletedAt: new Date(now.getTime() + remainingSeconds * 1_000) } : {}), progressUpdatedAt: now, claimLeaseUntil: new Date(now.getTime() + H3_CLAIM_LEASE_MS), updatedAt: now } },

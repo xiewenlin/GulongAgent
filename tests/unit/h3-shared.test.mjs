@@ -16,6 +16,7 @@ import {
   cleanupExpiredH3Output,
   ensureH3ConversationMessages,
   normalizeH3TaskInput,
+  normalizeH3ProgressCallback,
   maskH3NodeId,
   registerH3SharedRoutes,
   reserveH3Wallet,
@@ -62,6 +63,25 @@ test("H3 callback idempotency is stable per task event status and local job", ()
   assert.equal(h3CallbackEventKey("task-1", metadata), h3CallbackEventKey("task-1", { ...metadata }));
   assert.notEqual(h3CallbackEventKey("task-1", metadata), h3CallbackEventKey("task-1", { ...metadata, local_job_id: "local-2" }));
   assert.equal(H3_ACCOUNT_BINDING_HEADER, "X-Gulong-Account-Binding");
+});
+
+test("H3 first progress callback requires an estimate and later progress reuses it", () => {
+  assert.deepEqual(
+    normalizeH3ProgressCallback({ status: "claimed" }, { status: "started", progress: 0 }),
+    {
+      error: {
+        code: "ESTIMATED_DURATION_REQUIRED",
+        message: "节点首次进度回调必须提供预计总耗时 estimated_total_seconds",
+      },
+    },
+  );
+  assert.deepEqual(
+    normalizeH3ProgressCallback(
+      { status: "processing", estimatedTotalSeconds: 900 },
+      { status: "progress", progress: 40 },
+    ),
+    { progress: 40, estimatedTotalSeconds: 900, remainingSeconds: 540 },
+  );
 });
 
 test("H3 worker task DTO excludes requester and billing identity", () => {
