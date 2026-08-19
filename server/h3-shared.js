@@ -10,12 +10,14 @@ import { localizeErrorMessage } from "../shared/error-messages.js";
 
 export const H3_ACCOUNT_BINDING_HEADER = "X-Gulong-Account-Binding";
 export const H3_SHARED_MODEL = "minimax_h3_shared";
+export const H3_OUTPUT_RETENTION_MS = 24 * 60 * 60_000;
 const H3_MAX_DURATION_SECONDS = 600;
 const H3_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 const DEFAULT_PLATFORM_ADMIN_EMAIL = "1186664388@qq.com";
 const H3_NODE_ONLINE_WINDOW_MS = 3 * 60_000;
 const CHINA_UTC_OFFSET_MS = 8 * 60 * 60_000;
 const NATURAL_DAY_MS = 24 * 60 * 60_000;
+const h3CleanupThrottle = new Map();
 
 function integer(value, fallback = 0) {
   const parsed = Number(value);
@@ -125,7 +127,37 @@ function objectBytes(head) {
   return integer(objectHeader(head, "content-length") || head?.ContentLength || head?.contentLength, 0);
 }
 
-function publicTask(task, { includePrompt = true, outputUrl = null } = {}) {
+export function h3OutputExpiresAt(completedAt) {
+  const completed = new Date(completedAt);
+  if (Number.isNaN(completed.getTime())) return null;
+  return new Date(completed.getTime() + H3_OUTPUT_RETENTION_MS);
+}
+
+function h3OutputState(task, now = new Date()) {
+  if (!task?.output?.objectKey) return null;
+  const expiresAt = task.output.expiresAt ? new Date(task.output.expiresAt) : h3OutputExpiresAt(task.completedAt);
+  const expired = Boolean(task.output.deletedAt) || !expiresAt || expiresAt <= now;
+  return { expiresAt, expired, status: expired ? "expired" : "available" };
+}
+
+function publicH3Output(task, now = new Date()) {
+  const state = h3OutputState(task, now);
+  if (!state) return null;
+  const base = `/api/h3/tasks/${task._id}/output`;
+  return {
+    sha256: task.output.sha256 || null,
+    bytes: integer(task.output.bytes),
+    filename: task.output.filename || "MiniMaxH3-视频.mp4",
+    status: state.status,
+    expiresAt: state.expiresAt,
+    deletedAt: task.output.deletedAt || null,
+    cleanupStatus: task.output.cleanupStatus || (state.expired ? "pending" : "scheduled"),
+    cleanupAttempts: integer(task.output.cleanupAttempts),
+    ...(state.expired ? {} : { previewPath: `${base}?disposition=inline`, downloadPath: `${base}?disposition=attachment` }),
+  };
+}
+
+function publicTask(task, { includePrompt = true } = {}) {
   return {
     id: task._id.toString(),
     orderNo: task.orderNo,
@@ -148,7 +180,10 @@ function publicTask(task, { includePrompt = true, outputUrl = null } = {}) {
     assignee: task.assigneeUserId ? { userId: task.assigneeUserId.toString(), email: task.assigneeEmailSnapshot || null, displayName: task.assigneeDisplayNameSnapshot || null } : null,
     claimedByNode: publicNode(task.claimedByNode),
     executedByNode: publicNode(task.executedByNode),
-    output: task.output ? { ...task.output, ...(outputUrl ? { url: outputUrl } : {}) } : null,
+    conversationId: task.conversationId?.toString?.() || task.conversationId || null,
+    requestMessageId: task.requestMessageId?.toString?.() || task.requestMessageId || null,
+    resultMessageId: task.resultMessageId?.toString?.() || task.resultMessageId || null,
+    output: publicH3Output(task),
     error: task.error ? { ...task.error, message: localizeErrorMessage(task.error.message, "共享节点任务处理失败") } : null,
     createdAt: task.createdAt,
     claimedAt: task.claimedAt || null,
@@ -158,6 +193,144 @@ function publicTask(task, { includePrompt = true, outputUrl = null } = {}) {
     refundedAt: task.refundedAt || null,
     retryCount: integer(task.retryCount),
   };
+}
+
+function publicH3ConversationMessage(message, now = new Date()) {
+  const expiresAt = message.video?.expiresAt ? new Date(message.video.expiresAt) : null;
+  const expired = Boolean(message.video?.deletedAt) || !expiresAt || expiresAt <= now;
+  const taskId = message.h3TaskId?.toString?.() || message.h3TaskId;
+  return {
+    id: message._id.toString(),
+    role: "assistant",
+    content: message.content || "MiniMaxH3共享节点视频已生成。",
+    model: H3_SHARED_MODEL,
+    createdAt: message.createdAt,
+    video: {
+      taskId,
+      filename: message.video?.filename || "MiniMaxH3-视频.mp4",
+      bytes: integer(message.video?.bytes),
+      expiresAt,
+      status: expired ? "expired" : "available",
+      deletedAt: message.video?.deletedAt || null,
+      ...(expired ? {} : {
+        previewPath: `/api/h3/tasks/${taskId}/output?disposition=inline`,
+        downloadPath: `/api/h3/tasks/${taskId}/output?disposition=attachment`,
+      }),
+    },
+  };
+}
+
+function publicH3ConversationTask(task) {
+  return {
+    id: task._id.toString(),
+    orderNo: task.orderNo,
+    status: task.status,
+    progress: Math.min(100, Math.max(0, integer(task.progress, task.status === "completed" ? 100 : 0))),
+    estimatedTotalSeconds: Math.max(0, integer(task.estimatedTotalSeconds)),
+    remainingSeconds: Math.max(0, integer(task.remainingSeconds)),
+    expectedCompletedAt: task.expectedCompletedAt || null,
+    progressUpdatedAt: task.progressUpdatedAt || task.updatedAt || null,
+    createdAt: task.createdAt,
+  };
+}
+
+export async function ensureH3ConversationMessages({ getCollection, task, now = new Date() }) {
+  if (!task || task.sourceChannel !== "website" || !task.conversationId || !task.requestMessageId || !task.resultMessageId) return { written: false };
+  const messages = await getCollection("agentMessages");
+  const upsertMessageOnce = async (filter, update) => {
+    try { return await messages.updateOne(filter, update, { upsert: true }); }
+    catch (error) {
+      if (error?.code !== 11000) throw error;
+      return messages.updateOne(filter, { $set: { updatedAt: now } });
+    }
+  };
+  await upsertMessageOnce({ _id: task.requestMessageId }, { $setOnInsert: { _id: task.requestMessageId, ownerId: task.requesterUserId, conversationId: task.conversationId, requestId: task.orderNo, h3TaskId: task._id, role: "user", content: task.prompt, modality: "video", model: H3_SHARED_MODEL, createdAt: task.createdAt || now } });
+  if (task.status !== "completed" || !task.output?.objectKey) return { written: false };
+  const expiresAt = task.output.expiresAt ? new Date(task.output.expiresAt) : h3OutputExpiresAt(task.completedAt || now);
+  if (!task.output.expiresAt) {
+    await (await getCollection("h3SharedTasks")).updateOne({ _id: task._id, "output.expiresAt": { $exists: false } }, { $set: { "output.expiresAt": expiresAt, "output.status": expiresAt <= now ? "expired" : "available", "output.cleanupStatus": "pending", updatedAt: now } });
+  }
+  const result = await upsertMessageOnce(
+    { _id: task.resultMessageId },
+    { $setOnInsert: { _id: task.resultMessageId, ownerId: task.requesterUserId, conversationId: task.conversationId, requestId: task.orderNo, h3TaskId: task._id, role: "assistant", content: "MiniMaxH3共享节点视频已生成。", modality: "video", model: H3_SHARED_MODEL, video: { objectKey: task.output.objectKey, filename: task.output.filename, bytes: task.output.bytes, sha256: task.output.sha256, expiresAt, status: expiresAt <= now ? "expired" : "available" }, createdAt: task.completedAt || now }, $set: { updatedAt: now } },
+  );
+  await (await getCollection("h3SharedTasks")).updateOne({ _id: task._id }, { $set: { resultMessageWrittenAt: now, updatedAt: now } });
+  return { written: Boolean(result?.upsertedCount), expiresAt };
+}
+
+export async function backfillCompletedH3ConversationMessages({ getCollection, ownerId = null, limit = 50, now = new Date() }) {
+  const tasksCollection = await getCollection("h3SharedTasks");
+  const filter = { sourceChannel: "website", status: "completed", "output.objectKey": { $exists: true }, ...(ownerId ? { requesterUserId: ownerId instanceof ObjectId ? ownerId : new ObjectId(ownerId) } : {}) };
+  const tasks = await tasksCollection.find(filter).sort({ completedAt: -1, _id: -1 }).limit(Math.max(1, Math.min(200, integer(limit, 50)))).toArray();
+  const messages = await getCollection("agentMessages");
+  let repaired = 0;
+  for (const original of tasks) {
+    let task = original;
+    const changes = {};
+    if (!task.conversationId) {
+      const from = new Date(new Date(task.createdAt || task.completedAt).getTime() - 15 * 60_000);
+      const to = new Date(new Date(task.createdAt || task.completedAt).getTime() + 15 * 60_000);
+      const candidates = await messages.find({ ownerId: task.requesterUserId, role: "user", content: task.prompt, createdAt: { $gte: from, $lte: to }, conversationId: { $exists: true } }).sort({ createdAt: 1 }).limit(3).toArray();
+      const conversationIds = [...new Map(candidates.map((item) => [item.conversationId?.toString?.(), item.conversationId]).filter(([key]) => key)).values()];
+      changes.conversationId = conversationIds.length === 1 ? conversationIds[0] : new ObjectId();
+      changes.conversationAssociation = conversationIds.length === 1 ? "exact_owner_prompt_window" : "owner_isolated_recovery";
+    }
+    if (!task.requestMessageId) changes.requestMessageId = new ObjectId();
+    if (!task.resultMessageId) changes.resultMessageId = new ObjectId();
+    if (!task.output?.expiresAt) {
+      changes["output.expiresAt"] = h3OutputExpiresAt(task.completedAt || now);
+      changes["output.status"] = changes["output.expiresAt"] <= now ? "expired" : "available";
+      changes["output.cleanupStatus"] = "pending";
+    }
+    if (Object.keys(changes).length) {
+      const guards = {};
+      if (!task.conversationId) guards.conversationId = { $exists: false };
+      if (!task.requestMessageId) guards.requestMessageId = { $exists: false };
+      if (!task.resultMessageId) guards.resultMessageId = { $exists: false };
+      if (!task.output?.expiresAt) guards["output.expiresAt"] = { $exists: false };
+      const updated = await tasksCollection.findOneAndUpdate({ _id: task._id, ...guards }, { $set: { ...changes, backfilledAt: now, updatedAt: now } }, { returnDocument: "after" });
+      task = updated || (tasksCollection.findOne ? await tasksCollection.findOne({ _id: task._id }) : null) || { ...task, ...Object.fromEntries(Object.entries(changes).filter(([key]) => !key.includes("."))), output: { ...task.output, expiresAt: changes["output.expiresAt"] || task.output?.expiresAt, status: changes["output.status"] || task.output?.status, cleanupStatus: changes["output.cleanupStatus"] || task.output?.cleanupStatus } };
+    }
+    const ensured = await ensureH3ConversationMessages({ getCollection, task, now });
+    if (ensured.written || Object.keys(changes).length) repaired += 1;
+  }
+  return { scanned: tasks.length, repaired };
+}
+
+export async function cleanupExpiredH3Output({ getCollection, task, removeObject, now = new Date() }) {
+  const state = h3OutputState(task, now);
+  if (!state?.expired || task.output?.deletedAt || !task.output?.objectKey) return { cleaned: false, skipped: true };
+  const tasks = await getCollection("h3SharedTasks");
+  const leaseUntil = new Date(now.getTime() + 5 * 60_000);
+  const locked = await tasks.findOneAndUpdate(
+    { _id: task._id, "output.objectKey": task.output.objectKey, "output.deletedAt": { $exists: false }, $or: [{ "output.cleanupLeaseUntil": { $exists: false } }, { "output.cleanupLeaseUntil": { $lte: now } }] },
+    { $set: { "output.cleanupStatus": "deleting", "output.cleanupLeaseUntil": leaseUntil, updatedAt: now }, $inc: { "output.cleanupAttempts": 1 } },
+    { returnDocument: "after" },
+  );
+  if (!locked) return { cleaned: false, skipped: true };
+  try {
+    await removeObject(task.output.objectKey);
+    const deletedAt = new Date();
+    await tasks.updateOne({ _id: task._id, "output.objectKey": task.output.objectKey }, { $set: { "output.status": "expired", "output.cleanupStatus": "deleted", "output.deletedAt": deletedAt, updatedAt: deletedAt }, $unset: { "output.cleanupLeaseUntil": "", "output.cleanupError": "", "output.cleanupRetryAt": "" } });
+    await (await getCollection("agentMessages")).updateMany({ h3TaskId: task._id, role: "assistant" }, { $set: { "video.status": "expired", "video.deletedAt": deletedAt, updatedAt: deletedAt }, $unset: { "video.objectKey": "" } });
+    return { cleaned: true, deletedAt };
+  } catch (error) {
+    const attempts = integer(locked.output?.cleanupAttempts, integer(task.output?.cleanupAttempts) + 1);
+    const retryAt = new Date(now.getTime() + Math.min(6 * 60 * 60_000, 5 * 60_000 * (2 ** Math.min(6, attempts - 1))));
+    await tasks.updateOne({ _id: task._id, "output.objectKey": task.output.objectKey }, { $set: { "output.status": "expired", "output.cleanupStatus": "retry", "output.cleanupError": localizeErrorMessage(error, "COS 视频删除失败").slice(0, 300), "output.cleanupRetryAt": retryAt, updatedAt: new Date() }, $unset: { "output.cleanupLeaseUntil": "" } });
+    return { cleaned: false, retry: true, retryAt };
+  }
+}
+
+export async function cleanupExpiredH3Outputs({ getCollection, removeObject, ownerId = null, now = new Date(), limit = 100 }) {
+  const tasks = await (await getCollection("h3SharedTasks")).find({ status: "completed", ...(ownerId ? { requesterUserId: ownerId instanceof ObjectId ? ownerId : new ObjectId(ownerId) } : {}), "output.objectKey": { $exists: true }, "output.deletedAt": { $exists: false }, "output.expiresAt": { $lte: now }, $or: [{ "output.cleanupRetryAt": { $exists: false } }, { "output.cleanupRetryAt": { $lte: now } }] }).sort({ "output.expiresAt": 1 }).limit(Math.max(1, Math.min(200, integer(limit, 100)))).toArray();
+  const summary = { scanned: tasks.length, cleaned: 0, retry: 0 };
+  for (const task of tasks) {
+    const result = await cleanupExpiredH3Output({ getCollection, task, removeObject, now });
+    if (result.cleaned) summary.cleaned += 1;
+    if (result.retry) summary.retry += 1;
+  }
+  return summary;
 }
 
 function taskBilling(task, wallet) {
@@ -179,6 +352,14 @@ export function toH3WorkerTask(task, { assets = [], outputUpload = null } = {}) 
     audioCount: task.audioCount,
     assets,
     output_upload: outputUpload,
+    progress_callback: {
+      method: "POST",
+      url: "/api/h3/tasks/callback",
+      content_type: "multipart/form-data",
+      first_status: "started",
+      first_required_fields: ["estimated_total_seconds"],
+      progress_fields: ["progress", "remaining_seconds"],
+    },
   };
 }
 
@@ -188,6 +369,9 @@ function workerCallbackTask(task) {
     orderNo: task.orderNo,
     status: task.status,
     progress: integer(task.progress),
+    estimated_total_seconds: Math.max(0, integer(task.estimatedTotalSeconds)),
+    remaining_seconds: Math.max(0, integer(task.remainingSeconds)),
+    expected_completed_at: task.expectedCompletedAt || null,
     completedAt: task.completedAt || null,
     failedAt: task.failedAt || null,
     cancelledAt: task.cancelledAt || null,
@@ -554,6 +738,9 @@ function routeError(c, error) {
 export function registerH3SharedRoutes(app, dependencies) {
   const getCollection = dependencies.getCollection || databaseCollection;
   const enforceRateLimit = dependencies.enforceRateLimit || databaseRateLimit;
+  const issueDownloadUrl = dependencies.createPresignedDownloadUrl || createPresignedDownloadUrl;
+  const inspectCosObject = dependencies.headObject || headObject;
+  const removeCosObject = dependencies.deleteObject || deleteObject;
   const queueCoordinator = dependencies.queueCoordinator || createH3QueueCoordinator({ getCollection, model: H3_SHARED_MODEL });
   const { authenticate, requireAdmin, requireTrustedMutation, verifyActivationReceipt } = dependencies;
 
@@ -590,7 +777,7 @@ export function registerH3SharedRoutes(app, dependencies) {
 
   function claimAssets(assets) {
     const expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
-    const issue = (asset) => ({ ...asset, download_url: createPresignedDownloadUrl(asset.objectKey, { expires: 15 * 60, filename: asset.filename }), download_expires_at: expiresAt });
+    const issue = (asset) => ({ ...asset, download_url: issueDownloadUrl(asset.objectKey, { expires: 15 * 60, filename: asset.filename }), download_expires_at: expiresAt });
     return { images: (assets?.images || []).map(issue), videos: (assets?.videos || []).map(issue), audio: (assets?.audio || []).map(issue) };
   }
 
@@ -711,7 +898,7 @@ export function registerH3SharedRoutes(app, dependencies) {
     const asset = await uploads.findOne({ _id: new ObjectId(c.req.param("id")), ownerId: new ObjectId(auth.user.id), status: "uploading", expiresAt: { $gt: new Date() } });
     if (!asset) return c.json({ code: "ASSET_NOT_FOUND", message: "H3 素材上传不存在、已完成或已过期" }, 404);
     let head;
-    try { head = await headObject(asset.objectKey); }
+    try { head = await inspectCosObject(asset.objectKey); }
     catch { return c.json({ code: "ASSET_OBJECT_NOT_FOUND", message: "腾讯云 COS 中尚未找到素材" }, 409); }
     const matches = objectBytes(head) === asset.bytes
       && objectHeader(head, "x-cos-meta-sha256").trim().toUpperCase() === asset.sha256
@@ -719,7 +906,7 @@ export function registerH3SharedRoutes(app, dependencies) {
       && objectHeader(head, "x-cos-meta-owner-id").trim() === asset.ownerId.toString()
       && objectHeader(head, "x-cos-meta-h3-asset-id").trim() === asset._id.toString();
     if (!matches) {
-      await Promise.allSettled([deleteObject(asset.objectKey), uploads.updateOne({ _id: asset._id }, { $set: { status: "rejected", error: "ASSET_RECEIPT_MISMATCH", updatedAt: new Date() } })]);
+      await Promise.allSettled([removeCosObject(asset.objectKey), uploads.updateOne({ _id: asset._id }, { $set: { status: "rejected", error: "ASSET_RECEIPT_MISMATCH", updatedAt: new Date() } })]);
       return c.json({ code: "ASSET_RECEIPT_MISMATCH", message: "素材对象的大小、摘要或归属校验失败" }, 409);
     }
     const now = new Date();
@@ -743,16 +930,24 @@ export function registerH3SharedRoutes(app, dependencies) {
       const tasks = await getCollection("h3SharedTasks");
       const existing = await tasks.findOne({ idempotencyKey });
       if (existing) {
+        await ensureH3ConversationMessages({ getCollection, task: existing });
         const wallet = await (await getCollection("wallets")).findOne({ ownerId: existing.requesterUserId });
         return c.json({ task: publicTask(existing), billing: taskBilling(existing, wallet), idempotent: true });
       }
       const now = new Date();
       const orderNo = orderNumber();
       const taskId = new ObjectId();
+      const requestedConversationId = String(body.conversation_id || body.conversationId || "").trim();
+      const conversation = input.sourceChannel === "website" ? {
+        conversationId: ObjectId.isValid(requestedConversationId) ? new ObjectId(requestedConversationId) : new ObjectId(),
+        requestMessageId: new ObjectId(),
+        resultMessageId: new ObjectId(),
+        conversationAssociation: ObjectId.isValid(requestedConversationId) ? "client_supplied" : "created_with_task",
+      } : {};
       const chargeKey = `h3:charge:${orderNo}:0`;
       const exempt = auth.user.role === "admin";
       const task = {
-        _id: taskId, orderNo, idempotencyKey, requesterUserId: ownerId, requesterEmailSnapshot: auth.user.email || null, requesterRoleSnapshot: auth.user.role || "user", ...input,
+        _id: taskId, orderNo, idempotencyKey, requesterUserId: ownerId, requesterEmailSnapshot: auth.user.email || null, requesterRoleSnapshot: auth.user.role || "user", ...input, ...conversation,
         ...(exempt ? {} : { walletLedgerId: chargeKey, activeChargeKey: chargeKey }),
         status: exempt ? "queued" : "reserving", chargeStatus: exempt ? "exempt" : "reserving", revenueStatus: exempt ? "exempt" : "pending",
         ...(exempt ? { queuedAt: now } : {}), retryCount: 0, createdAt: now, updatedAt: now,
@@ -761,9 +956,11 @@ export function registerH3SharedRoutes(app, dependencies) {
       catch (error) {
         if (error?.code !== 11000) throw error;
         const duplicate = await tasks.findOne({ idempotencyKey });
+        await ensureH3ConversationMessages({ getCollection, task: duplicate });
         const wallet = await (await getCollection("wallets")).findOne({ ownerId: duplicate.requesterUserId });
         return c.json({ task: publicTask(duplicate), billing: taskBilling(duplicate, wallet), idempotent: true });
       }
+      await ensureH3ConversationMessages({ getCollection, task });
       if (exempt) {
         const wallet = await (await getCollection("wallets")).findOne({ ownerId });
         await audit(await getCollection("h3TaskAudits"), "created", { taskId, orderNo, actorUserId: ownerId, sourceChannel: input.sourceChannel, priceFen: input.priceFen, billingExempt: true });
@@ -789,14 +986,65 @@ export function registerH3SharedRoutes(app, dependencies) {
     return c.json({ tasks: tasks.map((task) => publicTask(task)) });
   });
 
+  app.get("/api/h3/conversations/recent", async (c) => {
+    const auth = await authenticate(c, { scopes: ["tasks:read"] }); if (auth.error) return auth.error;
+    c.header("Cache-Control", "private, no-store, max-age=0");
+    const ownerId = new ObjectId(auth.user.id);
+    await backfillCompletedH3ConversationMessages({ getCollection, ownerId, limit: 50 });
+    const cleanupKey = ownerId.toString();
+    if (!h3CleanupThrottle.has(cleanupKey) || Date.now() - h3CleanupThrottle.get(cleanupKey) >= 60_000) {
+      h3CleanupThrottle.set(cleanupKey, Date.now());
+      if (h3CleanupThrottle.size > 2_000) h3CleanupThrottle.delete(h3CleanupThrottle.keys().next().value);
+      await cleanupExpiredH3Outputs({ getCollection, removeObject: removeCosObject, ownerId, limit: 20 });
+    }
+    const messages = await getCollection("agentMessages");
+    const requested = String(c.req.query("conversation_id") || "").trim();
+    let conversationId = ObjectId.isValid(requested) ? new ObjectId(requested) : null;
+    if (!conversationId) {
+      const latest = await messages.find({ ownerId, role: "assistant", model: H3_SHARED_MODEL, h3TaskId: { $exists: true } }).sort({ createdAt: -1 }).limit(1).toArray();
+      conversationId = latest[0]?.conversationId || null;
+    }
+    if (!conversationId) return c.json({ conversationId: null, messages: [] });
+    const taskCollection = await getCollection("h3SharedTasks");
+    const readConversation = (selectedConversationId) => Promise.all([
+      messages.find({ ownerId, conversationId: selectedConversationId, role: "assistant", model: H3_SHARED_MODEL, h3TaskId: { $exists: true } }).sort({ createdAt: 1 }).limit(100).toArray(),
+      taskCollection.find({ requesterUserId: ownerId, conversationId: selectedConversationId, sourceChannel: "website" }).sort({ createdAt: 1 }).limit(100).toArray(),
+    ]);
+    let [records, conversationTasks] = await readConversation(conversationId);
+    if (!records.length && !conversationTasks.length && ObjectId.isValid(requested)) {
+      const latest = await messages.find({ ownerId, role: "assistant", model: H3_SHARED_MODEL, h3TaskId: { $exists: true } }).sort({ createdAt: -1 }).limit(1).toArray();
+      if (latest[0]?.conversationId) {
+        conversationId = latest[0].conversationId;
+        [records, conversationTasks] = await readConversation(conversationId);
+      }
+    }
+    return c.json({ conversationId: conversationId.toString(), messages: records.map((message) => publicH3ConversationMessage(message)), tasks: conversationTasks.map(publicH3ConversationTask) });
+  });
+
   app.get("/api/h3/tasks/:id", async (c) => {
     const auth = await authenticate(c, { scopes: ["tasks:read"] }); if (auth.error) return auth.error;
     const id = c.req.param("id");
     const filter = ObjectId.isValid(id) ? { _id: new ObjectId(id) } : { orderNo: id };
     const task = await (await getCollection("h3SharedTasks")).findOne({ ...filter, ...(auth.user.role === "admin" ? {} : { requesterUserId: new ObjectId(auth.user.id) }) });
     if (!task) return c.json({ code: "TASK_NOT_FOUND", message: "共享节点任务不存在" }, 404);
-    const outputUrl = task.output?.objectKey ? createPresignedDownloadUrl(task.output.objectKey, { filename: task.output.filename }) : null;
-    return c.json({ task: publicTask(task, { outputUrl }) });
+    return c.json({ task: publicTask(task) });
+  });
+
+  app.get("/api/h3/tasks/:id/output", async (c) => {
+    const auth = await authenticate(c, { scopes: ["tasks:read"] }); if (auth.error) return auth.error;
+    c.header("Cache-Control", "private, no-store, max-age=0");
+    const id = c.req.param("id");
+    const task = await (await getCollection("h3SharedTasks")).findOne({ ...(ObjectId.isValid(id) ? { _id: new ObjectId(id) } : { orderNo: id }), ...(auth.user.role === "admin" ? {} : { requesterUserId: new ObjectId(auth.user.id) }) });
+    if (!task?.output?.objectKey) return c.json({ code: "OUTPUT_NOT_FOUND", message: "视频不存在或无权访问" }, 404);
+    const state = h3OutputState(task);
+    if (state.expired) {
+      await cleanupExpiredH3Output({ getCollection, task, removeObject: removeCosObject }).catch(() => {});
+      return c.json({ code: "OUTPUT_EXPIRED", message: "视频已过期并删除", expiresAt: state.expiresAt }, 410);
+    }
+    const remainingSeconds = Math.max(1, Math.floor((state.expiresAt.getTime() - Date.now()) / 1_000));
+    const disposition = c.req.query("disposition") === "attachment" ? "attachment" : "inline";
+    const url = issueDownloadUrl(task.output.objectKey, { expires: Math.min(5 * 60, remainingSeconds), ...(disposition === "attachment" ? { filename: task.output.filename } : {}) });
+    return c.redirect(url, 302);
   });
 
   app.get("/api/v1/desktop/agent/tools/minimax-h3-shared", async (c) => {
@@ -967,8 +1215,20 @@ export function registerH3SharedRoutes(app, dependencies) {
     const heartbeat = { nodeName: executionNode.nodeName, lastSeenAt: now, lastCallbackAt: now, queueStatus: ["started", "processing", "progress"].includes(status) ? "processing" : "idle", updatedAt: now };
     if (["completed", "succeeded"].includes(status)) heartbeat.lastCompletedAt = now;
     await (await getCollection("nodeAccountBindings")).updateOne({ _id: auth.binding._id, userId: auth.user._id, status: "active" }, { $set: heartbeat });
+    if (["completed", "succeeded"].includes(status) && task.status === "completed") {
+      await ensureH3ConversationMessages({ getCollection, task, now });
+      return c.json({ ok: true, idempotent: true, task: workerCallbackTask(task) });
+    }
     if (["started", "processing", "progress"].includes(status)) {
-      task = await tasks.findOneAndUpdate({ _id: task._id, status: { $in: ["claimed", "processing"] } }, { $set: { status: "processing", executedByNode: executionNode, progress: Math.min(99, Math.max(0, integer(metadata.progress))), claimLeaseUntil: new Date(now.getTime() + H3_CLAIM_LEASE_MS), updatedAt: now } }, { returnDocument: "after" }) || task;
+      const progress = Math.min(99, Math.max(0, integer(metadata.progress)));
+      const estimatedTotalSeconds = Math.max(0, integer(metadata.estimated_total_seconds ?? metadata.estimatedTotalSeconds));
+      const reportedRemainingSeconds = integer(metadata.remaining_seconds ?? metadata.remainingSeconds, -1);
+      const remainingSeconds = reportedRemainingSeconds >= 0 ? reportedRemainingSeconds : estimatedTotalSeconds > 0 ? Math.ceil(estimatedTotalSeconds * (100 - progress) / 100) : 0;
+      task = await tasks.findOneAndUpdate(
+        { _id: task._id, status: { $in: ["claimed", "processing"] } },
+        { $set: { status: "processing", executedByNode: executionNode, progress, ...(estimatedTotalSeconds > 0 ? { estimatedTotalSeconds } : {}), ...(remainingSeconds > 0 ? { remainingSeconds, expectedCompletedAt: new Date(now.getTime() + remainingSeconds * 1_000) } : {}), progressUpdatedAt: now, claimLeaseUntil: new Date(now.getTime() + H3_CLAIM_LEASE_MS), updatedAt: now } },
+        { returnDocument: "after" },
+      ) || task;
       return c.json({ ok: true, idempotent: H3_TERMINAL_STATUSES.has(task.status), task: workerCallbackTask(task) });
     }
     if (["completed", "succeeded"].includes(status)) {
@@ -985,7 +1245,7 @@ export function registerH3SharedRoutes(app, dependencies) {
       if (!grant) return c.json({ code: "OUTPUT_UPLOAD_GRANT_NOT_FOUND", message: "输出直传票据不存在或不属于当前任务" }, 409);
       if (grant.status !== "completed" && grant.expiresAt <= now) return c.json({ code: "OUTPUT_UPLOAD_GRANT_EXPIRED", message: "输出直传票据已过期，请重新领取任务" }, 409);
       let head;
-      try { head = await headObject(objectKey); }
+      try { head = await inspectCosObject(objectKey); }
       catch { return c.json({ code: "OUTPUT_OBJECT_NOT_FOUND", message: "腾讯云 COS 中尚未找到输出视频" }, 409); }
       const actualBytes = objectBytes(head);
       const storedSha256 = objectHeader(head, "x-cos-meta-sha256").trim().toUpperCase();
@@ -993,18 +1253,19 @@ export function registerH3SharedRoutes(app, dependencies) {
       const storedTaskId = objectHeader(head, "x-cos-meta-h3-task-id").trim();
       const storedGrantId = objectHeader(head, "x-cos-meta-h3-upload-grant").trim();
       if (actualBytes !== bytes || storedBytes !== bytes || storedSha256 !== sha256 || storedTaskId !== task._id.toString() || storedGrantId !== grant.grantId) {
-        await Promise.allSettled([deleteObject(objectKey), uploads.updateOne({ _id: grant._id }, { $set: { status: "rejected", error: "OUTPUT_RECEIPT_MISMATCH", rejectedAt: now, updatedAt: now } })]);
+        await Promise.allSettled([removeCosObject(objectKey), uploads.updateOne({ _id: grant._id }, { $set: { status: "rejected", error: "OUTPUT_RECEIPT_MISMATCH", rejectedAt: now, updatedAt: now } })]);
         return c.json({ code: "OUTPUT_RECEIPT_MISMATCH", message: "COS 输出对象的大小、SHA-256 或任务归属校验失败" }, 409);
       }
       await uploads.updateOne({ _id: grant._id, status: "issued" }, { $set: { status: "completed", sha256, bytes, filename, completedByBindingId: auth.binding._id, completedByNodeId: auth.binding.nodeId, completedAt: now, updatedAt: now }, $unset: { expiresAt: "" } });
       const completed = await tasks.findOneAndUpdate(
         { _id: task._id, status: { $in: ["claimed", "processing"] } },
-        { $set: { status: "completed", chargeStatus: task.chargeStatus === "exempt" ? "exempt" : "settled", executedByNode: executionNode, assigneeUserId: auth.user._id, assigneeEmailSnapshot: auth.user.email || auth.binding.emailSnapshot, assigneeDisplayNameSnapshot: auth.user.displayName || auth.user.username || null, output: { sha256, bytes, filename, objectKey, uploadGrantId: grant.grantId }, elapsedSeconds: Math.max(0, Number(metadata.elapsed_seconds || 0)), completedAt: now, updatedAt: now } },
+        { $set: { status: "completed", progress: 100, remainingSeconds: 0, progressUpdatedAt: now, chargeStatus: task.chargeStatus === "exempt" ? "exempt" : "settled", executedByNode: executionNode, assigneeUserId: auth.user._id, assigneeEmailSnapshot: auth.user.email || auth.binding.emailSnapshot, assigneeDisplayNameSnapshot: auth.user.displayName || auth.user.username || null, output: { sha256, bytes, filename, objectKey, uploadGrantId: grant.grantId, expiresAt: h3OutputExpiresAt(now), status: "available", cleanupStatus: "pending", cleanupAttempts: 0 }, elapsedSeconds: Math.max(0, Number(metadata.elapsed_seconds || 0)), completedAt: now, updatedAt: now } },
         { returnDocument: "after" },
       );
       task = completed || await tasks.findOne({ _id: task._id });
       if (task.status === "completed" && task.chargeStatus !== "exempt") await (await getCollection("h3WalletLedger")).updateOne({ ledgerKey: task.activeChargeKey }, { $set: { status: "settled", settledAt: task.completedAt || now, updatedAt: now } });
       if (task.status === "completed") task = await settleH3Revenue({ getCollection, task, executorUserId: task.assigneeUserId || auth.user._id });
+      if (task.status === "completed") await ensureH3ConversationMessages({ getCollection, task, now });
       await (await getCollection("nodeAccountBindings")).updateOne({ _id: auth.binding._id }, { $unset: { nextClaimAt: "" }, $set: { queueStatus: "idle", updatedAt: new Date() } });
       await audit(await getCollection("h3TaskAudits"), completed ? "completed" : "callback_replayed", { taskId: task._id, orderNo: task.orderNo, actorUserId: auth.user._id, bindingId: auth.binding._id, nodeId: auth.binding.nodeId, eventKey });
       return c.json({ ok: true, idempotent: !completed, task: workerCallbackTask(task) });
@@ -1046,8 +1307,7 @@ export function registerH3SharedRoutes(app, dependencies) {
     const task = await (await getCollection("h3SharedTasks")).findOne(ObjectId.isValid(id) ? { _id: new ObjectId(id) } : { orderNo: id });
     if (!task) return c.json({ code: "TASK_NOT_FOUND", message: "共享节点任务不存在" }, 404);
     const [callbacks, audits] = await Promise.all([(await getCollection("h3TaskCallbacks")).find({ taskId: task._id }).sort({ createdAt: 1 }).toArray(), (await getCollection("h3TaskAudits")).find({ taskId: task._id }).sort({ createdAt: 1 }).toArray()]);
-    const outputUrl = task.output?.objectKey ? createPresignedDownloadUrl(task.output.objectKey, { filename: task.output.filename }) : null;
-    return c.json({ task: publicTask(task, { outputUrl }), callbacks: callbacks.map((item) => ({ id: item._id.toString(), status: item.status, event: item.event, localJobId: item.localJobId, createdAt: item.createdAt })), audits: audits.map((item) => ({ id: item._id.toString(), event: item.event, createdAt: item.createdAt })) });
+    return c.json({ task: publicTask(task), callbacks: callbacks.map((item) => ({ id: item._id.toString(), status: item.status, event: item.event, localJobId: item.localJobId, createdAt: item.createdAt })), audits: audits.map((item) => ({ id: item._id.toString(), event: item.event, createdAt: item.createdAt })) });
   });
 
   app.post("/api/admin/h3/tasks/:id/cancel", async (c) => {
@@ -1093,6 +1353,16 @@ export function registerH3SharedRoutes(app, dependencies) {
     return c.json({ task: publicTask(queued || await tasks.findOne({ _id: task._id })) });
   });
 
+  app.get("/api/cron/h3-output-cleanup", async (c) => {
+    const cronSecret = String(process.env.CRON_SECRET || "").trim();
+    if (!cronSecret) return c.json({ code: "CRON_NOT_CONFIGURED", message: "H3 视频清理任务尚未配置" }, 503);
+    if (c.req.header("authorization") !== `Bearer ${cronSecret}`) return c.json({ code: "UNAUTHORIZED", message: "无权执行 H3 视频清理任务" }, 401);
+    c.header("Cache-Control", "private, no-store, max-age=0");
+    const backfill = await backfillCompletedH3ConversationMessages({ getCollection, limit: 200 });
+    const cleanup = await cleanupExpiredH3Outputs({ getCollection, removeObject: removeCosObject, limit: 200 });
+    return c.json({ ok: true, backfill, cleanup, completedAt: new Date().toISOString() });
+  });
+
   app.openAPIRegistry.registerComponent("securitySchemes", "accountBinding", { type: "apiKey", in: "header", name: H3_ACCOUNT_BINDING_HEADER, description: "桌面端账号绑定时签发的可撤销高熵令牌；服务端仅保存哈希。" });
   const errorSchema = z.object({ code: z.string(), message: z.string() });
   const bindingSuccessSchema = z.object({ ok: z.literal(true), binding_token: z.string(), binding: z.object({ id: z.string(), email: z.email(), user_id: z.string(), display_name: z.string(), node_id: z.string(), node_name: z.string(), app_version: z.string(), verified_at: z.string() }) });
@@ -1105,14 +1375,17 @@ export function registerH3SharedRoutes(app, dependencies) {
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/account/earnings/summary", tags: ["Account"], summary: "用户后台读取自己的共享节点收益", description: "使用官网登录会话或账户 API Key，仅返回当前账户；网页端 node_id 已脱敏。", responses: { 200: { description: "账户收益和脱敏设备列表", content: { "application/json": { schema: earningsSummarySchema } } }, 401: { description: "未登录" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/assets/presign", tags: ["MiniMax H3 Shared Nodes"], summary: "为输入素材签发账号专属 COS 直传票据", request: { body: { required: true, content: { "application/json": { schema: z.object({ kind: z.enum(["image", "video", "audio"]), filename: z.string(), content_type: z.string(), bytes: z.number().int().positive(), sha256: z.string().regex(/^[A-Fa-f0-9]{64}$/) }) } } } }, responses: { 201: { description: "返回 PUT URL、固定 headers、asset_id 与 object_key" }, 409: { description: "COS 回执不匹配" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/assets/{id}/complete", tags: ["MiniMax H3 Shared Nodes"], summary: "校验并完成 H3 输入素材上传", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "返回可用于任务 assets manifest 的素材记录" }, 409: { description: "对象大小、摘要或归属不匹配" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "创建共享节点视频任务并原子预扣余额", description: "实际价格（分）= 时长秒数×20 + 图片数×5 + 视频数×20；音频免费。普通用户与订阅用户统一原子预扣余额并记录流水；管理员免扣费且不参与分佣。任务成功后，实扣金额的 50% 幂等计入执行桌面节点绑定用户的钱包，剩余 50% 计入平台管理员钱包；奇数分由平台侧承接尾差。素材数量由服务端根据已完成且属于当前账号的 asset_id 重新统计，客户端 price/count 字段不会参与计费。必须提供 Idempotency-Key。", request: { body: { required: true, content: { "application/json": { schema: z.object({ source_channel: z.enum(["website", "desktop_agent"]), model: z.literal(H3_SHARED_MODEL), prompt: z.string().min(1).max(20_000), aspect_ratio: z.string(), duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profile: z.string(), assets: z.object({ images: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(9), videos: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3), audio: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3) }), idempotency_key: z.string().min(8).max(160).optional() }) } } } }, responses: { 201: { description: "非管理员已扣减余额并排队；管理员免扣费排队" }, 402: { description: "非管理员余额不足" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "创建共享节点视频任务并原子预扣余额", description: "实际价格（分）= 时长秒数×20 + 图片数×5 + 视频数×20；音频免费。普通用户与订阅用户统一原子预扣余额并记录流水；管理员免扣费且不参与分佣。任务成功后，实扣金额的 50% 幂等计入执行桌面节点绑定用户的钱包，剩余 50% 计入平台管理员钱包；奇数分由平台侧承接尾差。website 来源会在任务同一条原子记录中保存 conversationId、requestMessageId、resultMessageId；完成回调按 resultMessageId 幂等回写视频消息。素材数量由服务端根据已完成且属于当前账号的 asset_id 重新统计，客户端 price/count 字段不会参与计费。必须提供 Idempotency-Key。", request: { body: { required: true, content: { "application/json": { schema: z.object({ source_channel: z.enum(["website", "desktop_agent"]), model: z.literal(H3_SHARED_MODEL), prompt: z.string().min(1).max(20_000), conversation_id: z.string().optional(), aspect_ratio: z.string(), duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profile: z.string(), assets: z.object({ images: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(9), videos: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3), audio: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3) }), idempotency_key: z.string().min(8).max(160).optional() }) } } } }, responses: { 201: { description: "非管理员已扣减余额并排队；管理员免扣费排队" }, 402: { description: "非管理员余额不足" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "查看当前账号的共享节点订单", responses: { 200: { description: "最多返回最近 50 个订单" }, 401: { description: "未认证" } } });
-  app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}", tags: ["MiniMax H3 Shared Nodes"], summary: "查看共享节点订单详情与短时结果下载地址", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "订单详情" }, 404: { description: "订单不存在或无权查看" } } });
+  app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/conversations/recent", tags: ["MiniMax H3 Shared Nodes"], summary: "读取当前用户会话中的 H3 视频结果", description: "仅返回当前登录用户的 H3 assistant 结果消息；历史已完成任务会先进行同用户安全幂等回填。消息不包含 COS 永久地址。", request: { query: z.object({ conversation_id: z.string().optional() }) }, responses: { 200: { description: "当前会话及其 H3 视频结果" }, 401: { description: "未认证" } } });
+  app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}", tags: ["MiniMax H3 Shared Nodes"], summary: "查看共享节点订单详情", description: "输出只包含受控 previewPath/downloadPath 和 24 小时到期状态，不返回 COS objectKey 或永久 URL。", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "订单详情" }, 404: { description: "订单不存在或无权查看" } } });
+  app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}/output", tags: ["MiniMax H3 Shared Nodes"], summary: "鉴权预览或下载 H3 输出视频", description: "仅任务请求用户或管理员可访问。服务端按次签发不超过 5 分钟且不越过 24 小时保留截止时间的 COS GET 地址；disposition=attachment 用于下载。过期返回 410 并触发幂等删除。", request: { params: z.object({ id: z.string() }), query: z.object({ disposition: z.enum(["inline", "attachment"]).optional() }) }, responses: { 302: { description: "跳转到短时 COS 签名地址" }, 404: { description: "视频不存在或无权访问" }, 410: { description: "视频已过期并删除" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/desktop/agent/tools/minimax-h3-shared", tags: ["Desktop Agent Tools"], summary: "读取桌面古龙智能体的 H3 共享节点工具合同", description: "使用现有古龙会话或具有 tasks:read 的 API Key。返回统一任务 URL、素材上传 URL、9图3视频3音频限制、整数分价格与当前余额；管理员响应 wallet.unlimited=true，桌面端不得按余额拦截。桌面创建任务时 source_channel 必须为 desktop_agent。", responses: { 200: { description: "工具合同、钱包余额与管理员不限额标记" }, 401: { description: "未认证" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/claim", tags: ["MiniMax H3 Shared Nodes"], summary: "桌面节点按能力与队列压力原子领取任务", description: "capabilities 必须上报 max_duration_seconds、profiles、max_image_count、max_video_count、max_audio_count 与可选 gpu_name、vram_mb。服务端使用 MongoDB 中央 3 秒短缓存汇总待处理任务和在线节点数，按 queued÷在线节点计算公平份额，并严格按 createdAt、_id 从旧到新原子领取。兼容旧节点时仍只返回 task；声明 batch_claim=true 且提供 max_concurrent_tasks 后，最多一次领取 4 个任务，额外任务位于 additional_tasks。客户端必须遵循 claim_plan.poll_after_ms 或 Retry-After，服务端会拒绝提前轮询的实际队列访问。45 分钟领取租约会由进度回调续期；过期任务自动回队并废弃旧上传票据。dry_run=true 在身份、能力、限流通过后只返回服务可达状态，绝不读取或修改队列、也不签发上传票据。正式领取使用最小化 workerTask DTO，仅包含执行所需参数、每个 COS 素材的 15 分钟 download_url，以及一小时任务专属 output_upload；不会下发 requester、价格、钱包流水或内部绑定信息。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "application/json": { schema: z.object({ bound_account_email: z.string().optional(), bound_account_id: z.string().optional(), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: z.object({ max_duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profiles: z.array(z.string()).min(1), gpu_name: z.string().max(160).optional(), vram_mb: z.number().int().min(0).optional(), max_image_count: z.number().int().min(0).max(9), max_video_count: z.number().int().min(0).max(3), max_audio_count: z.number().int().min(0).max(3), batch_claim: z.boolean().optional(), max_concurrent_tasks: z.number().int().min(1).max(8).optional() }) }) } } } }, responses: { 200: { description: "dry_run 返回可达状态；正式领取返回 task、additional_tasks 与动态 claim_plan，任务均含素材下载票据和 output_upload" }, 400: { description: "节点能力无效" }, 401: { description: "绑定无效" }, 429: { description: "未遵循轮询退避或请求频率过高" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/callback", tags: ["MiniMax H3 Shared Nodes"], summary: "执行节点回调进度或结果", description: "multipart/form-data 仅发送 metadata 字段，不得上传 video 文件。metadata JSON 必须包含 task_id、local_job_id、status、node_id、node_name、elapsed_seconds；成功状态还需 video.sha256/bytes/filename/object_key。服务端 HEAD 校验 COS 对象存在、Content-Length、SHA-256 元数据、上传 grant 与 task 专属前缀，不接受客户端任意 URL。最终接单人与 50% 节点分佣接收人只取绑定令牌对应用户；另 50% 进入平台管理员余额。管理员发起的任务免扣费、免分佣。task_id + event/status + local_job_id 及两笔分佣流水均幂等。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "multipart/form-data": { schema: z.object({ metadata: z.string() }) } } } }, responses: { 200: { description: "回调、扣款结算与分佣已幂等处理" }, 400: { description: "回执不完整" }, 401: { description: "绑定无效" }, 409: { description: "COS 回执、上传票据或结算状态不匹配" }, 413: { description: "禁止把视频文件经 Vercel 中转" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/claim", tags: ["MiniMax H3 Shared Nodes"], summary: "桌面节点按能力与队列压力原子领取任务", description: "capabilities 必须上报 max_duration_seconds、profiles、max_image_count、max_video_count、max_audio_count 与可选 gpu_name、vram_mb。服务端使用 MongoDB 中央 3 秒短缓存汇总待处理任务和在线节点数，按 queued÷在线节点计算公平份额，并严格按 createdAt、_id 从旧到新原子领取。兼容旧节点时仍只返回 task；声明 batch_claim=true 且提供 max_concurrent_tasks 后，最多一次领取 4 个任务，额外任务位于 additional_tasks。客户端必须遵循 claim_plan.poll_after_ms 或 Retry-After，服务端会拒绝提前轮询的实际队列访问。45 分钟领取租约会由进度回调续期；过期任务自动回队并废弃旧上传票据。dry_run=true 在身份、能力、限流通过后只返回服务可达状态，绝不读取或修改队列、也不签发上传票据。正式领取使用最小化 workerTask DTO，仅包含执行所需参数、每个 COS 素材的 15 分钟 download_url、一小时任务专属 output_upload，以及 progress_callback 合同；节点领取后应先用 started + estimated_total_seconds 上报预计耗时，再持续发送 progress 与 remaining_seconds。不会下发 requester、价格、钱包流水或内部绑定信息。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "application/json": { schema: z.object({ bound_account_email: z.string().optional(), bound_account_id: z.string().optional(), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: z.object({ max_duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profiles: z.array(z.string()).min(1), gpu_name: z.string().max(160).optional(), vram_mb: z.number().int().min(0).optional(), max_image_count: z.number().int().min(0).max(9), max_video_count: z.number().int().min(0).max(3), max_audio_count: z.number().int().min(0).max(3), batch_claim: z.boolean().optional(), max_concurrent_tasks: z.number().int().min(1).max(8).optional() }) }) } } } }, responses: { 200: { description: "dry_run 返回可达状态；正式领取返回 task、additional_tasks 与动态 claim_plan，任务均含素材下载票据、output_upload 和进度回调合同" }, 400: { description: "节点能力无效" }, 401: { description: "绑定无效" }, 429: { description: "未遵循轮询退避或请求频率过高" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/callback", tags: ["MiniMax H3 Shared Nodes"], summary: "执行节点回调进度或结果", description: "multipart/form-data 仅发送 metadata 字段，不得上传 video 文件。节点接单后的首次 started 回调应发送 estimated_total_seconds；后续 processing/progress 回调发送 progress（0–99）与可选 remaining_seconds，官网会实时显示百分比和预计完成时间。metadata JSON 必须包含 task_id、local_job_id、status、node_id、node_name、elapsed_seconds；成功状态还需 video.sha256/bytes/filename/object_key。服务端 HEAD 校验 COS 对象存在、Content-Length、SHA-256 元数据、上传 grant 与 task 专属前缀，不接受客户端任意 URL。成功落库后从 completedAt 起保留视频 24 小时，并按 resultMessageId 幂等回写原网页会话；重复 callback 不重复发消息。最终接单人与 50% 节点分佣接收人只取绑定令牌对应用户；另 50% 进入平台管理员钱包。管理员发起的任务免扣费、免分佣。task_id + event/status + local_job_id 及两笔分佣流水均幂等。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "multipart/form-data": { schema: z.object({ metadata: z.string() }) } } } }, responses: { 200: { description: "进度已更新，或完成回调、扣款结算、分佣与会话结果已幂等处理" }, 400: { description: "回执不完整" }, 401: { description: "绑定无效" }, 409: { description: "COS 回执、上传票据或结算状态不匹配" }, 413: { description: "禁止把视频文件经 Vercel 中转" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/admin/h3/tasks", tags: ["Administration"], summary: "管理员筛选共享节点任务派单", responses: { 200: { description: "任务列表" }, 403: { description: "需要管理员角色" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/admin/h3/tasks/{id}", tags: ["Administration"], summary: "管理员查看共享节点任务、回调和审计详情", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "任务详情、回调和审计时间线" }, 404: { description: "任务不存在" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/admin/h3/tasks/{id}/cancel", tags: ["Administration"], summary: "管理员幂等取消任务并退款", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "取消状态和退款结果" }, 409: { description: "已完成任务不能取消" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/admin/h3/tasks/{id}/retry", tags: ["Administration"], summary: "管理员重新派发失败任务", description: "普通用户与订阅用户的已退款任务会重新原子预扣；管理员发起的免扣费任务直接重新排队，不产生扣款或分佣。", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "重新排队后的任务" }, 402: { description: "需求用户余额不足" }, 409: { description: "当前状态不可重试" } } });
+  app.openAPIRegistry.registerPath({ method: "get", path: "/api/cron/h3-output-cleanup", tags: ["Operations"], summary: "回填会话结果并清理过期 H3 视频", description: "Vercel Cron 使用 CRON_SECRET Bearer 鉴权。先安全幂等回填历史 website 任务，再删除 completedAt 后已满 24 小时的 COS 对象；删除失败记录指数退避并重试。", responses: { 200: { description: "回填与清理汇总" }, 401: { description: "Cron 鉴权失败" }, 503: { description: "Cron 未配置" } } });
 }

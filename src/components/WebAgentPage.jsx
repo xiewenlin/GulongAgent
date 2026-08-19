@@ -3,6 +3,7 @@ import {
   Check,
   CheckCircle,
   Coins,
+  DownloadSimple,
   File,
   ImageSquare,
   LockKey,
@@ -13,6 +14,7 @@ import {
   SpinnerGap,
   TextT,
   VideoCamera,
+  WarningCircle,
   Wallet,
   X,
 } from "@phosphor-icons/react";
@@ -111,6 +113,26 @@ async function imageDataUrl(file) {
 }
 
 function MediaResult({ item }) {
+  if (item.video) {
+    const expired = item.video.status === "expired" || !item.video.previewPath;
+    return <section className={`agent-h3-result ${expired ? "expired" : "available"}`}>
+      <header><div><VideoCamera size={22} weight="duotone" /><span><strong>MiniMaxH3 共享节点视频</strong><small>{item.video.filename}</small></span></div><em>{expired ? "已过期" : "24 小时保留"}</em></header>
+      {expired ? <div className="agent-h3-expired"><WarningCircle size={28} weight="duotone" /><strong>视频已过期并删除</strong><span>为保护隐私并控制存储成本，过期视频不能继续播放或下载。</span></div> : <>
+        <video src={item.video.previewPath} controls preload="metadata" />
+        <div className="agent-h3-retention"><WarningCircle size={21} weight="fill" /><span><strong>请尽快下载，视频将在生成完成后 24 小时自动删除。</strong><small>准确到期时间：{new Date(item.video.expiresAt).toLocaleString("zh-CN")}</small></span></div>
+        <a className="button primary" href={item.video.downloadPath}><DownloadSimple size={18} weight="bold" />下载视频</a>
+      </>}
+    </section>;
+  }
+  if (item.h3Task && item.h3Task.status !== "completed") {
+    const failed = ["failed", "cancelled", "rejected"].includes(item.h3Task.status);
+    const progress = Math.min(99, Math.max(0, Number(item.h3Task.progress || 0)));
+    return <section className={`agent-h3-progress ${failed ? "failed" : "running"}`}>
+      <header><span><SpinnerGap size={20} className={failed ? "" : "agent-spin"} />{failed ? "视频任务未完成" : "共享节点正在制作视频"}</span><strong>{failed ? "已结束" : `${progress}%`}</strong></header>
+      {!failed && <><div className="agent-h3-progress-track"><i style={{ width: `${Math.max(2, progress)}%` }} /></div><div className="agent-h3-progress-meta"><span>{item.h3Task.estimatedTotalSeconds ? `预计总耗时 ${Math.ceil(item.h3Task.estimatedTotalSeconds / 60)} 分钟` : "节点正在估算制作时间"}</span><span>{item.h3Task.expectedCompletedAt ? `预计完成：${new Date(item.h3Task.expectedCompletedAt).toLocaleString("zh-CN")}` : "等待节点首次耗时回调"}</span></div></>}
+      <small>订单号：{item.h3Task.orderNo}{item.h3Task.progressUpdatedAt ? ` · 更新于 ${new Date(item.h3Task.progressUpdatedAt).toLocaleTimeString("zh-CN")}` : ""}</small>
+    </section>;
+  }
   if (item.status === "processing") return <div className="agent-media-pending"><SpinnerGap size={21} className="agent-spin" /><span>任务已进入 PearAPI 队列，正在创作…</span></div>;
   if (item.status === "failed") return <div className="agent-media-error">生成失败，费用已退回：{item.error}</div>;
   if (!item.urls?.length) return null;
@@ -203,11 +225,50 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
   const endRef = useRef(null);
   const pollersRef = useRef(new Map());
 
+  function rememberConversation(nextConversationId) {
+    const value = String(nextConversationId || "");
+    setConversationId(value);
+    if (user?.id && value) sessionStorage.setItem(`gulong-agent-conversation:${user.id}`, value);
+  }
+
   useEffect(() => {
     if (!user) { setLoading(false); setBootstrap(null); return; }
+    setMessages([]);
+    setConversationId(sessionStorage.getItem(`gulong-agent-conversation:${user.id}`) || "");
     setLoading(true);
     apiFetch("/api/agent/bootstrap").then((result) => { setBootstrap(result); setModel(result.defaultModel || "glm-4-flash-250414"); }).catch((error) => setMessage(error.message)).finally(() => setLoading(false));
   }, [user?.id]);
+
+  useEffect(() => {
+    if (!user?.id) return undefined;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const query = conversationId ? `?conversation_id=${encodeURIComponent(conversationId)}` : "";
+        const result = await apiFetch(`/api/h3/conversations/recent${query}`);
+        if (cancelled) return;
+        if (result.conversationId && result.conversationId !== conversationId) rememberConversation(result.conversationId);
+        setMessages((current) => {
+          const next = current.map((item) => {
+            const task = result.tasks?.find((candidate) => candidate.id === item.h3TaskId);
+            return task ? { ...item, h3Task: task } : item;
+          });
+          const knownMessages = new Set(next.map((item) => item.id).filter(Boolean));
+          for (const message of result.messages || []) if (!knownMessages.has(message.id)) next.push(message);
+          const knownTasks = new Set(next.map((item) => item.h3TaskId).filter(Boolean));
+          for (const task of result.tasks || []) {
+            if (!knownTasks.has(task.id) && task.status !== "completed") next.push({ id: `h3-progress-${task.id}`, role: "assistant", content: "MiniMaxH3共享节点任务处理进度", createdAt: task.createdAt, h3TaskId: task.id, h3Task: task });
+          }
+          return next;
+        });
+      } catch (error) {
+        if (!cancelled && error.status !== 401) setMessage(error.message);
+      }
+    };
+    void poll();
+    const timer = setInterval(poll, 6_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [user?.id, conversationId]);
 
   useEffect(() => () => { for (const timer of pollersRef.current.values()) clearTimeout(timer); pollersRef.current.clear(); }, []);
 
@@ -321,8 +382,9 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
     try {
       if (isH3Video) {
         const idempotencyKey = crypto.randomUUID();
-        const result = await apiFetch("/api/h3/tasks", { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ source_channel: "website", model: H3_SHARED_MODEL.id, prompt: content, aspect_ratio: aspectRatio, duration_seconds: duration, profile: "balanced", assets: { images: [], videos: [], audio: [] } }) });
-        setMessages((current) => [...current, { role: "assistant", content: `MiniMaxH3共享节点任务已创建。\n\n订单号：${result.task.orderNo}\n\n${user.role === "admin" ? "管理员免扣费，本任务不产生分佣。" : `已从余额预扣：${formatMoney(result.billing?.chargedFen ?? result.task.priceFen)}\n\n剩余余额：${formatMoney(result.billing?.remainingBalanceFen || 0)}`}\n\n状态：等待桌面节点领取。完成或失败后可在任务记录中查看结果；最终失败会自动退款。`, createdAt: new Date().toISOString(), model: H3_SHARED_MODEL.id }]);
+        const result = await apiFetch("/api/h3/tasks", { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ source_channel: "website", model: H3_SHARED_MODEL.id, prompt: content, conversation_id: conversationId || undefined, aspect_ratio: aspectRatio, duration_seconds: duration, profile: "balanced", assets: { images: [], videos: [], audio: [] } }) });
+        rememberConversation(result.task.conversationId);
+        setMessages((current) => [...current, { role: "assistant", content: `MiniMaxH3共享节点任务已创建。\n\n订单号：${result.task.orderNo}\n\n${user.role === "admin" ? "管理员免扣费，本任务不产生分佣。" : `已从余额预扣：${formatMoney(result.billing?.chargedFen ?? result.task.priceFen)}\n\n剩余余额：${formatMoney(result.billing?.remainingBalanceFen || 0)}`}\n\n状态：等待桌面节点领取。视频生成完成后会自动回到当前会话；最终失败会自动退款。`, createdAt: new Date().toISOString(), model: H3_SHARED_MODEL.id, h3TaskId: result.task.id, h3Task: { id: result.task.id, orderNo: result.task.orderNo, status: result.task.status, progress: 0, createdAt: result.task.createdAt } }]);
         apiFetch("/api/agent/bootstrap").then(setBootstrap).catch(() => {});
         return;
       }
@@ -331,7 +393,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
         const result = await apiFetch("/api/agent/media", { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({
           modality: creationType, model, prompt: content, conversationId: conversationId || undefined, referenceImages, imageSize, aspectRatio, duration,
         }) });
-        setConversationId(result.job.conversationId);
+        rememberConversation(result.job.conversationId);
         setMessages((current) => [...current, {
           role: "assistant", content: `${result.job.modelName} 已接收创作任务${user.role === "admin" ? " · 管理员免扣额度" : ` · 已从余额预扣 ${formatMoney(result.billing?.chargedFen ?? result.job.chargedFen)}`}`, createdAt: new Date().toISOString(),
           jobId: result.job.id, modality: creationType, status: result.job.status, urls: result.job.urls, error: result.job.error,
@@ -343,7 +405,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
       const context = await attachmentContext(attachments);
       const requestMessages = nextMessages.slice(-23).map((item, index, list) => ({ role: item.role, content: index === list.length - 1 && item.role === "user" ? `${item.content}${context}`.slice(0, 12_000) : item.content.slice(0, 12_000) }));
       const result = await apiFetch("/api/agent/chat", { method: "POST", body: JSON.stringify({ operationId, model, conversationId: conversationId || undefined, messages: requestMessages }) });
-      setConversationId(result.conversationId);
+      rememberConversation(result.conversationId);
       setMessages((current) => [...current, { ...result.message, model: result.model, resolvedModel: result.resolvedModel, fallback: result.fallback, free: result.free, workflow: result.workflow }]);
       apiFetch("/api/agent/bootstrap").then(setBootstrap).catch(() => {});
     } catch (error) {

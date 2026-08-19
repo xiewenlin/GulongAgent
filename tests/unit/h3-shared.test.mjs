@@ -6,10 +6,15 @@ import { ObjectId } from "mongodb";
 import app from "../../server/app.js";
 import {
   H3_ACCOUNT_BINDING_HEADER,
+  H3_OUTPUT_RETENTION_MS,
+  backfillCompletedH3ConversationMessages,
   buildH3EarningsSummary,
   calculateH3RevenueSplit,
   calculateH3SharedPrice,
   h3CallbackEventKey,
+  h3OutputExpiresAt,
+  cleanupExpiredH3Output,
+  ensureH3ConversationMessages,
   normalizeH3TaskInput,
   maskH3NodeId,
   registerH3SharedRoutes,
@@ -80,7 +85,8 @@ test("H3 worker task DTO excludes requester and billing identity", () => {
     assets: [{ type: "image", download_url: "https://example.invalid/signed" }],
     outputUpload: { url: "https://example.invalid/upload", object_key: "h3/tasks/test/output.mp4" },
   });
-  assert.deepEqual(Object.keys(task), ["id", "orderNo", "model", "prompt", "aspectRatio", "durationSeconds", "profile", "imageCount", "videoCount", "audioCount", "assets", "output_upload"]);
+  assert.deepEqual(Object.keys(task), ["id", "orderNo", "model", "prompt", "aspectRatio", "durationSeconds", "profile", "imageCount", "videoCount", "audioCount", "assets", "output_upload", "progress_callback"]);
+  assert.deepEqual(task.progress_callback.first_required_fields, ["estimated_total_seconds"]);
   const serialized = JSON.stringify(task);
   assert.doesNotMatch(serialized, /requester|private@example\.com|priceFen|walletLedger|bindingId/);
 });
@@ -385,6 +391,9 @@ test("administrator-created H3 tasks queue without wallet deduction or revenue s
   assert.equal(payload.task.revenueStatus, "exempt");
   assert.equal(walletMutations, 0);
   assert.equal(storedTask.activeChargeKey, undefined);
+  assert.ok(storedTask.conversationId instanceof ObjectId);
+  assert.ok(storedTask.requestMessageId instanceof ObjectId);
+  assert.ok(storedTask.resultMessageId instanceof ObjectId);
 });
 
 test("H3 claim dry-run validates identity and capabilities without touching the queue", async () => {
@@ -454,6 +463,130 @@ test("H3 claim enforces the server poll window before queue and rate-limit datab
   assert.equal(queueSnapshots, 0);
 });
 
+function testCursor(items) {
+  return { sort() { return this; }, limit() { return this; }, async toArray() { return items; } };
+}
+
+function setDocumentFields(document, values = {}) {
+  for (const [key, value] of Object.entries(values)) {
+    const segments = key.split(".");
+    let target = document;
+    for (const segment of segments.slice(0, -1)) target = target[segment] ||= {};
+    target[segments.at(-1)] = value;
+  }
+}
+
+test("H3 completion writes one idempotent assistant video result with a 24-hour retention deadline", async () => {
+  const completedAt = new Date("2026-08-19T01:02:03.000Z");
+  assert.equal(h3OutputExpiresAt(completedAt).getTime() - completedAt.getTime(), H3_OUTPUT_RETENTION_MS);
+  const task = {
+    _id: new ObjectId(), requesterUserId: new ObjectId(), sourceChannel: "website", status: "completed", orderNo: "H3-CONVERSATION-1",
+    conversationId: new ObjectId(), requestMessageId: new ObjectId(), resultMessageId: new ObjectId(), prompt: "制作一段测试视频", createdAt: new Date("2026-08-19T00:58:00.000Z"), completedAt,
+    output: { objectKey: "h3/tasks/test/outputs/video.mp4", filename: "video.mp4", bytes: 321, sha256: "A".repeat(64), expiresAt: h3OutputExpiresAt(completedAt) },
+  };
+  const storedMessages = new Map();
+  const collections = {
+    agentMessages: {
+      async updateOne(filter, update) {
+        const key = filter._id.toString();
+        const existing = storedMessages.get(key);
+        if (!existing) {
+          storedMessages.set(key, { ...(update.$setOnInsert || {}) });
+          if (update.$set) setDocumentFields(storedMessages.get(key), update.$set);
+          return { upsertedCount: 1 };
+        }
+        if (update.$set) setDocumentFields(existing, update.$set);
+        return { upsertedCount: 0 };
+      },
+    },
+    h3SharedTasks: { updateOne: async () => ({ modifiedCount: 1 }) },
+  };
+  const getCollection = async (name) => collections[name];
+  await ensureH3ConversationMessages({ getCollection, task, now: completedAt });
+  await ensureH3ConversationMessages({ getCollection, task, now: new Date(completedAt.getTime() + 1_000) });
+  assert.equal(storedMessages.size, 2);
+  const result = storedMessages.get(task.resultMessageId.toString());
+  assert.equal(result.role, "assistant");
+  assert.equal(result.h3TaskId.toString(), task._id.toString());
+  assert.equal(result.video.objectKey, task.output.objectKey);
+  assert.equal(result.video.expiresAt.toISOString(), h3OutputExpiresAt(completedAt).toISOString());
+});
+
+test("historical completed H3 tasks backfill only into an exact same-owner conversation", async () => {
+  const ownerId = new ObjectId();
+  const foreignOwnerId = new ObjectId();
+  const task = { _id: new ObjectId(), requesterUserId: ownerId, sourceChannel: "website", status: "completed", orderNo: "H3-BACKFILL-1", prompt: "唯一提示词", createdAt: new Date("2026-08-19T02:00:00Z"), completedAt: new Date("2026-08-19T02:10:00Z"), output: { objectKey: "h3/tasks/backfill/outputs/video.mp4", filename: "video.mp4", bytes: 88 } };
+  const expectedConversation = new ObjectId();
+  const foreignConversation = new ObjectId();
+  const storedMessages = [];
+  const tasks = {
+    find: () => testCursor([task]),
+    async findOneAndUpdate(_filter, update) { setDocumentFields(task, update.$set); return task; },
+    updateOne: async () => ({ modifiedCount: 1 }),
+  };
+  const messages = {
+    find(filter) {
+      if (filter.role === "user") return testCursor([
+        { _id: new ObjectId(), ownerId, role: "user", content: task.prompt, conversationId: expectedConversation, createdAt: task.createdAt },
+        ...(filter.ownerId.toString() === foreignOwnerId.toString() ? [{ _id: new ObjectId(), ownerId: foreignOwnerId, role: "user", content: task.prompt, conversationId: foreignConversation, createdAt: task.createdAt }] : []),
+      ]);
+      return testCursor([]);
+    },
+    async updateOne(_filter, update) { storedMessages.push(update.$setOnInsert); return { upsertedCount: 1 }; },
+  };
+  const result = await backfillCompletedH3ConversationMessages({ getCollection: async (name) => name === "h3SharedTasks" ? tasks : messages, ownerId, now: new Date("2026-08-19T02:11:00Z") });
+  assert.equal(result.repaired, 1);
+  assert.equal(task.conversationId.toString(), expectedConversation.toString());
+  assert.notEqual(task.conversationId.toString(), foreignConversation.toString());
+  assert.equal(storedMessages.filter((item) => item?.role === "assistant").length, 1);
+});
+
+test("expired H3 output deletion is idempotent and records a retry after COS failure", async () => {
+  const now = new Date("2026-08-20T03:00:00Z");
+  const task = { _id: new ObjectId(), completedAt: new Date("2026-08-19T00:00:00Z"), output: { objectKey: "h3/tasks/expired/outputs/video.mp4", expiresAt: new Date("2026-08-20T00:00:00Z"), cleanupAttempts: 0 } };
+  const updates = [];
+  const tasks = {
+    async findOneAndUpdate() { return { ...task, output: { ...task.output, cleanupAttempts: 1, cleanupStatus: "deleting" } }; },
+    async updateOne(_filter, update) { updates.push(update); return { modifiedCount: 1 }; },
+  };
+  const messages = { updateMany: async () => ({ modifiedCount: 1 }) };
+  const failed = await cleanupExpiredH3Output({ getCollection: async (name) => name === "h3SharedTasks" ? tasks : messages, task, removeObject: async () => { throw new Error("temporary COS outage"); }, now });
+  assert.equal(failed.retry, true);
+  assert.equal(updates.at(-1).$set["output.cleanupStatus"], "retry");
+  const succeeded = await cleanupExpiredH3Output({ getCollection: async (name) => name === "h3SharedTasks" ? tasks : messages, task, removeObject: async () => {}, now });
+  assert.equal(succeeded.cleaned, true);
+  assert.equal(updates.at(-1).$set["output.cleanupStatus"], "deleted");
+});
+
+test("H3 output signing is requester-only and expired output returns 410", async () => {
+  const isolated = new OpenAPIHono();
+  const ownerId = new ObjectId();
+  const taskId = new ObjectId();
+  const activeTask = { _id: taskId, requesterUserId: ownerId, sourceChannel: "website", status: "completed", orderNo: "H3-SIGNED-1", model: "minimax_h3_shared", prompt: "test", assets: {}, output: { objectKey: `h3/tasks/${taskId}/outputs/video.mp4`, filename: "video.mp4", bytes: 42, expiresAt: new Date(Date.now() + 60_000) }, completedAt: new Date(), createdAt: new Date() };
+  const taskCollection = {
+    async findOne(filter) { return filter.requesterUserId?.toString() === ownerId.toString() ? activeTask : null; },
+    findOneAndUpdate: async () => null,
+    updateOne: async () => ({}),
+  };
+  registerH3SharedRoutes(isolated, {
+    getCollection: async (name) => name === "h3SharedTasks" ? taskCollection : { find: () => testCursor([]), findOne: async () => null, insertOne: async () => ({}), updateOne: async () => ({}), updateMany: async () => ({}) },
+    enforceRateLimit: async () => ({ allowed: true }),
+    authenticate: async (c) => ({ user: { id: c.req.header("x-test-user"), role: "user" } }),
+    requireAdmin: async () => ({ error: new Response(null, { status: 403 }) }), requireTrustedMutation: () => null, verifyActivationReceipt: async () => null,
+    createPresignedDownloadUrl: (key, options) => `https://signed.example/${encodeURIComponent(key)}?expires=${options.expires}`,
+    deleteObject: async () => {}, headObject: async () => ({}),
+  });
+  const allowed = await isolated.request(`http://localhost/api/h3/tasks/${taskId}/output?disposition=inline`, { headers: { "x-test-user": ownerId.toString() }, redirect: "manual" });
+  assert.equal(allowed.status, 302);
+  assert.match(allowed.headers.get("location"), /^https:\/\/signed\.example\//);
+  const denied = await isolated.request(`http://localhost/api/h3/tasks/${taskId}/output`, { headers: { "x-test-user": new ObjectId().toString() }, redirect: "manual" });
+  assert.equal(denied.status, 404);
+  activeTask.output.expiresAt = new Date(Date.now() - 1_000);
+  const expired = await isolated.request(`http://localhost/api/h3/tasks/${taskId}/output`, { headers: { "x-test-user": ownerId.toString() }, redirect: "manual" });
+  assert.equal(expired.status, 410);
+  assert.equal((await expired.json()).message, "视频已过期并删除");
+});
+
 test("H3 OpenAPI publishes binding, assets, desktop tool, claim and callback contracts", () => {
   const document = app.getOpenAPIDocument({ openapi: "3.1.0", info: { title: "test", version: "1" } });
   for (const path of [
@@ -464,7 +597,9 @@ test("H3 OpenAPI publishes binding, assets, desktop tool, claim and callback con
     "/api/h3/assets/presign",
     "/api/h3/assets/{id}/complete",
     "/api/h3/tasks",
+    "/api/h3/conversations/recent",
     "/api/h3/tasks/{id}",
+    "/api/h3/tasks/{id}/output",
     "/api/h3/tasks/claim",
     "/api/h3/tasks/callback",
     "/api/v1/desktop/agent/tools/minimax-h3-shared",
@@ -472,6 +607,7 @@ test("H3 OpenAPI publishes binding, assets, desktop tool, claim and callback con
     "/api/admin/h3/tasks/{id}",
     "/api/admin/h3/tasks/{id}/cancel",
     "/api/admin/h3/tasks/{id}/retry",
+    "/api/cron/h3-output-cleanup",
   ]) assert.ok(document.paths[path], `${path} should be documented`);
   assert.equal(document.components.securitySchemes.accountBinding.name, H3_ACCOUNT_BINDING_HEADER);
   assert.deepEqual(document.paths["/api/desktop/earnings/summary"].get.security, [{ accountBinding: [] }]);
@@ -480,6 +616,8 @@ test("H3 OpenAPI publishes binding, assets, desktop tool, claim and callback con
   assert.match(document.paths["/api/h3/tasks/claim"].post.description, /additional_tasks/);
   assert.equal(document.paths["/api/h3/tasks/claim"].post.requestBody.content["application/json"].schema.properties.capabilities.properties.batch_claim.type, "boolean");
   assert.match(document.paths["/api/h3/tasks/callback"].post.description, /HEAD/);
+  assert.match(document.paths["/api/h3/tasks/callback"].post.description, /estimated_total_seconds/);
+  assert.match(document.paths["/api/h3/tasks/{id}/output"].get.description, /24 小时/);
 });
 
 test("H3 implementation keeps identity, capability, COS ownership and ledger gates together", async () => {
@@ -499,7 +637,7 @@ test("H3 implementation keeps identity, capability, COS ownership and ledger gat
   assert.match(source, /sort: \{ createdAt: 1, _id: 1 \}/);
   assert.match(source, /calculateH3ClaimPlan[\s\S]+additional_tasks:[\s\S]+poll_after_ms/);
   assert.match(source, /imageCount: \{ \$lte: maxImageCount \}[\s\S]+videoCount: \{ \$lte: maxVideoCount \}[\s\S]+audioCount: \{ \$lte: maxAudioCount \}/);
-  assert.match(source, /OUTPUT_OBJECT_FORBIDDEN[\s\S]+headObject\(objectKey\)[\s\S]+x-cos-meta-sha256/);
+  assert.match(source, /OUTPUT_OBJECT_FORBIDDEN[\s\S]+inspectCosObject\(objectKey\)[\s\S]+x-cos-meta-sha256/);
   assert.match(source, /ledgerKeys: \{ \$ne: ledgerKey \}[\s\S]+balanceFen: -amountFen/);
   assert.match(source, /assigneeUserId: auth\.user\._id/);
   assert.match(source, /wallet: \{ balanceFen: integer\(wallet\?\.balanceFen\), unlimited: auth\.user\.role === "admin" \}/);
@@ -512,11 +650,14 @@ test("H3 implementation keeps identity, capability, COS ownership and ledger gat
   assert.match(account, /kind: "recharge", provider: "offline"/);
   assert.match(agent, /source_channel: "website"/);
   assert.match(agent, /minimax_h3_shared/);
+  assert.match(agent, /请尽快下载，视频将在生成完成后 24 小时自动删除/);
+  assert.match(agent, /expectedCompletedAt[\s\S]+progress/);
   assert.match(review, /账户余额充值/);
   assert.match(vercel, /"source": "\/api\/desktop\/account-bindings\/:path\*"/);
   assert.match(vercel, /"source": "\/api\/desktop\/earnings\/:path\*"/);
   assert.match(vercel, /"source": "\/api\/h3\/:path\*"/);
   assert.match(vercel, /"source": "\/api\/admin\/h3\/:path\*"/);
+  assert.match(vercel, /h3-output-cleanup/);
 });
 
 test("H3 admin filters keep search and pricing copy visible across responsive rows", async () => {

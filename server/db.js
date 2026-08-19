@@ -141,6 +141,10 @@ export async function ensureIndexes() {
           { ownerId: 1, conversationId: 1, createdAt: 1 },
           { name: "agent_messages_by_conversation" },
         ),
+        db.collection("agentMessages").createIndex(
+          { h3TaskId: 1, role: 1 },
+          { unique: true, partialFilterExpression: { h3TaskId: { $exists: true } }, name: "uniq_h3_conversation_message_role" },
+        ),
         db.collection("agentWorkflows").createIndex(
           { ownerId: 1, operationId: 1 },
           { unique: true, name: "uniq_agent_workflow_operation" },
@@ -444,6 +448,14 @@ export async function ensureIndexes() {
         db.collection("h3SharedTasks").createIndex(
           { assigneeUserId: 1, "executedByNode.nodeId": 1, completedAt: -1 },
           { name: "h3_earnings_by_assignee_node" },
+        ),
+        db.collection("h3SharedTasks").createIndex(
+          { status: 1, "output.expiresAt": 1, "output.cleanupRetryAt": 1 },
+          { name: "h3_output_retention_cleanup" },
+        ),
+        db.collection("h3SharedTasks").createIndex(
+          { requesterUserId: 1, status: 1, "output.expiresAt": 1 },
+          { name: "h3_output_cleanup_by_requester" },
         ),
         db.collection("h3TaskCallbacks").createIndex(
           { eventKey: 1 },
