@@ -108,17 +108,18 @@
 .agent-workflow-trace > header span { color: var(--accent); font-size: 18px; font-weight: 900; letter-spacing: .13em; }
 .agent-workflow-trace > header strong { font-size: 18px; }
 .agent-workflow-trace > header em { margin-left: 0; padding: 0; color: var(--muted); background: transparent; font-size: 18px; font-style: normal; font-variant-numeric: tabular-nums; }
-.agent-workflow-track { margin-top: 13px; display: flex; align-items: stretch; gap: 0; overflow-x: auto; padding-bottom: 4px; scrollbar-width: thin; }
-.agent-workflow-node { min-width: 145px; flex: 1 0 145px; display: grid; grid-template-columns: 26px minmax(0, 1fr) 20px; align-items: center; gap: 8px; position: relative; }
+.agent-workflow-track { margin-top: 16px; display: grid; gap: 0; }
+.agent-workflow-node { min-width: 0; display: grid; grid-template-columns: 26px minmax(0, 1fr); align-items: start; gap: 12px; position: relative; padding-bottom: 20px; }
 .agent-workflow-node > i { width: 25px; height: 25px; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 50%; color: var(--muted); background: var(--surface); font-size: 18px; font-style: normal; font-weight: 850; z-index: 1; }
 .agent-workflow-node.running > i { color: #fff; border-color: var(--accent); background: var(--accent); box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 12%, transparent); }
 .agent-workflow-node.completed > i { color: #fff; border-color: var(--success); background: var(--success); }
 .agent-workflow-node.failed > i { color: #fff; border-color: var(--danger); background: var(--danger); }
-.agent-workflow-node > div { min-width: 0; display: grid; gap: 2px; }
-.agent-workflow-node > div strong { overflow: hidden; font-size: 18px; text-overflow: ellipsis; white-space: nowrap; }
-.agent-workflow-node > div span { overflow: hidden; color: var(--muted); font-size: 18px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
-.agent-workflow-node > div small { overflow: hidden; color: color-mix(in srgb, var(--muted) 82%, transparent); font-size: 18px; text-overflow: ellipsis; white-space: nowrap; }
-.agent-workflow-node > b { width: 22px; height: 1px; margin-right: -2px; background: color-mix(in srgb, var(--primary) 28%, var(--line)); }
+.agent-workflow-node > div { min-width: 0; display: grid; gap: 3px; padding-top: 1px; }
+.agent-workflow-node > div strong { font-size: 18px; line-height: 1.45; }
+.agent-workflow-node > div span { color: var(--muted); font-size: 18px; font-variant-numeric: tabular-nums; line-height: 1.5; }
+.agent-workflow-node > div small { color: color-mix(in srgb, var(--muted) 82%, transparent); font-size: 18px; line-height: 1.5; overflow-wrap: anywhere; }
+.agent-workflow-node > b { position: absolute; left: 12px; top: 28px; bottom: 0; width: 1px; background: linear-gradient(to bottom, color-mix(in srgb, var(--primary) 38%, var(--line)), color-mix(in srgb, var(--primary) 14%, var(--line))); }
+.agent-workflow-node:last-child { padding-bottom: 0; }
 .agent-workflow-node:last-child > b { display: none; }
 .agent-workflow-trace > footer { margin-top: 12px; padding-top: 11px; display: flex; align-items: center; gap: 7px; border-top: 1px solid var(--line); color: var(--success); }
 .agent-workflow-trace > footer span { color: var(--muted); font-size: 18px; }

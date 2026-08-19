@@ -193,11 +193,12 @@ test("PearAPI routes publish the free-model and protected admin contracts in Ope
 });
 
 test("website exposes the simplified agent while user settings no longer expose MiniMax", async () => {
-  const [appSource, agentSource, adminSource, accountSource] = await Promise.all([
+  const [appSource, agentSource, adminSource, accountSource, stylesSource] = await Promise.all([
     readFile(new URL("../../src/App.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../src/components/WebAgentPage.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../src/components/AccountDashboard.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/styles.css", import.meta.url), "utf8"),
   ]);
   assert.match(appSource, /pathname === "\/agent"/);
   assert.match(appSource, /<small className="brand-web-entry">网页版入口<\/small>/);
@@ -225,6 +226,8 @@ test("website exposes the simplified agent while user settings no longer expose 
   assert.match(agentSource, /remarkPlugins=\{\[remarkGfm\]\}/);
   assert.match(agentSource, /<MarkdownMessage>\{item\.content\}<\/MarkdownMessage>/);
   assert.match(agentSource, /<WorkflowTrace workflow=\{item\.workflow\}/);
+  assert.match(stylesSource, /\.agent-workflow-track \{[^}]*display: grid/);
+  assert.match(stylesSource, /\.agent-workflow-node > b \{[^}]*position: absolute[^}]*bottom: 0[^}]*width: 1px/);
   assert.match(agentSource, /safeMarkdownHref/);
   assert.doesNotMatch(agentSource, /rehypeRaw/);
   assert.match(adminSource, /\{ id: "tokens", label: "令牌配置", icon: LockKey \}/);
