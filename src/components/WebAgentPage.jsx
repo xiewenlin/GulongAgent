@@ -331,7 +331,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
     setMessage("");
     try {
       const result = await apiFetch("/api/h3/prompts/optimize", { method: "POST", body: JSON.stringify({ prompt: original, duration_seconds: duration, aspect_ratio: aspectRatio, assets: { images: [], videos: [], audio: [] } }) });
-      const optimized = String(result.optimized_prompt || "").trim();
+      const optimized = String(result.authoring_prompt || result.optimized_prompt || "").trim();
       if (!optimized) throw new Error("提示词优化结果为空，请重试");
       setH3OriginalPrompt(original);
       setDraft(optimized);
@@ -408,7 +408,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
     try {
       if (isH3Video) {
         const idempotencyKey = crypto.randomUUID();
-        const result = await apiFetch("/api/h3/tasks", { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ source_channel: "website", model: H3_SHARED_MODEL.id, prompt: content, original_prompt: h3OriginalPrompt || content, optimized_prompt: h3OriginalPrompt ? content : undefined, conversation_id: conversationId || undefined, aspect_ratio: aspectRatio, duration_seconds: duration, profile: "balanced", assets: { images: [], videos: [], audio: [] } }) });
+        const result = await apiFetch("/api/h3/tasks", { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ source_channel: "website", model: H3_SHARED_MODEL.id, prompt: content, original_prompt: h3OriginalPrompt || content, authoring_prompt: content, optimized_prompt: h3OriginalPrompt ? content : undefined, conversation_id: conversationId || undefined, aspect_ratio: aspectRatio, duration_seconds: duration, profile: "balanced", assets: { images: [], videos: [], audio: [] } }) });
         rememberConversation(result.task.conversationId);
         setH3PromptState({ status: "idle", optimized: "" });
         setH3OriginalPrompt("");
