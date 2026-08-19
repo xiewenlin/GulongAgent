@@ -158,8 +158,8 @@ function QuotaPrompt({ kind, onClose, navigate }) {
       <div className="agent-quota-icon">{subscription ? <Coins size={34} weight="duotone" /> : <Wallet size={34} weight="duotone" />}</div>
       <span>{subscription ? "MEMBERSHIP REQUIRED" : "USAGE EXHAUSTED"}</span>
       <h2 id="agent-quota-title">{subscription ? "开通会员后开始创作" : "当前可用额度已用完"}</h2>
-      <p>{subscription ? "图片和视频模型仅向已开通会员的用户开放。选择适合你的会员套餐，到账后即可开始创作。" : "你的会员权益仍然有效，但创作额度已经用完。充值余额后即可继续调用图片和视频模型。"}</p>
-      <div className="agent-quota-summary"><ShieldCheck size={21} weight="duotone" /><span><strong>{subscription ? "先开通会员" : "会员无需重复开通"}</strong><small>{subscription ? "月度或年度会员均可使用媒体创作" : "只需补充余额，原会员有效期保持不变"}</small></span></div>
+      <p>{subscription ? "当前没有生效会员或可用余额。开通月度或年度会员后，实付金额会同步成为创作余额；已有充值余额的普通用户也可以按次调用付费图片和视频模型。" : "你的会员权益仍然有效，但创作额度已经用完。充值余额后即可继续调用图片和视频模型。"}</p>
+      <div className="agent-quota-summary"><ShieldCheck size={21} weight="duotone" /><span><strong>{subscription ? "开通会员获得余额" : "会员无需重复开通"}</strong><small>{subscription ? "普通用户与订阅用户都按实际调用扣减余额" : "只需补充余额，原会员有效期保持不变"}</small></span></div>
       <div className="agent-quota-actions"><button className="button secondary" type="button" onClick={onClose}>暂不处理</button><button className="button primary" type="button" onClick={() => { onClose(); navigate("/pricing"); }}>{subscription ? "查看会员套餐" : "立即充值"}<ArrowRight size={17} /></button></div>
     </section>
   </div>;
@@ -293,16 +293,15 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
   async function send() {
     const content = draft.trim();
     if (!content || sending) return;
-    if (!bootstrap?.subscription?.active) {
-      if (creationType === "text") setMessage("网页版古龙 Agent 需要生效中的会员订阅。");
-      else setQuotaPrompt("subscription");
+    if (creationType === "text" && !bootstrap?.subscription?.active) {
+      setMessage("网页版古龙 Agent 需要生效中的会员订阅。");
       return;
     }
     if (creationType !== "text" && user.role !== "admin") {
       const balanceFen = Number(bootstrap?.quota?.balanceFen || 0);
       const durationFactor = creationType === "video" ? Math.max(1, Number(duration || 5) / 5) : 1;
       const expectedFen = isH3Video ? Number(duration || 5) * 20 : selectedModel?.chargedFen == null ? 0 : Math.ceil(Number(selectedModel.chargedFen) * durationFactor);
-      if (balanceFen <= 0 || (expectedFen > 0 && balanceFen < expectedFen)) { setQuotaPrompt("recharge"); return; }
+      if (balanceFen <= 0 || (expectedFen > 0 && balanceFen < expectedFen)) { setQuotaPrompt(bootstrap?.subscription?.active ? "recharge" : "subscription"); return; }
     }
     if (creationType === "text" && !bootstrap?.configured) { setMessage("管理员尚未完成 PearAPI 免费渠道令牌配置，请稍后再试。"); return; }
     if (creationType !== "text" && !isH3Video && !bootstrap?.mediaConfigured) { setMessage("管理员尚未完成 PearAPI Key 配置，请稍后再试。"); return; }
@@ -323,7 +322,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
       if (isH3Video) {
         const idempotencyKey = crypto.randomUUID();
         const result = await apiFetch("/api/h3/tasks", { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ source_channel: "website", model: H3_SHARED_MODEL.id, prompt: content, aspect_ratio: aspectRatio, duration_seconds: duration, profile: "balanced", assets: { images: [], videos: [], audio: [] } }) });
-        setMessages((current) => [...current, { role: "assistant", content: `MiniMaxH3共享节点任务已创建。\n\n订单号：${result.task.orderNo}\n\n已从余额预扣：${formatMoney(result.billing?.chargedFen ?? result.task.priceFen)}\n\n剩余余额：${formatMoney(result.billing?.remainingBalanceFen || 0)}\n\n状态：等待桌面节点领取。完成或失败后可在任务记录中查看结果；最终失败会自动退款。`, createdAt: new Date().toISOString(), model: H3_SHARED_MODEL.id }]);
+        setMessages((current) => [...current, { role: "assistant", content: `MiniMaxH3共享节点任务已创建。\n\n订单号：${result.task.orderNo}\n\n${user.role === "admin" ? "管理员免扣费，本任务不产生分佣。" : `已从余额预扣：${formatMoney(result.billing?.chargedFen ?? result.task.priceFen)}\n\n剩余余额：${formatMoney(result.billing?.remainingBalanceFen || 0)}`}\n\n状态：等待桌面节点领取。完成或失败后可在任务记录中查看结果；最终失败会自动退款。`, createdAt: new Date().toISOString(), model: H3_SHARED_MODEL.id }]);
         apiFetch("/api/agent/bootstrap").then(setBootstrap).catch(() => {});
         return;
       }
@@ -381,7 +380,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
 
         <div className="agent-composer-wrap">
           {message && <div className="agent-inline-alert"><LockKey size={18} /><span>{message}</span><button type="button" onClick={() => setMessage("")}><X size={16} /></button></div>}
-          {!bootstrap?.subscription?.active && !loading && <div className="agent-membership-gate"><div><Coins size={24} weight="duotone" /><span><strong>会员订阅尚未生效</strong><small>开通月度或年度会员后使用网页版 Agent。</small></span></div><button type="button" onClick={() => navigate("/pricing")}>查看会员 <ArrowRight size={16} /></button></div>}
+          {!bootstrap?.subscription?.active && !loading && <div className="agent-membership-gate"><div><Coins size={24} weight="duotone" /><span><strong>会员订阅尚未生效</strong><small>免费文字对话需开通会员；付费图片与视频可使用已有余额按次创作。</small></span></div><button type="button" onClick={() => navigate("/pricing")}>查看会员 <ArrowRight size={16} /></button></div>}
           <div className="agent-mode-row"><div className="agent-creation-hint">{creationType === "text" ? "免费文字对话" : isH3Video ? `${formatMoney(Number(duration || 0) * 20)} · MiniMaxH3共享节点预估价` : (selectedModel?.priceLabel || "按实际模型计费")}</div><span>{draft.length} / 4096</span></div>
           {attachments.length > 0 && <div className="agent-attachment-row">{attachments.map((file, index) => <span key={`${file.name}-${index}`}><File size={16} /><b>{file.name}</b><small>{byteText(file.size)}</small><button type="button" aria-label={`移除 ${file.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button></span>)}</div>}
           <textarea ref={inputRef} maxLength={4096} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keyDown} placeholder="描述任务；上传附件后输入你的要求。Enter 发送，Shift + Enter 换行" />

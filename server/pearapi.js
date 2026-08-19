@@ -535,7 +535,7 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
       referenceImages: z.array(ReferenceImageSchema).max(16).default([]), imageSize: z.enum(PEAR_IMAGE_SIZES).default("1:1"),
       aspectRatio: z.enum(["16:9", "9:16"]).default("16:9"), duration: z.number().int().refine((value) => PEAR_VIDEO_DURATIONS.includes(value), "不支持的视频时长").default(5),
     }) } } } },
-    responses: { 201: { description: "媒体任务已提交；返回预扣金额与剩余余额" }, 400: { description: "模型、参数或 Idempotency-Key 无效", content: { "application/json": { schema: ErrorSchema } } }, 402: { description: "余额或订阅不足", content: { "application/json": { schema: ErrorSchema } } } },
+    responses: { 201: { description: "媒体任务已提交；普通用户与订阅用户返回原子预扣金额和剩余余额，管理员免扣费" }, 400: { description: "模型、参数或 Idempotency-Key 无效", content: { "application/json": { schema: ErrorSchema } } }, 402: { description: "非管理员余额不足", content: { "application/json": { schema: ErrorSchema } } } },
   });
   const mediaStatusRoute = createRoute({
     method: "get", path: "/api/agent/media/{id}", tags: ["Web Agent"], summary: "查询并推进 PearAPI 媒体任务",
@@ -687,12 +687,6 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     const ownerId = new ObjectId(auth.user.id);
     const now = new Date();
     const unlimited = auth.user.role === "admin";
-    if (!unlimited) {
-      const subscription = await (await getCollection("subscriptions")).findOne({ ownerId });
-      if (!subscription || subscription.currentPeriodStart > now || subscription.currentPeriodEnd <= now || ["cancelled", "canceled", "expired"].includes(subscription.status)) {
-        return c.json({ code: "SUBSCRIPTION_REQUIRED", message: "图片和视频创作需要生效中的会员订阅" }, 402);
-      }
-    }
     const record = await credentialRecord();
     const key = credentialSecrets(record).key;
     if (!key) return c.json({ code: "PEAR_API_KEY_NOT_CONFIGURED", message: "管理员尚未配置 PearAPI Key" }, 503);

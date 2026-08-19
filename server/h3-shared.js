@@ -10,6 +10,7 @@ export const H3_ACCOUNT_BINDING_HEADER = "X-Gulong-Account-Binding";
 export const H3_SHARED_MODEL = "minimax_h3_shared";
 const H3_MAX_DURATION_SECONDS = 600;
 const H3_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
+const DEFAULT_PLATFORM_ADMIN_EMAIL = "1186664388@qq.com";
 
 function integer(value, fallback = 0) {
   const parsed = Number(value);
@@ -24,6 +25,13 @@ export function calculateH3SharedPrice({ durationSeconds, imageCount, videoCount
     throw Object.assign(new Error("MiniMax H3 时长或素材数量超出允许范围"), { code: "VALIDATION_ERROR", status: 400 });
   }
   return duration * 20 + images * 5 + videos * 20;
+}
+
+export function calculateH3RevenueSplit(priceFen) {
+  const grossFen = integer(priceFen, -1);
+  if (grossFen < 0) throw Object.assign(new Error("MiniMax H3 分账金额无效"), { code: "VALIDATION_ERROR", status: 400 });
+  const nodeShareFen = Math.floor(grossFen / 2);
+  return { grossFen, nodeShareFen, platformShareFen: grossFen - nodeShareFen };
 }
 
 export function h3CallbackEventKey(taskId, metadata = {}) {
@@ -129,6 +137,7 @@ function publicTask(task, { includePrompt = true, outputUrl = null } = {}) {
     priceFen: task.priceFen,
     status: task.status,
     chargeStatus: task.chargeStatus,
+    revenueStatus: task.revenueStatus || null,
     refundStatus: task.refundStatus || null,
     requester: { userId: task.requesterUserId.toString(), email: task.requesterEmailSnapshot || null },
     assignee: task.assigneeUserId ? { userId: task.assigneeUserId.toString(), email: task.assigneeEmailSnapshot || null, displayName: task.assigneeDisplayNameSnapshot || null } : null,
@@ -144,6 +153,11 @@ function publicTask(task, { includePrompt = true, outputUrl = null } = {}) {
     refundedAt: task.refundedAt || null,
     retryCount: integer(task.retryCount),
   };
+}
+
+function taskBilling(task, wallet) {
+  const charged = ["reserved", "settled"].includes(task?.chargeStatus);
+  return { chargedFen: charged ? integer(task?.priceFen) : 0, remainingBalanceFen: integer(wallet?.balanceFen), exempt: task?.chargeStatus === "exempt" };
 }
 
 export function toH3WorkerTask(task, { assets = [], outputUpload = null } = {}) {
@@ -200,6 +214,134 @@ export async function reserveH3Wallet({ getCollection, ownerId, amountFen, ledge
   return wallet || { idempotent: true };
 }
 
+export async function creditH3Wallet({ getCollection, ownerId, amountFen, ledgerKey, orderNo, taskId, kind }) {
+  const creditFen = integer(amountFen, -1);
+  if (!ownerId || creditFen < 0 || !ledgerKey || !kind) throw Object.assign(new Error("MiniMax H3 入账参数无效"), { code: "VALIDATION_ERROR", status: 400 });
+  const wallets = await getCollection("wallets");
+  const ledgers = await getCollection("h3WalletLedger");
+  const now = new Date();
+  try {
+    await ledgers.updateOne(
+      { ledgerKey },
+      { $setOnInsert: { ledgerKey, ownerId, taskId, orderNo, kind, amountFen: creditFen, status: "pending", createdAt: now }, $set: { updatedAt: now } },
+      { upsert: true },
+    );
+  } catch (error) {
+    if (error?.code !== 11000) throw error;
+  }
+  const ledger = await ledgers.findOne({ ledgerKey });
+  if (ledger && (ledger.ownerId?.toString?.() || String(ledger.ownerId)) !== (ownerId?.toString?.() || String(ownerId))) {
+    throw Object.assign(new Error("MiniMax H3 流水归属冲突"), { code: "H3_LEDGER_CONFLICT", status: 409 });
+  }
+  if (ledger && (integer(ledger.amountFen, -1) !== creditFen || ledger.kind !== kind || ledger.orderNo !== orderNo)) {
+    throw Object.assign(new Error("MiniMax H3 流水内容冲突"), { code: "H3_LEDGER_CONFLICT", status: 409 });
+  }
+  if (ledger?.status === "settled") return { wallet: await wallets.findOne({ ownerId }), idempotent: true };
+
+  const entry = { key: ledgerKey, kind, amountFen: creditFen, orderNo, taskId, createdAt: now };
+  const applyCredit = () => wallets.findOneAndUpdate(
+    { ownerId, ledgerKeys: { $ne: ledgerKey } },
+    { $inc: { balanceFen: creditFen }, $push: { ledgerKeys: { $each: [ledgerKey], $slice: -600 }, ledgerEntries: { $each: [entry], $slice: -600 } }, $set: { updatedAt: now } },
+    { returnDocument: "after" },
+  );
+  let wallet = await applyCredit();
+  let idempotent = false;
+  if (!wallet) {
+    const existing = await wallets.findOne({ ownerId });
+    if (existing?.ledgerKeys?.includes?.(ledgerKey)) {
+      wallet = existing;
+      idempotent = true;
+    } else if (!existing) {
+      const created = { _id: new ObjectId(), ownerId, balanceFen: creditFen, ledgerKeys: [ledgerKey], ledgerEntries: [entry], createdAt: now, updatedAt: now };
+      try {
+        await wallets.insertOne(created);
+        wallet = created;
+      } catch (error) {
+        if (error?.code !== 11000) throw error;
+        wallet = await applyCredit();
+        if (!wallet) {
+          wallet = await wallets.findOne({ ownerId });
+          if (!wallet?.ledgerKeys?.includes?.(ledgerKey)) throw Object.assign(new Error("MiniMax H3 入账并发冲突"), { code: "H3_WALLET_CONFLICT", status: 409 });
+          idempotent = true;
+        }
+      }
+    } else {
+      wallet = await applyCredit();
+      if (!wallet) throw Object.assign(new Error("MiniMax H3 入账状态冲突"), { code: "H3_WALLET_CONFLICT", status: 409 });
+    }
+  }
+  await ledgers.updateOne({ ledgerKey }, { $set: { status: "settled", settledAt: new Date(), updatedAt: new Date() } });
+  return { wallet, idempotent };
+}
+
+async function resolvePlatformAdministrator(getCollection) {
+  const users = await getCollection("users");
+  const configuredId = String(process.env.GULONG_PLATFORM_ADMIN_USER_ID || "").trim();
+  if (ObjectId.isValid(configuredId)) {
+    const configured = await users.findOne({ _id: new ObjectId(configuredId), role: "admin", status: { $nin: ["disabled", "deleted"] } });
+    if (configured) return configured;
+  }
+  const configuredEmail = normalizeEmail(process.env.GULONG_PLATFORM_ADMIN_EMAIL || DEFAULT_PLATFORM_ADMIN_EMAIL);
+  const bootstrap = await users.findOne({ emailNormalized: configuredEmail, role: "admin", status: { $nin: ["disabled", "deleted"] } });
+  if (bootstrap) return bootstrap;
+  return users.findOne({ role: "admin", status: { $nin: ["disabled", "deleted"] } }, { sort: { createdAt: 1, _id: 1 } });
+}
+
+async function h3RequesterIsAdministrator(getCollection, task) {
+  if (task?.requesterRoleSnapshot) return task.requesterRoleSnapshot === "admin";
+  if (!task?.requesterUserId) return false;
+  const requester = await (await getCollection("users")).findOne({ _id: task.requesterUserId }, { projection: { role: 1 } });
+  return requester?.role === "admin";
+}
+
+export async function settleH3Revenue({ getCollection, task, executorUserId, platformAdminUserId = null }) {
+  if (!task?._id) return task;
+  const tasks = await getCollection("h3SharedTasks");
+  let current = await tasks.findOne({ _id: task._id }) || task;
+  if (current.status !== "completed") return current;
+  if (current.chargeStatus !== "exempt" && await h3RequesterIsAdministrator(getCollection, current)) {
+    current = await refundTask({ getCollection, task: current, reason: "管理员任务免扣费迁移", actor: "administrator_exemption" });
+    current = await tasks.findOneAndUpdate(
+      { _id: current._id },
+      { $set: { chargeStatus: "exempt", revenueStatus: "exempt", administratorExemptedAt: new Date(), updatedAt: new Date() } },
+      { returnDocument: "after" },
+    ) || current;
+  }
+  if (current.chargeStatus === "exempt") {
+    await tasks.updateOne(
+      { _id: current._id, revenueStatus: { $ne: "exempt" } },
+      { $set: { revenueStatus: "exempt", settlement: { grossFen: 0, nodeShareFen: 0, platformShareFen: 0, reason: "administrator_exempt" }, updatedAt: new Date() } },
+    );
+    return await tasks.findOne({ _id: current._id }) || current;
+  }
+  if (current.revenueStatus === "settled") return current;
+  if (current.chargeStatus !== "settled") throw Object.assign(new Error("MiniMax H3 扣款尚未结算，不能分账"), { code: "H3_CHARGE_NOT_SETTLED", status: 409 });
+  const executorId = executorUserId instanceof ObjectId ? executorUserId : ObjectId.isValid(executorUserId) ? new ObjectId(executorUserId) : null;
+  if (!executorId) throw Object.assign(new Error("MiniMax H3 执行节点未绑定有效用户"), { code: "H3_EXECUTOR_REQUIRED", status: 409 });
+  const platformAdministrator = platformAdminUserId
+    ? { _id: platformAdminUserId instanceof ObjectId ? platformAdminUserId : new ObjectId(platformAdminUserId) }
+    : await resolvePlatformAdministrator(getCollection);
+  if (!platformAdministrator?._id) throw Object.assign(new Error("尚未配置可接收平台分成的管理员账号"), { code: "PLATFORM_ADMIN_NOT_CONFIGURED", status: 503 });
+  const split = calculateH3RevenueSplit(current.priceFen);
+  const nodeLedgerKey = `h3:revenue:${current.orderNo}:${integer(current.retryCount)}:node`;
+  const platformLedgerKey = `h3:revenue:${current.orderNo}:${integer(current.retryCount)}:platform`;
+  const settlingAt = new Date();
+  await tasks.updateOne(
+    { _id: current._id, revenueStatus: { $ne: "settled" } },
+    { $set: { revenueStatus: "settling", settlement: { ...split, nodeUserId: executorId, platformAdminUserId: platformAdministrator._id, nodeLedgerKey, platformLedgerKey, settlingAt }, updatedAt: settlingAt } },
+  );
+  await Promise.all([
+    creditH3Wallet({ getCollection, ownerId: executorId, amountFen: split.nodeShareFen, ledgerKey: nodeLedgerKey, orderNo: current.orderNo, taskId: current._id, kind: "h3_node_commission" }),
+    creditH3Wallet({ getCollection, ownerId: platformAdministrator._id, amountFen: split.platformShareFen, ledgerKey: platformLedgerKey, orderNo: current.orderNo, taskId: current._id, kind: "h3_platform_commission" }),
+  ]);
+  const settledAt = new Date();
+  await tasks.updateOne(
+    { _id: current._id, revenueStatus: { $ne: "settled" } },
+    { $set: { revenueStatus: "settled", "settlement.settledAt": settledAt, updatedAt: settledAt } },
+  );
+  return await tasks.findOne({ _id: current._id }) || { ...current, revenueStatus: "settled", settlement: { ...split, nodeUserId: executorId, platformAdminUserId: platformAdministrator._id, nodeLedgerKey, platformLedgerKey, settledAt } };
+}
+
 async function refundTask({ getCollection, task, reason, actor = "system" }) {
   if (!task || task.chargeStatus === "exempt" || task.refundStatus === "refunded") return task;
   const tasks = await getCollection("h3SharedTasks");
@@ -225,7 +367,7 @@ async function refundTask({ getCollection, task, reason, actor = "system" }) {
     { upsert: true },
   );
   await (await getCollection("h3WalletLedger")).updateOne({ ledgerKey: current.activeChargeKey }, { $set: { status: "refunded", refundedAt: now, updatedAt: now } });
-  return await tasks.findOneAndUpdate({ _id: current._id, refundStatus: "refunding" }, { $set: { refundStatus: "refunded", chargeStatus: "refunded", refundedAt: now, updatedAt: now } }, { returnDocument: "after" })
+  return await tasks.findOneAndUpdate({ _id: current._id, refundStatus: "refunding" }, { $set: { refundStatus: "refunded", chargeStatus: "refunded", revenueStatus: "not_earned", refundedAt: now, updatedAt: now } }, { returnDocument: "after" })
     || tasks.findOne({ _id: current._id });
 }
 
@@ -383,19 +525,30 @@ export function registerH3SharedRoutes(app, dependencies) {
       const existing = await tasks.findOne({ idempotencyKey });
       if (existing) {
         const wallet = await (await getCollection("wallets")).findOne({ ownerId: existing.requesterUserId });
-        return c.json({ task: publicTask(existing), billing: { chargedFen: existing.priceFen, remainingBalanceFen: integer(wallet?.balanceFen) }, idempotent: true });
+        return c.json({ task: publicTask(existing), billing: taskBilling(existing, wallet), idempotent: true });
       }
       const now = new Date();
       const orderNo = orderNumber();
       const taskId = new ObjectId();
       const chargeKey = `h3:charge:${orderNo}:0`;
-      const task = { _id: taskId, orderNo, idempotencyKey, requesterUserId: ownerId, requesterEmailSnapshot: auth.user.email || null, ...input, walletLedgerId: chargeKey, activeChargeKey: chargeKey, status: "reserving", chargeStatus: "reserving", retryCount: 0, createdAt: now, updatedAt: now };
+      const exempt = auth.user.role === "admin";
+      const task = {
+        _id: taskId, orderNo, idempotencyKey, requesterUserId: ownerId, requesterEmailSnapshot: auth.user.email || null, requesterRoleSnapshot: auth.user.role || "user", ...input,
+        ...(exempt ? {} : { walletLedgerId: chargeKey, activeChargeKey: chargeKey }),
+        status: exempt ? "queued" : "reserving", chargeStatus: exempt ? "exempt" : "reserving", revenueStatus: exempt ? "exempt" : "pending",
+        ...(exempt ? { queuedAt: now } : {}), retryCount: 0, createdAt: now, updatedAt: now,
+      };
       try { await tasks.insertOne(task); }
       catch (error) {
         if (error?.code !== 11000) throw error;
         const duplicate = await tasks.findOne({ idempotencyKey });
         const wallet = await (await getCollection("wallets")).findOne({ ownerId: duplicate.requesterUserId });
-        return c.json({ task: publicTask(duplicate), billing: { chargedFen: duplicate.priceFen, remainingBalanceFen: integer(wallet?.balanceFen) }, idempotent: true });
+        return c.json({ task: publicTask(duplicate), billing: taskBilling(duplicate, wallet), idempotent: true });
+      }
+      if (exempt) {
+        const wallet = await (await getCollection("wallets")).findOne({ ownerId });
+        await audit(await getCollection("h3TaskAudits"), "created", { taskId, orderNo, actorUserId: ownerId, sourceChannel: input.sourceChannel, priceFen: input.priceFen, billingExempt: true });
+        return c.json({ task: publicTask(task), billing: taskBilling(task, wallet), idempotent: false }, 201);
       }
       const reserved = await reserveH3Wallet({ getCollection, ownerId, amountFen: input.priceFen, ledgerKey: chargeKey, orderNo, taskId });
       if (!reserved) {
@@ -405,7 +558,7 @@ export function registerH3SharedRoutes(app, dependencies) {
       const queued = await tasks.findOneAndUpdate({ _id: taskId, status: "reserving" }, { $set: { status: "queued", chargeStatus: "reserved", queuedAt: new Date(), updatedAt: new Date() } }, { returnDocument: "after" });
       await audit(await getCollection("h3TaskAudits"), "created", { taskId, orderNo, actorUserId: ownerId, sourceChannel: input.sourceChannel, priceFen: input.priceFen });
       const remainingBalanceFen = reserved.balanceFen == null ? integer((await (await getCollection("wallets")).findOne({ ownerId }))?.balanceFen) : integer(reserved.balanceFen);
-      return c.json({ task: publicTask(queued), billing: { chargedFen: input.priceFen, remainingBalanceFen }, idempotent: false }, 201);
+      return c.json({ task: publicTask(queued), billing: { chargedFen: input.priceFen, remainingBalanceFen, exempt: false }, idempotent: false }, 201);
     } catch (error) { return routeError(c, error); }
   });
 
@@ -439,7 +592,7 @@ export function registerH3SharedRoutes(app, dependencies) {
         limits: { durationSeconds: { min: 1, max: H3_MAX_DURATION_SECONDS }, imageCount: 9, videoCount: 3, audioCount: 3 },
         pricingFen: { perSecond: 20, perImage: 5, perVideo: 20, perAudio: 0 },
       },
-      wallet: { balanceFen: integer(wallet?.balanceFen) },
+      wallet: { balanceFen: integer(wallet?.balanceFen), unlimited: auth.user.role === "admin" },
     });
   });
 
@@ -551,17 +704,18 @@ export function registerH3SharedRoutes(app, dependencies) {
       await uploads.updateOne({ _id: grant._id, status: "issued" }, { $set: { status: "completed", sha256, bytes, filename, completedByBindingId: auth.binding._id, completedByNodeId: auth.binding.nodeId, completedAt: now, updatedAt: now }, $unset: { expiresAt: "" } });
       const completed = await tasks.findOneAndUpdate(
         { _id: task._id, status: { $in: ["claimed", "processing"] } },
-        { $set: { status: "completed", chargeStatus: "settled", executedByNode: executionNode, assigneeUserId: auth.user._id, assigneeEmailSnapshot: auth.user.email || auth.binding.emailSnapshot, assigneeDisplayNameSnapshot: auth.user.displayName || auth.user.username || null, output: { sha256, bytes, filename, objectKey, uploadGrantId: grant.grantId }, elapsedSeconds: Math.max(0, Number(metadata.elapsed_seconds || 0)), completedAt: now, updatedAt: now } },
+        { $set: { status: "completed", chargeStatus: task.chargeStatus === "exempt" ? "exempt" : "settled", executedByNode: executionNode, assigneeUserId: auth.user._id, assigneeEmailSnapshot: auth.user.email || auth.binding.emailSnapshot, assigneeDisplayNameSnapshot: auth.user.displayName || auth.user.username || null, output: { sha256, bytes, filename, objectKey, uploadGrantId: grant.grantId }, elapsedSeconds: Math.max(0, Number(metadata.elapsed_seconds || 0)), completedAt: now, updatedAt: now } },
         { returnDocument: "after" },
       );
       task = completed || await tasks.findOne({ _id: task._id });
-      if (task.status === "completed") await (await getCollection("h3WalletLedger")).updateOne({ ledgerKey: task.activeChargeKey }, { $set: { status: "settled", settledAt: task.completedAt || now, updatedAt: now } });
+      if (task.status === "completed" && task.chargeStatus !== "exempt") await (await getCollection("h3WalletLedger")).updateOne({ ledgerKey: task.activeChargeKey }, { $set: { status: "settled", settledAt: task.completedAt || now, updatedAt: now } });
+      if (task.status === "completed") task = await settleH3Revenue({ getCollection, task, executorUserId: task.assigneeUserId || auth.user._id });
       await audit(await getCollection("h3TaskAudits"), completed ? "completed" : "callback_replayed", { taskId: task._id, orderNo: task.orderNo, actorUserId: auth.user._id, bindingId: auth.binding._id, nodeId: auth.binding.nodeId, eventKey });
       return c.json({ ok: true, idempotent: !completed, task: workerCallbackTask(task) });
     }
     const failed = await tasks.findOneAndUpdate(
       { _id: task._id, status: { $in: ["claimed", "processing", "queued"] } },
-      { $set: { status: status === "cancelled" ? "cancelled" : "failed", executedByNode: executionNode, error: { code: String(metadata.error_code || "NODE_EXECUTION_FAILED").slice(0, 80), message: String(metadata.error_message || "共享节点执行失败").slice(0, 500) }, ...(status === "cancelled" ? { cancelledAt: now } : { failedAt: now }), updatedAt: now } },
+      { $set: { status: status === "cancelled" ? "cancelled" : "failed", revenueStatus: "not_earned", executedByNode: executionNode, error: { code: String(metadata.error_code || "NODE_EXECUTION_FAILED").slice(0, 80), message: String(metadata.error_message || "共享节点执行失败").slice(0, 500) }, ...(status === "cancelled" ? { cancelledAt: now } : { failedAt: now }), updatedAt: now } },
       { returnDocument: "after" },
     );
     task = failed || await tasks.findOne({ _id: task._id });
@@ -624,12 +778,19 @@ export function registerH3SharedRoutes(app, dependencies) {
     const tasks = await getCollection("h3SharedTasks");
     const task = await tasks.findOne(filter);
     if (!task) return c.json({ code: "TASK_NOT_FOUND", message: "共享节点任务不存在" }, 404);
-    if (!["failed", "cancelled"].includes(task.status) || task.refundStatus !== "refunded") return c.json({ code: "TASK_NOT_RETRYABLE", message: "只有已经退款的失败或取消任务可以重试" }, 409);
+    const exempt = task.chargeStatus === "exempt" || await h3RequesterIsAdministrator(getCollection, task);
+    if (!["failed", "cancelled"].includes(task.status) || (!exempt && task.refundStatus !== "refunded")) return c.json({ code: "TASK_NOT_RETRYABLE", message: "只有免扣费任务或已经退款的失败、取消任务可以重试" }, 409);
     const retryCount = integer(task.retryCount) + 1;
     const chargeKey = `h3:charge:${task.orderNo}:${retryCount}`;
-    const reserved = await reserveH3Wallet({ getCollection, ownerId: task.requesterUserId, amountFen: task.priceFen, ledgerKey: chargeKey, orderNo: task.orderNo, taskId: task._id, kind: "h3_retry_reservation" });
-    if (!reserved) return c.json({ code: "INSUFFICIENT_BALANCE", message: "需求用户余额不足，无法重新派单", requiredFen: task.priceFen }, 402);
-    const queued = await tasks.findOneAndUpdate({ _id: task._id, status: task.status, refundStatus: "refunded" }, { $set: { status: "queued", chargeStatus: "reserved", refundStatus: null, activeChargeKey: chargeKey, walletLedgerId: chargeKey, retryCount, queuedAt: new Date(), updatedAt: new Date() }, $unset: { claimedByNode: "", executedByNode: "", assigneeUserId: "", assigneeEmailSnapshot: "", assigneeDisplayNameSnapshot: "", output: "", error: "", claimedAt: "", completedAt: "", failedAt: "", cancelledAt: "", refundedAt: "", refundReason: "" } }, { returnDocument: "after" });
+    if (!exempt) {
+      const reserved = await reserveH3Wallet({ getCollection, ownerId: task.requesterUserId, amountFen: task.priceFen, ledgerKey: chargeKey, orderNo: task.orderNo, taskId: task._id, kind: "h3_retry_reservation" });
+      if (!reserved) return c.json({ code: "INSUFFICIENT_BALANCE", message: "需求用户余额不足，无法重新派单", requiredFen: task.priceFen }, 402);
+    }
+    const queued = await tasks.findOneAndUpdate(
+      { _id: task._id, status: task.status, ...(exempt ? {} : { refundStatus: "refunded" }) },
+      { $set: { status: "queued", chargeStatus: exempt ? "exempt" : "reserved", revenueStatus: exempt ? "exempt" : "pending", refundStatus: null, ...(exempt ? { administratorExemptedAt: new Date() } : { activeChargeKey: chargeKey, walletLedgerId: chargeKey }), retryCount, queuedAt: new Date(), updatedAt: new Date() }, $unset: { claimedByNode: "", executedByNode: "", assigneeUserId: "", assigneeEmailSnapshot: "", assigneeDisplayNameSnapshot: "", output: "", error: "", settlement: "", claimedAt: "", completedAt: "", failedAt: "", cancelledAt: "", refundedAt: "", refundReason: "" } },
+      { returnDocument: "after" },
+    );
     await audit(await getCollection("h3TaskAudits"), "admin_retried", { taskId: task._id, orderNo: task.orderNo, actorUserId: new ObjectId(auth.user.id), retryCount });
     return c.json({ task: publicTask(queued || await tasks.findOne({ _id: task._id })) });
   });
@@ -642,14 +803,14 @@ export function registerH3SharedRoutes(app, dependencies) {
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/desktop/account-bindings/unbind", tags: ["Desktop Account Binding"], summary: "撤销当前节点账号绑定", security: [{ accountBinding: [] }], responses: { 200: { description: "已撤销" }, 401: { description: "绑定令牌无效" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/assets/presign", tags: ["MiniMax H3 Shared Nodes"], summary: "为输入素材签发账号专属 COS 直传票据", request: { body: { required: true, content: { "application/json": { schema: z.object({ kind: z.enum(["image", "video", "audio"]), filename: z.string(), content_type: z.string(), bytes: z.number().int().positive(), sha256: z.string().regex(/^[A-Fa-f0-9]{64}$/) }) } } } }, responses: { 201: { description: "返回 PUT URL、固定 headers、asset_id 与 object_key" }, 409: { description: "COS 回执不匹配" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/assets/{id}/complete", tags: ["MiniMax H3 Shared Nodes"], summary: "校验并完成 H3 输入素材上传", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "返回可用于任务 assets manifest 的素材记录" }, 409: { description: "对象大小、摘要或归属不匹配" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "创建共享节点视频任务并原子预扣余额", description: "实际价格（分）= 时长秒数×20 + 图片数×5 + 视频数×20；音频免费。素材数量由服务端根据已完成且属于当前账号的 asset_id 重新统计，客户端 price/count 字段不会参与计费。必须提供 Idempotency-Key。", request: { body: { required: true, content: { "application/json": { schema: z.object({ source_channel: z.enum(["website", "desktop_agent"]), model: z.literal(H3_SHARED_MODEL), prompt: z.string().min(1).max(20_000), aspect_ratio: z.string(), duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profile: z.string(), assets: z.object({ images: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(9), videos: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3), audio: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3) }), idempotency_key: z.string().min(8).max(160).optional() }) } } } }, responses: { 201: { description: "已扣减可用余额并排队" }, 402: { description: "余额不足" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "创建共享节点视频任务并原子预扣余额", description: "实际价格（分）= 时长秒数×20 + 图片数×5 + 视频数×20；音频免费。普通用户与订阅用户统一原子预扣余额并记录流水；管理员免扣费且不参与分佣。任务成功后，实扣金额的 50% 幂等计入执行桌面节点绑定用户的钱包，剩余 50% 计入平台管理员钱包；奇数分由平台侧承接尾差。素材数量由服务端根据已完成且属于当前账号的 asset_id 重新统计，客户端 price/count 字段不会参与计费。必须提供 Idempotency-Key。", request: { body: { required: true, content: { "application/json": { schema: z.object({ source_channel: z.enum(["website", "desktop_agent"]), model: z.literal(H3_SHARED_MODEL), prompt: z.string().min(1).max(20_000), aspect_ratio: z.string(), duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profile: z.string(), assets: z.object({ images: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(9), videos: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3), audio: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3) }), idempotency_key: z.string().min(8).max(160).optional() }) } } } }, responses: { 201: { description: "非管理员已扣减余额并排队；管理员免扣费排队" }, 402: { description: "非管理员余额不足" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "查看当前账号的共享节点订单", responses: { 200: { description: "最多返回最近 50 个订单" }, 401: { description: "未认证" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}", tags: ["MiniMax H3 Shared Nodes"], summary: "查看共享节点订单详情与短时结果下载地址", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "订单详情" }, 404: { description: "订单不存在或无权查看" } } });
-  app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/desktop/agent/tools/minimax-h3-shared", tags: ["Desktop Agent Tools"], summary: "读取桌面古龙智能体的 H3 共享节点工具合同", description: "使用现有古龙会话或具有 tasks:read 的 API Key。返回统一任务 URL、素材上传 URL、9图3视频3音频限制、整数分价格与当前余额。桌面创建任务时 source_channel 必须为 desktop_agent。", responses: { 200: { description: "工具合同与钱包余额" }, 401: { description: "未认证" } } });
+  app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/desktop/agent/tools/minimax-h3-shared", tags: ["Desktop Agent Tools"], summary: "读取桌面古龙智能体的 H3 共享节点工具合同", description: "使用现有古龙会话或具有 tasks:read 的 API Key。返回统一任务 URL、素材上传 URL、9图3视频3音频限制、整数分价格与当前余额；管理员响应 wallet.unlimited=true，桌面端不得按余额拦截。桌面创建任务时 source_channel 必须为 desktop_agent。", responses: { 200: { description: "工具合同、钱包余额与管理员不限额标记" }, 401: { description: "未认证" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/claim", tags: ["MiniMax H3 Shared Nodes"], summary: "桌面节点按能力原子领取一个任务", description: "capabilities 必须上报 max_duration_seconds、profiles、max_image_count、max_video_count、max_audio_count 与可选 vram_mb；MongoDB 原子领取只匹配节点能力范围内的 queued 任务。dry_run=true 在身份、能力、限流通过后只返回服务可达状态，绝不读取或修改队列、也不签发上传票据。明文账号字段仅作审计。正式领取使用最小化 workerTask DTO，仅包含执行所需参数、每个 COS 素材的 15 分钟 download_url，以及一小时任务专属 output_upload；不会下发 requester、价格、钱包流水或内部绑定信息。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "application/json": { schema: z.object({ bound_account_email: z.string().optional(), bound_account_id: z.string().optional(), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: z.object({ max_duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profiles: z.array(z.string()).min(1), vram_mb: z.number().int().min(0).optional(), max_image_count: z.number().int().min(0).max(9), max_video_count: z.number().int().min(0).max(3), max_audio_count: z.number().int().min(0).max(3) }) }) } } } }, responses: { 200: { description: "dry_run 返回可达状态；正式领取返回最小化 task（含素材下载票据与 output_upload）或 null" }, 400: { description: "节点能力无效" }, 401: { description: "绑定无效" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/callback", tags: ["MiniMax H3 Shared Nodes"], summary: "执行节点回调进度或结果", description: "multipart/form-data 仅发送 metadata 字段，不得上传 video 文件。metadata JSON 必须包含 task_id、local_job_id、status、node_id、node_name、elapsed_seconds；成功状态还需 video.sha256/bytes/filename/object_key。服务端 HEAD 校验 COS 对象存在、Content-Length、SHA-256 元数据、上传 grant 与 task 专属前缀，不接受客户端任意 URL。最终接单人只取绑定令牌对应用户。task_id + event/status + local_job_id 幂等。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "multipart/form-data": { schema: z.object({ metadata: z.string() }) } } } }, responses: { 200: { description: "回调已幂等处理" }, 400: { description: "回执不完整" }, 401: { description: "绑定无效" }, 409: { description: "COS 回执或上传票据不匹配" }, 413: { description: "禁止把视频文件经 Vercel 中转" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/callback", tags: ["MiniMax H3 Shared Nodes"], summary: "执行节点回调进度或结果", description: "multipart/form-data 仅发送 metadata 字段，不得上传 video 文件。metadata JSON 必须包含 task_id、local_job_id、status、node_id、node_name、elapsed_seconds；成功状态还需 video.sha256/bytes/filename/object_key。服务端 HEAD 校验 COS 对象存在、Content-Length、SHA-256 元数据、上传 grant 与 task 专属前缀，不接受客户端任意 URL。最终接单人与 50% 节点分佣接收人只取绑定令牌对应用户；另 50% 进入平台管理员余额。管理员发起的任务免扣费、免分佣。task_id + event/status + local_job_id 及两笔分佣流水均幂等。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "multipart/form-data": { schema: z.object({ metadata: z.string() }) } } } }, responses: { 200: { description: "回调、扣款结算与分佣已幂等处理" }, 400: { description: "回执不完整" }, 401: { description: "绑定无效" }, 409: { description: "COS 回执、上传票据或结算状态不匹配" }, 413: { description: "禁止把视频文件经 Vercel 中转" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/admin/h3/tasks", tags: ["Administration"], summary: "管理员筛选共享节点任务派单", responses: { 200: { description: "任务列表" }, 403: { description: "需要管理员角色" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/admin/h3/tasks/{id}", tags: ["Administration"], summary: "管理员查看共享节点任务、回调和审计详情", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "任务详情、回调和审计时间线" }, 404: { description: "任务不存在" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/admin/h3/tasks/{id}/cancel", tags: ["Administration"], summary: "管理员幂等取消任务并退款", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "取消状态和退款结果" }, 409: { description: "已完成任务不能取消" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/admin/h3/tasks/{id}/retry", tags: ["Administration"], summary: "管理员重新扣款并将已退款任务重新排队", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "重新排队后的任务" }, 402: { description: "需求用户余额不足" }, 409: { description: "当前状态不可重试" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/admin/h3/tasks/{id}/retry", tags: ["Administration"], summary: "管理员重新派发失败任务", description: "普通用户与订阅用户的已退款任务会重新原子预扣；管理员发起的免扣费任务直接重新排队，不产生扣款或分佣。", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "重新排队后的任务" }, 402: { description: "需求用户余额不足" }, 409: { description: "当前状态不可重试" } } });
 }

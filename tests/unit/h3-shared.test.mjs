@@ -6,11 +6,13 @@ import { ObjectId } from "mongodb";
 import app from "../../server/app.js";
 import {
   H3_ACCOUNT_BINDING_HEADER,
+  calculateH3RevenueSplit,
   calculateH3SharedPrice,
   h3CallbackEventKey,
   normalizeH3TaskInput,
   registerH3SharedRoutes,
   reserveH3Wallet,
+  settleH3Revenue,
   toH3WorkerTask,
 } from "../../server/h3-shared.js";
 
@@ -35,6 +37,11 @@ test("H3 shared pricing uses integer fen and keeps audio free", () => {
   assert.equal(normalized.imageCount, 1);
   assert.equal(normalized.audioCount, 1);
   assert.equal(normalized.priceFen, 205);
+});
+
+test("H3 successful revenue uses integer-fen 50/50 split with platform taking the odd-cent remainder", () => {
+  assert.deepEqual(calculateH3RevenueSplit(205), { grossFen: 205, nodeShareFen: 102, platformShareFen: 103 });
+  assert.deepEqual(calculateH3RevenueSplit(300), { grossFen: 300, nodeShareFen: 150, platformShareFen: 150 });
 });
 
 test("H3 pricing rejects unsupported duration and material counts", () => {
@@ -214,6 +221,126 @@ test("H3 wallet reservation is atomic under concurrent different orders", async 
   assert.equal(ledgers.size, 1);
 });
 
+test("H3 completion credits node and platform wallets once with separate auditable ledgers", async () => {
+  const taskId = new ObjectId();
+  const requesterId = new ObjectId();
+  const nodeUserId = new ObjectId();
+  const platformAdminId = new ObjectId();
+  let task = { _id: taskId, orderNo: "H3SPLIT001", requesterUserId: requesterId, requesterRoleSnapshot: "user", status: "completed", chargeStatus: "settled", revenueStatus: "pending", priceFen: 205, retryCount: 0 };
+  const walletState = new Map();
+  const ledgerState = new Map();
+  const sameId = (left, right) => left?.toString?.() === right?.toString?.();
+  const setFields = (target, fields = {}) => {
+    for (const [key, value] of Object.entries(fields)) {
+      if (key.includes(".")) {
+        const [parent, child] = key.split(".");
+        target[parent] = { ...(target[parent] || {}), [child]: value };
+      } else target[key] = value;
+    }
+  };
+  const collections = {
+    h3SharedTasks: {
+      findOne: async (filter) => sameId(filter._id, task._id) ? task : null,
+      updateOne: async (_filter, update) => { setFields(task, update.$set); return { matchedCount: 1, modifiedCount: 1 }; },
+    },
+    wallets: {
+      findOne: async (filter) => walletState.get(filter.ownerId.toString()) || null,
+      findOneAndUpdate: async (filter, update) => {
+        const key = filter.ownerId.toString();
+        const wallet = walletState.get(key);
+        if (!wallet || wallet.ledgerKeys.includes(filter.ledgerKeys.$ne)) return null;
+        wallet.balanceFen += update.$inc.balanceFen;
+        wallet.ledgerKeys.push(...update.$push.ledgerKeys.$each);
+        wallet.ledgerEntries.push(...update.$push.ledgerEntries.$each);
+        return wallet;
+      },
+      insertOne: async (record) => {
+        const key = record.ownerId.toString();
+        if (walletState.has(key)) throw Object.assign(new Error("duplicate"), { code: 11000 });
+        walletState.set(key, record);
+        return { insertedId: record._id };
+      },
+    },
+    h3WalletLedger: {
+      updateOne: async (filter, update) => {
+        const current = ledgerState.get(filter.ledgerKey);
+        const next = current || { ...update.$setOnInsert };
+        setFields(next, update.$set);
+        ledgerState.set(filter.ledgerKey, next);
+        return { upsertedCount: current ? 0 : 1 };
+      },
+      findOne: async (filter) => ledgerState.get(filter.ledgerKey) || null,
+    },
+  };
+  const getCollection = async (name) => collections[name];
+  await settleH3Revenue({ getCollection, task, executorUserId: nodeUserId, platformAdminUserId: platformAdminId });
+  await settleH3Revenue({ getCollection, task, executorUserId: nodeUserId, platformAdminUserId: platformAdminId });
+  assert.equal(walletState.get(nodeUserId.toString()).balanceFen, 102);
+  assert.equal(walletState.get(platformAdminId.toString()).balanceFen, 103);
+  assert.equal(walletState.get(nodeUserId.toString()).ledgerEntries[0].kind, "h3_node_commission");
+  assert.equal(walletState.get(platformAdminId.toString()).ledgerEntries[0].kind, "h3_platform_commission");
+  assert.equal(ledgerState.size, 2);
+  assert.equal(task.revenueStatus, "settled");
+  assert.equal(task.settlement.grossFen, 205);
+});
+
+test("H3 administrator exemption never opens a commission wallet ledger", async () => {
+  const taskId = new ObjectId();
+  let task = { _id: taskId, orderNo: "H3EXEMPT001", status: "completed", chargeStatus: "exempt", revenueStatus: "pending", priceFen: 500 };
+  let financialCollectionReads = 0;
+  const getCollection = async (name) => {
+    if (name !== "h3SharedTasks") {
+      financialCollectionReads += 1;
+      throw new Error(`unexpected financial collection: ${name}`);
+    }
+    return {
+      findOne: async () => task,
+      updateOne: async (_filter, update) => { task = { ...task, ...update.$set }; return { modifiedCount: 1 }; },
+    };
+  };
+  const settled = await settleH3Revenue({ getCollection, task, executorUserId: new ObjectId() });
+  assert.equal(settled.revenueStatus, "exempt");
+  assert.deepEqual(settled.settlement, { grossFen: 0, nodeShareFen: 0, platformShareFen: 0, reason: "administrator_exempt" });
+  assert.equal(financialCollectionReads, 0);
+});
+
+test("administrator-created H3 tasks queue without wallet deduction or revenue sharing", async () => {
+  const isolated = new OpenAPIHono();
+  const adminId = new ObjectId();
+  let storedTask = null;
+  let walletMutations = 0;
+  const collections = {
+    h3SharedTasks: {
+      findOne: async (filter) => filter.idempotencyKey && storedTask?.idempotencyKey === filter.idempotencyKey ? storedTask : null,
+      insertOne: async (record) => { storedTask = record; return { insertedId: record._id }; },
+      updateOne: async () => ({ modifiedCount: 1 }),
+      findOneAndUpdate: async () => { throw new Error("admin task must not reserve a wallet"); },
+    },
+    wallets: { findOne: async () => ({ ownerId: adminId, balanceFen: 999 }), findOneAndUpdate: async () => { walletMutations += 1; return null; } },
+    h3TaskAudits: { insertOne: async () => ({ insertedId: new ObjectId() }) },
+  };
+  registerH3SharedRoutes(isolated, {
+    getCollection: async (name) => collections[name] || { findOne: async () => null, insertOne: async () => ({ insertedId: new ObjectId() }), updateOne: async () => ({}) },
+    enforceRateLimit: async () => ({ allowed: true }),
+    authenticate: async () => ({ user: { id: adminId.toString(), email: "admin@example.com", role: "admin" } }),
+    requireAdmin: async () => ({ user: { id: adminId.toString(), role: "admin" } }),
+    requireTrustedMutation: () => null,
+    verifyActivationReceipt: async () => { throw new Error("not used"); },
+  });
+  const response = await isolated.request("http://localhost/api/h3/tasks", {
+    method: "POST",
+    headers: { "content-type": "application/json", "Idempotency-Key": "admin-h3-exempt-001" },
+    body: JSON.stringify({ source_channel: "website", model: "minimax_h3_shared", prompt: "admin render", duration_seconds: 5, aspect_ratio: "16:9", profile: "balanced", assets: { images: [], videos: [], audio: [] } }),
+  });
+  assert.equal(response.status, 201);
+  const payload = await response.json();
+  assert.deepEqual(payload.billing, { chargedFen: 0, remainingBalanceFen: 999, exempt: true });
+  assert.equal(payload.task.chargeStatus, "exempt");
+  assert.equal(payload.task.revenueStatus, "exempt");
+  assert.equal(walletMutations, 0);
+  assert.equal(storedTask.activeChargeKey, undefined);
+});
+
 test("H3 claim dry-run validates identity and capabilities without touching the queue", async () => {
   const isolated = new OpenAPIHono();
   const bindingId = new ObjectId();
@@ -282,6 +409,7 @@ test("H3 implementation keeps identity, capability, COS ownership and ledger gat
   assert.match(source, /OUTPUT_OBJECT_FORBIDDEN[\s\S]+headObject\(objectKey\)[\s\S]+x-cos-meta-sha256/);
   assert.match(source, /ledgerKeys: \{ \$ne: ledgerKey \}[\s\S]+balanceFen: -amountFen/);
   assert.match(source, /assigneeUserId: auth\.user\._id/);
+  assert.match(source, /wallet: \{ balanceFen: integer\(wallet\?\.balanceFen\), unlimited: auth\.user\.role === "admin" \}/);
   assert.match(source, /workerCallbackTask\(task\)/);
   assert.match(db, /uniq_h3_order_no[\s\S]+uniq_h3_idempotency_key[\s\S]+uniq_h3_callback_event[\s\S]+uniq_h3_wallet_ledger/);
   assert.match(account, /WarningCircle/);

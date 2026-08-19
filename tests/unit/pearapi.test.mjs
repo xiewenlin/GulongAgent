@@ -168,6 +168,7 @@ test("website exposes the simplified agent while user settings no longer expose 
   assert.match(agentSource, /MEMBERSHIP REQUIRED/);
   assert.match(agentSource, /USAGE EXHAUSTED/);
   assert.match(agentSource, /creationType !== "text" && user\.role !== "admin"/);
+  assert.match(agentSource, /creationType === "text" && !bootstrap\?\.subscription\?\.active/);
   assert.doesNotMatch(agentSource, /已包含 30% 平台服务费/);
   assert.doesNotMatch(agentSource, /结算加收 30% 服务费/);
   assert.doesNotMatch(agentSource, /深度思考/);
@@ -209,6 +210,7 @@ test("monthly subscription payments credit the wallet once and PearAPI routes ar
   assert.match(pearSource, /"credits\.key": \{ \$ne: key \}/);
   assert.match(pearSource, /limit: 30, windowMs: 5 \* 60_000/);
   assert.match(pearSource, /const unlimited = auth\.user\.role === "admin"/);
+  assert.doesNotMatch(pearSource, /图片和视频创作需要生效中的会员订阅/);
   assert.match(pearSource, /reservePearMediaWallet/);
   assert.match(pearSource, /pear_media_reservation/);
   assert.match(pearSource, /IDEMPOTENCY_KEY_REQUIRED/);
