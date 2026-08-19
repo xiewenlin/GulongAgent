@@ -140,7 +140,7 @@ export function AccountModal({ open, initialMode = "login", onClose, onUser, the
           )}
           {mode === "register" && (
             <>
-              <label><span>用户名（可选，用于登录）</span><div className="input-shell"><UserCircle size={18} /><input minLength={3} maxLength={32} value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} autoComplete="username" placeholder="3–32 个字符" /></div></label>
+              <label><span>用户名（可选，用于登录）</span><div className="input-shell"><UserCircle size={18} /><input value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} autoComplete="username" placeholder="可输入中文、空格、符号或任意字符" /></div></label>
               <label><span>显示名称（可选）</span><div className="input-shell"><UserCircle size={18} /><input maxLength={64} value={form.displayName} onChange={(event) => setForm({ ...form, displayName: event.target.value })} placeholder="例如：施富" /></div></label>
               <label><span>邀请码（可选）</span><div className="input-shell"><UserCircle size={18} /><input maxLength={64} value={form.inviteCode} onChange={(event) => setForm({ ...form, inviteCode: event.target.value })} placeholder="如有邀请码可填写" /></div></label>
             </>

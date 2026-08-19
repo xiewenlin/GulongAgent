@@ -16,9 +16,12 @@ import {
   productEdition,
   productEditionFromChannel,
   refreshChandlerLogin,
+  registerWithChandler,
   resetPasswordWithChandler,
   resolveWebsiteLoginEmail,
   verifyChandlerWebhook,
+  websiteUsernameIdentity,
+  websiteUsernameOwnerFilter,
 } from "../../server/chandler.js";
 import { browserUploadCorsReady, browserUploadCorsRule, cosConfig, sanitizeFilename } from "../../server/cos.js";
 import { readExternalAuth, readUserSecret, sealExternalAuth, sealUserSecret } from "../../server/security.js";
@@ -58,11 +61,36 @@ test("website login normalizes e-mail identifiers and resolves registered userna
   const chandlerSource = await readFile(new URL("../../server/chandler.js", import.meta.url), "utf8");
   assert.match(source, /const loginEmail = await resolveWebsiteLoginEmail\(input\.identifier\)/);
   assert.match(source, /loginWithChandler\(loginEmail, input\.password\)/);
-  assert.match(chandlerSource, /usernameNormalized: normalized/);
+  assert.match(chandlerSource, /usernameLookupHash: identity\.lookupHash/);
+  assert.match(chandlerSource, /usernameNormalized: identity\.legacyNormalized/);
   assert.match(chandlerSource, /chandlerRequest\("\/v1\/oauth\/token"/);
   assert.match(chandlerSource, /grant_type: "refresh_token"/);
   assert.match(chandlerSource, /\[404, 405\]\.includes\(error\.status\)/);
   assert.match(chandlerSource, /auth\.invalid_credentials/);
+});
+
+test("website registration accepts arbitrary username aliases without sending them to Chandler", async () => {
+  const alias = websiteUsernameIdentity("  施 富 ✨ / 古龙（测试）  ");
+  assert.equal(alias.username, "施 富 ✨ / 古龙（测试）");
+  assert.equal(alias.lookupHash.length, 64);
+  assert.deepEqual(websiteUsernameOwnerFilter(alias.username).$or[0], { usernameLookupHash: alias.lookupHash });
+
+  const originalFetch = globalThis.fetch;
+  let body;
+  globalThis.fetch = async (_url, options = {}) => {
+    body = JSON.parse(options.body);
+    return new Response(JSON.stringify({ data: { access_token: "access", user: { id: "user-1", email: "member@example.com" } } }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    await registerWithChandler({ email: "member@example.com", password: "任意密码", displayName: "施富" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(Object.hasOwn(body, "username"), false);
+  assert.equal(body.email, "member@example.com");
 });
 
 test("Chandler login refresh uses the v3.3 form-encoded OAuth contract", async () => {
@@ -384,7 +412,7 @@ test("email verification-code password recovery is wired end to end", async () =
   assert.match(css, /\.account-label-row\s*\{/);
 });
 
-test("registration validation is user-readable and pricing imports every rendered icon", async () => {
+test("registration accepts unrestricted usernames, keeps errors Chinese, and pricing imports every rendered icon", async () => {
   const [modalSource, apiSource, platformSource, chandlerSource] = await Promise.all([
     readFile(new URL("../../src/components/AccountModal.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../src/api.js", import.meta.url), "utf8"),
@@ -394,7 +422,7 @@ test("registration validation is user-readable and pricing imports every rendere
   const response = await app.request("http://localhost/api/auth/register", {
     method: "POST",
     headers: { "Content-Type": "application/json", Origin: "http://localhost" },
-    body: JSON.stringify({ email: "not-an-email", password: "x" }),
+    body: JSON.stringify({ username: "  任意 用户名 ✨ / !@#$%^&*()  ", email: "not-an-email", password: "x" }),
   });
   assert.equal(response.status, 400);
   assert.deepEqual(await response.json(), {
@@ -403,8 +431,17 @@ test("registration validation is user-readable and pricing imports every rendere
     requestId: response.headers.get("x-request-id"),
   });
   assert.match(modalSource, /const optionalText = \(value\) => value\.trim\(\) \|\| undefined/);
+  assert.match(modalSource, /可输入中文、空格、符号或任意字符/);
+  assert.doesNotMatch(modalSource, /name="username"[^>]+(?:minLength|maxLength|pattern)=/);
   assert.match(apiSource, /payload\.error\?\.message/);
+  assert.match(apiSource, /localizeErrorMessage\(candidate\)/);
   assert.match(chandlerSource, /auth\.weak_password/);
+  const openapi = await app.request("http://localhost/api/openapi.json").then((result) => result.json());
+  const usernameSchema = openapi.paths["/api/auth/register"].post.requestBody.content["application/json"].schema.properties.username;
+  assert.equal(usernameSchema.type, "string");
+  assert.equal(usernameSchema.minLength, undefined);
+  assert.equal(usernameSchema.maxLength, undefined);
+  assert.equal(usernameSchema.pattern, undefined);
   const iconImports = platformSource.slice(0, platformSource.indexOf('} from "@phosphor-icons\/react"'));
   assert.match(iconImports, /\bCoins\b/);
 });

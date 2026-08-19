@@ -2,6 +2,7 @@ import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { ObjectId } from "mongodb";
 import { getCollection } from "./db.js";
 import { readExternalAuth, sealExternalAuth } from "./security.js";
+import { localizeErrorMessage } from "../shared/error-messages.js";
 
 const DEFAULT_BASE_URL = "https://api.chandler.work";
 const DEFAULT_APPLICATION_ID = "cm_89be865af1af48f4a83406f0cf1a472e";
@@ -96,13 +97,13 @@ function friendlyMessage(status, payload) {
   if (code === "order.not_refundable") return "该订单当前不可退款，请检查订单状态与可退金额";
   if (code === "order.invalid" && /refund amount/i.test(raw)) return "退款金额必须大于 0，且不能超过订单可退金额";
   if (code === "request.invalid" && /malformed json/i.test(raw)) return "发送给 Chandler 的字段与当前接口契约不一致，请更新客户端后重试";
-  if (status === 401) return raw || "登录已失效，请重新登录";
+  if (status === 401) return localizeErrorMessage(raw, "登录已失效，请重新登录");
   if (status === 403) return "当前账号没有执行该操作的 Chandler 权限";
   if (status === 409) return "该账号、订单或操作已存在，请刷新后查看";
   if (status === 428) return "该账号已启用多因素认证，请先在 Chandler 完成验证";
   if (status === 429) return "操作过于频繁，请稍后重试";
   if (status >= 500) return "Chandler 服务暂时不可用，请稍后重试";
-  return raw || code || "Chandler 请求失败";
+  return localizeErrorMessage(raw || code, "统一账号服务请求失败，请稍后重试");
 }
 
 export async function chandlerRequest(path, {
@@ -170,20 +171,42 @@ export function verifyChandlerWebhook(rawBody, signature) {
   return timingSafeEqual(Buffer.from(received, "hex"), Buffer.from(expected, "hex"));
 }
 
-export function registerWithChandler({ email, username, password, displayName, inviteCode }) {
+export function registerWithChandler({ email, password, displayName, inviteCode }) {
   return chandlerRequest("/v1/auth/register", {
     method: "POST",
     body: {
       email: email.trim(),
       password,
-      display_name: (displayName || username || email.split("@")[0]).trim(),
-      ...(username ? { username: username.trim() } : {}),
+      display_name: (displayName || email.split("@")[0]).trim(),
       ...(inviteCode ? { invite_code: inviteCode.trim() } : {}),
       agree_policies: true,
       client_version: "gulong-web-1.1",
       device_type: "web",
     },
   });
+}
+
+export function websiteUsernameIdentity(value) {
+  const username = String(value ?? "").trim();
+  if (!username) return null;
+  const normalized = username.normalize("NFKC").toLowerCase();
+  return {
+    username,
+    normalized,
+    lookupHash: createHash("sha256").update(normalized).digest("hex"),
+    legacyNormalized: normalized.length <= 32 ? normalized : null,
+  };
+}
+
+export function websiteUsernameOwnerFilter(value) {
+  const identity = websiteUsernameIdentity(value);
+  if (!identity) return null;
+  return {
+    $or: [
+      { usernameLookupHash: identity.lookupHash },
+      ...(identity.legacyNormalized ? [{ usernameNormalized: identity.legacyNormalized }] : []),
+    ],
+  };
 }
 
 export function loginWithChandler(identifier, password) {
@@ -220,8 +243,9 @@ export async function resetPasswordWithChandler(token, newPassword) {
 export async function resolveWebsiteLoginEmail(identifier) {
   const normalized = String(identifier || "").trim().normalize("NFKC").toLowerCase();
   if (!normalized || normalized.includes("@")) return normalized;
+  const ownerFilter = websiteUsernameOwnerFilter(normalized);
   const user = await (await getCollection("users")).findOne(
-    { usernameNormalized: normalized },
+    ownerFilter,
     { projection: { email: 1, emailNormalized: 1 } },
   );
   return String(user?.emailNormalized || user?.email || normalized).trim().toLowerCase();
@@ -403,13 +427,12 @@ export async function upsertChandlerUser(chandlerUser, { username, identity, def
     ...(releaseAssignment?.channelId ? { releaseChannelId: releaseAssignment.channelId, releaseChannelGroupId: releaseAssignment.groupId } : {}),
     updatedAt: now,
   };
-  if (username && !canonical?.username) {
-    const requestedUsername = username.trim();
-    const usernameNormalized = requestedUsername.toLowerCase();
-    const usernameOwner = await users.findOne({ usernameNormalized });
+  const websiteUsername = websiteUsernameIdentity(username);
+  if (websiteUsername && !canonical?.username) {
+    const usernameOwner = await users.findOne(websiteUsernameOwnerFilter(websiteUsername.username));
     if (!usernameOwner || usernameOwner._id.equals(canonical?._id)) {
-      record.username = requestedUsername;
-      record.usernameNormalized = usernameNormalized;
+      record.username = websiteUsername.username;
+      record.usernameLookupHash = websiteUsername.lookupHash;
     }
   }
   try {

@@ -6,6 +6,7 @@ import { enforceRateLimit as databaseRateLimit } from "./rate-limit.js";
 import { fingerprintIp, hashOpaqueToken, normalizeEmail } from "./security.js";
 import { createPresignedDownloadUrl, createPresignedPutUrl, deleteObject, headObject, sanitizeFilename } from "./cos.js";
 import { calculateH3ClaimPlan, createH3QueueCoordinator, H3_CLAIM_LEASE_MS } from "./h3-queue.js";
+import { localizeErrorMessage } from "../shared/error-messages.js";
 
 export const H3_ACCOUNT_BINDING_HEADER = "X-Gulong-Account-Binding";
 export const H3_SHARED_MODEL = "minimax_h3_shared";
@@ -148,7 +149,7 @@ function publicTask(task, { includePrompt = true, outputUrl = null } = {}) {
     claimedByNode: publicNode(task.claimedByNode),
     executedByNode: publicNode(task.executedByNode),
     output: task.output ? { ...task.output, ...(outputUrl ? { url: outputUrl } : {}) } : null,
-    error: task.error || null,
+    error: task.error ? { ...task.error, message: localizeErrorMessage(task.error.message, "共享节点任务处理失败") } : null,
     createdAt: task.createdAt,
     claimedAt: task.claimedAt || null,
     completedAt: task.completedAt || null,
@@ -547,7 +548,7 @@ async function refundTask({ getCollection, task, reason, actor = "system" }) {
 }
 
 function routeError(c, error) {
-  return c.json({ code: error.code || "H3_SHARED_ERROR", message: error.message || "共享节点服务暂时不可用" }, error.status || 500);
+  return c.json({ code: error.code || "H3_SHARED_ERROR", message: localizeErrorMessage(error, "共享节点服务暂时不可用") }, error.status || 500);
 }
 
 export function registerH3SharedRoutes(app, dependencies) {
@@ -1010,7 +1011,7 @@ export function registerH3SharedRoutes(app, dependencies) {
     }
     const failed = await tasks.findOneAndUpdate(
       { _id: task._id, status: { $in: ["claimed", "processing", "queued"] } },
-      { $set: { status: status === "cancelled" ? "cancelled" : "failed", revenueStatus: "not_earned", executedByNode: executionNode, error: { code: String(metadata.error_code || "NODE_EXECUTION_FAILED").slice(0, 80), message: String(metadata.error_message || "共享节点执行失败").slice(0, 500) }, ...(status === "cancelled" ? { cancelledAt: now } : { failedAt: now }), updatedAt: now } },
+      { $set: { status: status === "cancelled" ? "cancelled" : "failed", revenueStatus: "not_earned", executedByNode: executionNode, error: { code: String(metadata.error_code || "NODE_EXECUTION_FAILED").slice(0, 80), message: localizeErrorMessage(metadata.error_message, "共享节点执行失败").slice(0, 500) }, ...(status === "cancelled" ? { cancelledAt: now } : { failedAt: now }), updatedAt: now } },
       { returnDocument: "after" },
     );
     task = failed || await tasks.findOne({ _id: task._id });

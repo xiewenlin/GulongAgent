@@ -26,7 +26,7 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
-import { apiFetch, formatMoney } from "../api.js";
+import { apiFetch, formatMoney, localizedFetch } from "../api.js";
 import { useConfirmDialog } from "./ConfirmDialog.jsx";
 import { WorkerManagementPanel } from "./WorkerPages.jsx";
 
@@ -188,7 +188,7 @@ export function AccountDashboard({ user, openAuth, navigate, onUser }) {
     setBusy("avatar"); setMessage("");
     try {
       const presigned = await apiFetch("/api/account/avatar/presign", { method: "POST", body: JSON.stringify({ filename: file.name, contentType: file.type, bytes: file.size }) });
-      const upload = await fetch(presigned.uploadUrl, { method: "PUT", headers: presigned.requiredHeaders, body: file });
+      const upload = await localizedFetch(presigned.uploadUrl, { method: "PUT", headers: presigned.requiredHeaders, body: file });
       if (!upload.ok) throw new Error("头像上传到腾讯云 COS 失败，请重试");
       const completed = await apiFetch(`/api/account/avatar/${presigned.uploadId}/complete`, { method: "POST", body: "{}" });
       setData((current) => ({ ...current, profile: { ...current.profile, avatar: completed.avatar } }));

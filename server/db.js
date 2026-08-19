@@ -54,6 +54,10 @@ export async function ensureIndexes() {
           { unique: true, sparse: true, name: "uniq_username" },
         ),
         db.collection("users").createIndex(
+          { usernameLookupHash: 1 },
+          { unique: true, sparse: true, name: "uniq_username_lookup_hash" },
+        ),
+        db.collection("users").createIndex(
           { emailNormalized: 1 },
           { unique: true, sparse: true, name: "uniq_email" },
         ),

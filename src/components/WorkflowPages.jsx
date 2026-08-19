@@ -1,6 +1,6 @@
 import { ArrowRight, MagnifyingGlass, Sparkle } from "@phosphor-icons/react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiFetch } from "../api.js";
+import { apiFetch, localizeErrorMessage } from "../api.js";
 
 export function WorkflowCard({ workflow, navigate }) {
   const external = /^https?:\/\//i.test(workflow.url);
@@ -97,7 +97,7 @@ export function ShortDramaPage({ user, authResolved, openAuth }) {
           else pendingAuthModeRef.current = mode;
         }
       } else if (event.data?.type === "dramaclaw:sso-error") {
-        setError(event.data.message || "短剧账号授权失败，请重试");
+        setError(localizeErrorMessage(event.data.message, "短剧账号授权失败，请重试"));
       }
     }
     window.addEventListener("message", onMessage);

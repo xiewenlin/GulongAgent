@@ -64,6 +64,8 @@ import {
   setPartnerSkuStatus,
   upsertChandlerUser,
   verifyChandlerWebhook,
+  websiteUsernameIdentity,
+  websiteUsernameOwnerFilter,
 } from "./chandler.js";
 import {
   cosConfig,
@@ -78,6 +80,7 @@ import { buildAdminAnalyticsDashboard, recordAnalyticsEvent } from "./analytics.
 import { recoverExpiredDirectReleaseLock } from "./release-lock.js";
 import { creditPaymentBalanceWithPromotion, paymentPromotionBonusFen, registerPearApiRoutes } from "./pearapi.js";
 import { registerH3SharedRoutes } from "./h3-shared.js";
+import { localizeErrorMessage } from "../shared/error-messages.js";
 import {
   OFFLINE_REVIEW_REJECTION_REASON,
   chandlerOrderItems,
@@ -100,11 +103,6 @@ function requestValidationMessage(error) {
   const issue = error?.issues?.[0];
   const field = String(issue?.path?.at(-1) || "");
   if (field === "email") return "请输入有效的邮箱地址";
-  if (field === "username") {
-    if (issue?.code === "too_small") return "用户名至少需要 3 个字符";
-    if (issue?.code === "too_big") return "用户名最多允许 32 个字符";
-    return "用户名只能包含中英文、数字、下划线或短横线";
-  }
   if (field === "displayName") return "显示名称不能只包含空格，且最多允许 64 个字符";
   if (field === "inviteCode") return "邀请码最多允许 64 个字符";
   if (field === "password") return issue?.code === "too_big" ? "密码最多允许 255 个字符" : "请输入密码";
@@ -255,7 +253,7 @@ const PublicUserSchema = z.object({
 
 const RegisterSchema = z
   .object({
-    username: z.string().trim().min(3).max(32).regex(/^[\p{L}\p{N}_-]+$/u).optional(),
+    username: z.string().optional(),
     email: z.email(),
     displayName: z.string().trim().min(1).max(64).optional(),
     inviteCode: z.string().trim().max(64).optional(),
@@ -263,7 +261,7 @@ const RegisterSchema = z
   });
 
 const LoginSchema = z.object({
-  identifier: z.string().trim().min(3).max(254),
+  identifier: z.string().trim().min(1),
   password: z.string().min(1).max(128),
 });
 
@@ -334,7 +332,7 @@ async function requireAdmin(c) {
       // A previously verified local administrator must retain access to
       // MongoDB-backed operations during a transient Chandler outage. Remote
       // mutations still call Chandler separately and keep their own guards.
-      auth.chandlerWarning = error.message;
+      auth.chandlerWarning = localizeErrorMessage(error, "统一账号服务暂时不可用");
     }
   }
   if (auth.user.role !== "admin") {
@@ -2219,13 +2217,13 @@ app.onError((error, c) => {
   console.error(`[${c.get("requestId")}]`, error);
   if (error instanceof ChandlerError) {
     return c.json(
-      { code: error.code, message: error.message, requestId: c.get("requestId") },
+      { code: error.code, message: localizeErrorMessage(error, "统一账号服务暂时不可用，请稍后重试"), requestId: c.get("requestId") },
       error.status,
     );
   }
   if (error instanceof ConfigurationError || error.code === "CONFIG_REQUIRED") {
     return c.json(
-      { code: "CONFIG_REQUIRED", message: error.message, requestId: c.get("requestId") },
+      { code: "CONFIG_REQUIRED", message: localizeErrorMessage(error, "服务配置尚未完成，请联系管理员"), requestId: c.get("requestId") },
       503,
     );
   }
@@ -2307,16 +2305,20 @@ app.openapi(registerRoute, async (c) => {
   if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "注册尝试过多，请稍后重试" }, 429);
 
   const input = c.req.valid("json");
+  const websiteUsername = websiteUsernameIdentity(input.username);
+  if (websiteUsername) {
+    const existingUsername = await (await getCollection("users")).findOne(websiteUsernameOwnerFilter(websiteUsername.username), { projection: { _id: 1 } });
+    if (existingUsername) return c.json({ code: "USERNAME_TAKEN", message: "该用户名已被使用，请换一个用户名或使用邮箱登录" }, 409);
+  }
   const auth = await registerWithChandler({
     email: input.email,
-    username: input.username,
     password: input.password,
     displayName: input.displayName,
     inviteCode: input.inviteCode,
   });
   await markChandlerProductEdition(auth.access_token, auth.user.id, "gulong", "website-registration").catch(() => null);
   const identity = { role: auth.user.is_admin || isChandlerBootstrapAdmin(auth.user) ? "admin" : "user", editionKey: "gulong", editionName: "古龙版", editionSource: "website-registration" };
-  const user = await upsertChandlerUser(auth.user, { username: input.username, identity, defaultEdition: "gulong", forceEdition: true });
+  const user = await upsertChandlerUser(auth.user, { username: websiteUsername?.username, identity, defaultEdition: "gulong", forceEdition: true });
   await issueSession(c, user._id, { externalAuth: externalAuthFromResponse(auth) });
   return c.json(
     {
@@ -3107,7 +3109,7 @@ app.openapi(adminListChandlerUsersRoute, async (c) => {
         source: "website-snapshot",
         permissionLimited: true,
         synchronized: false,
-        warning: error.message,
+        warning: localizeErrorMessage(error, "统一账号服务暂时不可用，当前显示官网同步数据"),
         capabilities: subscriptionDirectoryCapabilities(),
       },
     });
@@ -3288,13 +3290,15 @@ app.openapi(adminChandlerUserSubscriptionsRoute, async (c) => {
       const actionableFailures = results.filter((result) => result.status === "rejected" && result.reason?.status !== 404);
       remoteApplicationCount = successful.length;
       partial = successful.length > 0 && actionableFailures.length > 0;
-      remoteWarning = actionableFailures[0]?.reason?.message || null;
+      remoteWarning = actionableFailures[0]
+        ? localizeErrorMessage(actionableFailures[0].reason, "部分统一账号数据暂时无法同步")
+        : null;
       const subscriptionAttributes = successful
         .filter((item) => chandlerAttributePeriod(item.attributes))
         .sort((left, right) => Number(right.attributes.subscription_period_updated_at_unix_ms || right.attributes.subscription_reviewed_at_unix_ms || 0) - Number(left.attributes.subscription_period_updated_at_unix_ms || left.attributes.subscription_reviewed_at_unix_ms || 0))[0];
       if (subscriptionAttributes) await synchronizeChandlerAttributeSubscription(user._id, subscriptionAttributes.attributes, subscriptionAttributes.target.id);
     } catch (error) {
-      remoteWarning = error.message;
+      remoteWarning = localizeErrorMessage(error, "统一账号数据暂时无法同步");
     }
   }
 
@@ -4004,7 +4008,7 @@ app.post("/api/release-worker/jobs/:id/fail", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   await (await getCollection("releaseJobs")).updateOne(
     { _id: new ObjectId(c.req.param("id")), status: { $in: ["building", "uploading"] } },
-    { $set: { status: "failed", error: String(body.error || "发行工作流失败").slice(0, 4000), failedAt: new Date(), updatedAt: new Date() } },
+    { $set: { status: "failed", error: localizeErrorMessage(body.error, "发行工作流失败").slice(0, 4000), failedAt: new Date(), updatedAt: new Date() } },
   );
   return c.json({ ok: true });
 });
@@ -5838,7 +5842,7 @@ app.post("/api/admin/offline-payments/:id/approve", async (c) => {
     validFrom: body.validFrom,
     validUntil: body.validUntil,
   });
-  if (result.error) return c.json({ code: result.error.code, message: result.error.message }, result.error.status);
+  if (result.error) return c.json({ code: result.error.code, message: localizeErrorMessage(result.error.message) }, result.error.status);
   await (await getCollection("offlinePaymentReviewEvents")).updateOne(
     { orderId: new ObjectId(c.req.param("id")), status: { $in: ["pending", "leased", "awaiting_action"] } },
     { $set: { status: "completed", action: "approve", completedAt: new Date(), updatedAt: new Date() } },
@@ -5858,7 +5862,7 @@ app.post("/api/admin/offline-payments/:id/reject", async (c) => {
     accessToken: await getAdminChandlerAccessToken(auth).catch(() => null),
     reason: body.reason,
   });
-  if (result.error) return c.json({ code: result.error.code, message: result.error.message }, result.error.status);
+  if (result.error) return c.json({ code: result.error.code, message: localizeErrorMessage(result.error.message) }, result.error.status);
   await (await getCollection("offlinePaymentReviewEvents")).updateOne(
     { orderId: new ObjectId(c.req.param("id")), status: { $in: ["pending", "leased", "awaiting_action"] } },
     { $set: { status: "completed", action: "reject", completedAt: new Date(), updatedAt: new Date() } },
@@ -5995,7 +5999,7 @@ app.openapi(desktopAdminApproveOfflinePaymentRoute, async (c) => {
     validFrom: body.validFrom,
     validUntil: body.validUntil,
   });
-  if (result.error) return c.json({ code: result.error.code, message: result.error.message }, result.error.status);
+  if (result.error) return c.json({ code: result.error.code, message: localizeErrorMessage(result.error.message) }, result.error.status);
   const now = new Date();
   await (await getCollection("offlinePaymentReviewEvents")).updateOne(
     { orderId: new ObjectId(orderId), status: { $in: ["pending", "leased", "awaiting_action"] } },
@@ -6192,7 +6196,7 @@ app.openapi(desktopReviewActionRoute, async (c) => {
         ? { $set: { status: "cancelled", completedAt: new Date(), updatedAt: new Date() } }
         : { $set: { status: "awaiting_action", updatedAt: new Date() }, $unset: { actionStartedAt: "" } },
     );
-    return c.json({ code: result.error.code, message: result.error.message }, result.error.status);
+    return c.json({ code: result.error.code, message: localizeErrorMessage(result.error.message) }, result.error.status);
   }
   await events.updateOne(
     { _id: event._id, status: "processing" },

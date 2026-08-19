@@ -22,7 +22,7 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
-import { apiFetch, formatMoney } from "../api.js";
+import { apiFetch, formatMoney, localizedFetch } from "../api.js";
 import { useConfirmDialog } from "./ConfirmDialog.jsx";
 
 const taskStatus = {
@@ -50,7 +50,7 @@ async function uploadTaskFiles(taskId, section, files) {
       method: "POST",
       body: JSON.stringify({ section, filename: file.name, contentType: file.type || "application/octet-stream", bytes: file.size }),
     });
-    const response = await fetch(ticket.uploadUrl, { method: "PUT", headers: ticket.requiredHeaders, body: file });
+    const response = await localizedFetch(ticket.uploadUrl, { method: "PUT", headers: ticket.requiredHeaders, body: file });
     if (!response.ok) throw new Error(`附件“${file.name}”上传失败，请重试`);
     await apiFetch(`/api/worker/tasks/${taskId}/assets/${ticket.uploadId}/complete`, { method: "POST", body: "{}" });
   }

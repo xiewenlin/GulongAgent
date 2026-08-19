@@ -4,6 +4,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import { getCollection } from "./db.js";
 import { enforceRateLimit } from "./rate-limit.js";
 import { readUserSecret, sealUserSecret } from "./security.js";
+import { localizeErrorMessage } from "../shared/error-messages.js";
 import {
   PEAR_API_IMAGE_MODELS,
   PEAR_API_MEDIA_MODEL_MAP,
@@ -350,7 +351,7 @@ function mediaPublicView(job) {
     prompt: job.prompt,
     urls: job.urls || [],
     chargedFen: job.chargedFen,
-    error: job.error || null,
+    error: job.error ? localizeErrorMessage(job.error, "媒体生成失败，费用已退回") : null,
     createdAt: job.createdAt,
     completedAt: job.completedAt || null,
   };
@@ -359,10 +360,11 @@ function mediaPublicView(job) {
 async function refundMediaJob(job, error) {
   const jobs = await getCollection("agentMediaJobs");
   const now = new Date();
+  const localizedError = localizeErrorMessage(error, "媒体生成失败，费用已退回").slice(0, 500);
   if (job.chargeStatus === "exempt") {
     const failed = await jobs.findOneAndUpdate(
       { _id: job._id, chargeStatus: "exempt", status: { $nin: ["succeeded", "failed"] } },
-      { $set: { status: "failed", error: String(error || "生成失败").slice(0, 500), failedAt: now, updatedAt: now } },
+      { $set: { status: "failed", error: localizedError, failedAt: now, updatedAt: now } },
       { returnDocument: "after" },
     );
     if (failed) await (await getCollection("agentUsage")).updateOne(
@@ -373,7 +375,7 @@ async function refundMediaJob(job, error) {
   }
   const claimed = await jobs.findOneAndUpdate(
     { _id: job._id, chargeStatus: "reserved", status: { $nin: ["succeeded", "failed"] } },
-    { $set: { status: "failed", chargeStatus: "refunding", error: String(error || "生成失败").slice(0, 500), failedAt: now, updatedAt: now } },
+    { $set: { status: "failed", chargeStatus: "refunding", error: localizedError, failedAt: now, updatedAt: now } },
     { returnDocument: "after" },
   );
   if (!claimed) return jobs.findOne({ _id: job._id });
@@ -469,7 +471,7 @@ export async function checkPearApiFreeModels({ token, tokenChannel = "免费", f
       });
       return { id: model.id, name: model.name, available: true, resolvedModel: result.resolvedModel, latencyMs: Date.now() - startedAt };
     } catch (error) {
-      return { id: model.id, name: model.name, available: false, code: error.code || "PEAR_API_ERROR", message: String(error.message || "检测失败").slice(0, 180), latencyMs: Date.now() - startedAt };
+      return { id: model.id, name: model.name, available: false, code: error.code || "PEAR_API_ERROR", message: localizeErrorMessage(error, "模型检测失败，请稍后重试").slice(0, 180), latencyMs: Date.now() - startedAt };
     }
   }));
   const healthy = models.filter((model) => model.available).length;
@@ -705,7 +707,7 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
         (await getCollection("agentUsage")).updateOne({ requestId }, { $set: { status: "failed", errorCode: error.code || "PEAR_API_ERROR", failedAt, updatedAt: failedAt } }),
         workflows.updateOne({ operationId, ownerId }, { $set: { nodes: workflowNodes, status: "failed", errorCode: error.code || "PEAR_API_ERROR", completedAt: failedAt, updatedAt: failedAt } }),
       ]);
-      return c.json({ code: error.code || "PEAR_API_ERROR", message: error.message || "PearAPI 调用失败" }, error.status || 502);
+      return c.json({ code: error.code || "PEAR_API_ERROR", message: localizeErrorMessage(error, "远程模型调用失败，请稍后重试") }, error.status || 502);
     }
   });
 
@@ -813,8 +815,8 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
       c.header("Cache-Control", "private, no-store, max-age=0");
       return c.json({ job: mediaPublicView(current), billing: { chargedFen, remainingBalanceFen, exempt: unlimited }, idempotent: false }, 201);
     } catch (error) {
-      const failed = await refundMediaJob(job, error.message || "PearAPI 媒体任务提交失败");
-      return c.json({ code: error.code || "PEAR_API_ERROR", message: failed.error }, error.status || 502);
+      const failed = await refundMediaJob(job, localizeErrorMessage(error, "远程媒体任务提交失败，请稍后重试"));
+      return c.json({ code: error.code || "PEAR_API_ERROR", message: localizeErrorMessage(failed.error, "远程媒体任务提交失败，请稍后重试") }, error.status || 502);
     }
   });
 
@@ -856,7 +858,7 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
         job = await jobs.findOne({ _id: job._id });
       }
     } catch (error) {
-      await jobs.updateOne({ _id: job._id }, { $set: { nextPollAt: new Date(Date.now() + 10_000), lastPollError: String(error.message || error).slice(0, 300), updatedAt: new Date() }, $unset: { pollingUntil: "" } });
+      await jobs.updateOne({ _id: job._id }, { $set: { nextPollAt: new Date(Date.now() + 10_000), lastPollError: localizeErrorMessage(error, "远程媒体任务状态查询失败，请稍后重试").slice(0, 300), updatedAt: new Date() }, $unset: { pollingUntil: "" } });
       job = await jobs.findOne({ _id: job._id });
     }
     c.header("Cache-Control", "private, no-store, max-age=0");

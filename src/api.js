@@ -1,3 +1,5 @@
+import { localizeErrorMessage } from "../shared/error-messages.js";
+
 export class ApiError extends Error {
   constructor(message, code = "API_ERROR", status = 500) {
     super(message);
@@ -7,8 +9,18 @@ export class ApiError extends Error {
   }
 }
 
+export async function localizedFetch(path, options = {}) {
+  try {
+    return await fetch(path, options);
+  } catch (error) {
+    throw new ApiError(localizeErrorMessage(error, "网络连接失败，请检查网络后重试"), "NETWORK_ERROR", 0);
+  }
+}
+
+export { localizeErrorMessage };
+
 export async function apiFetch(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await localizedFetch(path, {
     credentials: "include",
     ...options,
     headers: {
@@ -18,21 +30,27 @@ export async function apiFetch(path, options = {}) {
   });
 
   const contentType = response.headers.get("content-type") || "";
-  const payload = contentType.includes("application/json")
-    ? await response.json()
-    : await response.text();
+  let payload;
+  try {
+    payload = contentType.includes("application/json")
+      ? await response.json()
+      : await response.text();
+  } catch {
+    throw new ApiError("服务返回的数据格式不正确，请稍后重试", "INVALID_RESPONSE", response.status);
+  }
 
   if (!response.ok) {
     const nestedMessage = payload && typeof payload === "object" ? payload.error?.message : "";
     const validationFallback = payload?.error?.name === "ZodError"
       ? "请检查填写内容是否正确"
       : "";
-    throw new ApiError(
-      payload?.message
+    const candidate = payload?.message
         || validationFallback
         || (typeof nestedMessage === "string" && nestedMessage.trim() ? nestedMessage : "")
         || (typeof payload === "string" && payload.trim() ? payload : "")
-        || "请求失败，请稍后重试",
+        || "请求失败，请稍后重试";
+    throw new ApiError(
+      localizeErrorMessage(candidate),
       payload?.code || "API_ERROR",
       response.status,
     );
