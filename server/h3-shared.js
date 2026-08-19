@@ -7,6 +7,8 @@ import { fingerprintIp, hashOpaqueToken, normalizeEmail } from "./security.js";
 import { createPresignedDownloadUrl, createPresignedPutUrl, deleteObject, headObject, sanitizeFilename } from "./cos.js";
 import { calculateH3ClaimPlan, createH3QueueCoordinator, H3_CLAIM_LEASE_MS } from "./h3-queue.js";
 import { localizeErrorMessage } from "../shared/error-messages.js";
+import { acceptH3OptimizedPrompt, compileH3Prompt, h3PromptOptimizerMessages, validateH3CompiledPrompt } from "./h3-prompt.js";
+import { callPearApiChat, loadPearApiTextCredential } from "./pearapi.js";
 
 export const H3_ACCOUNT_BINDING_HEADER = "X-Gulong-Account-Binding";
 export const H3_SHARED_MODEL = "minimax_h3_shared";
@@ -73,8 +75,9 @@ function assetManifest(value, kind, maximum) {
 }
 
 export function normalizeH3TaskInput(body = {}) {
-  const prompt = String(body.prompt || "").trim();
-  if (!prompt || prompt.length > 20_000) throw Object.assign(new Error("提示词需为 1–20000 个字符"), { code: "VALIDATION_ERROR", status: 400 });
+  const originalPrompt = String(body.original_prompt || body.originalPrompt || body.prompt || "").trim();
+  const promptCandidate = String(body.optimized_prompt || body.optimizedPrompt || body.prompt || "").trim();
+  if (!originalPrompt || originalPrompt.length > 20_000 || !promptCandidate || promptCandidate.length > 20_000) throw Object.assign(new Error("提示词需为 1–20000 个字符"), { code: "VALIDATION_ERROR", status: 400 });
   const model = String(body.model || H3_SHARED_MODEL).trim();
   if (model !== H3_SHARED_MODEL) throw Object.assign(new Error("仅支持 MiniMax H3 共享节点模型"), { code: "MODEL_NOT_ALLOWED", status: 400 });
   const sourceChannel = body.source_channel === "desktop_agent" || body.sourceChannel === "desktop_agent" ? "desktop_agent" : "website";
@@ -84,10 +87,19 @@ export function normalizeH3TaskInput(body = {}) {
   const audio = assetManifest(assets.audio || body.audio_assets, "audio", 3);
   const durationSeconds = integer(body.duration_seconds ?? body.durationSeconds, -1);
   const priceFen = calculateH3SharedPrice({ durationSeconds, imageCount: images.length, videoCount: videos.length });
+  const promptInput = { prompt: originalPrompt, durationSeconds, aspectRatio: body.aspect_ratio || body.aspectRatio, assets: { images, videos, audio } };
+  const deterministicPrompt = compileH3Prompt(promptInput);
+  const promptMode = deterministicPrompt.mode;
+  const candidateValidation = validateH3CompiledPrompt(promptCandidate, { mode: promptMode, assets: promptInput.assets, instrumentalRequested: /\b(?:instrumental|orchestral|piano|strings|background music|bgm|score)\b|器乐|纯音乐|背景音乐|配乐/iu.test(originalPrompt) });
+  const compiled = candidateValidation.valid
+    ? { prompt: promptCandidate, mode: promptMode, source: body.optimized_prompt || body.optimizedPrompt ? "client_optimized" : "client_validated", validation: candidateValidation }
+    : deterministicPrompt;
   return {
     sourceChannel,
     model,
-    prompt,
+    prompt: compiled.prompt,
+    originalPrompt,
+    promptCompilation: { mode: compiled.mode, source: compiled.source, validated: true },
     aspectRatio: String(body.aspect_ratio || body.aspectRatio || "16:9").trim().slice(0, 24),
     durationSeconds,
     profile: String(body.profile || "balanced").trim().toLowerCase().slice(0, 60),
@@ -182,7 +194,8 @@ function publicTask(task, { includePrompt = true } = {}) {
     orderNo: task.orderNo,
     sourceChannel: task.sourceChannel,
     model: task.model,
-    ...(includePrompt ? { prompt: task.prompt } : { promptSummary: String(task.prompt || "").slice(0, 120) }),
+    ...(includePrompt ? { prompt: task.prompt, originalPrompt: task.originalPrompt || task.prompt } : { promptSummary: String(task.originalPrompt || task.prompt || "").slice(0, 120) }),
+    promptCompilation: task.promptCompilation || null,
     aspectRatio: task.aspectRatio,
     durationSeconds: task.durationSeconds,
     profile: task.profile,
@@ -263,7 +276,7 @@ export async function ensureH3ConversationMessages({ getCollection, task, now = 
       return messages.updateOne(filter, { $set: { updatedAt: now } });
     }
   };
-  await upsertMessageOnce({ _id: task.requestMessageId }, { $setOnInsert: { _id: task.requestMessageId, ownerId: task.requesterUserId, conversationId: task.conversationId, requestId: task.orderNo, h3TaskId: task._id, role: "user", content: task.prompt, modality: "video", model: H3_SHARED_MODEL, createdAt: task.createdAt || now } });
+  await upsertMessageOnce({ _id: task.requestMessageId }, { $setOnInsert: { _id: task.requestMessageId, ownerId: task.requesterUserId, conversationId: task.conversationId, requestId: task.orderNo, h3TaskId: task._id, role: "user", content: task.originalPrompt || task.prompt, compiledPrompt: task.prompt, modality: "video", model: H3_SHARED_MODEL, createdAt: task.createdAt || now } });
   if (task.status !== "completed" || !task.output?.objectKey) return { written: false };
   const expiresAt = task.output.expiresAt ? new Date(task.output.expiresAt) : h3OutputExpiresAt(task.completedAt || now);
   if (!task.output.expiresAt) {
@@ -761,6 +774,8 @@ export function registerH3SharedRoutes(app, dependencies) {
   const inspectCosObject = dependencies.headObject || headObject;
   const removeCosObject = dependencies.deleteObject || deleteObject;
   const queueCoordinator = dependencies.queueCoordinator || createH3QueueCoordinator({ getCollection, model: H3_SHARED_MODEL });
+  const loadPromptCredential = dependencies.loadPearApiTextCredential || loadPearApiTextCredential;
+  const callPromptModel = dependencies.callPearApiChat || callPearApiChat;
   const { authenticate, requireAdmin, requireTrustedMutation, verifyActivationReceipt } = dependencies;
 
   async function authenticateBinding(c, { requireNodeId, touch = true } = {}) {
@@ -886,6 +901,34 @@ export function registerH3SharedRoutes(app, dependencies) {
     const auth = await authenticate(c); if (auth.error) return auth.error;
     const summary = await buildH3EarningsSummary({ getCollection, userId: auth.user.id, maskNodeIds: true });
     return c.json(summary);
+  });
+
+  app.post("/api/h3/prompts/optimize", async (c) => {
+    const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+    const auth = await authenticate(c, { scopes: ["tasks:write"] }); if (auth.error) return auth.error;
+    const rate = await enforceRateLimit(`h3-prompt-optimize:${auth.user.id}`, { limit: 30, windowMs: 10 * 60_000 });
+    if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "提示词优化请求过于频繁，请稍后重试" }, 429);
+    const body = await c.req.json().catch(() => ({}));
+    const prompt = String(body.prompt || "").trim();
+    const durationSeconds = integer(body.duration_seconds ?? body.durationSeconds, -1);
+    const aspectRatio = String(body.aspect_ratio || body.aspectRatio || "16:9").trim().slice(0, 24);
+    const assets = body.assets && typeof body.assets === "object" ? body.assets : {};
+    if (!prompt || prompt.length > 20_000 || durationSeconds < 1 || durationSeconds > H3_MAX_DURATION_SECONDS) return c.json({ code: "VALIDATION_ERROR", message: "请填写有效提示词和视频时长" }, 400);
+    const promptInput = { prompt, durationSeconds, aspectRatio, assets };
+    const { deterministic, messages } = h3PromptOptimizerMessages(promptInput);
+    let optimized = deterministic;
+    try {
+      const credential = await loadPromptCredential();
+      if (credential?.token) {
+        const response = await callPromptModel({ token: credential.token, tokenChannel: credential.tokenChannel || "免费", model: "glm-4-flash-250414", messages, timeoutMs: 35_000, allowFallback: true });
+        optimized = acceptH3OptimizedPrompt(String(response?.text || "").slice(0, 20_000), promptInput);
+      }
+    } catch {
+      optimized = { ...deterministic, fallbackReason: ["低成本文字路由暂时不可用，已使用确定性编译"] };
+    }
+    await audit(await getCollection("h3TaskAudits"), "prompt_optimized", { actorUserId: new ObjectId(auth.user.id), mode: optimized.mode, source: optimized.source, fallback: optimized.source !== "pearapi", durationSeconds, aspectRatio, assetCounts: { images: Array.isArray(assets.images) ? assets.images.length : 0, videos: Array.isArray(assets.videos) ? assets.videos.length : 0, audio: Array.isArray(assets.audio) ? assets.audio.length : 0 } });
+    c.header("Cache-Control", "private, no-store, max-age=0");
+    return c.json({ ok: true, optimized_prompt: optimized.prompt, mode: optimized.mode, source: optimized.source, fallback: optimized.source !== "pearapi", validation: { valid: true } });
   });
 
   app.post("/api/h3/assets/presign", async (c) => {
@@ -1075,6 +1118,7 @@ export function registerH3SharedRoutes(app, dependencies) {
         id: H3_SHARED_MODEL,
         name: "MiniMax H3 共享节点",
         sourceChannel: "desktop_agent",
+        optimizePrompt: { method: "POST", url: "/api/h3/prompts/optimize", scope: "tasks:write" },
         createTask: { method: "POST", url: "/api/h3/tasks", scope: "tasks:write" },
         assetUpload: { presign: "/api/h3/assets/presign", complete: "/api/h3/assets/{asset_id}/complete", scope: "tasks:write" },
         limits: { durationSeconds: { min: 1, max: H3_MAX_DURATION_SECONDS }, imageCount: 9, videoCount: 3, audioCount: 3 },
@@ -1310,7 +1354,7 @@ export function registerH3SharedRoutes(app, dependencies) {
     if (status) filter.status = status;
     if (["website", "desktop_agent"].includes(source)) filter.sourceChannel = source;
     if (assignee) filter.assigneeEmailSnapshot = { $regex: escapedRegex(assignee), $options: "i" };
-    if (q) filter.$or = [{ orderNo: { $regex: escapedRegex(q), $options: "i" } }, { requesterEmailSnapshot: { $regex: escapedRegex(q), $options: "i" } }, { assigneeEmailSnapshot: { $regex: escapedRegex(q), $options: "i" } }, { prompt: { $regex: escapedRegex(q), $options: "i" } }];
+    if (q) filter.$or = [{ orderNo: { $regex: escapedRegex(q), $options: "i" } }, { requesterEmailSnapshot: { $regex: escapedRegex(q), $options: "i" } }, { assigneeEmailSnapshot: { $regex: escapedRegex(q), $options: "i" } }, { prompt: { $regex: escapedRegex(q), $options: "i" } }, { originalPrompt: { $regex: escapedRegex(q), $options: "i" } }];
     const from = c.req.query("from") ? new Date(c.req.query("from")) : null;
     const to = c.req.query("to") ? new Date(`${c.req.query("to")}T23:59:59.999Z`) : null;
     if ((from && !Number.isNaN(from.getTime())) || (to && !Number.isNaN(to.getTime()))) filter.createdAt = { ...(from && !Number.isNaN(from.getTime()) ? { $gte: from } : {}), ...(to && !Number.isNaN(to.getTime()) ? { $lte: to } : {}) };
@@ -1391,14 +1435,15 @@ export function registerH3SharedRoutes(app, dependencies) {
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/desktop/account-bindings/unbind", tags: ["Desktop Account Binding"], summary: "撤销当前节点账号绑定", security: [{ accountBinding: [] }], responses: { 200: { description: "已撤销" }, 401: { description: "绑定令牌无效" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/desktop/earnings/summary", tags: ["Desktop Earnings"], summary: "读取当前绑定账户的 MiniMax H3 节点收益", description: "仅接受 X-Gulong-Account-Binding。可选 node_id 必须属于令牌对应账户，否则返回 403。金额均为人民币整数分。收益只聚合服务端 h3_node_commission 结算流水；平均每天收益=已结算累计收益÷max(1, 从首个成功结算的中国自然日到当前中国自然日的天数)。", security: [{ accountBinding: [] }], request: { query: z.object({ node_id: z.string().optional() }) }, responses: { 200: { description: "账户与设备收益汇总", content: { "application/json": { schema: earningsSummarySchema } } }, 401: { description: "未绑定或绑定令牌失效", content: { "application/json": { schema: errorSchema } } }, 403: { description: "node_id 不属于当前账户", content: { "application/json": { schema: errorSchema } } } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/account/earnings/summary", tags: ["Account"], summary: "用户后台读取自己的共享节点收益", description: "使用官网登录会话或账户 API Key，仅返回当前账户；网页端 node_id 已脱敏。", responses: { 200: { description: "账户收益和脱敏设备列表", content: { "application/json": { schema: earningsSummarySchema } } }, 401: { description: "未登录" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/prompts/optimize", tags: ["MiniMax H3 Shared Nodes"], summary: "按 MiniMax H3 官方结构优化视频提示词", description: "鉴权后优先使用管理员配置的免费文字路由优化；输出必须通过服务端段落顺序、尖括号素材标签、多图 Subject 定义、参考继承边界、单镜头时间线、声画禁用项与非器乐配乐校验，否则自动返回确定性编译结果。@图片1/@视频1/@音频1 会在模型层规范为 <Picture 1>/<Video 1>/<Audio 1>。", request: { body: { required: true, content: { "application/json": { schema: z.object({ prompt: z.string().min(1).max(20_000), duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), aspect_ratio: z.string().max(24), assets: z.object({ images: z.array(z.unknown()).max(9).default([]), videos: z.array(z.unknown()).max(3).default([]), audio: z.array(z.unknown()).max(3).default([]) }) }) } } } }, responses: { 200: { description: "返回 optimized_prompt、模式、编译来源与校验状态" }, 400: { description: "输入无效" }, 401: { description: "未认证" }, 429: { description: "请求过于频繁" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/assets/presign", tags: ["MiniMax H3 Shared Nodes"], summary: "为输入素材签发账号专属 COS 直传票据", request: { body: { required: true, content: { "application/json": { schema: z.object({ kind: z.enum(["image", "video", "audio"]), filename: z.string(), content_type: z.string(), bytes: z.number().int().positive(), sha256: z.string().regex(/^[A-Fa-f0-9]{64}$/) }) } } } }, responses: { 201: { description: "返回 PUT URL、固定 headers、asset_id 与 object_key" }, 409: { description: "COS 回执不匹配" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/assets/{id}/complete", tags: ["MiniMax H3 Shared Nodes"], summary: "校验并完成 H3 输入素材上传", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "返回可用于任务 assets manifest 的素材记录" }, 409: { description: "对象大小、摘要或归属不匹配" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "创建共享节点视频任务并原子预扣余额", description: "实际价格（分）= 时长秒数×20 + 图片数×5 + 视频数×20；音频免费。普通用户与订阅用户统一原子预扣余额并记录流水；管理员免扣费且不参与分佣。任务成功后，实扣金额的 50% 幂等计入执行桌面节点绑定用户的钱包，剩余 50% 计入平台管理员钱包；奇数分由平台侧承接尾差。website 来源会在任务同一条原子记录中保存 conversationId、requestMessageId、resultMessageId；完成回调按 resultMessageId 幂等回写视频消息。素材数量由服务端根据已完成且属于当前账号的 asset_id 重新统计，客户端 price/count 字段不会参与计费。必须提供 Idempotency-Key。", request: { body: { required: true, content: { "application/json": { schema: z.object({ source_channel: z.enum(["website", "desktop_agent"]), model: z.literal(H3_SHARED_MODEL), prompt: z.string().min(1).max(20_000), conversation_id: z.string().optional(), aspect_ratio: z.string(), duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profile: z.string(), assets: z.object({ images: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(9), videos: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3), audio: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3) }), idempotency_key: z.string().min(8).max(160).optional() }) } } } }, responses: { 201: { description: "非管理员已扣减余额并排队；管理员免扣费排队" }, 402: { description: "非管理员余额不足" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "创建共享节点视频任务并原子预扣余额", description: "实际价格（分）= 时长秒数×20 + 图片数×5 + 视频数×20；音频免费。普通用户与订阅用户统一原子预扣余额并记录流水；管理员免扣费且不参与分佣。任务成功后，实扣金额的 50% 幂等计入执行桌面节点绑定用户的钱包，剩余 50% 计入平台管理员钱包；奇数分由平台侧承接尾差。optimized_prompt 通过官方结构校验后作为实际 prompt 入队；未点击优化或客户端结果不合格时，服务端从 original_prompt/prompt 确定性编译，绝不把未编译提示词交给节点。website 来源会在任务同一条原子记录中保存 conversationId、requestMessageId、resultMessageId；完成回调按 resultMessageId 幂等回写视频消息。素材数量由服务端根据已完成且属于当前账号的 asset_id 重新统计，客户端 price/count 字段不会参与计费。必须提供 Idempotency-Key。", request: { body: { required: true, content: { "application/json": { schema: z.object({ source_channel: z.enum(["website", "desktop_agent"]), model: z.literal(H3_SHARED_MODEL), prompt: z.string().min(1).max(20_000), original_prompt: z.string().min(1).max(20_000).optional(), optimized_prompt: z.string().min(1).max(20_000).optional(), conversation_id: z.string().optional(), aspect_ratio: z.string(), duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profile: z.string(), assets: z.object({ images: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(9), videos: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3), audio: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3) }), idempotency_key: z.string().min(8).max(160).optional() }) } } } }, responses: { 201: { description: "非管理员已扣减余额并排队；管理员免扣费排队" }, 402: { description: "非管理员余额不足" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "查看当前账号的共享节点订单", responses: { 200: { description: "最多返回最近 50 个订单" }, 401: { description: "未认证" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/conversations/recent", tags: ["MiniMax H3 Shared Nodes"], summary: "读取当前用户会话中的 H3 视频结果", description: "仅返回当前登录用户的 H3 assistant 结果消息；历史已完成任务会先进行同用户安全幂等回填。消息不包含 COS 永久地址。", request: { query: z.object({ conversation_id: z.string().optional() }) }, responses: { 200: { description: "当前会话及其 H3 视频结果" }, 401: { description: "未认证" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}", tags: ["MiniMax H3 Shared Nodes"], summary: "查看共享节点订单详情", description: "输出只包含受控 previewPath/downloadPath 和 24 小时到期状态，不返回 COS objectKey 或永久 URL。", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "订单详情" }, 404: { description: "订单不存在或无权查看" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}/output", tags: ["MiniMax H3 Shared Nodes"], summary: "鉴权预览或下载 H3 输出视频", description: "仅任务请求用户或管理员可访问。服务端按次签发不超过 5 分钟且不越过 24 小时保留截止时间的 COS GET 地址；disposition=attachment 用于下载。过期返回 410 并触发幂等删除。", request: { params: z.object({ id: z.string() }), query: z.object({ disposition: z.enum(["inline", "attachment"]).optional() }) }, responses: { 302: { description: "跳转到短时 COS 签名地址" }, 404: { description: "视频不存在或无权访问" }, 410: { description: "视频已过期并删除" } } });
-  app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/desktop/agent/tools/minimax-h3-shared", tags: ["Desktop Agent Tools"], summary: "读取桌面古龙智能体的 H3 共享节点工具合同", description: "使用现有古龙会话或具有 tasks:read 的 API Key。返回统一任务 URL、素材上传 URL、9图3视频3音频限制、整数分价格与当前余额；管理员响应 wallet.unlimited=true，桌面端不得按余额拦截。桌面创建任务时 source_channel 必须为 desktop_agent。", responses: { 200: { description: "工具合同、钱包余额与管理员不限额标记" }, 401: { description: "未认证" } } });
+  app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/desktop/agent/tools/minimax-h3-shared", tags: ["Desktop Agent Tools"], summary: "读取桌面古龙智能体的 H3 共享节点工具合同", description: "使用现有古龙会话或具有 tasks:read 的 API Key。返回 optimizePrompt、createTask、素材上传 URL、9图3视频3音频限制、整数分价格与当前余额；管理员响应 wallet.unlimited=true，桌面端不得按余额拦截。桌面创建任务时 source_channel 必须为 desktop_agent。", responses: { 200: { description: "工具合同、钱包余额与管理员不限额标记" }, 401: { description: "未认证" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/claim", tags: ["MiniMax H3 Shared Nodes"], summary: "桌面节点按能力与队列压力原子领取任务", description: "capabilities 必须上报 max_duration_seconds、profiles、max_image_count、max_video_count、max_audio_count 与可选 gpu_name、vram_mb。服务端使用 MongoDB 中央 3 秒短缓存汇总待处理任务和在线节点数，按 queued÷在线节点计算公平份额，并严格按 createdAt、_id 从旧到新原子领取。兼容旧节点时仍只返回 task；声明 batch_claim=true 且提供 max_concurrent_tasks 后，最多一次领取 4 个任务，额外任务位于 additional_tasks。客户端必须遵循 claim_plan.poll_after_ms 或 Retry-After，服务端会拒绝提前轮询的实际队列访问。45 分钟领取租约会由进度回调续期；过期任务自动回队并废弃旧上传票据。dry_run=true 在身份、能力、限流通过后只返回服务可达状态，绝不读取或修改队列、也不签发上传票据。正式领取使用最小化 workerTask DTO，仅包含执行所需参数、每个 COS 素材的 15 分钟 download_url、一小时任务专属 output_upload，以及 progress_callback 合同；节点领取后应先用 started + estimated_total_seconds 上报预计耗时，再持续发送 progress 与 remaining_seconds。不会下发 requester、价格、钱包流水或内部绑定信息。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "application/json": { schema: z.object({ bound_account_email: z.string().optional(), bound_account_id: z.string().optional(), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: z.object({ max_duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profiles: z.array(z.string()).min(1), gpu_name: z.string().max(160).optional(), vram_mb: z.number().int().min(0).optional(), max_image_count: z.number().int().min(0).max(9), max_video_count: z.number().int().min(0).max(3), max_audio_count: z.number().int().min(0).max(3), batch_claim: z.boolean().optional(), max_concurrent_tasks: z.number().int().min(1).max(8).optional() }) }) } } } }, responses: { 200: { description: "dry_run 返回可达状态；正式领取返回 task、additional_tasks 与动态 claim_plan，任务均含素材下载票据、output_upload 和进度回调合同" }, 400: { description: "节点能力无效" }, 401: { description: "绑定无效" }, 429: { description: "未遵循轮询退避或请求频率过高" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/callback", tags: ["MiniMax H3 Shared Nodes"], summary: "执行节点回调进度或结果", description: "multipart/form-data 仅发送 metadata 字段，不得上传 video 文件。节点接单后的首次 started 回调应发送 estimated_total_seconds；后续 processing/progress 回调发送 progress（0–99）与可选 remaining_seconds，官网会实时显示百分比和预计完成时间。metadata JSON 必须包含 task_id、local_job_id、status、node_id、node_name、elapsed_seconds；成功状态还需 video.sha256/bytes/filename/object_key。服务端 HEAD 校验 COS 对象存在、Content-Length、SHA-256 元数据、上传 grant 与 task 专属前缀，不接受客户端任意 URL。成功落库后从 completedAt 起保留视频 24 小时，并按 resultMessageId 幂等回写原网页会话；重复 callback 不重复发消息。最终接单人与 50% 节点分佣接收人只取绑定令牌对应用户；另 50% 进入平台管理员钱包。管理员发起的任务免扣费、免分佣。task_id + event/status + local_job_id 及两笔分佣流水均幂等。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "multipart/form-data": { schema: z.object({ metadata: z.string() }) } } } }, responses: { 200: { description: "进度已更新，或完成回调、扣款结算、分佣与会话结果已幂等处理" }, 400: { description: "回执不完整" }, 401: { description: "绑定无效" }, 409: { description: "COS 回执、上传票据或结算状态不匹配" }, 413: { description: "禁止把视频文件经 Vercel 中转" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/admin/h3/tasks", tags: ["Administration"], summary: "管理员筛选共享节点任务派单", responses: { 200: { description: "任务列表" }, 403: { description: "需要管理员角色" } } });

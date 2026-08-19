@@ -149,6 +149,11 @@ function credentialSecrets(record) {
   };
 }
 
+export async function loadPearApiTextCredential() {
+  const record = await credentialRecord();
+  return { ...credentialSecrets(record), tokenChannel: record?.tokenChannel || "免费" };
+}
+
 function responseText(payload) {
   const content = payload?.choices?.[0]?.message?.content;
   if (typeof content === "string") return content.trim();

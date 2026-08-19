@@ -614,6 +614,7 @@ test("H3 OpenAPI publishes binding, assets, desktop tool, claim and callback con
     "/api/desktop/account-bindings/unbind",
     "/api/desktop/earnings/summary",
     "/api/account/earnings/summary",
+    "/api/h3/prompts/optimize",
     "/api/h3/assets/presign",
     "/api/h3/assets/{id}/complete",
     "/api/h3/tasks",
@@ -637,6 +638,8 @@ test("H3 OpenAPI publishes binding, assets, desktop tool, claim and callback con
   assert.equal(document.paths["/api/h3/tasks/claim"].post.requestBody.content["application/json"].schema.properties.capabilities.properties.batch_claim.type, "boolean");
   assert.match(document.paths["/api/h3/tasks/callback"].post.description, /HEAD/);
   assert.match(document.paths["/api/h3/tasks/callback"].post.description, /estimated_total_seconds/);
+  assert.match(document.paths["/api/h3/prompts/optimize"].post.description, /<Picture 1>/);
+  assert.match(document.paths["/api/h3/tasks"].post.description, /确定性编译/);
   assert.match(document.paths["/api/h3/tasks/{id}/output"].get.description, /24 小时/);
 });
 
