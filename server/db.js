@@ -401,6 +401,10 @@ export async function ensureIndexes() {
           { userId: 1, status: 1, lastSeenAt: -1 },
           { name: "node_bindings_by_user_presence" },
         ),
+        db.collection("nodeAccountBindings").createIndex(
+          { status: 1, lastSeenAt: -1 },
+          { name: "h3_nodes_by_presence" },
+        ),
         db.collection("nodeAccountBindingAudits").createIndex(
           { bindingId: 1, createdAt: -1 },
           { name: "node_binding_audit_history" },
@@ -416,6 +420,14 @@ export async function ensureIndexes() {
         db.collection("h3SharedTasks").createIndex(
           { status: 1, createdAt: 1 },
           { name: "h3_claim_queue" },
+        ),
+        db.collection("h3SharedTasks").createIndex(
+          { status: 1, model: 1, createdAt: 1 },
+          { name: "h3_claim_queue_fifo" },
+        ),
+        db.collection("h3SharedTasks").createIndex(
+          { "claimedByNode.bindingId": 1, status: 1, claimLeaseUntil: 1 },
+          { name: "h3_active_tasks_by_binding" },
         ),
         db.collection("h3SharedTasks").createIndex(
           { requesterUserId: 1, createdAt: -1 },

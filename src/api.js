@@ -23,8 +23,16 @@ export async function apiFetch(path, options = {}) {
     : await response.text();
 
   if (!response.ok) {
+    const nestedMessage = payload && typeof payload === "object" ? payload.error?.message : "";
+    const validationFallback = payload?.error?.name === "ZodError"
+      ? "请检查填写内容是否正确"
+      : "";
     throw new ApiError(
-      payload?.message || "请求失败，请稍后重试",
+      payload?.message
+        || validationFallback
+        || (typeof nestedMessage === "string" && nestedMessage.trim() ? nestedMessage : "")
+        || (typeof payload === "string" && payload.trim() ? payload : "")
+        || "请求失败，请稍后重试",
       payload?.code || "API_ERROR",
       response.status,
     );

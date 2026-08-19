@@ -81,9 +81,16 @@ export function AccountModal({ open, initialMode = "login", onClose, onUser, the
         setSuccess(result.message || "密码已重置，请使用新密码登录");
         return;
       }
+      const optionalText = (value) => value.trim() || undefined;
       const body = mode === "login"
-        ? { identifier: form.identifier, password: form.password }
-        : { email: form.email, username: form.username || undefined, displayName: form.displayName || undefined, inviteCode: form.inviteCode || undefined, password: form.password };
+        ? { identifier: form.identifier.trim(), password: form.password }
+        : {
+            email: form.email.trim(),
+            username: optionalText(form.username),
+            displayName: optionalText(form.displayName),
+            inviteCode: optionalText(form.inviteCode),
+            password: form.password,
+          };
       const result = await apiFetch(`/api/auth/${mode}`, { method: "POST", body: JSON.stringify(body) });
       onUser(result.user);
       onClose();
@@ -139,7 +146,7 @@ export function AccountModal({ open, initialMode = "login", onClose, onUser, the
             </>
           )}
           {mode === "forgot" && <label><span>注册邮箱</span><div className="input-shell"><EnvelopeSimple size={18} /><input required disabled={resetSent} type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} autoComplete="email" placeholder="name@example.com" /></div></label>}
-          {(mode === "login" || mode === "register") && <div className="account-password-field"><div className="account-label-row"><label htmlFor="account-password">密码</label>{mode === "login" && <button type="button" onClick={() => switchMode("forgot")}>忘记密码？</button>}</div><div className="input-shell"><LockKey size={18} /><input id="account-password" required type={showPassword ? "text" : "password"} minLength={1} maxLength={128} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} autoComplete={mode === "login" ? "current-password" : "new-password"} placeholder={mode === "register" ? "可输入任意字符" : "输入密码"} /><PasswordVisibilityButton visible={showPassword} onChange={setShowPassword} controls="account-password" /></div></div>}
+          {(mode === "login" || mode === "register") && <div className="account-password-field"><div className="account-label-row"><label htmlFor="account-password">密码</label>{mode === "login" && <button type="button" onClick={() => switchMode("forgot")}>忘记密码？</button>}</div><div className="input-shell"><LockKey size={18} /><input id="account-password" required type={showPassword ? "text" : "password"} minLength={1} maxLength={255} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} autoComplete={mode === "login" ? "current-password" : "new-password"} placeholder={mode === "register" ? "输入你要使用的密码" : "输入密码"} /><PasswordVisibilityButton visible={showPassword} onChange={setShowPassword} controls="account-password" /></div>{mode === "register" && <small className="account-password-help">官网不预先限制字符类型；如果统一账号服务判断密码过弱，会直接给出明确提示。</small>}</div>}
           {mode === "forgot" && resetSent && <>
             <div className="reset-email-confirm"><EnvelopeSimple size={18} /><span>验证邮件已发送至 <strong>{form.email}</strong></span><button type="button" onClick={() => { setResetSent(false); setSuccess(""); setError(""); }}>修改邮箱</button></div>
             <label><span>邮箱验证码</span><div className="input-shell"><Key size={18} /><input required minLength={6} maxLength={2048} value={form.resetCode} onChange={(event) => setForm({ ...form, resetCode: event.target.value.trim() })} autoComplete="one-time-code" placeholder="粘贴邮件中的验证码或重置令牌" /></div><small className="reset-code-help">邮件中如果显示为较长的重置令牌，也可直接完整粘贴到这里。</small></label>

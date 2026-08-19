@@ -87,6 +87,8 @@ function friendlyMessage(status, payload) {
   if (code === "catalog.price_not_found") return "该订阅套餐当前没有生效中的价格版本";
   if (code === "catalog.sku_exists") return "当前应用中已经存在相同编码的 SKU";
   if (code === "auth.invalid_credentials") return "用户名、邮箱或密码不正确";
+  if (code === "auth.weak_password") return "统一账号服务判定密码过弱：请使用 8–255 个字符，并在小写字母、大写字母、数字、符号中至少包含三类";
+  if (["auth.email_exists", "auth.user_exists", "account.exists"].includes(code)) return "该邮箱已经注册，请直接登录或找回密码";
   if (code === "token.invalid" || code === "auth.token_invalid") return "登录已失效，请重新登录";
   if (code === "client.not_found") return "支付服务端账号尚未获得当前应用的管理员或财务权限，请管理员检查 Chandler API Key 所属账号的应用角色";
   if (code === "payment.direct_contract_required") return "当前应用尚未完成 Chandler 线下合同确认，请管理员在合作伙伴后台完成确认后重试";

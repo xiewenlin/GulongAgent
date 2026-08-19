@@ -96,7 +96,31 @@ import {
   workerWorkflowRevenue,
 } from "./worker-market.js";
 
-const app = new OpenAPIHono();
+function requestValidationMessage(error) {
+  const issue = error?.issues?.[0];
+  const field = String(issue?.path?.at(-1) || "");
+  if (field === "email") return "请输入有效的邮箱地址";
+  if (field === "username") {
+    if (issue?.code === "too_small") return "用户名至少需要 3 个字符";
+    if (issue?.code === "too_big") return "用户名最多允许 32 个字符";
+    return "用户名只能包含中英文、数字、下划线或短横线";
+  }
+  if (field === "displayName") return "显示名称不能只包含空格，且最多允许 64 个字符";
+  if (field === "inviteCode") return "邀请码最多允许 64 个字符";
+  if (field === "password") return issue?.code === "too_big" ? "密码最多允许 255 个字符" : "请输入密码";
+  return "请检查填写内容是否正确";
+}
+
+const app = new OpenAPIHono({
+  defaultHook: (result, c) => {
+    if (result.success) return undefined;
+    return c.json({
+      code: "VALIDATION_ERROR",
+      message: requestValidationMessage(result.error),
+      requestId: c.get("requestId"),
+    }, 400);
+  },
+});
 
 const MINIMAX_API_HOST = "https://api.minimaxi.com/v1";
 const MINIMAX_DEFAULT_MODEL = "MiniMax-M3";
@@ -235,7 +259,7 @@ const RegisterSchema = z
     email: z.email(),
     displayName: z.string().trim().min(1).max(64).optional(),
     inviteCode: z.string().trim().max(64).optional(),
-    password: z.string().min(1).max(128),
+    password: z.string().min(1).max(255),
   });
 
 const LoginSchema = z.object({

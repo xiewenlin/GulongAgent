@@ -3050,6 +3050,7 @@ textarea:focus {
 .account-label-row > label,
 .account-password-field > label { font-size: 18px; font-weight: 800; }
 .account-label-row > button { padding: 0; color: var(--jade); border: 0; background: transparent; font-size: 18px; font-weight: 800; cursor: pointer; }
+.account-password-help { color: var(--muted); font-size: 18px; line-height: 1.55; }
 .reset-email-confirm { padding: 12px 13px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 9px; color: var(--muted); border: 1px solid var(--line); border-radius: 10px; background: var(--bg-soft); font-size: 18px; }
 .reset-email-confirm strong { color: var(--ink); overflow-wrap: anywhere; }
 .reset-email-confirm button,

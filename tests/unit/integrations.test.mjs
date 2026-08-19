@@ -373,8 +373,8 @@ test("email verification-code password recovery is wired end to end", async () =
   assert.doesNotMatch(modalSource, /<label><span className="account-label-row"/);
   assert.doesNotMatch(modalSource, /minLength=\{10\}|至少 10 位/);
   assert.match(modalSource, /minLength=\{1\}/);
-  assert.match(modalSource, /可输入任意字符/);
-  assert.match(serverSource, /password: z\.string\(\)\.min\(1\)\.max\(128\)/);
+  assert.match(modalSource, /官网不预先限制字符类型/);
+  assert.match(serverSource, /password: z\.string\(\)\.min\(1\)\.max\(255\)/);
   assert.match(serverSource, /newPassword: z\.string\(\)\.min\(8\)\.max\(255\)/);
   assert.match(serverSource, /password-forgot-email:/);
   assert.match(serverSource, /password-reset-code:/);
@@ -382,6 +382,31 @@ test("email verification-code password recovery is wired end to end", async () =
   assert.match(serverSource, /Cache-Control", "no-store, max-age=0/);
   assert.match(css, /\.reset-code-actions\s*\{/);
   assert.match(css, /\.account-label-row\s*\{/);
+});
+
+test("registration validation is user-readable and pricing imports every rendered icon", async () => {
+  const [modalSource, apiSource, platformSource, chandlerSource] = await Promise.all([
+    readFile(new URL("../../src/components/AccountModal.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/api.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/PlatformPages.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../server/chandler.js", import.meta.url), "utf8"),
+  ]);
+  const response = await app.request("http://localhost/api/auth/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Origin: "http://localhost" },
+    body: JSON.stringify({ email: "not-an-email", password: "x" }),
+  });
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), {
+    code: "VALIDATION_ERROR",
+    message: "请输入有效的邮箱地址",
+    requestId: response.headers.get("x-request-id"),
+  });
+  assert.match(modalSource, /const optionalText = \(value\) => value\.trim\(\) \|\| undefined/);
+  assert.match(apiSource, /payload\.error\?\.message/);
+  assert.match(chandlerSource, /auth\.weak_password/);
+  const iconImports = platformSource.slice(0, platformSource.indexOf('} from "@phosphor-icons\/react"'));
+  assert.match(iconImports, /\bCoins\b/);
 });
 
 test("system workflows remain deleted and Worker online escrow uses the server-side task budget", async () => {

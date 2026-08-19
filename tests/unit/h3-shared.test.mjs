@@ -415,6 +415,45 @@ test("H3 claim dry-run validates identity and capabilities without touching the 
   assert.equal(queueReadsOrWrites, 0);
 });
 
+test("H3 claim enforces the server poll window before queue and rate-limit database work", async () => {
+  const isolated = new OpenAPIHono();
+  const bindingId = new ObjectId();
+  const userId = new ObjectId();
+  let rateLimitWrites = 0;
+  let queueSnapshots = 0;
+  const nextClaimAt = new Date(Date.now() + 20_000);
+  const collections = {
+    nodeAccountBindings: {
+      findOne: async () => ({ _id: bindingId, userId, nodeId: "stable-node-0001", nodeName: "test", status: "active", revokedAt: null, lastSeenAt: new Date(), nextClaimAt, lastClaimPlan: { queued_count: 25, active_node_count: 10 } }),
+      updateOne: async () => ({ modifiedCount: 1 }),
+    },
+    users: { findOne: async () => ({ _id: userId, email: "test@example.com", status: "active" }) },
+  };
+  registerH3SharedRoutes(isolated, {
+    getCollection: async (name) => collections[name] || { insertOne: async () => ({}), updateOne: async () => ({}), findOne: async () => null },
+    enforceRateLimit: async () => { rateLimitWrites += 1; return { allowed: true }; },
+    queueCoordinator: { snapshot: async () => { queueSnapshots += 1; return { queuedCount: 1, activeNodeCount: 1 }; }, invalidate: async () => {} },
+    authenticate: async () => ({ user: { id: userId.toString() } }),
+    requireAdmin: async () => ({ user: { id: userId.toString(), role: "admin" } }),
+    requireTrustedMutation: () => null,
+    verifyActivationReceipt: async () => { throw new Error("not used"); },
+  });
+  const response = await isolated.request("http://localhost/api/h3/tasks/claim", {
+    method: "POST",
+    headers: { "content-type": "application/json", [H3_ACCOUNT_BINDING_HEADER]: `gab_${"b".repeat(48)}` },
+    body: JSON.stringify({ node_id: "stable-node-0001", node_name: "test", capabilities: { max_duration_seconds: 15, profiles: ["balanced"], max_image_count: 9, max_video_count: 3, max_audio_count: 3 } }),
+  });
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.task, null);
+  assert.equal(payload.claim_plan.throttled, true);
+  assert.equal(payload.claim_plan.scheduling, "oldest_first");
+  assert.ok(payload.claim_plan.poll_after_ms > 0);
+  assert.ok(response.headers.get("retry-after"));
+  assert.equal(rateLimitWrites, 0);
+  assert.equal(queueSnapshots, 0);
+});
+
 test("H3 OpenAPI publishes binding, assets, desktop tool, claim and callback contracts", () => {
   const document = app.getOpenAPIDocument({ openapi: "3.1.0", info: { title: "test", version: "1" } });
   for (const path of [
@@ -437,6 +476,9 @@ test("H3 OpenAPI publishes binding, assets, desktop tool, claim and callback con
   assert.equal(document.components.securitySchemes.accountBinding.name, H3_ACCOUNT_BINDING_HEADER);
   assert.deepEqual(document.paths["/api/desktop/earnings/summary"].get.security, [{ accountBinding: [] }]);
   assert.match(document.paths["/api/h3/tasks/claim"].post.description, /max_duration_seconds/);
+  assert.match(document.paths["/api/h3/tasks/claim"].post.description, /oldest|从旧到新/);
+  assert.match(document.paths["/api/h3/tasks/claim"].post.description, /additional_tasks/);
+  assert.equal(document.paths["/api/h3/tasks/claim"].post.requestBody.content["application/json"].schema.properties.capabilities.properties.batch_claim.type, "boolean");
   assert.match(document.paths["/api/h3/tasks/callback"].post.description, /HEAD/);
 });
 
@@ -450,10 +492,12 @@ test("H3 implementation keeps identity, capability, COS ownership and ledger gat
     readFile(new URL("../../vercel.json", import.meta.url), "utf8"),
   ]);
   assert.match(source, /verifyActivationReceipt\(body\.activation_receipt\)[\s\S]+users[\s\S]+USER_NOT_FOUND/);
-  assert.match(source, /findOneAndUpdate\(\{ status: "queued", model: H3_SHARED_MODEL, durationSeconds: \{ \$lte: maxDurationSeconds \}/);
+  assert.match(source, /findOneAndUpdate\([\s\S]*?\{ status: "queued", model: H3_SHARED_MODEL, durationSeconds: \{ \$lte: maxDurationSeconds \}/);
   const dryRunBranch = source.indexOf('if (body.dry_run === true) return c.json({ ok: true, service: "gulong-h3-shared", queue: "reachable" });');
-  const queueMutation = source.indexOf('findOneAndUpdate({ status: "queued", model: H3_SHARED_MODEL');
+  const queueMutation = source.indexOf('{ status: "queued", model: H3_SHARED_MODEL, durationSeconds:');
   assert.ok(dryRunBranch > -1 && queueMutation > dryRunBranch, "dry-run returns before the first queue mutation so the queue cannot decrease");
+  assert.match(source, /sort: \{ createdAt: 1, _id: 1 \}/);
+  assert.match(source, /calculateH3ClaimPlan[\s\S]+additional_tasks:[\s\S]+poll_after_ms/);
   assert.match(source, /imageCount: \{ \$lte: maxImageCount \}[\s\S]+videoCount: \{ \$lte: maxVideoCount \}[\s\S]+audioCount: \{ \$lte: maxAudioCount \}/);
   assert.match(source, /OUTPUT_OBJECT_FORBIDDEN[\s\S]+headObject\(objectKey\)[\s\S]+x-cos-meta-sha256/);
   assert.match(source, /ledgerKeys: \{ \$ne: ledgerKey \}[\s\S]+balanceFen: -amountFen/);

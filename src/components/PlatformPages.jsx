@@ -6,6 +6,7 @@ import {
   CloudArrowUp,
   Clock,
   Code,
+  Coins,
   Copy,
   CreditCard,
   DownloadSimple,
