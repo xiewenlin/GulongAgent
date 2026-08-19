@@ -140,7 +140,7 @@ function AssetPanel({ bootstrap, onClose, navigate }) {
     <aside className="agent-asset-drawer">
       <button className="modal-close" type="button" onClick={onClose}><X size={20} /></button>
       <span>REMAINING USAGE</span><h2>剩余用量</h2><p>查看当前余额、预计创作数量和滚动用量记录。</p>
-      <div className="agent-balance-card"><div><Wallet size={29} weight="duotone" /><span>{quota?.unlimited ? "管理员创作权限" : "当前可用余额"}</span></div><strong>{quota?.unlimited ? "不限额" : formatMoney(quota?.balanceFen || 0)}</strong><small>{quota?.unlimited ? "管理员角色调用图片和视频模型不检查额度，也不会扣减余额" : "月度会员到账后，实付金额同步成为可用余额"}</small></div>
+      <div className="agent-balance-card"><div><Wallet size={29} weight="duotone" /><span>{quota?.unlimited ? "管理员创作权限" : "当前可用余额"}</span></div><strong>{quota?.unlimited ? "不限额" : formatMoney(quota?.balanceFen || 0)}</strong><small>{quota?.unlimited ? "管理员角色调用图片和视频模型不检查额度，也不会扣减余额" : "会员实付金额与额外赠送的 10% 已合并为可用余额"}</small></div>
       {!quota?.unlimited && <div className="agent-estimate-grid"><EstimateCard icon={ImageSquare} title="预计可创作图片" value={quota?.estimates?.images} unit="张" /><EstimateCard icon={VideoCamera} title="预计可创作视频" value={quota?.estimates?.videos} unit="条" /></div>}
       <RollingUsage title="本周滚动用量" data={quota?.weekly} />
       <RollingUsage title="本月滚动用量" data={quota?.monthly} />
@@ -158,7 +158,7 @@ function QuotaPrompt({ kind, onClose, navigate }) {
       <div className="agent-quota-icon">{subscription ? <Coins size={34} weight="duotone" /> : <Wallet size={34} weight="duotone" />}</div>
       <span>{subscription ? "MEMBERSHIP REQUIRED" : "USAGE EXHAUSTED"}</span>
       <h2 id="agent-quota-title">{subscription ? "开通会员后开始创作" : "当前可用额度已用完"}</h2>
-      <p>{subscription ? "当前没有生效会员或可用余额。开通月度或年度会员后，实付金额会同步成为创作余额；已有充值余额的普通用户也可以按次调用付费图片和视频模型。" : "你的会员权益仍然有效，但创作额度已经用完。充值余额后即可继续调用图片和视频模型。"}</p>
+      <p>{subscription ? "当前没有生效会员或可用余额。开通月度或年度会员后，实付金额会成为创作余额，并额外赠送 10%；已有充值余额的普通用户也可以按次调用付费图片和视频模型。" : "你的会员权益仍然有效，但创作额度已经用完。单次充值满 500 元会额外赠送 10% 余额。"}</p>
       <div className="agent-quota-summary"><ShieldCheck size={21} weight="duotone" /><span><strong>{subscription ? "开通会员获得余额" : "会员无需重复开通"}</strong><small>{subscription ? "普通用户与订阅用户都按实际调用扣减余额" : "只需补充余额，原会员有效期保持不变"}</small></span></div>
       <div className="agent-quota-actions"><button className="button secondary" type="button" onClick={onClose}>暂不处理</button><button className="button primary" type="button" onClick={() => { onClose(); navigate("/pricing"); }}>{subscription ? "查看会员套餐" : "立即充值"}<ArrowRight size={17} /></button></div>
     </section>

@@ -19,6 +19,8 @@ export const PEAR_API_ACQUISITION_URL = "https://api.pearapi.ai/zh/dashboard";
 export const PEAR_API_DOCS_URL = "https://api.pearapi.ai/zh/dashboard/docs";
 export const PEAR_API_MARKUP_RATE = 0.3;
 export const PEAR_API_TOKEN_CHANNELS = Object.freeze(["默认", "优质", "免费", "按次", "特价", "限时免费"]);
+export const WALLET_PROMOTION_BONUS_RATE = 0.1;
+export const WALLET_RECHARGE_BONUS_THRESHOLD_FEN = 50_000;
 
 export const PEAR_API_FREE_MODELS = Object.freeze([
   { id: "glm-4-flash-250414", name: "GLM-4-Flash-250414", vendor: "GLM", description: "轻量通用模型，适合日常问答、多任务处理与长上下文。" },
@@ -474,34 +476,67 @@ export async function checkPearApiFreeModels({ token, tokenChannel = "免费", f
   return { healthy, total: models.length, allAvailable: healthy === models.length, models };
 }
 
-export async function creditMonthlySubscriptionBalance({ ownerId, amountFen, source, sourceId, kind = "monthly_subscription" }) {
+export async function creditMonthlySubscriptionBalance({ ownerId, amountFen, source, sourceId, kind = "monthly_subscription", collectionProvider = getCollection }) {
   const creditFen = safeFen(amountFen);
   if (!creditFen || !ownerId || !sourceId) return { applied: false, reason: "invalid" };
   const key = `${source}:${sourceId}`;
-  const wallets = await getCollection("wallets");
+  const wallets = await collectionProvider("wallets");
+  const ledgers = await collectionProvider("walletCreditLedger");
   const now = new Date();
   const credit = { key, kind, amountFen: creditFen, createdAt: now };
+  await ledgers.updateOne(
+    { creditKey: key },
+    { $setOnInsert: { creditKey: key, ownerId, source, sourceId, kind, amountFen: creditFen, status: "pending", createdAt: now }, $set: { updatedAt: now } },
+    { upsert: true },
+  );
+  const ledger = await ledgers.findOne({ creditKey: key });
+  if ((ledger?.ownerId?.toString?.() || String(ledger?.ownerId)) !== (ownerId?.toString?.() || String(ownerId)) || ledger?.amountFen !== creditFen || ledger?.kind !== kind) {
+    throw Object.assign(new Error("钱包入账流水内容冲突"), { code: "WALLET_CREDIT_CONFLICT", status: 409 });
+  }
   const current = await wallets.findOne({ ownerId }, { projection: { credits: 1 } });
-  if (current?.credits?.some((item) => item.key === key)) return { applied: false, reason: "already_applied" };
+  if (current?.credits?.some((item) => item.key === key)) {
+    await ledgers.updateOne({ creditKey: key }, { $set: { status: "settled", settledAt: ledger.settledAt || now, updatedAt: now } });
+    return { applied: false, reason: "already_applied", amountFen: 0 };
+  }
   let updated = current
     ? await wallets.updateOne(
       { _id: current._id, "credits.key": { $ne: key } },
-      { $inc: { balanceFen: creditFen }, $push: { credits: { $each: [credit], $slice: -120 } }, $set: { updatedAt: now } },
+      { $inc: { balanceFen: creditFen }, $push: { credits: credit }, $set: { updatedAt: now } },
     )
     : { matchedCount: 0, modifiedCount: 0 };
   if (!current) {
     try {
       const inserted = await wallets.insertOne({ ownerId, balanceFen: creditFen, credits: [credit], createdAt: now, updatedAt: now });
-      return { applied: Boolean(inserted.insertedId), amountFen: creditFen };
+      if (inserted.insertedId) await ledgers.updateOne({ creditKey: key }, { $set: { status: "settled", settledAt: new Date(), updatedAt: new Date() } });
+      return { applied: Boolean(inserted.insertedId), amountFen: inserted.insertedId ? creditFen : 0 };
     } catch (error) {
       if (error?.code !== 11000) throw error;
       updated = await wallets.updateOne(
         { ownerId, "credits.key": { $ne: key } },
-        { $inc: { balanceFen: creditFen }, $push: { credits: { $each: [credit], $slice: -120 } }, $set: { updatedAt: now } },
+        { $inc: { balanceFen: creditFen }, $push: { credits: credit }, $set: { updatedAt: now } },
       );
     }
   }
-  return { applied: Boolean(updated.modifiedCount), amountFen: updated.modifiedCount ? creditFen : 0 };
+  const applied = Boolean(updated.modifiedCount);
+  const resultingWallet = applied ? true : await wallets.findOne({ ownerId, "credits.key": key }, { projection: { _id: 1 } });
+  if (resultingWallet) await ledgers.updateOne({ creditKey: key }, { $set: { status: "settled", settledAt: ledger.settledAt || new Date(), updatedAt: new Date() } });
+  return { applied, amountFen: applied ? creditFen : 0 };
+}
+
+export function paymentPromotionBonusFen({ amountFen, kind }) {
+  const paidFen = safeFen(amountFen);
+  const eligible = kind === "subscription_payment" || (kind === "recharge" && paidFen >= WALLET_RECHARGE_BONUS_THRESHOLD_FEN);
+  return eligible ? Math.floor(paidFen * WALLET_PROMOTION_BONUS_RATE) : 0;
+}
+
+export async function creditPaymentBalanceWithPromotion({ ownerId, amountFen, source, sourceId, kind, collectionProvider = getCollection }) {
+  const paidFen = safeFen(amountFen);
+  const base = await creditMonthlySubscriptionBalance({ ownerId, amountFen: paidFen, source, sourceId, kind, collectionProvider });
+  const bonusFen = paymentPromotionBonusFen({ amountFen: paidFen, kind });
+  const bonus = bonusFen > 0
+    ? await creditMonthlySubscriptionBalance({ ownerId, amountFen: bonusFen, source: `${source}_bonus`, sourceId, kind: kind === "subscription_payment" ? "subscription_bonus" : "recharge_bonus", collectionProvider })
+    : { applied: false, reason: "not_eligible", amountFen: 0 };
+  return { base, bonus, paidFen, bonusFen, creditedFen: paidFen + bonusFen };
 }
 
 const ErrorSchema = z.object({ code: z.string(), message: z.string() });

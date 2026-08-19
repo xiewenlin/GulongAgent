@@ -4,14 +4,19 @@ import {
   Brain,
   Briefcase,
   Camera,
+  ChartLineUp,
   ChatCircleText,
   CheckCircle,
+  Coins,
   Clock,
+  Cpu,
   CreditCard,
+  DesktopTower,
   FloppyDisk,
   Gauge,
   LockKey,
   PaperPlaneRight,
+  Pulse,
   Receipt,
   ShieldCheck,
   UploadSimple,
@@ -30,6 +35,7 @@ const dashboardMenu = [
   { id: "brain", label: "第二大脑", icon: Brain },
   { id: "feedback", label: "我的反馈", icon: ChatCircleText },
   { id: "worker", label: "威客管理", icon: Briefcase },
+  { id: "earnings", label: "我的收益", icon: ChartLineUp },
   { id: "billing", label: "会员与充值", icon: CreditCard },
   { id: "profile", label: "个人资料", icon: UserCircle },
 ];
@@ -80,6 +86,44 @@ function FeedbackCard({ item }) {
   </article>;
 }
 
+function earningsTime(value) {
+  return value ? new Date(value).toLocaleString("zh-CN") : "暂无记录";
+}
+
+function queueLabel(value) {
+  return ({ processing: "任务处理中", polling: "正在轮询", reachable: "连接正常", idle: "等待接单", offline: "离线" })[value] || "等待接单";
+}
+
+function EarningsPanel({ summary, loading }) {
+  if (loading) return <section className="account-module earnings-module"><div className="earnings-loading"><span /><strong>正在核对服务端结算流水</strong></div></section>;
+  if (!summary) return <section className="account-module earnings-module"><EmptyPanel icon={ChartLineUp} title="收益数据暂时无法加载" text="请刷新后重试；未结算或失败任务不会计入收益。" /></section>;
+  const account = summary.account || {};
+  return <section className="account-module earnings-module">
+    <header><div><span>H3 NODE EARNINGS</span><h2>MiniMax H3 共享节点收益</h2><p>收益以服务端成功回调后的真实结算流水为准；失败、取消与重复回调不会重复计入。</p></div><div className="earnings-currency">CNY · 人民币</div></header>
+    <div className="earnings-metrics">
+      <article className="primary"><Coins size={25} weight="duotone" /><span>累计总收益</span><strong>{formatMoney(account.total_earnings_fen || 0)}</strong><small>已结算与待结算合计</small></article>
+      <article><ChartLineUp size={25} weight="duotone" /><span>平均每天收益</span><strong>{formatMoney(account.average_daily_earnings_fen || 0)}</strong><small>按中国自然日计算 · {account.active_days || 0} 天</small></article>
+      <article><CheckCircle size={25} weight="duotone" /><span>已结算收益</span><strong>{formatMoney(account.settled_earnings_fen || 0)}</strong><small>已进入账户余额</small></article>
+      <article><Clock size={25} weight="duotone" /><span>待结算收益</span><strong>{formatMoney(account.pending_earnings_fen || 0)}</strong><small>等待服务端完成结算</small></article>
+      <article><DesktopTower size={25} weight="duotone" /><span>参与接单设备</span><strong>{account.device_count || 0} 台</strong><small>当前账户绑定与历史执行节点</small></article>
+    </div>
+    <div className="earnings-devices-head"><div><span>BOUND COMPUTE NODES</span><h3>我的接单设备</h3></div><p><Pulse size={19} /> 节点连续 3 分钟没有领取或回调心跳时显示为离线。</p></div>
+    {summary.devices?.length ? <div className="earnings-device-list">{summary.devices.map((device) => <article className={`earnings-device ${device.online ? "online" : "offline"}`} key={`${device.node_id}-${device.node_name}`}>
+      <header><div className="earnings-device-icon"><DesktopTower size={27} weight="duotone" /></div><div><strong>{device.node_name || "未命名节点"}</strong><code title="匿名稳定节点 ID">{device.node_id}</code></div><span><i />{device.online ? "在线" : "离线"}</span></header>
+      <div className="earnings-device-grid">
+        <dl><dt><Cpu size={18} /> GPU / 显存</dt><dd>{device.gpu_name || "未上报"}{device.vram_mb ? ` · ${(device.vram_mb / 1024).toFixed(device.vram_mb % 1024 ? 1 : 0)} GB` : ""}</dd></dl>
+        <dl><dt>队列状态</dt><dd>{queueLabel(device.queue_status)}</dd></dl>
+        <dl><dt>累计完成任务</dt><dd>{device.completed_task_count || 0} 个</dd></dl>
+        <dl><dt>累计收益</dt><dd>{formatMoney(device.total_earnings_fen || 0)}</dd></dl>
+        <dl><dt>平均每天收益</dt><dd>{formatMoney(device.average_daily_earnings_fen || 0)}</dd></dl>
+        <dl><dt>最近接单时间</dt><dd>{earningsTime(device.last_claimed_at)}</dd></dl>
+        <dl><dt>最近回调时间</dt><dd>{earningsTime(device.last_callback_at)}</dd></dl>
+        <dl><dt>最近完成时间</dt><dd>{earningsTime(device.last_completed_at)}</dd></dl>
+      </div>
+    </article>)}</div> : <EmptyPanel icon={DesktopTower} title="还没有接单设备" text="在已激活的古龙桌面端绑定当前账号并开启 MiniMax H3 本地节点后，设备会显示在这里。" />}
+  </section>;
+}
+
 export function AccountDashboard({ user, openAuth, navigate, onUser }) {
   const confirmAction = useConfirmDialog();
   const [active, setActive] = useState(() => {
@@ -87,6 +131,8 @@ export function AccountDashboard({ user, openAuth, navigate, onUser }) {
     return dashboardMenu.some((item) => item.id === section) ? section : "overview";
   });
   const [data, setData] = useState(null);
+  const [earnings, setEarnings] = useState(null);
+  const [earningsLoading, setEarningsLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
   const [profile, setProfile] = useState({ displayName: "", username: "", bio: "", wechatId: "" });
@@ -110,6 +156,16 @@ export function AccountDashboard({ user, openAuth, navigate, onUser }) {
   }
 
   useEffect(() => { load(); }, [user]);
+
+  async function loadEarnings() {
+    if (!user) return;
+    setEarningsLoading(true); setMessage("");
+    try { setEarnings(await apiFetch("/api/account/earnings/summary")); }
+    catch (error) { setMessage(error.message); }
+    finally { setEarningsLoading(false); }
+  }
+
+  useEffect(() => { if (active === "earnings") loadEarnings(); }, [active, user?.id]);
 
   const activeUploads = useMemo(() => (data?.brainUploads || []).filter((item) => !["completed", "failed"].includes(item.status)).length, [data]);
   const completedUploads = useMemo(() => (data?.brainUploads || []).filter((item) => item.status === "completed").length, [data]);
@@ -204,6 +260,8 @@ export function AccountDashboard({ user, openAuth, navigate, onUser }) {
   const editionName = data?.profile.edition?.name || user.edition?.name || "古龙版";
   const avatar = data?.profile.avatar || user.avatar || null;
   const unreadNotifications = (data?.notifications || []).filter((item) => !item.readAt);
+  const rechargeFen = Math.round(Number(rechargeAmount || 0) * 100);
+  const rechargeBonusFen = rechargeFen >= 50_000 ? Math.floor(rechargeFen * 0.1) : 0;
   return <main id="main-content" className="account-page section-shell">
     <aside className="account-sidebar">
       <div className="account-identity"><div>{avatar ? <img src={avatar} alt="个人头像" /> : (data?.profile.displayName || data?.profile.username || "古").slice(0, 1).toUpperCase()}</div><span>MY GULONG</span><strong>{data?.profile.displayName || data?.profile.username || "古龙用户"}</strong><small>{data?.profile.email}</small><p className="account-identity-meta"><b>{editionName}</b><em className={isAdmin ? "admin" : ""}>{identityLabel}</em></p></div>
@@ -211,7 +269,7 @@ export function AccountDashboard({ user, openAuth, navigate, onUser }) {
       {isAdmin && <button className="account-admin-link" onClick={() => navigate("/admin")}><ShieldCheck size={20} /> 进入管理员后台 <ArrowRight size={17} /></button>}
     </aside>
     <section className="account-workspace">
-      <header className="account-workspace-head"><div><span>PERSONAL CONSOLE</span><h1>{dashboardMenu.find((item) => item.id === active)?.label}</h1></div><button className="button small ghost" onClick={load}>刷新数据</button></header>
+      <header className="account-workspace-head"><div><span>PERSONAL CONSOLE</span><h1>{dashboardMenu.find((item) => item.id === active)?.label}</h1></div><button className="button small ghost" onClick={active === "earnings" ? loadEarnings : load}>刷新数据</button></header>
       {message && <div className={`account-message ${message.includes("已") || message.includes("现在") ? "success" : "error"}`}>{message}</div>}
       {unreadNotifications.length > 0 && <div className="account-notification-stack">{unreadNotifications.map((notification) => <button key={notification.id} onClick={() => openNotification(notification)}><Bell size={21} weight="fill" /><span><strong>{notification.title}</strong><small>{notification.message}{notification.reason ? ` 原因：${notification.reason}` : ""}</small></span><ArrowRight size={18} /></button>)}</div>}
 
@@ -226,16 +284,18 @@ export function AccountDashboard({ user, openAuth, navigate, onUser }) {
 
       {active === "worker" && <WorkerManagementPanel user={user} navigate={navigate} />}
 
+      {active === "earnings" && <EarningsPanel summary={earnings} loading={earningsLoading} />}
+
       {active === "billing" && <section className="account-module">
         <header><div><span>MEMBERSHIP & WALLET</span><h2>会员、余额与订单</h2><p>线上支付即将开通，微信支付将优先上线；当前会员订阅可使用线下支付并等待管理员审核。</p></div></header>
-        <div className="account-billing-grid"><article className={isMember || isAdmin ? "member active" : "member"}><ShieldCheck size={27} weight="duotone" /><span>当前身份 · {editionName}</span><h3>{identityLabel}</h3><p>{isAdmin ? "管理员拥有古龙官网全部后台权限，会员订阅状态不会覆盖管理员身份。" : isMember ? `会员权益有效至 ${new Date(subscription.currentPeriodEnd).toLocaleString("zh-CN")}` : "升级后解锁第二大脑、完整工作流和本地模型能力。"}</p><button className="button primary full" onClick={() => isAdmin ? navigate("/admin") : navigate("/pricing")}>{isAdmin ? "进入管理员后台" : isMember ? "查看会员方案" : "立即订阅会员"}</button>{!isAdmin && isMember && subscription.autoRenew && !subscription.cancelAtPeriodEnd && <button className="text-button" onClick={cancelSubscription}>关闭到期自动续订</button>}</article><article className="wallet"><Wallet size={27} weight="duotone" /><span>可用余额</span><h3>{formatMoney(data?.balanceFen || 0)}</h3><p>输入充值金额并使用线下支付；管理员确认到账后，余额会同步到网页端与桌面端。</p><button className="button secondary full" onClick={() => { setRecharge({ mode: "cashier" }); setMessage(""); }}><CreditCard size={17} /> 输入金额，线下充值</button></article></div>
+        <div className="account-billing-grid"><article className={isMember || isAdmin ? "member active" : "member"}><ShieldCheck size={27} weight="duotone" /><span>当前身份 · {editionName}</span><h3>{identityLabel}</h3><p>{isAdmin ? "管理员拥有古龙官网全部后台权限，会员订阅状态不会覆盖管理员身份。" : isMember ? `会员权益有效至 ${new Date(subscription.currentPeriodEnd).toLocaleString("zh-CN")}` : "升级后解锁第二大脑、完整工作流和本地模型能力。订阅实付金额还会额外赠送 10% 创作余额。"}</p><button className="button primary full" onClick={() => isAdmin ? navigate("/admin") : navigate("/pricing")}>{isAdmin ? "进入管理员后台" : isMember ? "查看会员方案" : "立即订阅会员"}</button>{!isAdmin && isMember && subscription.autoRenew && !subscription.cancelAtPeriodEnd && <button className="text-button" onClick={cancelSubscription}>关闭到期自动续订</button>}</article><article className="wallet"><Wallet size={27} weight="duotone" /><span>可用余额</span><h3>{formatMoney(data?.balanceFen || 0)}</h3><p>单次充值满 500 元额外赠送 10% 余额；管理员确认到账后同步到网页端与桌面端。</p><button className="button secondary full" onClick={() => { setRecharge({ mode: "cashier" }); setMessage(""); }}><CreditCard size={17} /> 输入金额，线下充值</button></article></div>
         <div className="account-order-list"><h3><Receipt size={20} /> 最近订单</h3>{data?.orders?.length ? data.orders.map((order) => <article className={order.status === "rejected" ? "rejected" : ""} key={`${order.provider}-${order.id}`}><div className="account-order-main"><div><strong>{order.kind === "recharge" ? "账户充值" : order.cycle === "year" ? "年度会员" : "月度会员"}<small>{order.orderNo}</small></strong></div><span>{order.provider === "wechat" ? "微信" : order.provider === "alipay" ? "支付宝" : "线下支付"}</span><strong>{formatMoney(order.amountFen)}</strong><em>{order.provider === "offline" && order.status === "pending" ? "待审核" : statusText[order.status] || order.status}</em><time>{new Date(order.createdAt).toLocaleDateString("zh-CN")}</time></div>{order.status === "rejected" && <div className="account-order-rejection"><WarningCircle size={22} weight="fill" /><div><strong>审核未通过</strong><p>{order.reviewReason || "管理员暂未填写原因，请联系客服确认。"}</p></div><button className="button small primary" onClick={() => setResubmission({ order, note: "" })}>调整后重新申请</button></div>}{order.status === "pending" && order.resubmissionNote && <div className="account-order-resubmitted"><CheckCircle size={18} /> 已重新提交：{order.resubmissionNote}</div>}</article>) : <EmptyPanel icon={Receipt} title="还没有订单" text="订阅或充值完成后，交易记录会显示在这里。" />}</div>
       </section>}
 
       {active === "profile" && <section className="account-module"><header><div><span>PROFILE</span><h2>个人基本信息</h2><p>昵称会显示在网站右上角；头像保存到腾讯云 COS，并可同步到古龙桌面端。</p></div></header><form className="account-form" onSubmit={saveProfile}><label className="account-avatar-uploader"><div className="account-avatar-preview">{avatar ? <img src={avatar} alt="个人头像预览" /> : (profile.displayName || profile.username || "古").slice(0, 1).toUpperCase()}<span><Camera size={20} /></span></div><strong>{busy === "avatar" ? "正在上传" : "更换头像"}</strong><small>JPG / PNG / WebP / GIF，最大 10MB</small><input type="file" accept="image/jpeg,image/png,image/webp,image/gif" disabled={busy === "avatar"} onChange={uploadAvatar} /></label><div className="account-form-fields"><label><span>昵称</span><input required maxLength={64} value={profile.displayName} onChange={(event) => setProfile({ ...profile, displayName: event.target.value })} placeholder="你希望大家如何称呼你" /></label><label><span>用户名</span><input minLength={3} maxLength={32} value={profile.username} onChange={(event) => setProfile({ ...profile, username: event.target.value })} placeholder="用于账户识别" /></label><label><span>邮箱</span><input value={data?.profile.email || ""} disabled /><small>邮箱由 Chandler 账号中心维护，官网不会绕过统一身份修改。</small></label><label><span>微信号</span><input minLength={5} maxLength={64} value={profile.wechatId} onChange={(event) => setProfile({ ...profile, wechatId: event.target.value })} placeholder="发单或接单前必须填写" /><small>默认保密；任务另一方需支付 2 元并审核通过后才能查看。</small></label><label><span>个人简介</span><textarea maxLength={240} value={profile.bio} onChange={(event) => setProfile({ ...profile, bio: event.target.value })} placeholder="简单介绍你的工作与希望古龙帮助你的方向" /></label><button className="button primary" disabled={busy === "profile"}><FloppyDisk size={17} /> {busy === "profile" ? "正在保存" : "保存个人资料"}</button></div></form></section>}
 
     </section>
-    {recharge && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && setRecharge(null)}><section className="payment-modal offline-payment-modal" role="dialog" aria-modal="true" aria-labelledby="offline-recharge-title"><button className="modal-close" type="button" disabled={Boolean(busy)} onClick={() => setRecharge(null)}><X size={19} /></button><div className="payment-logo"><Wallet size={30} weight="duotone" /></div><span className="payment-eyebrow">OFFLINE WALLET RECHARGE</span><h2 id="offline-recharge-title">{recharge.mode === "cashier" ? "输入金额，线下充值" : "已提交，等待管理员审核"}</h2>{recharge.mode === "cashier" ? <form onSubmit={submitOfflineRecharge}><p>填写充值金额后扫描企业收款码付款，再点击“我已支付”。管理员确认到账后，金额会原额计入可用余额。</p><label><span>充值金额（元）</span><input type="number" min="1" max="50000" step="0.01" required autoFocus value={rechargeAmount} onChange={(event) => setRechargeAmount(event.target.value)} /></label><img className="payment-qr enterprise-qr" src="/assets/enterprise-payment-qr.jpg" alt="古龙企业微信收款码" /><div className="offline-payment-summary"><span>账户余额充值</span><strong>{formatMoney(Math.round(Number(rechargeAmount || 0) * 100))}</strong></div><div className="payment-dialog-actions"><button type="button" className="button secondary" disabled={Boolean(busy)} onClick={() => setRecharge(null)}>稍后充值</button><button className="button primary" disabled={Boolean(busy)}>{busy ? "正在提交" : "我已支付"}</button></div></form> : <><p>订单 <strong>{recharge.orderNo}</strong> 已进入线下审核队列。管理员确认到账后，充值余额会自动入账。</p><div className="form-success">待审核 · {formatMoney(recharge.amountFen)}</div><p className="offline-payment-urgent">请尽快添加客服微信并发送支付截图，以加速审核进度。</p><img className="payment-qr service-qr" src="/assets/customer-service-wechat.jpg" alt="古龙客服微信二维码" /><button className="button primary full" type="button" onClick={() => setRecharge(null)}>我知道了</button></>}</section></div>}
+    {recharge && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && setRecharge(null)}><section className="payment-modal offline-payment-modal" role="dialog" aria-modal="true" aria-labelledby="offline-recharge-title"><button className="modal-close" type="button" disabled={Boolean(busy)} onClick={() => setRecharge(null)}><X size={19} /></button><div className="payment-logo"><Wallet size={30} weight="duotone" /></div><span className="payment-eyebrow">OFFLINE WALLET RECHARGE</span><h2 id="offline-recharge-title">{recharge.mode === "cashier" ? "输入金额，线下充值" : "已提交，等待管理员审核"}</h2>{recharge.mode === "cashier" ? <form onSubmit={submitOfflineRecharge}><p>填写充值金额后扫描企业收款码付款，再点击“我已支付”。满 500 元额外赠送 10%，管理员确认到账后一次入账。</p><label><span>充值金额（元）</span><input type="number" min="1" max="50000" step="0.01" required autoFocus value={rechargeAmount} onChange={(event) => setRechargeAmount(event.target.value)} /></label><div className={`recharge-bonus-preview ${rechargeBonusFen ? "active" : ""}`}><Coins size={21} weight="duotone" /><span><strong>{rechargeBonusFen ? `额外赠送 ${formatMoney(rechargeBonusFen)}` : "满 500 元赠送 10%"}</strong><small>{rechargeBonusFen ? `预计到账 ${formatMoney(rechargeFen + rechargeBonusFen)}` : "当前金额按实付金额到账"}</small></span></div><img className="payment-qr enterprise-qr" src="/assets/enterprise-payment-qr.jpg" alt="古龙企业微信收款码" /><div className="offline-payment-summary"><span>账户余额充值</span><strong>{formatMoney(rechargeFen)}</strong></div><div className="payment-dialog-actions"><button type="button" className="button secondary" disabled={Boolean(busy)} onClick={() => setRecharge(null)}>稍后充值</button><button className="button primary" disabled={Boolean(busy)}>{busy ? "正在提交" : "我已支付"}</button></div></form> : <><p>订单 <strong>{recharge.orderNo}</strong> 已进入线下审核队列。管理员确认到账后，充值余额会自动入账。</p><div className="form-success">待审核 · 实付 {formatMoney(recharge.amountFen)}{recharge.bonusFen > 0 ? ` · 赠送 ${formatMoney(recharge.bonusFen)}` : ""}</div><p className="offline-payment-urgent">请尽快添加客服微信并发送支付截图，以加速审核进度。</p><img className="payment-qr service-qr" src="/assets/customer-service-wechat.jpg" alt="古龙客服微信二维码" /><button className="button primary full" type="button" onClick={() => setRecharge(null)}>我知道了</button></>}</section></div>}
     {resubmission && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && busy !== "resubmit" && setResubmission(null)}><form className="account-resubmit-modal" onSubmit={resubmitOffline}><button className="modal-close" type="button" disabled={busy === "resubmit"} onClick={() => setResubmission(null)}><X size={19} /></button><span>RESUBMIT OFFLINE PAYMENT</span><h2>调整后重新申请</h2><p>管理员拒绝原因：<strong>{resubmission.order.reviewReason}</strong></p><label><span>本次调整说明</span><textarea required minLength={2} maxLength={500} value={resubmission.note} onChange={(event) => setResubmission({ ...resubmission, note: event.target.value })} placeholder="例如：已补发付款截图，并核对了付款金额与订单号。" /></label><div className="account-resubmit-actions"><button className="button secondary" type="button" disabled={busy === "resubmit"} onClick={() => setResubmission(null)}>取消</button><button className="button primary" disabled={busy === "resubmit"}><PaperPlaneRight size={18} /> {busy === "resubmit" ? "正在提交" : "保存并重新申请"}</button></div></form></div>}
   </main>;
 }

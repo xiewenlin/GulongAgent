@@ -2,6 +2,7 @@ export const OFFLINE_REVIEW_REJECTION_REASON = "管理员通过微信端拒绝�
 
 export function offlineReviewWechatMessage(order) {
   const amount = `¥${(Number(order.amountFen || 0) / 100).toFixed(2)}`;
+  const bonusFen = Number(order.promotionBonusFen || order.partnerData?.promotion_bonus_fen || 0);
   const cycle = order.kind === "recharge" ? "账户余额充值" : order.cycle === "year" ? "年度会员" : "月度会员";
   const lines = [
     "【古龙官网 · 新的线下支付待审核订单】",
@@ -10,6 +11,7 @@ export function offlineReviewWechatMessage(order) {
     `套餐：${cycle}`,
     `金额：${amount}`,
   ];
+  if (bonusFen > 0) lines.push(`赠送余额：¥${(bonusFen / 100).toFixed(2)}（审核通过后自动入账）`);
   if (order.previousReviewReason) lines.push(`上次拒绝：${order.previousReviewReason}`);
   if (order.resubmissionNote) lines.push(`用户调整：${order.resubmissionNote}`);
   lines.push("", "请直接回复：", "1、审核通过", "2、审核拒绝", "也可以回复“2 拒绝原因”把具体原因同步给用户。", "", "仅当前已绑定的管理员微信会话可以执行本订单操作。");

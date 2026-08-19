@@ -2,13 +2,17 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { OpenAPIHono } from "@hono/zod-openapi";
+import { ObjectId } from "mongodb";
 import {
   PEAR_API_BASE_URL,
   PEAR_API_FREE_MODELS,
   PEAR_API_MARKUP_RATE,
   PEAR_API_TOKEN_CHANNELS,
+  WALLET_RECHARGE_BONUS_THRESHOLD_FEN,
   callPearApiChat,
   checkPearApiFreeModels,
+  creditPaymentBalanceWithPromotion,
+  paymentPromotionBonusFen,
   pearApiMarkedUpFen,
   pearApiOutputRange,
   registerPearApiRoutes,
@@ -50,6 +54,42 @@ test("paid media estimates apply the required 30 percent markup", () => {
   assert.equal(image.priceLabel, "¥0.13");
   assert.equal(video.chargedFen, 60);
   assert.equal(video.priceLabel, "按时长 · 首档 ¥0.60");
+});
+
+test("membership and qualifying top-ups receive a ten-percent idempotent wallet bonus", async () => {
+  assert.equal(WALLET_RECHARGE_BONUS_THRESHOLD_FEN, 50_000);
+  assert.equal(paymentPromotionBonusFen({ amountFen: 19_900, kind: "subscription_payment" }), 1_990);
+  assert.equal(paymentPromotionBonusFen({ amountFen: 49_999, kind: "recharge" }), 0);
+  assert.equal(paymentPromotionBonusFen({ amountFen: 50_000, kind: "recharge" }), 5_000);
+  const ownerId = new ObjectId();
+  let wallet = null;
+  const creditLedgers = new Map();
+  const wallets = {
+    findOne: async ({ ownerId: requested }) => wallet && requested.toString() === ownerId.toString() ? wallet : null,
+    insertOne: async (record) => { wallet = { ...record }; return { insertedId: record._id || new ObjectId() }; },
+    updateOne: async (filter, update) => {
+      if (!wallet || filter._id?.toString() !== wallet._id?.toString() || wallet.credits.some((item) => item.key === filter["credits.key"].$ne)) return { modifiedCount: 0 };
+      wallet.balanceFen += update.$inc.balanceFen;
+      wallet.credits.push(update.$push.credits);
+      return { modifiedCount: 1 };
+    },
+  };
+  const ledgers = {
+    updateOne: async (filter, update) => {
+      const current = creditLedgers.get(filter.creditKey);
+      const next = current || { ...update.$setOnInsert };
+      Object.assign(next, update.$set || {});
+      creditLedgers.set(filter.creditKey, next);
+      return { upsertedCount: current ? 0 : 1, modifiedCount: 1 };
+    },
+    findOne: async (filter) => creditLedgers.get(filter.creditKey) || null,
+  };
+  const input = { ownerId, amountFen: 10_000, source: "offline_subscription", sourceId: "ORDER-ONE", kind: "subscription_payment", collectionProvider: async (name) => name === "wallets" ? wallets : ledgers };
+  await creditPaymentBalanceWithPromotion(input);
+  await creditPaymentBalanceWithPromotion(input);
+  assert.equal(wallet.balanceFen, 11_000);
+  assert.deepEqual(wallet.credits.map((item) => [item.kind, item.amountFen]), [["subscription_payment", 10_000], ["subscription_bonus", 1_000]]);
+  assert.deepEqual([...creditLedgers.values()].map((item) => item.status), ["settled", "settled"]);
 });
 
 test("paid PearAPI media reserves wallet balance once and records an auditable ledger", async () => {
@@ -194,20 +234,29 @@ test("website exposes the simplified agent while user settings no longer expose 
 });
 
 test("monthly subscription payments credit the wallet once and PearAPI routes are registered", async () => {
-  const [serverSource, dbSource, pearSource, vercel] = await Promise.all([
+  const [serverSource, dbSource, pearSource, pricingSource, accountSource, vercel] = await Promise.all([
     readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
     readFile(new URL("../../server/db.js", import.meta.url), "utf8"),
     readFile(new URL("../../server/pearapi.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/PlatformPages.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/AccountDashboard.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../vercel.json", import.meta.url), "utf8"),
   ]);
   assert.match(serverSource, /registerPearApiRoutes\(app, \{ authenticate, requireAdmin, requireTrustedMutation \}\)/);
   assert.match(serverSource, /source: "online_subscription"/);
   assert.match(serverSource, /source: "offline_subscription"/);
+  assert.match(serverSource, /creditPaymentBalanceWithPromotion/);
   assert.match(dbSource, /uniq_wallet_owner/);
+  assert.match(dbSource, /uniq_wallet_credit_ledger/);
   assert.match(dbSource, /agent_media_polling/);
   assert.match(dbSource, /uniq_agent_workflow_operation/);
   assert.match(dbSource, /ttl_agent_workflows/);
   assert.match(pearSource, /"credits\.key": \{ \$ne: key \}/);
+  assert.match(pearSource, /subscription_bonus/);
+  assert.match(pearSource, /recharge_bonus/);
+  assert.match(pricingSource, /订阅即送 10% 创作余额/);
+  assert.match(pricingSource, /满 500 元赠送 10%/);
+  assert.match(accountSource, /单次充值满 500 元额外赠送 10% 余额/);
   assert.match(pearSource, /limit: 30, windowMs: 5 \* 60_000/);
   assert.match(pearSource, /const unlimited = auth\.user\.role === "admin"/);
   assert.doesNotMatch(pearSource, /图片和视频创作需要生效中的会员订阅/);

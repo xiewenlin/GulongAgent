@@ -349,6 +349,14 @@ export async function ensureIndexes() {
           { status: 1, currentPeriodEnd: 1 },
           { name: "subscriptions_active" },
         ),
+        db.collection("walletCreditLedger").createIndex(
+          { creditKey: 1 },
+          { unique: true, name: "uniq_wallet_credit_ledger" },
+        ),
+        db.collection("walletCreditLedger").createIndex(
+          { ownerId: 1, createdAt: -1 },
+          { name: "wallet_credit_ledger_by_owner" },
+        ),
         db.collection("subscriptionPeriodAudits").createIndex(
           { ownerId: 1, createdAt: -1 },
           { name: "subscription_period_audits_by_user" },
@@ -389,6 +397,10 @@ export async function ensureIndexes() {
           { activationLicenseId: 1, nodeId: 1 },
           { unique: true, name: "uniq_activation_node_binding" },
         ),
+        db.collection("nodeAccountBindings").createIndex(
+          { userId: 1, status: 1, lastSeenAt: -1 },
+          { name: "node_bindings_by_user_presence" },
+        ),
         db.collection("nodeAccountBindingAudits").createIndex(
           { bindingId: 1, createdAt: -1 },
           { name: "node_binding_audit_history" },
@@ -412,6 +424,10 @@ export async function ensureIndexes() {
         db.collection("h3SharedTasks").createIndex(
           { assigneeUserId: 1, completedAt: -1 },
           { name: "h3_tasks_by_assignee" },
+        ),
+        db.collection("h3SharedTasks").createIndex(
+          { assigneeUserId: 1, "executedByNode.nodeId": 1, completedAt: -1 },
+          { name: "h3_earnings_by_assignee_node" },
         ),
         db.collection("h3TaskCallbacks").createIndex(
           { eventKey: 1 },
@@ -448,6 +464,10 @@ export async function ensureIndexes() {
         db.collection("h3WalletLedger").createIndex(
           { ownerId: 1, createdAt: -1 },
           { name: "h3_wallet_ledger_by_owner" },
+        ),
+        db.collection("h3WalletLedger").createIndex(
+          { ownerId: 1, kind: 1, status: 1, settledAt: 1 },
+          { name: "h3_node_earnings_summary" },
         ),
         db.collection("h3TaskAudits").createIndex(
           { taskId: 1, createdAt: 1 },

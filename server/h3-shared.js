@@ -11,6 +11,9 @@ export const H3_SHARED_MODEL = "minimax_h3_shared";
 const H3_MAX_DURATION_SECONDS = 600;
 const H3_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 const DEFAULT_PLATFORM_ADMIN_EMAIL = "1186664388@qq.com";
+const H3_NODE_ONLINE_WINDOW_MS = 3 * 60_000;
+const CHINA_UTC_OFFSET_MS = 8 * 60 * 60_000;
+const NATURAL_DAY_MS = 24 * 60 * 60_000;
 
 function integer(value, fallback = 0) {
   const parsed = Number(value);
@@ -189,6 +192,177 @@ function workerCallbackTask(task) {
   };
 }
 
+function idText(value) {
+  return value?.toString?.() || String(value || "");
+}
+
+function chinaNaturalDay(value) {
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? Math.floor((timestamp + CHINA_UTC_OFFSET_MS) / NATURAL_DAY_MS) : null;
+}
+
+function averageDailyFen(amountFen, firstSettledAt, now) {
+  const firstDay = chinaNaturalDay(firstSettledAt);
+  const currentDay = chinaNaturalDay(now);
+  if (firstDay == null || currentDay == null) return { amountFen: 0, activeDays: 0 };
+  const activeDays = Math.max(1, currentDay - firstDay + 1);
+  return { amountFen: Math.floor(Math.max(0, integer(amountFen)) / activeDays), activeDays };
+}
+
+export function maskH3NodeId(value) {
+  const nodeId = String(value || "");
+  if (nodeId.length <= 12) return nodeId ? `${nodeId.slice(0, 3)}…${nodeId.slice(-3)}` : "";
+  return `${nodeId.slice(0, 6)}…${nodeId.slice(-4)}`;
+}
+
+export async function buildH3EarningsSummary({ getCollection, userId, currentNodeId = null, maskNodeIds = false, now = new Date() }) {
+  const ownerId = userId instanceof ObjectId ? userId : ObjectId.isValid(userId) ? new ObjectId(userId) : null;
+  if (!ownerId) throw Object.assign(new Error("收益账户不正确"), { code: "INVALID_ACCOUNT", status: 400 });
+  const [bindingsCollection, ledgersCollection, tasksCollection] = await Promise.all([
+    getCollection("nodeAccountBindings"),
+    getCollection("h3WalletLedger"),
+    getCollection("h3SharedTasks"),
+  ]);
+  const [bindings, ledgers] = await Promise.all([
+    bindingsCollection.find({ userId: ownerId, status: { $in: ["active", "revoked"] } }).sort({ createdAt: 1 }).toArray(),
+    ledgersCollection.find({ ownerId, kind: "h3_node_commission", status: { $in: ["pending", "settled"] } }).sort({ createdAt: 1 }).toArray(),
+  ]);
+  const taskObjectIds = [...new Map(ledgers.filter((item) => item.taskId).map((item) => [idText(item.taskId), item.taskId])).values()];
+  const taskFilter = {
+    $or: [
+      { assigneeUserId: ownerId },
+      { "claimedByNode.userId": ownerId },
+      ...(taskObjectIds.length ? [{ _id: { $in: taskObjectIds } }] : []),
+    ],
+  };
+  const tasks = await tasksCollection.find(taskFilter).sort({ createdAt: -1 }).toArray();
+  const tasksById = new Map(tasks.map((task) => [idText(task._id), task]));
+  const deviceMap = new Map();
+  const ensureDevice = (nodeId, fallback = {}) => {
+    const key = String(nodeId || "").trim();
+    if (!key) return null;
+    if (!deviceMap.has(key)) deviceMap.set(key, {
+      nodeId: key,
+      nodeName: fallback.nodeName || "未命名节点",
+      bindingStatus: fallback.status || null,
+      appVersion: fallback.appVersion || null,
+      capabilities: fallback.capabilities || {},
+      queueStatus: fallback.queueStatus || null,
+      lastSeenAt: fallback.lastSeenAt || null,
+      lastClaimedAt: fallback.lastClaimedAt || null,
+      lastCallbackAt: fallback.lastCallbackAt || null,
+      lastCompletedAt: fallback.lastCompletedAt || null,
+      completedTaskCount: 0,
+      settledFen: 0,
+      pendingFen: 0,
+      firstSettledAt: null,
+      processing: false,
+    });
+    return deviceMap.get(key);
+  };
+  for (const binding of bindings) {
+    const device = ensureDevice(binding.nodeId, binding);
+    if (!device) continue;
+    const latestSeen = [device.lastSeenAt, binding.lastSeenAt].filter(Boolean).sort((left, right) => new Date(right) - new Date(left))[0];
+    device.nodeName = binding.nodeName || device.nodeName;
+    device.bindingStatus = binding.status;
+    device.appVersion = binding.appVersion || device.appVersion;
+    device.capabilities = binding.capabilities || device.capabilities;
+    device.queueStatus = binding.queueStatus || device.queueStatus;
+    device.lastSeenAt = latestSeen || null;
+    device.lastCallbackAt = binding.lastCallbackAt || device.lastCallbackAt;
+    device.lastCompletedAt = binding.lastCompletedAt || device.lastCompletedAt;
+  }
+  for (const task of tasks) {
+    const claimedNodeId = task.claimedByNode?.nodeId;
+    if (claimedNodeId && idText(task.claimedByNode?.userId) === idText(ownerId)) {
+      const device = ensureDevice(claimedNodeId, task.claimedByNode);
+      if (device) {
+        if (!device.lastClaimedAt || new Date(task.claimedAt || task.claimedByNode.at || 0) > new Date(device.lastClaimedAt)) device.lastClaimedAt = task.claimedAt || task.claimedByNode.at || null;
+        if (["claimed", "processing"].includes(task.status)) device.processing = true;
+      }
+    }
+    if (task.executedByNode?.nodeId && idText(task.assigneeUserId) === idText(ownerId)) {
+      const device = ensureDevice(task.executedByNode.nodeId, task.executedByNode);
+      if (device && (!device.lastCallbackAt || new Date(task.executedByNode.at || task.updatedAt || 0) > new Date(device.lastCallbackAt))) device.lastCallbackAt = task.executedByNode.at || task.updatedAt || null;
+    }
+  }
+  let settledFen = 0;
+  let pendingFen = 0;
+  let firstSettledAt = null;
+  const countedLedgerKeys = new Set();
+  for (const ledger of ledgers) {
+    const ledgerKey = String(ledger.ledgerKey || "");
+    if (!ledgerKey || countedLedgerKeys.has(ledgerKey)) continue;
+    const task = tasksById.get(idText(ledger.taskId));
+    if (!task || task.status !== "completed" || idText(task.assigneeUserId) !== idText(ownerId)) continue;
+    if (task.settlement?.nodeLedgerKey && task.settlement.nodeLedgerKey !== ledgerKey) continue;
+    const amountFen = Math.max(0, integer(ledger.settlementFen ?? ledger.amountFen));
+    const device = ensureDevice(task.executedByNode?.nodeId, task.executedByNode || {});
+    if (!device) continue;
+    countedLedgerKeys.add(ledgerKey);
+    if (ledger.status === "settled") {
+      settledFen += amountFen;
+      device.settledFen += amountFen;
+      device.completedTaskCount += 1;
+      const settledAt = ledger.settledAt || task.settlement?.settledAt || task.completedAt;
+      if (settledAt && (!firstSettledAt || new Date(settledAt) < new Date(firstSettledAt))) firstSettledAt = settledAt;
+      if (settledAt && (!device.firstSettledAt || new Date(settledAt) < new Date(device.firstSettledAt))) device.firstSettledAt = settledAt;
+      if (!device.lastCompletedAt || new Date(task.completedAt || settledAt || 0) > new Date(device.lastCompletedAt)) device.lastCompletedAt = task.completedAt || settledAt || null;
+    } else {
+      pendingFen += amountFen;
+      device.pendingFen += amountFen;
+    }
+  }
+  const accountAverage = averageDailyFen(settledFen, firstSettledAt, now);
+  const devices = [...deviceMap.values()].map((device) => {
+    const average = averageDailyFen(device.settledFen, device.firstSettledAt, now);
+    const lastSeenTime = device.lastSeenAt ? new Date(device.lastSeenAt).getTime() : 0;
+    const online = device.bindingStatus === "active" && Number.isFinite(lastSeenTime) && now.getTime() - lastSeenTime <= H3_NODE_ONLINE_WINDOW_MS;
+    return {
+      node_id: maskNodeIds ? maskH3NodeId(device.nodeId) : device.nodeId,
+      node_name: device.nodeName,
+      gpu_name: String(device.capabilities?.gpuName || device.capabilities?.gpu_name || "").trim() || null,
+      vram_mb: Math.max(0, integer(device.capabilities?.vramMb ?? device.capabilities?.vram_mb)),
+      online,
+      status: online ? "online" : "offline",
+      queue_status: device.processing ? "processing" : online ? (device.queueStatus || "idle") : "offline",
+      total_earnings_fen: device.settledFen + device.pendingFen,
+      settled_earnings_fen: device.settledFen,
+      pending_earnings_fen: device.pendingFen,
+      average_daily_earnings_fen: average.amountFen,
+      active_days: average.activeDays,
+      completed_task_count: device.completedTaskCount,
+      last_claimed_at: device.lastClaimedAt ? new Date(device.lastClaimedAt).toISOString() : null,
+      last_callback_at: device.lastCallbackAt ? new Date(device.lastCallbackAt).toISOString() : null,
+      last_completed_at: device.lastCompletedAt ? new Date(device.lastCompletedAt).toISOString() : null,
+      app_version: device.appVersion,
+    };
+  }).sort((left, right) => Number(right.online) - Number(left.online) || new Date(right.last_callback_at || 0) - new Date(left.last_callback_at || 0));
+  const selected = currentNodeId ? devices.find((device) => device.node_id === currentNodeId || (!maskNodeIds && device.node_id === String(currentNodeId))) : null;
+  return {
+    ok: true,
+    currency: "CNY",
+    account: {
+      total_earnings_fen: settledFen + pendingFen,
+      settled_earnings_fen: settledFen,
+      pending_earnings_fen: pendingFen,
+      average_daily_earnings_fen: accountAverage.amountFen,
+      active_days: accountAverage.activeDays,
+      device_count: devices.length,
+    },
+    current_device: selected ? {
+      node_id: selected.node_id,
+      node_name: selected.node_name,
+      total_earnings_fen: selected.total_earnings_fen,
+      average_daily_earnings_fen: selected.average_daily_earnings_fen,
+      completed_task_count: selected.completed_task_count,
+      last_completed_at: selected.last_completed_at,
+    } : null,
+    devices,
+  };
+}
+
 async function audit(collection, event, details = {}) {
   await collection.insertOne({ event, ...details, createdAt: new Date() });
 }
@@ -223,7 +397,7 @@ export async function creditH3Wallet({ getCollection, ownerId, amountFen, ledger
   try {
     await ledgers.updateOne(
       { ledgerKey },
-      { $setOnInsert: { ledgerKey, ownerId, taskId, orderNo, kind, amountFen: creditFen, status: "pending", createdAt: now }, $set: { updatedAt: now } },
+      { $setOnInsert: { ledgerKey, ownerId, taskId, orderNo, kind, amountFen: creditFen, settlementFen: creditFen, status: "pending", createdAt: now }, $set: { updatedAt: now } },
       { upsert: true },
     );
   } catch (error) {
@@ -463,6 +637,26 @@ export function registerH3SharedRoutes(app, dependencies) {
     return c.json({ ok: true, revoked_at: now.toISOString() });
   });
 
+  app.get("/api/desktop/earnings/summary", async (c) => {
+    c.header("Cache-Control", "private, no-store, max-age=0");
+    const auth = await authenticateBinding(c); if (auth.error) return auth.error;
+    const rate = await enforceRateLimit(`h3-earnings:${auth.binding._id}`, { limit: 120, windowMs: 60_000 });
+    if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "收益查询过于频繁，请稍后重试" }, 429);
+    const requestedNodeId = String(c.req.query("node_id") || auth.binding.nodeId || "").trim();
+    const summary = await buildH3EarningsSummary({ getCollection, userId: auth.user._id, currentNodeId: requestedNodeId });
+    if (requestedNodeId && !summary.devices.some((device) => device.node_id === requestedNodeId)) {
+      return c.json({ code: "NODE_NOT_OWNED", message: "该节点不属于当前绑定账户" }, 403);
+    }
+    return c.json(summary);
+  });
+
+  app.get("/api/account/earnings/summary", async (c) => {
+    c.header("Cache-Control", "private, no-store, max-age=0");
+    const auth = await authenticate(c); if (auth.error) return auth.error;
+    const summary = await buildH3EarningsSummary({ getCollection, userId: auth.user.id, maskNodeIds: true });
+    return c.json(summary);
+  });
+
   app.post("/api/h3/assets/presign", async (c) => {
     const rejected = requireTrustedMutation(c); if (rejected) return rejected;
     const auth = await authenticate(c, { scopes: ["tasks:write"] }); if (auth.error) return auth.error;
@@ -607,14 +801,24 @@ export function registerH3SharedRoutes(app, dependencies) {
     const maxVideoCount = integer(capabilities.max_video_count ?? capabilities.max_videos, -1);
     const maxAudioCount = integer(capabilities.max_audio_count ?? capabilities.max_audio, -1);
     const vramMb = Math.max(0, integer(capabilities.vram_mb));
+    const gpuName = String(capabilities.gpu_name || capabilities.gpu || "").trim().slice(0, 160) || null;
     if (maxDurationSeconds < 1 || maxDurationSeconds > H3_MAX_DURATION_SECONDS || !profiles.length || maxImageCount < 0 || maxImageCount > 9 || maxVideoCount < 0 || maxVideoCount > 3 || maxAudioCount < 0 || maxAudioCount > 3) return c.json({ code: "INVALID_NODE_CAPABILITIES", message: "节点必须上报有效的最大时长、profiles 与素材上限" }, 400);
     const rate = await enforceRateLimit(`h3-claim:${auth.binding._id}`, { limit: 120, windowMs: 60_000 });
     if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "任务领取请求过于频繁" }, 429);
-    if (body.dry_run === true) return c.json({ ok: true, service: "gulong-h3-shared", queue: "reachable" });
     const now = new Date();
+    const nodeName = String(body.node_name || auth.binding.nodeName || "").slice(0, 120);
+    await (await getCollection("nodeAccountBindings")).updateOne(
+      { _id: auth.binding._id, userId: auth.user._id, status: "active" },
+      { $set: { nodeName, lastSeenAt: now, queueStatus: body.dry_run === true ? "reachable" : "polling", capabilities: { gpuName, vramMb, maxDurationSeconds, profiles, maxImageCount, maxVideoCount, maxAudioCount }, updatedAt: now } },
+    );
+    if (body.dry_run === true) return c.json({ ok: true, service: "gulong-h3-shared", queue: "reachable" });
     const tasks = await getCollection("h3SharedTasks");
-    const node = { nodeId: auth.binding.nodeId, nodeName: String(body.node_name || auth.binding.nodeName || "").slice(0, 120), bindingId: auth.binding._id, userId: auth.user._id, at: now };
-    const task = await tasks.findOneAndUpdate({ status: "queued", model: H3_SHARED_MODEL, durationSeconds: { $lte: maxDurationSeconds }, profile: { $in: profiles }, imageCount: { $lte: maxImageCount }, videoCount: { $lte: maxVideoCount }, audioCount: { $lte: maxAudioCount } }, { $set: { status: "claimed", claimedByNode: { ...node, capabilities: { maxDurationSeconds, profiles, maxImageCount, maxVideoCount, maxAudioCount, vramMb } }, claimedAt: now, claimLeaseUntil: new Date(now.getTime() + 45 * 60_000), updatedAt: now } }, { sort: { createdAt: 1 }, returnDocument: "after" });
+    const node = { nodeId: auth.binding.nodeId, nodeName, bindingId: auth.binding._id, userId: auth.user._id, at: now };
+    const task = await tasks.findOneAndUpdate({ status: "queued", model: H3_SHARED_MODEL, durationSeconds: { $lte: maxDurationSeconds }, profile: { $in: profiles }, imageCount: { $lte: maxImageCount }, videoCount: { $lte: maxVideoCount }, audioCount: { $lte: maxAudioCount } }, { $set: { status: "claimed", claimedByNode: { ...node, capabilities: { maxDurationSeconds, profiles, maxImageCount, maxVideoCount, maxAudioCount, vramMb, gpuName } }, claimedAt: now, claimLeaseUntil: new Date(now.getTime() + 45 * 60_000), updatedAt: now } }, { sort: { createdAt: 1 }, returnDocument: "after" });
+    await (await getCollection("nodeAccountBindings")).updateOne(
+      { _id: auth.binding._id },
+      { $set: { queueStatus: task ? "processing" : "idle", ...(task ? { lastClaimedAt: now } : {}), updatedAt: new Date() } },
+    );
     let outputUpload = null;
     if (task) {
       const grantId = randomBytes(18).toString("base64url");
@@ -641,7 +845,7 @@ export function registerH3SharedRoutes(app, dependencies) {
         throw error;
       }
     }
-    await audit(await getCollection("h3TaskAudits"), task ? "claimed" : "claim_empty", { taskId: task?._id || null, actorUserId: auth.user._id, bindingId: auth.binding._id, nodeId: auth.binding.nodeId, capabilities: { maxDurationSeconds, profiles, maxImageCount, maxVideoCount, maxAudioCount, vramMb }, reportedEmail: String(body.bound_account_email || "").slice(0, 254), reportedUserId: String(body.bound_account_id || "").slice(0, 80) });
+    await audit(await getCollection("h3TaskAudits"), task ? "claimed" : "claim_empty", { taskId: task?._id || null, actorUserId: auth.user._id, bindingId: auth.binding._id, nodeId: auth.binding.nodeId, capabilities: { maxDurationSeconds, profiles, maxImageCount, maxVideoCount, maxAudioCount, vramMb, gpuName }, reportedEmail: String(body.bound_account_email || "").slice(0, 254), reportedUserId: String(body.bound_account_id || "").slice(0, 80) });
     return c.json({ task: task ? toH3WorkerTask(task, { assets: claimAssets(task.assets), outputUpload }) : null });
   });
 
@@ -672,6 +876,9 @@ export function registerH3SharedRoutes(app, dependencies) {
       { upsert: true },
     );
     const executionNode = { nodeId: auth.binding.nodeId, nodeName: String(metadata.node_name || auth.binding.nodeName || "").slice(0, 120), bindingId: auth.binding._id, at: now };
+    const heartbeat = { nodeName: executionNode.nodeName, lastSeenAt: now, lastCallbackAt: now, queueStatus: ["started", "processing", "progress"].includes(status) ? "processing" : "idle", updatedAt: now };
+    if (["completed", "succeeded"].includes(status)) heartbeat.lastCompletedAt = now;
+    await (await getCollection("nodeAccountBindings")).updateOne({ _id: auth.binding._id, userId: auth.user._id, status: "active" }, { $set: heartbeat });
     if (["started", "processing", "progress"].includes(status)) {
       task = await tasks.findOneAndUpdate({ _id: task._id, status: { $in: ["claimed", "processing"] } }, { $set: { status: "processing", executedByNode: executionNode, progress: Math.min(99, Math.max(0, integer(metadata.progress))), updatedAt: now } }, { returnDocument: "after" }) || task;
       return c.json({ ok: true, idempotent: H3_TERMINAL_STATUSES.has(task.status), task: workerCallbackTask(task) });
@@ -799,15 +1006,19 @@ export function registerH3SharedRoutes(app, dependencies) {
   const errorSchema = z.object({ code: z.string(), message: z.string() });
   const bindingSuccessSchema = z.object({ ok: z.literal(true), binding_token: z.string(), binding: z.object({ id: z.string(), email: z.email(), user_id: z.string(), display_name: z.string(), node_id: z.string(), node_name: z.string(), app_version: z.string(), verified_at: z.string() }) });
   const unknownUserSchema = errorSchema.extend({ register_url: z.url() });
+  const earningsDeviceSchema = z.object({ node_id: z.string(), node_name: z.string(), gpu_name: z.string().nullable(), vram_mb: z.number().int(), online: z.boolean(), status: z.enum(["online", "offline"]), queue_status: z.string(), total_earnings_fen: z.number().int(), settled_earnings_fen: z.number().int(), pending_earnings_fen: z.number().int(), average_daily_earnings_fen: z.number().int(), active_days: z.number().int(), completed_task_count: z.number().int(), last_claimed_at: z.string().nullable(), last_callback_at: z.string().nullable(), last_completed_at: z.string().nullable(), app_version: z.string().nullable() });
+  const earningsSummarySchema = z.object({ ok: z.literal(true), currency: z.literal("CNY"), account: z.object({ total_earnings_fen: z.number().int(), settled_earnings_fen: z.number().int(), pending_earnings_fen: z.number().int(), average_daily_earnings_fen: z.number().int(), active_days: z.number().int(), device_count: z.number().int() }), current_device: z.object({ node_id: z.string(), node_name: z.string(), total_earnings_fen: z.number().int(), average_daily_earnings_fen: z.number().int(), completed_task_count: z.number().int(), last_completed_at: z.string().nullable() }).nullable(), devices: z.array(earningsDeviceSchema) });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/desktop/account-bindings/verify", tags: ["Desktop Account Binding"], summary: "在已激活桌面端绑定古龙官网账号", description: "先验证 RS256 激活回执，再查询邮箱。未激活或伪造客户端无法利用本接口枚举账号。服务端不会接收或保存原始 MAC。", security: [], request: { body: { required: true, content: { "application/json": { schema: z.object({ email: z.email(), node_id: z.string().min(12).max(160), node_name: z.string().min(1).max(120), app_version: z.string().min(1).max(40), activation_receipt: z.union([z.string(), z.record(z.string(), z.unknown())]) }) } } } }, responses: { 200: { description: "绑定成功；binding_token 只在本次响应返回", content: { "application/json": { schema: bindingSuccessSchema } } }, 403: { description: "激活证明无效", content: { "application/json": { schema: errorSchema } } }, 404: { description: "激活验证通过但邮箱未注册", content: { "application/json": { schema: unknownUserSchema } } }, 429: { description: "请求过于频繁", content: { "application/json": { schema: errorSchema } } } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/desktop/account-bindings/unbind", tags: ["Desktop Account Binding"], summary: "撤销当前节点账号绑定", security: [{ accountBinding: [] }], responses: { 200: { description: "已撤销" }, 401: { description: "绑定令牌无效" } } });
+  app.openAPIRegistry.registerPath({ method: "get", path: "/api/desktop/earnings/summary", tags: ["Desktop Earnings"], summary: "读取当前绑定账户的 MiniMax H3 节点收益", description: "仅接受 X-Gulong-Account-Binding。可选 node_id 必须属于令牌对应账户，否则返回 403。金额均为人民币整数分。收益只聚合服务端 h3_node_commission 结算流水；平均每天收益=已结算累计收益÷max(1, 从首个成功结算的中国自然日到当前中国自然日的天数)。", security: [{ accountBinding: [] }], request: { query: z.object({ node_id: z.string().optional() }) }, responses: { 200: { description: "账户与设备收益汇总", content: { "application/json": { schema: earningsSummarySchema } } }, 401: { description: "未绑定或绑定令牌失效", content: { "application/json": { schema: errorSchema } } }, 403: { description: "node_id 不属于当前账户", content: { "application/json": { schema: errorSchema } } } } });
+  app.openAPIRegistry.registerPath({ method: "get", path: "/api/account/earnings/summary", tags: ["Account"], summary: "用户后台读取自己的共享节点收益", description: "使用官网登录会话或账户 API Key，仅返回当前账户；网页端 node_id 已脱敏。", responses: { 200: { description: "账户收益和脱敏设备列表", content: { "application/json": { schema: earningsSummarySchema } } }, 401: { description: "未登录" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/assets/presign", tags: ["MiniMax H3 Shared Nodes"], summary: "为输入素材签发账号专属 COS 直传票据", request: { body: { required: true, content: { "application/json": { schema: z.object({ kind: z.enum(["image", "video", "audio"]), filename: z.string(), content_type: z.string(), bytes: z.number().int().positive(), sha256: z.string().regex(/^[A-Fa-f0-9]{64}$/) }) } } } }, responses: { 201: { description: "返回 PUT URL、固定 headers、asset_id 与 object_key" }, 409: { description: "COS 回执不匹配" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/assets/{id}/complete", tags: ["MiniMax H3 Shared Nodes"], summary: "校验并完成 H3 输入素材上传", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "返回可用于任务 assets manifest 的素材记录" }, 409: { description: "对象大小、摘要或归属不匹配" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "创建共享节点视频任务并原子预扣余额", description: "实际价格（分）= 时长秒数×20 + 图片数×5 + 视频数×20；音频免费。普通用户与订阅用户统一原子预扣余额并记录流水；管理员免扣费且不参与分佣。任务成功后，实扣金额的 50% 幂等计入执行桌面节点绑定用户的钱包，剩余 50% 计入平台管理员钱包；奇数分由平台侧承接尾差。素材数量由服务端根据已完成且属于当前账号的 asset_id 重新统计，客户端 price/count 字段不会参与计费。必须提供 Idempotency-Key。", request: { body: { required: true, content: { "application/json": { schema: z.object({ source_channel: z.enum(["website", "desktop_agent"]), model: z.literal(H3_SHARED_MODEL), prompt: z.string().min(1).max(20_000), aspect_ratio: z.string(), duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profile: z.string(), assets: z.object({ images: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(9), videos: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3), audio: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3) }), idempotency_key: z.string().min(8).max(160).optional() }) } } } }, responses: { 201: { description: "非管理员已扣减余额并排队；管理员免扣费排队" }, 402: { description: "非管理员余额不足" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "查看当前账号的共享节点订单", responses: { 200: { description: "最多返回最近 50 个订单" }, 401: { description: "未认证" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}", tags: ["MiniMax H3 Shared Nodes"], summary: "查看共享节点订单详情与短时结果下载地址", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "订单详情" }, 404: { description: "订单不存在或无权查看" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/desktop/agent/tools/minimax-h3-shared", tags: ["Desktop Agent Tools"], summary: "读取桌面古龙智能体的 H3 共享节点工具合同", description: "使用现有古龙会话或具有 tasks:read 的 API Key。返回统一任务 URL、素材上传 URL、9图3视频3音频限制、整数分价格与当前余额；管理员响应 wallet.unlimited=true，桌面端不得按余额拦截。桌面创建任务时 source_channel 必须为 desktop_agent。", responses: { 200: { description: "工具合同、钱包余额与管理员不限额标记" }, 401: { description: "未认证" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/claim", tags: ["MiniMax H3 Shared Nodes"], summary: "桌面节点按能力原子领取一个任务", description: "capabilities 必须上报 max_duration_seconds、profiles、max_image_count、max_video_count、max_audio_count 与可选 vram_mb；MongoDB 原子领取只匹配节点能力范围内的 queued 任务。dry_run=true 在身份、能力、限流通过后只返回服务可达状态，绝不读取或修改队列、也不签发上传票据。明文账号字段仅作审计。正式领取使用最小化 workerTask DTO，仅包含执行所需参数、每个 COS 素材的 15 分钟 download_url，以及一小时任务专属 output_upload；不会下发 requester、价格、钱包流水或内部绑定信息。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "application/json": { schema: z.object({ bound_account_email: z.string().optional(), bound_account_id: z.string().optional(), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: z.object({ max_duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profiles: z.array(z.string()).min(1), vram_mb: z.number().int().min(0).optional(), max_image_count: z.number().int().min(0).max(9), max_video_count: z.number().int().min(0).max(3), max_audio_count: z.number().int().min(0).max(3) }) }) } } } }, responses: { 200: { description: "dry_run 返回可达状态；正式领取返回最小化 task（含素材下载票据与 output_upload）或 null" }, 400: { description: "节点能力无效" }, 401: { description: "绑定无效" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/claim", tags: ["MiniMax H3 Shared Nodes"], summary: "桌面节点按能力原子领取一个任务", description: "capabilities 必须上报 max_duration_seconds、profiles、max_image_count、max_video_count、max_audio_count 与可选 gpu_name、vram_mb；MongoDB 原子领取只匹配节点能力范围内的 queued 任务。dry_run=true 在身份、能力、限流通过后只返回服务可达状态，绝不读取或修改队列、也不签发上传票据。明文账号字段仅作审计。正式领取使用最小化 workerTask DTO，仅包含执行所需参数、每个 COS 素材的 15 分钟 download_url，以及一小时任务专属 output_upload；不会下发 requester、价格、钱包流水或内部绑定信息。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "application/json": { schema: z.object({ bound_account_email: z.string().optional(), bound_account_id: z.string().optional(), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: z.object({ max_duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profiles: z.array(z.string()).min(1), gpu_name: z.string().max(160).optional(), vram_mb: z.number().int().min(0).optional(), max_image_count: z.number().int().min(0).max(9), max_video_count: z.number().int().min(0).max(3), max_audio_count: z.number().int().min(0).max(3) }) }) } } } }, responses: { 200: { description: "dry_run 返回可达状态；正式领取返回最小化 task（含素材下载票据与 output_upload）或 null" }, 400: { description: "节点能力无效" }, 401: { description: "绑定无效" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/callback", tags: ["MiniMax H3 Shared Nodes"], summary: "执行节点回调进度或结果", description: "multipart/form-data 仅发送 metadata 字段，不得上传 video 文件。metadata JSON 必须包含 task_id、local_job_id、status、node_id、node_name、elapsed_seconds；成功状态还需 video.sha256/bytes/filename/object_key。服务端 HEAD 校验 COS 对象存在、Content-Length、SHA-256 元数据、上传 grant 与 task 专属前缀，不接受客户端任意 URL。最终接单人与 50% 节点分佣接收人只取绑定令牌对应用户；另 50% 进入平台管理员余额。管理员发起的任务免扣费、免分佣。task_id + event/status + local_job_id 及两笔分佣流水均幂等。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "multipart/form-data": { schema: z.object({ metadata: z.string() }) } } } }, responses: { 200: { description: "回调、扣款结算与分佣已幂等处理" }, 400: { description: "回执不完整" }, 401: { description: "绑定无效" }, 409: { description: "COS 回执、上传票据或结算状态不匹配" }, 413: { description: "禁止把视频文件经 Vercel 中转" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/admin/h3/tasks", tags: ["Administration"], summary: "管理员筛选共享节点任务派单", responses: { 200: { description: "任务列表" }, 403: { description: "需要管理员角色" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/admin/h3/tasks/{id}", tags: ["Administration"], summary: "管理员查看共享节点任务、回调和审计详情", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "任务详情、回调和审计时间线" }, 404: { description: "任务不存在" } } });

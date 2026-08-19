@@ -76,7 +76,7 @@ import {
 } from "./cos.js";
 import { buildAdminAnalyticsDashboard, recordAnalyticsEvent } from "./analytics.js";
 import { recoverExpiredDirectReleaseLock } from "./release-lock.js";
-import { creditMonthlySubscriptionBalance, registerPearApiRoutes } from "./pearapi.js";
+import { creditPaymentBalanceWithPromotion, paymentPromotionBonusFen, registerPearApiRoutes } from "./pearapi.js";
 import { registerH3SharedRoutes } from "./h3-shared.js";
 import {
   OFFLINE_REVIEW_REJECTION_REASON,
@@ -1270,6 +1270,7 @@ async function approveOfflinePayment({ orderId, actorUserId, actorChandlerUserId
   if (!order || !["pending", "approved"].includes(order.status)) return { error: { code: "ORDER_STATE_CHANGED", message: "申请不存在或已经被拒绝", status: 409 } };
   const alreadyApproved = order.status === "approved";
   const isRecharge = order.kind === "recharge";
+  const promotionBonusFen = paymentPromotionBonusFen({ amountFen: order.amountFen, kind: isRecharge ? "recharge" : "subscription_payment" });
   const storedStart = alreadyApproved ? new Date(order.validFrom) : null;
   const storedEnd = alreadyApproved ? new Date(order.validUntil) : null;
   const start = storedStart && !Number.isNaN(storedStart.getTime())
@@ -1300,10 +1301,10 @@ async function approveOfflinePayment({ orderId, actorUserId, actorChandlerUserId
     )] : []),
     (await getCollection("notifications")).updateOne(
       { ownerId: order.ownerId, type: "offline_payment_approved", orderId: order._id },
-      { $set: { title: "线下支付审核已通过", message: isRecharge ? `订单 ${order.orderNo} 已确认到账，充值余额已经入账。` : `订单 ${order.orderNo} 已确认到账，会员权益已经生效。`, orderNo: order.orderNo, readAt: null, updatedAt: now }, $setOnInsert: { createdAt: now } },
+      { $set: { title: "线下支付审核已通过", message: isRecharge ? `订单 ${order.orderNo} 已确认到账，实付余额${promotionBonusFen ? `及赠送的 ${(promotionBonusFen / 100).toFixed(2)} 元` : ""}已经入账。` : `订单 ${order.orderNo} 已确认到账，会员权益与赠送的 ${(promotionBonusFen / 100).toFixed(2)} 元余额已经生效。`, orderNo: order.orderNo, readAt: null, updatedAt: now }, $setOnInsert: { createdAt: now } },
       { upsert: true },
     ),
-    ...(isRecharge ? [creditMonthlySubscriptionBalance({ ownerId: order.ownerId, amountFen: order.amountFen, source: "offline_recharge", sourceId: order.orderNo, kind: "recharge" })] : [creditMonthlySubscriptionBalance({ ownerId: order.ownerId, amountFen: order.amountFen, source: "offline_subscription", sourceId: order.orderNo, kind: "subscription_payment" })]),
+    ...(isRecharge ? [creditPaymentBalanceWithPromotion({ ownerId: order.ownerId, amountFen: order.amountFen, source: "offline_recharge", sourceId: order.orderNo, kind: "recharge" })] : [creditPaymentBalanceWithPromotion({ ownerId: order.ownerId, amountFen: order.amountFen, source: "offline_subscription", sourceId: order.orderNo, kind: "subscription_payment" })]),
   ]);
   if (accessToken && order.chandlerOrderNo) {
     const applicationId = order.applicationId || chandlerConfig().applicationId;
@@ -1318,7 +1319,7 @@ async function approveOfflinePayment({ orderId, actorUserId, actorChandlerUserId
       await chandlerRequest(path, { method: "PUT", accessToken, body: { attributes: { ...attributes, subscription_status: "active", subscription_source: "offline_review", subscription_order_no: order.orderNo, subscription_valid_from: start.toISOString(), subscription_valid_until: end.toISOString(), subscription_valid_from_unix_ms: start.getTime(), subscription_valid_until_unix_ms: end.getTime(), subscription_reviewed_at_unix_ms: now.getTime() } } });
     } catch { /* Website MongoDB remains authoritative and desktop reads it directly. */ }
   }
-  return { ok: true, orderNo: order.orderNo, status: "approved", ...(isRecharge ? {} : { validFrom: start, validUntil: end }), message: isRecharge ? "审核已通过，充值余额已经入账并可由桌面端立即同步" : "审核已通过，会员权益已经生效并可由桌面端立即同步" };
+  return { ok: true, orderNo: order.orderNo, status: "approved", creditedFen: order.amountFen + promotionBonusFen, bonusFen: promotionBonusFen, ...(isRecharge ? {} : { validFrom: start, validUntil: end }), message: isRecharge ? "审核已通过，充值余额与符合条件的赠送金额已经入账并可由桌面端立即同步" : "审核已通过，会员权益与 10% 赠送余额已经生效并可由桌面端立即同步" };
 }
 
 async function rejectOfflinePayment({ orderId, actorUserId, actorChandlerUserId, accessToken, reason }) {
@@ -2721,7 +2722,7 @@ app.get("/api/account/dashboard", async (c) => {
       resolvedAt: item.resolvedAt || null,
     })),
     orders: [
-      ...payments.map((item) => ({ id: item._id.toString(), orderNo: item.orderNo, kind: item.kind, cycle: item.cycle, provider: item.provider, amountFen: item.amountFen, status: item.status, createdAt: item.createdAt })),
+      ...payments.map((item) => ({ id: item._id.toString(), orderNo: item.orderNo, kind: item.kind, cycle: item.cycle, provider: item.provider, amountFen: item.amountFen, bonusFen: item.promotionBonusFen || 0, creditedFen: item.creditedFen || item.amountFen, status: item.status, createdAt: item.createdAt })),
       ...offlineOrders.map((item) => ({
         id: item._id.toString(),
         orderNo: item.orderNo,
@@ -2729,6 +2730,8 @@ app.get("/api/account/dashboard", async (c) => {
         cycle: item.cycle,
         provider: "offline",
         amountFen: item.amountFen,
+        bonusFen: item.promotionBonusFen || 0,
+        creditedFen: item.creditedFen || item.amountFen,
         status: item.status,
         reviewReason: item.reviewReason || null,
         previousReviewReason: item.previousReviewReason || null,
@@ -2990,7 +2993,7 @@ app.delete("/api/auth/account", async (c) => {
   await Promise.all([
     (await getCollection("sessions")).deleteMany({ userId: ownerId }),
     (await getCollection("offlinePaymentReviewEvents")).deleteMany({ orderId: { $in: offlineOrderIds.map((order) => order._id) } }),
-    ...["apiKeys", "tasks", "memories", "feedback", "payments", "subscriptions", "wallets", "uploads", "offlinePayments", "userConfigurations", "notifications", "avatarUploads", "offlinePaymentReviewWorkers", "workerTasks", "workerTaskUploads", "workerEarnings", "workerWorkflows", "workerWorkflowRevenueLedger", "workerContactPayments"]
+    ...["apiKeys", "tasks", "memories", "feedback", "payments", "subscriptions", "wallets", "walletCreditLedger", "uploads", "offlinePayments", "userConfigurations", "notifications", "avatarUploads", "offlinePaymentReviewWorkers", "workerTasks", "workerTaskUploads", "workerEarnings", "workerWorkflows", "workerWorkflowRevenueLedger", "workerContactPayments"]
       .map((name) => getCollection(name).then((collection) => collection.deleteMany({ ownerId }))),
   ]);
   await (await getCollection("users")).deleteOne({ _id: ownerId });
@@ -5233,6 +5236,12 @@ app.get("/api/billing/plans", async (c) => {
       autoRenew: { wechat: false },
       availability: ONLINE_PAYMENT_AVAILABILITY,
     },
+    walletPromotion: {
+      subscriptionBonusRate: 0.1,
+      rechargeBonusRate: 0.1,
+      rechargeThresholdFen: 50_000,
+      thresholdInclusive: true,
+    },
     pricingRevision: pricing.revision,
   });
 });
@@ -5329,6 +5338,7 @@ app.post("/api/billing/orders", async (c) => {
   const autoRenew = false;
 
   if (provider === "offline") {
+    const promotionBonusFen = paymentPromotionBonusFen({ amountFen, kind: kind === "recharge" ? "recharge" : "subscription_payment" });
     let plans = [];
     let offlineAccessToken = null;
     try {
@@ -5369,6 +5379,8 @@ app.post("/api/billing/orders", async (c) => {
       kind,
       plan_kind: kind === "recharge" ? "recharge" : cycle === "year" ? "yearly" : "monthly",
       amount_fen: amountFen,
+      promotion_bonus_fen: promotionBonusFen,
+      wallet_credit_fen: amountFen + promotionBonusFen,
       payment_method: "offline",
       platform_service_fee: false,
       review_status: "pending",
@@ -5400,6 +5412,8 @@ app.post("/api/billing/orders", async (c) => {
       kind,
       cycle,
       amountFen,
+      promotionBonusFen,
+      creditedFen: amountFen + promotionBonusFen,
       plan,
       partnerData,
       status: "pending",
@@ -5412,7 +5426,7 @@ app.post("/api/billing/orders", async (c) => {
     // write must never turn a durably created payment order into a client-side
     // failure that the user may submit twice.
     await enqueueOfflineReviewEvent({ _id: result.insertedId, orderNo }, "new-order").catch(() => null);
-    return c.json({ id: result.insertedId.toString(), orderNo, status: "pending_review", mode: "offline", amountFen, upgradeCreditFen }, 201);
+    return c.json({ id: result.insertedId.toString(), orderNo, status: "pending_review", mode: "offline", amountFen, bonusFen: promotionBonusFen, creditedFen: amountFen + promotionBonusFen, upgradeCreditFen }, 201);
   }
 
   // Creating an order is a service-side, role-guarded operation and is
@@ -5466,6 +5480,7 @@ app.post("/api/billing/orders", async (c) => {
   }
   const chandlerAmountFen = Number(result.checkout?.amount ?? result.order?.amount);
   if (Number.isSafeInteger(chandlerAmountFen) && chandlerAmountFen >= 0) amountFen = chandlerAmountFen;
+  const promotionBonusFen = paymentPromotionBonusFen({ amountFen, kind: kind === "subscription" ? "subscription_payment" : kind });
   const actualOrderNo = result.orderNo || orderNo;
   const prepay = result.prepay || result.payment || {};
   const paymentUrl = prepay.pay_url || prepay.h5_url || prepay.code_url;
@@ -5478,6 +5493,8 @@ app.post("/api/billing/orders", async (c) => {
     kind,
     cycle,
     amountFen,
+    promotionBonusFen,
+    creditedFen: ["subscription", "recharge"].includes(kind) ? amountFen + promotionBonusFen : amountFen,
     ...(workerTask ? { taskId: workerTask._id } : {}),
     autoRenew,
     chandler: true,
@@ -5517,6 +5534,8 @@ app.post("/api/billing/orders", async (c) => {
     mode: "chandler",
     provider,
     amountFen,
+    bonusFen: promotionBonusFen,
+    creditedFen: ["subscription", "recharge"].includes(kind) ? amountFen + promotionBonusFen : amountFen,
     upgradeCreditFen,
     autoRenewRequested,
     autoRenewAvailable: !isMonthlyUpgrade,
@@ -5566,10 +5585,10 @@ async function activatePayment(orderNo, providerTransactionId) {
       },
       { upsert: true },
     );
-    await creditMonthlySubscriptionBalance({ ownerId: payment.ownerId, amountFen: payment.amountFen, source: "online_subscription", sourceId: payment.orderNo, kind: "subscription_payment" });
+    await creditPaymentBalanceWithPromotion({ ownerId: payment.ownerId, amountFen: payment.amountFen, source: "online_subscription", sourceId: payment.orderNo, kind: "subscription_payment" });
     await notifyUserOnce(payment.ownerId, "subscription_payment_succeeded", "会员续费已生效", `微信支付已到账，${payment.cycle === "year" ? "年度" : "月度"}会员权益已同步到官网与桌面端。`, { orderNo: payment.orderNo });
   } else if (payment.kind === "recharge") {
-    await creditMonthlySubscriptionBalance({ ownerId: payment.ownerId, amountFen: payment.amountFen, source: "online_recharge", sourceId: payment.orderNo, kind: "recharge" });
+    await creditPaymentBalanceWithPromotion({ ownerId: payment.ownerId, amountFen: payment.amountFen, source: "online_recharge", sourceId: payment.orderNo, kind: "recharge" });
   } else if (payment.kind === "custom") {
     await notifyUserOnce(payment.ownerId, "custom_order_paid", "深度定制订单支付成功", "微信支付已到账，我们会根据订单信息与你联系并推进交付。", { orderNo: payment.orderNo });
   } else if (payment.kind === "worker_task" && payment.taskId) {
@@ -6493,11 +6512,20 @@ app.openAPIRegistry.registerPath({
 });
 
 app.openAPIRegistry.registerPath({
+  method: "get",
+  path: "/api/billing/plans",
+  tags: ["Billing"],
+  summary: "读取实时会员价格与钱包赠送规则",
+  security: [],
+  responses: { 200: { description: "会员价格、支付渠道和促销口径；金额均为整数分" } },
+});
+
+app.openAPIRegistry.registerPath({
   method: "post",
   path: "/api/billing/orders",
   tags: ["Billing"],
   summary: "创建微信支付或线下审核订单",
-  description: "线上仅支持微信。subscription 创建月/年手动续费订单；recharge 创建自定义金额充值订单，其中 provider=offline 会进入管理员到账审核，审核通过后原额计入钱包；custom 创建自定义金额深度定制订单；worker_task 按服务端任务预算创建一次性托管订单。线下渠道只允许 subscription 和 recharge。金额单位为分。",
+  description: "线上仅支持微信。subscription 创建月/年手动续费订单，成功后实付金额计入钱包并额外赠送 10%；recharge 创建自定义金额充值订单，单次实付满 500 元额外赠送 10%，未满 500 元不赠送。provider=offline 会进入管理员到账审核。基础入账与赠送入账使用独立幂等流水。custom 创建自定义金额深度定制订单；worker_task 按服务端任务预算创建一次性托管订单。线下渠道只允许 subscription 和 recharge。金额单位为整数分。",
   request: { body: { content: { "application/json": { schema: z.object({ kind: z.enum(["subscription", "recharge", "custom", "worker_task"]), provider: z.enum(["wechat", "offline"]), cycle: z.enum(["month", "year"]).optional(), amountFen: z.number().int().min(100).optional(), subject: z.string().max(80).optional(), taskId: z.string().optional() }) } } } },
   responses: { 201: { description: "Chandler 微信预支付信息，或线下待审核订单" }, 400: { description: "参数或渠道不受支持" }, 401: { description: "未登录" } },
 });
@@ -6560,8 +6588,8 @@ app.doc("/api/openapi.json", {
   openapi: "3.1.0",
   info: {
     title: "古龙 Gulong Agent Engine API",
-    version: "2.0.0",
-    description: "已按 Chandler v3.2 与 PearAPI 统一接入升级：服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费。新增 MiniMax H3 共享节点订单、钱包预扣与幂等退款、激活设备账号绑定、按能力原子领取、腾讯云 COS 输入下载和输出直传票据，以及管理员任务派单接口；工作器领取 DTO 不含需求用户身份和内部计费信息。另提供永久离线授权兑换、第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
+    version: "2.1.0",
+    description: "已按 Chandler v3.2 与 PearAPI 统一接入升级：服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费；会员实付额外赠送 10% 钱包余额，单次充值满 500 元同样赠送 10%，基础入账与赠送入账均使用独立幂等流水。MiniMax H3 共享节点支持钱包预扣、幂等退款与 50% 节点分成、激活设备账号绑定、按能力原子领取、腾讯云 COS 输入下载和输出直传票据，并提供仅按绑定账户聚合的桌面收益接口；工作器领取 DTO 不含需求用户身份和内部计费信息。另提供永久离线授权兑换、第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
   },
   servers: [
     { url: "/", description: "当前环境" },

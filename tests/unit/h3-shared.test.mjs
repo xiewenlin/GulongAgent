@@ -6,10 +6,12 @@ import { ObjectId } from "mongodb";
 import app from "../../server/app.js";
 import {
   H3_ACCOUNT_BINDING_HEADER,
+  buildH3EarningsSummary,
   calculateH3RevenueSplit,
   calculateH3SharedPrice,
   h3CallbackEventKey,
   normalizeH3TaskInput,
+  maskH3NodeId,
   registerH3SharedRoutes,
   reserveH3Wallet,
   settleH3Revenue,
@@ -81,6 +83,50 @@ test("H3 worker task DTO excludes requester and billing identity", () => {
   assert.deepEqual(Object.keys(task), ["id", "orderNo", "model", "prompt", "aspectRatio", "durationSeconds", "profile", "imageCount", "videoCount", "audioCount", "assets", "output_upload"]);
   const serialized = JSON.stringify(task);
   assert.doesNotMatch(serialized, /requester|private@example\.com|priceFen|walletLedger|bindingId/);
+});
+
+test("H3 earnings aggregate only authoritative settled node ledgers and de-duplicate task settlement", async () => {
+  const ownerId = new ObjectId("66c000000000000000000021");
+  const taskId = new ObjectId("66c000000000000000000022");
+  const cursor = (rows) => ({ sort() { return this; }, async toArray() { return rows; } });
+  const binding = { _id: new ObjectId(), userId: ownerId, nodeId: "stable-node-earnings-0001", nodeName: "RTX 工作站", status: "active", capabilities: { gpuName: "NVIDIA RTX 4090", vramMb: 24_576 }, lastSeenAt: new Date("2026-08-19T01:59:00.000Z"), createdAt: new Date("2026-08-01T00:00:00.000Z") };
+  const task = { _id: taskId, status: "completed", assigneeUserId: ownerId, executedByNode: { nodeId: binding.nodeId, nodeName: binding.nodeName, at: new Date("2026-08-17T02:00:00.000Z") }, settlement: { nodeLedgerKey: "h3:revenue:one:0:node", settledAt: new Date("2026-08-17T02:00:00.000Z") }, completedAt: new Date("2026-08-17T02:00:00.000Z"), createdAt: new Date("2026-08-17T01:00:00.000Z") };
+  const ledger = { ledgerKey: "h3:revenue:one:0:node", ownerId, taskId, kind: "h3_node_commission", status: "settled", amountFen: 100, settlementFen: 100, settledAt: new Date("2026-08-17T02:00:00.000Z"), createdAt: new Date("2026-08-17T02:00:00.000Z") };
+  const collections = {
+    nodeAccountBindings: { find: () => cursor([binding]) },
+    h3WalletLedger: { find: () => cursor([ledger, { ...ledger }]) },
+    h3SharedTasks: { find: () => cursor([task, { _id: new ObjectId(), status: "failed", assigneeUserId: ownerId, executedByNode: { nodeId: binding.nodeId } }]) },
+  };
+  const summary = await buildH3EarningsSummary({ getCollection: async (name) => collections[name], userId: ownerId, currentNodeId: binding.nodeId, now: new Date("2026-08-19T02:00:00.000Z") });
+  assert.equal(summary.currency, "CNY");
+  assert.deepEqual(summary.account, { total_earnings_fen: 100, settled_earnings_fen: 100, pending_earnings_fen: 0, average_daily_earnings_fen: 33, active_days: 3, device_count: 1 });
+  assert.equal(summary.current_device.node_id, binding.nodeId);
+  assert.equal(summary.current_device.completed_task_count, 1);
+  assert.equal(summary.devices[0].gpu_name, "NVIDIA RTX 4090");
+  assert.equal(summary.devices[0].online, true);
+  assert.equal(maskH3NodeId(binding.nodeId), "stable…0001");
+});
+
+test("desktop earnings requires a binding token and rejects a node outside the bound account", async () => {
+  const isolated = new OpenAPIHono();
+  const ownerId = new ObjectId();
+  const binding = { _id: new ObjectId(), userId: ownerId, nodeId: "stable-node-owned-0001", nodeName: "Owned", status: "active", revokedAt: null };
+  const cursor = (rows) => ({ sort() { return this; }, async toArray() { return rows; } });
+  const collections = {
+    nodeAccountBindings: { findOne: async () => binding, find: () => cursor([binding]), updateOne: async () => ({ modifiedCount: 1 }) },
+    users: { findOne: async () => ({ _id: ownerId, email: "owner@example.com", status: "active" }) },
+    h3WalletLedger: { find: () => cursor([]) },
+    h3SharedTasks: { find: () => cursor([]) },
+  };
+  registerH3SharedRoutes(isolated, {
+    getCollection: async (name) => collections[name] || { insertOne: async () => ({}), updateOne: async () => ({}) },
+    enforceRateLimit: async () => ({ allowed: true }), authenticate: async () => ({ user: { id: ownerId.toString() } }), requireAdmin: async () => ({ user: { id: ownerId.toString(), role: "admin" } }), requireTrustedMutation: () => null, verifyActivationReceipt: async () => { throw new Error("not used"); },
+  });
+  const missing = await isolated.request("http://localhost/api/desktop/earnings/summary");
+  assert.equal(missing.status, 401);
+  const forbidden = await isolated.request("http://localhost/api/desktop/earnings/summary?node_id=foreign-node-0001", { headers: { [H3_ACCOUNT_BINDING_HEADER]: `gab_${"e".repeat(48)}` } });
+  assert.equal(forbidden.status, 403);
+  assert.equal((await forbidden.json()).code, "NODE_NOT_OWNED");
 });
 
 test("H3 desktop account binding does not enumerate users before activation verification", async () => {
@@ -374,6 +420,8 @@ test("H3 OpenAPI publishes binding, assets, desktop tool, claim and callback con
   for (const path of [
     "/api/desktop/account-bindings/verify",
     "/api/desktop/account-bindings/unbind",
+    "/api/desktop/earnings/summary",
+    "/api/account/earnings/summary",
     "/api/h3/assets/presign",
     "/api/h3/assets/{id}/complete",
     "/api/h3/tasks",
@@ -387,6 +435,7 @@ test("H3 OpenAPI publishes binding, assets, desktop tool, claim and callback con
     "/api/admin/h3/tasks/{id}/retry",
   ]) assert.ok(document.paths[path], `${path} should be documented`);
   assert.equal(document.components.securitySchemes.accountBinding.name, H3_ACCOUNT_BINDING_HEADER);
+  assert.deepEqual(document.paths["/api/desktop/earnings/summary"].get.security, [{ accountBinding: [] }]);
   assert.match(document.paths["/api/h3/tasks/claim"].post.description, /max_duration_seconds/);
   assert.match(document.paths["/api/h3/tasks/callback"].post.description, /HEAD/);
 });
@@ -411,6 +460,9 @@ test("H3 implementation keeps identity, capability, COS ownership and ledger gat
   assert.match(source, /assigneeUserId: auth\.user\._id/);
   assert.match(source, /wallet: \{ balanceFen: integer\(wallet\?\.balanceFen\), unlimited: auth\.user\.role === "admin" \}/);
   assert.match(source, /workerCallbackTask\(task\)/);
+  assert.match(source, /kind: "h3_node_commission"[\s\S]+settlementFen/);
+  assert.match(account, /id: "earnings", label: "我的收益"/);
+  assert.match(account, /\/api\/account\/earnings\/summary/);
   assert.match(db, /uniq_h3_order_no[\s\S]+uniq_h3_idempotency_key[\s\S]+uniq_h3_callback_event[\s\S]+uniq_h3_wallet_ledger/);
   assert.match(account, /WarningCircle/);
   assert.match(account, /kind: "recharge", provider: "offline"/);
@@ -418,6 +470,7 @@ test("H3 implementation keeps identity, capability, COS ownership and ledger gat
   assert.match(agent, /minimax_h3_shared/);
   assert.match(review, /账户余额充值/);
   assert.match(vercel, /"source": "\/api\/desktop\/account-bindings\/:path\*"/);
+  assert.match(vercel, /"source": "\/api\/desktop\/earnings\/:path\*"/);
   assert.match(vercel, /"source": "\/api\/h3\/:path\*"/);
   assert.match(vercel, /"source": "\/api\/admin\/h3\/:path\*"/);
 });
