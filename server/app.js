@@ -43,26 +43,37 @@ import {
   createPartnerPriceVersion,
   createPartnerSku,
   createSubscriptionCheckout,
+  bindChandlerPhone,
+  deleteChandlerIdentity,
   externalAuthFromResponse,
   forgotPasswordWithChandler,
+  forgotPasswordWithChandlerPhone,
+  getChandlerAuthCapabilities,
   getChandlerAccessToken,
   getDirectPaymentOrder,
   issueOfflineCredential,
   isChandlerBootstrapAdmin,
   getPartnerClientUserAttributes,
   listAllPartnerClientUsers,
+  listChandlerIdentities,
   listPartnerPriceVersions,
   listPartnerSubscriptionPlans,
   loginWithChandler,
+  loginWithChandlerOtp,
   resolveWebsiteLoginEmail,
   logoutFromChandler,
   markChandlerProductEdition,
   productEditionFromChannel,
   registerWithChandler,
   resetPasswordWithChandler,
+  resetPasswordWithChandlerPhone,
   resolveChandlerIdentity,
   setPartnerSkuStatus,
+  sendChandlerVerificationEmail,
+  sendLoginOtpWithChandler,
   upsertChandlerUser,
+  verifyChandlerEmail,
+  verifyChandlerIdentity,
   verifyChandlerWebhook,
   websiteUsernameIdentity,
   websiteUsernameOwnerFilter,
@@ -106,6 +117,11 @@ function requestValidationMessage(error) {
   if (field === "displayName") return "显示名称不能只包含空格，且最多允许 64 个字符";
   if (field === "inviteCode") return "邀请码最多允许 64 个字符";
   if (field === "password") return issue?.code === "too_big" ? "密码最多允许 255 个字符" : "请输入密码";
+  if (field === "phone") return "请输入正确的大陆手机号或带国家码的国际手机号";
+  if (field === "target") return "请输入正确的邮箱或手机号";
+  if (field === "targetType") return "验证码登录类型不正确";
+  if (field === "code") return "请输入 6 位数字验证码";
+  if (field === "token") return "请输入邮件中的完整验证码或验证令牌";
   return "请检查填写内容是否正确";
 }
 
@@ -134,6 +150,7 @@ const CUSTOM_ORDER_MAX_FEN = 10_000_000;
 const ACTIVATION_CODE_MAX_BATCH = 500;
 const ACTIVATION_PRODUCT_DEFAULT = "minimax-h3-universal";
 const RENEWAL_REMINDER_DAYS = 7;
+let authCapabilitiesCache = { expiresAt: 0, value: null };
 const ONLINE_PAYMENT_AVAILABILITY = Object.freeze({
   online: true,
   status: "available",
@@ -279,6 +296,31 @@ const ResetPasswordSchema = z.object({
   code: z.string().trim().min(6).max(2048),
   newPassword: z.string().min(8).max(255),
 });
+
+const PhoneSchema = z.string().trim().regex(/^(?:1[3-9]\d{9}|\+[1-9]\d{6,14})$/);
+const OtpTargetTypeSchema = z.enum(["email", "phone"]);
+const OtpSendSchema = z.object({
+  target: z.string().trim().min(3).max(254),
+  targetType: OtpTargetTypeSchema,
+});
+const OtpLoginSchema = OtpSendSchema.extend({
+  code: z.string().trim().regex(/^\d{6}$/),
+});
+const PhoneForgotPasswordSchema = z.object({ phone: PhoneSchema });
+const PhoneResetPasswordSchema = z.object({
+  phone: PhoneSchema,
+  code: z.string().trim().regex(/^\d{6}$/),
+  newPassword: z.string().min(8).max(255),
+});
+const BindPhoneSchema = z.object({
+  phone: PhoneSchema,
+  currentPassword: z.string().min(1).max(255).optional(),
+  reauthCode: z.string().trim().min(6).max(128).optional(),
+}).refine((value) => Boolean(value.currentPassword || value.reauthCode), {
+  message: "请输入当前密码或身份验证码",
+});
+const VerifyCodeSchema = z.object({ code: z.string().trim().regex(/^\d{6}$/) });
+const VerifyEmailSchema = z.object({ token: z.string().trim().min(6).max(2048) });
 
 const ActivationRedeemRequestSchema = z.object({
   code: z.string().trim().regex(/^H3(?:-[A-HJ-NP-Z2-9]{5}){4}$/).openapi({ example: "H3-ABCDE-FGHJK-MNPQR-STUVW" }),
@@ -2203,6 +2245,257 @@ const resetPasswordRoute = createRoute({
   },
 });
 
+const AuthCapabilitiesResponseSchema = z.object({
+  smsOtpEnabled: z.boolean(),
+  emailOtpEnabled: z.literal(true),
+  phoneRegistrationEnabled: z.literal(false),
+});
+const IdentitySchema = z.object({
+  id: z.string(),
+  provider: z.enum(["email", "phone", "wechat"]),
+  value: z.string(),
+  verified: z.boolean(),
+  isPrimary: z.boolean(),
+  createdAt: z.string().nullable(),
+});
+const AccountSecurityResponseSchema = z.object({
+  profile: z.object({
+    email: z.string().nullable(),
+    emailVerified: z.boolean(),
+    mfaEnabled: z.boolean(),
+  }),
+  capabilities: AuthCapabilitiesResponseSchema,
+  identities: z.array(IdentitySchema),
+});
+
+const authCapabilitiesRoute = createRoute({
+  method: "get",
+  path: "/api/auth/capabilities",
+  tags: ["Authentication"],
+  summary: "查询验证码登录能力",
+  description: "实时读取 Chandler v3.6 能力开关。手机号仅支持已绑定账号登录，不支持手机号注册。",
+  responses: { 200: { description: "认证能力", content: { "application/json": { schema: AuthCapabilitiesResponseSchema } } } },
+});
+
+const otpSendRoute = createRoute({
+  method: "post",
+  path: "/api/auth/otp/send",
+  tags: ["Authentication"],
+  summary: "发送邮箱或手机登录验证码",
+  description: "固定成功语义避免账号枚举；官网按 IP 与目标摘要双重限流，客户端需等待 60 秒后再重发。",
+  request: { body: { content: { "application/json": { schema: OtpSendSchema } } } },
+  responses: {
+    200: { description: "验证码请求已受理", content: { "application/json": { schema: z.object({ status: z.literal("sent"), retryAfter: z.literal(60) }) } } },
+    400: { description: "目标格式不正确", content: { "application/json": { schema: ErrorSchema } } },
+    429: { description: "发送过于频繁", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const otpLoginRoute = createRoute({
+  method: "post",
+  path: "/api/auth/otp/login",
+  tags: ["Authentication"],
+  summary: "使用邮箱或手机验证码登录",
+  request: { body: { content: { "application/json": { schema: OtpLoginSchema } } } },
+  responses: {
+    200: { description: "登录成功", content: { "application/json": { schema: AuthResponseSchema } } },
+    401: { description: "验证码错误或过期", content: { "application/json": { schema: ErrorSchema } } },
+    429: { description: "尝试过于频繁", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const phoneForgotPasswordRoute = createRoute({
+  method: "post",
+  path: "/api/auth/phone/forgot-password",
+  tags: ["Authentication"],
+  summary: "发送手机密码重置验证码",
+  description: "仅适用于已经绑定手机号的邮箱账号；无论账号是否存在均返回相同结果。",
+  request: { body: { content: { "application/json": { schema: PhoneForgotPasswordSchema } } } },
+  responses: {
+    202: { description: "请求已受理", content: { "application/json": { schema: z.object({ status: z.literal("accepted"), retryAfter: z.literal(60) }) } } },
+    429: { description: "发送过于频繁", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const phoneResetPasswordRoute = createRoute({
+  method: "post",
+  path: "/api/auth/phone/reset-password",
+  tags: ["Authentication"],
+  summary: "使用短信验证码重置密码",
+  request: { body: { content: { "application/json": { schema: PhoneResetPasswordSchema } } } },
+  responses: {
+    200: { description: "密码已重置", content: { "application/json": { schema: z.object({ status: z.literal("reset"), message: z.string() }) } } },
+    401: { description: "验证码错误或过期", content: { "application/json": { schema: ErrorSchema } } },
+    422: { description: "新密码强度不足", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const accountSecurityRoute = createRoute({
+  method: "get",
+  path: "/api/account/security",
+  tags: ["Account Security"],
+  summary: "查看邮箱验证与绑定身份",
+  responses: {
+    200: { description: "账号安全信息", content: { "application/json": { schema: AccountSecurityResponseSchema } } },
+    401: { description: "需要登录", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const sendVerificationEmailRoute = createRoute({
+  method: "post",
+  path: "/api/account/security/email/send-verification",
+  tags: ["Account Security"],
+  summary: "重新发送邮箱验证邮件",
+  responses: { 202: { description: "邮件已受理", content: { "application/json": { schema: z.object({ status: z.literal("accepted"), retryAfter: z.literal(60) }) } } } },
+});
+
+const verifyAccountEmailRoute = createRoute({
+  method: "post",
+  path: "/api/account/security/email/verify",
+  tags: ["Account Security"],
+  summary: "验证注册邮箱",
+  request: { body: { content: { "application/json": { schema: VerifyEmailSchema } } } },
+  responses: { 200: { description: "验证成功", content: { "application/json": { schema: z.object({ status: z.literal("verified") }) } } } },
+});
+
+const bindPhoneRoute = createRoute({
+  method: "post",
+  path: "/api/account/security/phone/bind",
+  tags: ["Account Security"],
+  summary: "绑定手机号并发送验证短信",
+  description: "要求当前 Chandler 账号已有已验证邮箱；手机号不会作为注册入口。",
+  request: { body: { content: { "application/json": { schema: BindPhoneSchema } } } },
+  responses: {
+    201: { description: "手机号身份已创建并发送验证码", content: { "application/json": { schema: z.object({ identity: IdentitySchema, retryAfter: z.literal(60) }) } } },
+    403: { description: "邮箱尚未验证", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "手机号已绑定", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const verifyIdentityRoute = createRoute({
+  method: "post",
+  path: "/api/account/security/identities/{identityId}/verify",
+  tags: ["Account Security"],
+  summary: "验证绑定手机号",
+  request: {
+    params: z.object({ identityId: z.string().min(1).max(128) }),
+    body: { content: { "application/json": { schema: VerifyCodeSchema } } },
+  },
+  responses: { 200: { description: "验证成功", content: { "application/json": { schema: z.object({ status: z.literal("verified") }) } } } },
+});
+
+const deleteIdentityRoute = createRoute({
+  method: "delete",
+  path: "/api/account/security/identities/{identityId}",
+  tags: ["Account Security"],
+  summary: "解绑手机号",
+  description: "官网只允许解绑手机号，不能通过该接口删除注册邮箱。",
+  request: { params: z.object({ identityId: z.string().min(1).max(128) }) },
+  responses: { 200: { description: "解绑成功", content: { "application/json": { schema: z.object({ status: z.literal("deleted") }) } } } },
+});
+
+function normalizedPhone(value) {
+  const phone = String(value || "").trim().replace(/[\s()-]/g, "");
+  return /^1[3-9]\d{9}$/.test(phone) ? `+86${phone}` : phone;
+}
+
+function otpTarget(input) {
+  if (input.targetType === "email") {
+    const email = String(input.target || "").trim().toLowerCase();
+    if (!z.email().safeParse(email).success) throw new ChandlerError("请输入有效的邮箱地址", { status: 400, code: "request.invalid" });
+    return email;
+  }
+  const phone = normalizedPhone(input.target);
+  if (!/^\+[1-9]\d{6,14}$/.test(phone)) throw new ChandlerError("请输入正确的大陆手机号或 E.164 国际手机号", { status: 400, code: "auth.invalid_phone" });
+  return phone;
+}
+
+function maskedIdentityValue(provider, rawValue) {
+  const value = String(rawValue || "");
+  if (!value || value.includes("*")) return value;
+  if (provider === "phone") return `${value.slice(0, Math.min(3, value.length))}••••${value.slice(-4)}`;
+  if (provider === "email") {
+    const [local, domain] = value.split("@");
+    if (!domain) return value;
+    return `${local.slice(0, 1)}***@${domain}`;
+  }
+  return "已绑定";
+}
+
+function publicIdentity(identity) {
+  return {
+    id: String(identity?.id || ""),
+    provider: ["email", "phone", "wechat"].includes(identity?.provider) ? identity.provider : "email",
+    value: maskedIdentityValue(identity?.provider, identity?.value),
+    verified: Boolean(identity?.verified),
+    isPrimary: Boolean(identity?.is_primary ?? identity?.isPrimary),
+    createdAt: identity?.created_at || identity?.createdAt || null,
+  };
+}
+
+function chandlerIdentities(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.identities)) return payload.identities;
+  if (Array.isArray(payload?.items)) return payload.items;
+  return [];
+}
+
+function chandlerIdentity(payload) {
+  return payload?.identity || payload?.item || payload;
+}
+
+async function currentAuthCapabilities({ fresh = false } = {}) {
+  const now = Date.now();
+  if (!fresh && authCapabilitiesCache.value && authCapabilitiesCache.expiresAt > now) return authCapabilitiesCache.value;
+  let smsOtpEnabled = false;
+  try {
+    const remote = await getChandlerAuthCapabilities();
+    smsOtpEnabled = remote?.sms_otp_enabled === true;
+  } catch {
+    // Fail closed: a Chandler outage must hide the SMS entry instead of
+    // presenting a flow that cannot deliver a code.
+  }
+  const value = { smsOtpEnabled, emailOtpEnabled: true, phoneRegistrationEnabled: false };
+  authCapabilitiesCache = { value, expiresAt: now + 60_000 };
+  return value;
+}
+
+function publicWebsiteUser(user) {
+  return {
+    id: user._id.toString(),
+    username: user.username || null,
+    email: user.email || null,
+    displayName: user.displayName || null,
+    avatar: user.avatar || null,
+    authProvider: "chandler",
+    role: user.role,
+    edition: { key: user.editionKey, name: user.editionName, source: user.editionSource },
+    createdAt: user.createdAt,
+  };
+}
+
+async function establishChandlerWebsiteSession(c, chandlerAuth, { username, phone } = {}) {
+  const identity = await resolveChandlerIdentity(chandlerAuth.user, chandlerAuth.access_token);
+  const user = await upsertChandlerUser(chandlerAuth.user, { username, identity, defaultEdition: "gulong" });
+  if (phone) {
+    await (await getCollection("users")).updateOne(
+      { _id: user._id },
+      { $set: { chandlerPhoneHash: hashOpaqueToken(normalizedPhone(phone), "chandler-phone"), updatedAt: new Date() } },
+    );
+  }
+  await issueSession(c, user._id, { externalAuth: externalAuthFromResponse(chandlerAuth) });
+  return publicWebsiteUser(user);
+}
+
+async function requireChandlerAccountSession(c) {
+  const auth = await authenticate(c);
+  if (auth.error) return auth;
+  if (auth.kind !== "session" || auth.user.authProvider !== "chandler") {
+    return { error: c.json({ code: "CHANDLER_SESSION_REQUIRED", message: "请使用 Chandler 统一账号登录后管理账号安全" }, 401) };
+  }
+  return { auth, accessToken: await getChandlerAccessToken(auth.session) };
+}
+
 app.use("*", requestId());
 app.use(
   "*",
@@ -2349,26 +2642,244 @@ app.openapi(loginRoute, async (c) => {
   const input = c.req.valid("json");
   const loginEmail = await resolveWebsiteLoginEmail(input.identifier);
   const chandlerAuth = await loginWithChandler(loginEmail, input.password);
-  const identity = await resolveChandlerIdentity(chandlerAuth.user, chandlerAuth.access_token);
-  const user = await upsertChandlerUser(chandlerAuth.user, {
+  return c.json({ user: await establishChandlerWebsiteSession(c, chandlerAuth, {
     username: input.identifier.includes("@") ? undefined : input.identifier,
-    identity,
-    defaultEdition: "gulong",
-  });
-  await issueSession(c, user._id, { externalAuth: externalAuthFromResponse(chandlerAuth) });
+  }) });
+});
+
+app.openapi(authCapabilitiesRoute, async (c) => {
+  c.header("Cache-Control", "no-store, max-age=0");
+  return c.json(await currentAuthCapabilities());
+});
+
+app.openapi(otpSendRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const input = c.req.valid("json");
+  const target = otpTarget(input);
+  const capabilities = await currentAuthCapabilities();
+  if (input.targetType === "phone" && !capabilities.smsOtpEnabled) {
+    return c.json({ code: "SMS_OTP_DISABLED", message: "短信验证码服务暂时关闭，请改用邮箱或密码登录" }, 503);
+  }
+  const ipKey = fingerprintIp(c.req.header("x-forwarded-for") || "local");
+  const targetKey = hashOpaqueToken(`${input.targetType}:${target}`, "auth-otp-target").slice(0, 32);
+  const [ipRate, targetRate] = await Promise.all([
+    enforceRateLimit(`auth-otp-send-ip:${ipKey}`, { limit: 10, windowMs: 10 * 60_000 }),
+    enforceRateLimit(`auth-otp-send-target:${targetKey}`, { limit: 5, windowMs: 30 * 60_000 }),
+  ]);
+  if (!ipRate.allowed || !targetRate.allowed) {
+    c.header("Retry-After", "60");
+    return c.json({ code: "RATE_LIMITED", message: "验证码发送过于频繁，请 60 秒后再试" }, 429);
+  }
+  await sendLoginOtpWithChandler(target, input.targetType);
+  c.header("Cache-Control", "no-store, max-age=0");
+  c.header("Retry-After", "60");
+  return c.json({ status: "sent", retryAfter: 60 });
+});
+
+app.openapi(otpLoginRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const input = c.req.valid("json");
+  const target = otpTarget(input);
+  const capabilities = await currentAuthCapabilities();
+  if (input.targetType === "phone" && !capabilities.smsOtpEnabled) {
+    return c.json({ code: "SMS_OTP_DISABLED", message: "短信验证码服务暂时关闭，请改用邮箱或密码登录" }, 503);
+  }
+  const ipKey = fingerprintIp(c.req.header("x-forwarded-for") || "local");
+  const targetKey = hashOpaqueToken(`${input.targetType}:${target}`, "auth-otp-target").slice(0, 32);
+  const [ipRate, targetRate] = await Promise.all([
+    enforceRateLimit(`auth-otp-login-ip:${ipKey}`, { limit: 20, windowMs: 10 * 60_000 }),
+    enforceRateLimit(`auth-otp-login-target:${targetKey}`, { limit: 8, windowMs: 10 * 60_000 }),
+  ]);
+  if (!ipRate.allowed || !targetRate.allowed) {
+    return c.json({ code: "RATE_LIMITED", message: "验证码校验尝试过多，请重新获取验证码" }, 429);
+  }
+  const chandlerAuth = await loginWithChandlerOtp(target, input.targetType, input.code);
+  return c.json({ user: await establishChandlerWebsiteSession(c, chandlerAuth, {
+    ...(input.targetType === "phone" ? { phone: target } : {}),
+  }) });
+});
+
+app.openapi(phoneForgotPasswordRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const capabilities = await currentAuthCapabilities();
+  if (!capabilities.smsOtpEnabled) return c.json({ code: "SMS_OTP_DISABLED", message: "短信验证码服务暂时关闭，请使用邮箱找回密码" }, 503);
+  const phone = normalizedPhone(c.req.valid("json").phone);
+  const ipKey = fingerprintIp(c.req.header("x-forwarded-for") || "local");
+  const phoneKey = hashOpaqueToken(phone, "phone-password-reset").slice(0, 32);
+  const [ipRate, phoneRate] = await Promise.all([
+    enforceRateLimit(`phone-password-forgot-ip:${ipKey}`, { limit: 6, windowMs: 30 * 60_000 }),
+    enforceRateLimit(`phone-password-forgot-target:${phoneKey}`, { limit: 3, windowMs: 30 * 60_000 }),
+  ]);
+  if (!ipRate.allowed || !phoneRate.allowed) {
+    c.header("Retry-After", "60");
+    return c.json({ code: "RATE_LIMITED", message: "短信发送过于频繁，请稍后再试" }, 429);
+  }
+  await forgotPasswordWithChandlerPhone(phone);
+  c.header("Cache-Control", "no-store, max-age=0");
+  c.header("Retry-After", "60");
+  return c.json({ status: "accepted", retryAfter: 60 }, 202);
+});
+
+app.openapi(phoneResetPasswordRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const input = c.req.valid("json");
+  const phone = normalizedPhone(input.phone);
+  const ipKey = fingerprintIp(c.req.header("x-forwarded-for") || "local");
+  const attemptKey = hashOpaqueToken(`${phone}:${input.code}`, "phone-password-reset-attempt").slice(0, 32);
+  const [ipRate, attemptRate] = await Promise.all([
+    enforceRateLimit(`phone-password-reset-ip:${ipKey}`, { limit: 12, windowMs: 30 * 60_000 }),
+    enforceRateLimit(`phone-password-reset-attempt:${attemptKey}`, { limit: 5, windowMs: 30 * 60_000 }),
+  ]);
+  if (!ipRate.allowed || !attemptRate.allowed) {
+    return c.json({ code: "RATE_LIMITED", message: "短信验证码校验尝试过多，请重新获取验证码" }, 429);
+  }
+  await resetPasswordWithChandlerPhone(phone, input.code, input.newPassword);
+  const users = await getCollection("users");
+  const user = await users.findOne({ chandlerPhoneHash: hashOpaqueToken(phone, "chandler-phone") }, { projection: { _id: 1 } });
+  if (user) {
+    await Promise.all([
+      (await getCollection("sessions")).deleteMany({ userId: user._id }),
+      users.updateOne({ _id: user._id }, { $set: { passwordResetAt: new Date(), updatedAt: new Date() } }),
+    ]);
+  }
+  c.header("Cache-Control", "no-store, max-age=0");
+  return c.json({ status: "reset", message: "密码已重置，请使用新密码重新登录" });
+});
+
+app.openapi(accountSecurityRoute, async (c) => {
+  const session = await requireChandlerAccountSession(c); if (session.error) return session.error;
+  const [profile, identitiesPayload, capabilities] = await Promise.all([
+    chandlerRequest("/v1/me", { accessToken: session.accessToken, timeoutMs: 8_000 }),
+    listChandlerIdentities(session.accessToken),
+    currentAuthCapabilities(),
+  ]);
+  c.header("Cache-Control", "private, no-store, max-age=0");
   return c.json({
-    user: {
-      id: user._id.toString(),
-      username: user.username || null,
-      email: user.email || null,
-      displayName: user.displayName || null,
-      avatar: user.avatar || null,
-      authProvider: "chandler",
-      role: user.role,
-      edition: { key: user.editionKey, name: user.editionName, source: user.editionSource },
-      createdAt: user.createdAt,
+    profile: {
+      email: profile?.email || session.auth.user.email || null,
+      emailVerified: Boolean(profile?.email_verified),
+      mfaEnabled: Boolean(profile?.mfa_enabled),
     },
+    capabilities,
+    identities: chandlerIdentities(identitiesPayload).map(publicIdentity).filter((item) => item.id),
   });
+});
+
+app.openapi(sendVerificationEmailRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const session = await requireChandlerAccountSession(c); if (session.error) return session.error;
+  const ipKey = fingerprintIp(c.req.header("x-forwarded-for") || "local");
+  const [userRate, ipRate] = await Promise.all([
+    enforceRateLimit(`verify-email-user:${session.auth.user.id}`, { limit: 3, windowMs: 30 * 60_000 }),
+    enforceRateLimit(`verify-email-ip:${ipKey}`, { limit: 8, windowMs: 30 * 60_000 }),
+  ]);
+  if (!userRate.allowed || !ipRate.allowed) {
+    c.header("Retry-After", "60");
+    return c.json({ code: "RATE_LIMITED", message: "验证邮件发送过于频繁，请稍后再试" }, 429);
+  }
+  await sendChandlerVerificationEmail(session.accessToken);
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  c.header("Retry-After", "60");
+  return c.json({ status: "accepted", retryAfter: 60 }, 202);
+});
+
+app.openapi(verifyAccountEmailRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const session = await requireChandlerAccountSession(c); if (session.error) return session.error;
+  const rate = await enforceRateLimit(`verify-email-token:${session.auth.user.id}`, { limit: 10, windowMs: 30 * 60_000 });
+  if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "邮箱验证码校验尝试过多，请重新获取验证码" }, 429);
+  await verifyChandlerEmail(c.req.valid("json").token);
+  await (await getCollection("users")).updateOne(
+    { _id: new ObjectId(session.auth.user.id) },
+    { $set: { emailVerified: true, updatedAt: new Date() } },
+  );
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  return c.json({ status: "verified" });
+});
+
+app.openapi(bindPhoneRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const session = await requireChandlerAccountSession(c); if (session.error) return session.error;
+  const capabilities = await currentAuthCapabilities();
+  if (!capabilities.smsOtpEnabled) return c.json({ code: "SMS_OTP_DISABLED", message: "短信验证码服务暂时关闭，请稍后再试" }, 503);
+  const input = c.req.valid("json");
+  const phone = normalizedPhone(input.phone);
+  const targetKey = hashOpaqueToken(phone, "phone-binding-target").slice(0, 32);
+  const [userRate, targetRate] = await Promise.all([
+    enforceRateLimit(`phone-bind-user:${session.auth.user.id}`, { limit: 5, windowMs: 30 * 60_000 }),
+    enforceRateLimit(`phone-bind-target:${targetKey}`, { limit: 3, windowMs: 30 * 60_000 }),
+  ]);
+  if (!userRate.allowed || !targetRate.allowed) {
+    c.header("Retry-After", "60");
+    return c.json({ code: "RATE_LIMITED", message: "手机号绑定请求过于频繁，请稍后再试" }, 429);
+  }
+  const payload = await bindChandlerPhone(session.accessToken, {
+    phone,
+    currentPassword: input.currentPassword,
+    reauthCode: input.reauthCode,
+  });
+  const remoteIdentity = chandlerIdentity(payload);
+  const identity = publicIdentity({ ...remoteIdentity, provider: "phone", value: remoteIdentity?.value || phone });
+  if (!identity.id) throw new ChandlerError("统一账号服务没有返回手机号身份编号，请稍后重试", { status: 502, code: "IDENTITY_ID_MISSING" });
+  await (await getCollection("users")).updateOne(
+    { _id: new ObjectId(session.auth.user.id) },
+    { $set: { pendingChandlerPhoneIdentityId: identity.id, pendingChandlerPhoneHash: hashOpaqueToken(phone, "chandler-phone"), updatedAt: new Date() } },
+  );
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  c.header("Retry-After", "60");
+  return c.json({ identity, retryAfter: 60 }, 201);
+});
+
+app.openapi(verifyIdentityRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const session = await requireChandlerAccountSession(c); if (session.error) return session.error;
+  const identityId = c.req.valid("param").identityId;
+  const identitiesPayload = await listChandlerIdentities(session.accessToken);
+  const remoteIdentity = chandlerIdentities(identitiesPayload).find((item) => String(item.id) === identityId);
+  if (!remoteIdentity || remoteIdentity.provider !== "phone") return c.json({ code: "IDENTITY_NOT_FOUND", message: "没有找到当前账号的手机号绑定记录" }, 404);
+  const rate = await enforceRateLimit(`phone-verify:${session.auth.user.id}:${identityId}`, { limit: 8, windowMs: 30 * 60_000 });
+  if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "短信验证码校验尝试过多，请重新绑定手机号" }, 429);
+  await verifyChandlerIdentity(session.accessToken, identityId, c.req.valid("json").code);
+  const users = await getCollection("users");
+  const localUser = await users.findOne({ _id: new ObjectId(session.auth.user.id) });
+  const phoneHash = localUser?.pendingChandlerPhoneIdentityId === identityId
+    ? localUser.pendingChandlerPhoneHash
+    : remoteIdentity.value && !String(remoteIdentity.value).includes("*")
+      ? hashOpaqueToken(normalizedPhone(remoteIdentity.value), "chandler-phone")
+      : null;
+  await users.updateOne(
+    { _id: new ObjectId(session.auth.user.id) },
+    {
+      $set: { chandlerPhoneIdentityId: identityId, ...(phoneHash ? { chandlerPhoneHash: phoneHash } : {}), updatedAt: new Date() },
+      $unset: { pendingChandlerPhoneIdentityId: "", pendingChandlerPhoneHash: "" },
+    },
+  );
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  return c.json({ status: "verified" });
+});
+
+app.openapi(deleteIdentityRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const session = await requireChandlerAccountSession(c); if (session.error) return session.error;
+  const identityId = c.req.valid("param").identityId;
+  const identitiesPayload = await listChandlerIdentities(session.accessToken);
+  const remoteIdentity = chandlerIdentities(identitiesPayload).find((item) => String(item.id) === identityId);
+  if (!remoteIdentity || remoteIdentity.provider !== "phone") return c.json({ code: "IDENTITY_NOT_FOUND", message: "只允许解绑当前账号的手机号" }, 404);
+  await deleteChandlerIdentity(session.accessToken, identityId);
+  await (await getCollection("users")).updateOne(
+    { _id: new ObjectId(session.auth.user.id) },
+    {
+      $unset: {
+        chandlerPhoneIdentityId: "",
+        chandlerPhoneHash: "",
+        pendingChandlerPhoneIdentityId: "",
+        pendingChandlerPhoneHash: "",
+      },
+      $set: { updatedAt: new Date() },
+    },
+  );
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  return c.json({ status: "deleted" });
 });
 
 app.openapi(shortDramaSsoRoute, async (c) => {

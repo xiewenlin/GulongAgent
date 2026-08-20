@@ -4,12 +4,12 @@
 
 ## 1. 系统边界
 
-- Chandler：用户注册与登录、管理员角色、订阅目录、支付宝/微信预支付、用户订阅、离线权益凭据、双人审批。
+- Chandler v3.6：邮箱注册、密码与验证码登录、邮箱验证、手机号绑定、微信预支付、用户订阅、离线权益凭据和合作伙伴管理能力。
 - 古龙官网 MongoDB：加密会话引用、开发者 API Key、用户加密模型配置、合作伙伴、第二大脑文件索引、线下支付审核队列、发行渠道与发版任务。
 - 腾讯云 COS：第二大脑 ZIP 与 Windows 安装包的私有对象存储。
 - Windows 发行工作器：读取桌面端主题权限文件，领取官网发版任务，调用既有发布工作流并直传 COS。
 
-官网不保存 Chandler 密码。Access Token 和 Refresh Token 使用 `SESSION_SECRET` 派生的 AES-256-GCM 密钥加密后存入服务端会话；浏览器只持有 HttpOnly 会话 Cookie。
+官网不保存 Chandler 密码。Access Token 和 Refresh Token 使用 `SESSION_SECRET` 派生的 AES-256-GCM 密钥加密后存入服务端会话；浏览器只持有 HttpOnly 会话 Cookie。服务端合作伙伴调用使用 `Authorization: Apikey ${GulongAgent}`，API Key 不下发浏览器。
 
 Chandler 用户是全局账号：在古龙版桌面端或永生花版桌面端注册的用户名/邮箱与密码，可直接登录官网；官网注册的账号默认写入古龙应用属性并归属“古龙版”，因此也可直接用于古龙版桌面端登录。官网分别通过 `CHANDLER_APPLICATION_ID` 与 `CHANDLER_AIROS_APPLICATION_ID` 识别两个桌面产品。
 
@@ -19,28 +19,37 @@ Chandler 用户是全局账号：在古龙版桌面端或永生花版桌面端�
 
 | 官网能力 | Chandler 公共 OpenAPI |
 | --- | --- |
-| 注册 / 登录 / 刷新 / 退出 | `/v1/auth/register`、`/v1/auth/login`、`/v1/auth/refresh`、`/v1/auth/logout` |
+| 邮箱注册 / 密码登录 / 刷新 / 退出 | `/v1/auth/register`、`/v1/auth/login`、`/v1/oauth/token`（`grant_type=refresh_token`）、`/v1/auth/logout` |
+| 查询短信能力 | `/v1/auth/capabilities` |
+| 邮箱 / 短信验证码登录 | `/v1/auth/otp/send`、`/v1/auth/otp/login` |
+| 邮箱找回密码 | `/v1/auth/forgot-password`、`/v1/auth/reset-password` |
+| 手机找回密码 | `/v1/auth/phone/forgot-password`、`/v1/auth/phone/reset-password` |
+| 邮箱验证 | `/v1/auth/send-verification-email`、`/v1/auth/verify-email` |
+| 手机号绑定 / 验证 / 解绑 | `/v1/me/identities`、`/v1/me/identities/{id}/verify`、`DELETE /v1/me/identities/{id}` |
 | 月 / 年订阅 | `/v1/checkout/subscriptions` + `/v1/pay/orders/{order}/prepay` |
 | 当前用户订阅状态 | `/v1/me/subscriptions` |
 | 单次充值 / 线下订单镜像 | `/v1/pay/orders` |
 | 离线权益凭据 | `/v1/me/entitlements/offline-credential` |
-| 管理员用户搜索 | `/v1/admin/users` |
-| 冻结 / 恢复账号 | `/v1/admin/users/{id}/status` |
-| 查看用户订阅 | `/v1/admin/users/{id}/subscriptions` |
-| 权益变更申请 | `/v1/admin/approvals`，类型 `entitlement_grant` |
-| 发布价格版本 | `/v1/admin/prices` |
+| 合作伙伴应用用户同步 | `/v1/me/oauth/clients/{client_id}/users` |
+| 应用用户属性 | `/v1/me/oauth/clients/{client_id}/users/{user_id}/attributes` |
+| SKU 与价格版本 | `/v1/me/oauth/clients/{client_id}/skus`、`/v1/me/oauth/clients/{client_id}/skus/{sku_id}/prices` |
 
 管理员执行官网本地操作前会再次读取 Chandler `/v1/me`，防止管理员权限撤销后旧会话继续操作。
 
-## 3. 用户后台与桌面端模型配置
+## 3. 用户后台账号安全
 
 - 用户后台：`/account`
 - 聚合数据：`GET /api/account/dashboard`
 - 修改个人资料：`PUT /api/account/profile`
-- 保存 / 删除 MiniMax 配置：`PUT` / `DELETE /api/account/integrations/minimax`
-- 桌面端拉取：`GET /api/v1/configuration/minimax`
+- 认证能力：`GET /api/auth/capabilities`
+- 邮箱 / 短信验证码登录：`POST /api/auth/otp/send`、`POST /api/auth/otp/login`
+- 手机找回密码：`POST /api/auth/phone/forgot-password`、`POST /api/auth/phone/reset-password`
+- 安全概览：`GET /api/account/security`
+- 邮箱验证：`POST /api/account/security/email/send-verification`、`POST /api/account/security/email/verify`
+- 手机号绑定：`POST /api/account/security/phone/bind`
+- 手机号验证 / 解绑：`POST` / `DELETE /api/account/security/identities/{identityId}`
 
-MiniMax API Key 使用由 `SESSION_SECRET` 派生且用途隔离的 AES-256-GCM 密钥加密。网页只返回掩码；桌面端接口只接受属于该用户且具有 `configuration:read` scope 的古龙 API Key，响应设置 `Cache-Control: private, no-store`。管理员不能跨用户读取模型密钥。
+注册表单只接受邮箱，不提供手机号注册。手机号绑定要求 Chandler 邮箱已验证，并再次校验当前密码或短期再认证码。公开发送接口采用固定响应语义、60 秒客户端冷却、IP 和目标摘要双重限流，避免账号枚举与短信轰炸；账号安全接口只接受当前 Chandler 登录会话，响应禁止缓存。
 
 ## 4. COS 对象布局
 

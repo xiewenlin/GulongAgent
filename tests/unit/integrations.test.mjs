@@ -5,20 +5,31 @@ import test from "node:test";
 import app from "../../server/app.js";
 import platform from "../../api/platform.js";
 import {
+  bindChandlerPhone,
   chandlerConfig,
   createDirectPaymentOrder,
   createPartnerPriceVersion,
+  deleteChandlerIdentity,
   externalAuthFromResponse,
   forgotPasswordWithChandler,
+  forgotPasswordWithChandlerPhone,
+  getChandlerAuthCapabilities,
   isChandlerBootstrapAdmin,
   listAllPartnerClientUsers,
+  listChandlerIdentities,
   listPartnerSubscriptionPlans,
+  loginWithChandlerOtp,
   productEdition,
   productEditionFromChannel,
   refreshChandlerLogin,
   registerWithChandler,
   resetPasswordWithChandler,
+  resetPasswordWithChandlerPhone,
   resolveWebsiteLoginEmail,
+  sendChandlerVerificationEmail,
+  sendLoginOtpWithChandler,
+  verifyChandlerEmail,
+  verifyChandlerIdentity,
   verifyChandlerWebhook,
   websiteUsernameIdentity,
   websiteUsernameOwnerFilter,
@@ -130,6 +141,98 @@ test("Chandler password recovery sends mail and resets with the one-time token",
   assert.deepEqual(calls[0].body, { email: "member@example.com" });
   assert.equal(calls[1].url, "https://api.chandler.work/v1/auth/reset-password");
   assert.deepEqual(calls[1].body, { token: "reset-token-123", new_password: "New-Strong-Pass456!" });
+});
+
+test("Chandler v3.6 OTP, phone recovery and account identities follow the official contracts", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({
+      url: String(url),
+      method: options.method || "GET",
+      authorization: options.headers?.Authorization,
+      body: options.body ? JSON.parse(options.body) : null,
+    });
+    const path = new URL(url).pathname;
+    const data = path === "/v1/auth/capabilities" ? { sms_otp_enabled: true }
+      : path === "/v1/auth/otp/login" ? { access_token: "otp-access", refresh_token: "otp-refresh", user: { id: "user-otp", email: "member@example.com" } }
+        : path === "/v1/me/identities" && (options.method || "GET") === "GET" ? { identities: [{ id: "identity-phone", provider: "phone", value: "+8613800000000", verified: false }] }
+          : path === "/v1/me/identities" ? { identity: { id: "identity-phone", provider: "phone", value: "+8613800000000", verified: false } }
+            : { status: "accepted" };
+    return new Response(JSON.stringify({ data }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    await getChandlerAuthCapabilities();
+    await sendLoginOtpWithChandler("member@example.com", "email");
+    await loginWithChandlerOtp("+8613800000000", "phone", "123456");
+    await forgotPasswordWithChandlerPhone("+8613800000000");
+    await resetPasswordWithChandlerPhone("+8613800000000", "654321", "New-Pass-2026!");
+    await listChandlerIdentities("user-access");
+    await bindChandlerPhone("user-access", { phone: "+8613800000000", currentPassword: "Current-Pass" });
+    await verifyChandlerIdentity("user-access", "identity-phone", "123456");
+    await deleteChandlerIdentity("user-access", "identity-phone");
+    await sendChandlerVerificationEmail("user-access");
+    await verifyChandlerEmail("email-token");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual(calls.map((call) => call.url), [
+    "https://api.chandler.work/v1/auth/capabilities",
+    "https://api.chandler.work/v1/auth/otp/send",
+    "https://api.chandler.work/v1/auth/otp/login",
+    "https://api.chandler.work/v1/auth/phone/forgot-password",
+    "https://api.chandler.work/v1/auth/phone/reset-password",
+    "https://api.chandler.work/v1/me/identities",
+    "https://api.chandler.work/v1/me/identities",
+    "https://api.chandler.work/v1/me/identities/identity-phone/verify",
+    "https://api.chandler.work/v1/me/identities/identity-phone",
+    "https://api.chandler.work/v1/auth/send-verification-email",
+    "https://api.chandler.work/v1/auth/verify-email",
+  ]);
+  assert.deepEqual(calls[1].body, { target: "member@example.com", target_type: "email" });
+  assert.deepEqual(calls[2].body, { target: "+8613800000000", target_type: "phone", code: "123456", device_type: "web" });
+  assert.deepEqual(calls[4].body, { phone: "+8613800000000", code: "654321", new_password: "New-Pass-2026!" });
+  assert.equal(calls[5].authorization, "Bearer user-access");
+  assert.deepEqual(calls[6].body, { provider: "phone", value: "+8613800000000", current_password: "Current-Pass" });
+  assert.deepEqual(calls[7].body, { code: "123456" });
+  assert.equal(calls[8].method, "DELETE");
+  assert.deepEqual(calls[10].body, { token: "email-token" });
+});
+
+test("website authentication exposes email-only registration and rate-limited Chandler v3.6 security flows", async () => {
+  const [serverSource, modalSource, dashboardSource, securitySource, vercel, specResponse] = await Promise.all([
+    readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/AccountModal.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/AccountDashboard.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/AccountSecurityPanel.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../vercel.json", import.meta.url), "utf8"),
+    app.request(new Request("http://localhost/api/openapi.json")),
+  ]);
+  const spec = await specResponse.json();
+  for (const path of [
+    "/api/auth/capabilities",
+    "/api/auth/otp/send",
+    "/api/auth/otp/login",
+    "/api/auth/phone/forgot-password",
+    "/api/auth/phone/reset-password",
+    "/api/account/security",
+    "/api/account/security/email/send-verification",
+    "/api/account/security/email/verify",
+    "/api/account/security/phone/bind",
+    "/api/account/security/identities/{identityId}/verify",
+    "/api/account/security/identities/{identityId}",
+  ]) assert.ok(spec.paths[path], `OpenAPI missing ${path}`);
+  assert.match(serverSource, /auth-otp-send-ip/);
+  assert.match(serverSource, /auth-otp-send-target/);
+  assert.match(serverSource, /phone-bind-target/);
+  assert.match(serverSource, /phoneRegistrationEnabled: false/);
+  assert.match(modalSource, /仅支持邮箱注册/);
+  assert.match(modalSource, /setCooldown\(60\)/);
+  assert.match(modalSource, /秒后可重发/);
+  assert.match(dashboardSource, /id: "security", label: "账号安全"/);
+  assert.match(securitySource, /手机号仅用于已注册账号/);
+  assert.match(securitySource, /useConfirmDialog/);
+  assert.match(vercel, /\/api\/auth\/:path\*/);
 });
 
 test("user provider keys use purpose-bound encryption", () => {
@@ -853,11 +956,17 @@ test("desktop WeChat review API validates Chandler administrators and a bound wo
 });
 
 test("download page explains both desktop editions", async () => {
-  const source = await readFile(new URL("../../src/components/PlatformPages.jsx", import.meta.url), "utf8");
+  const [source, adminSource] = await Promise.all([
+    readFile(new URL("../../src/components/PlatformPages.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
+  ]);
   assert.match(source, /古龙基础版/);
-  assert.match(source, /永生花定制版/);
+  assert.match(source, /MiniMax H3 极速视频版/);
+  assert.match(source, /PromptEngine、Z-Image 与 ComfyUI/);
+  assert.doesNotMatch(source, /永生花定制版/);
   assert.match(source, /gulong-edition-icon\.png/);
   assert.match(source, /yongshenghua-edition-icon\.png/);
+  assert.match(adminSource, /return "MiniMax H3 极速视频版"/);
   assert.match(source, /\/api\/downloads\/\$\{editionKey\}\/download/);
   assert.match(source, /\/api\/platform\?_platform_path=downloads/);
   assert.match(source, /\/api\/releases\/\$\{encodeURIComponent\(channelId\)\}\/download/);

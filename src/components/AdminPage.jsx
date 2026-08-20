@@ -136,6 +136,12 @@ function ReleaseChannelOptions({ channels }) {
   return <><option value="">全部发行渠道</option>{channels.map((channel) => <option key={channel.id} value={channel.id}>{channel.isDefault ? "古龙版（默认）" : channel.name}</option>)}</>;
 }
 
+function releaseProductName(channel) {
+  const identity = `${channel?.profileKey || ""} ${channel?.name || ""}`.toLowerCase();
+  if (identity.includes("yongshenghua") || identity.includes("airos") || identity.includes("永生花")) return "MiniMax H3 极速视频版";
+  return channel?.isDefault ? "古龙版（默认）" : channel?.name || "未命名发行渠道";
+}
+
 function ChandlerUserManager() {
   const confirmAction = useConfirmDialog();
   const [query, setQuery] = useState("");
@@ -519,13 +525,13 @@ function VersionManager() {
     } catch (error) { setMessage(error.message); }
   }
   useEffect(() => { load(); }, []);
-  const filtered = useMemo(() => channels.filter((channel) => !keyword || channel.name.toLowerCase().includes(keyword.toLowerCase())), [channels, keyword]);
+  const filtered = useMemo(() => channels.filter((channel) => !keyword || `${channel.name} ${releaseProductName(channel)}`.toLowerCase().includes(keyword.toLowerCase())), [channels, keyword]);
 
   async function release(channel) {
     setMessage("");
     try {
       const result = await apiFetch("/api/admin/release-jobs", { method: "POST", body: JSON.stringify({ channelId: channel.id }) });
-      setMessage(`${result.channelName} 已进入发行队列；Windows 工作器会自动调用既有版本发布工作流。`);
+      setMessage(`${releaseProductName(channel)} 已进入发行队列；Windows 工作器会自动调用既有版本发布工作流。`);
       await load();
     } catch (error) { setMessage(error.message); }
   }
@@ -552,7 +558,7 @@ function VersionManager() {
         request.send(file);
       });
       await apiFetch(`/api/admin/release-uploads/${ticket.uploadId}/complete`, { method: "POST", body: "{}" });
-      setMessage(`${channel.name} 的 v${version} 已上传并切换为最新版本。`);
+      setMessage(`${releaseProductName(channel)} 的 v${version} 已上传并切换为最新版本。`);
       setManualUpload(null);
       await load();
     } catch (error) {
@@ -564,9 +570,9 @@ function VersionManager() {
     <header className="admin-module-head"><div><span>RELEASE CONTROL PLANE</span><h2>版本管理</h2><p>每个“主题访问权限”用户分组对应一个发行渠道；只有管理员明确操作时才上传或打包发布。</p></div><button className="button secondary" onClick={load}><ArrowClockwise size={17} /> 刷新状态</button></header>
     <AdminNotice>桌面端本地构建不会自动上传腾讯云 COS。只有管理员点击“手动上传”或“手动打包发布”才会创建单渠道任务并消耗 COS 流量。</AdminNotice>
     {message && <AdminNotice tone={message.includes("进入发行队列") || message.includes("已上传并切换") ? "success" : "error"}>{message}</AdminNotice>}
-    <div className="release-picker"><button className="release-picker-trigger" onClick={() => setOpen(!open)}><div><span>选择用户分组 / 发行渠道</span><strong>{channels.length ? `${channels.length} 个可用渠道` : "等待工作器同步分组"}</strong></div><MagnifyingGlass size={19} /></button>{open && <div className="release-picker-menu"><label><MagnifyingGlass size={16} /><input autoFocus value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="输入用户分组关键词" /></label><div>{filtered.map((channel) => <article key={channel.id}><div><strong>{channel.name}</strong><small>允许主题：{(channel.themeNames || []).join("、")}</small>{channel.latestRelease && <span>当前 v{channel.latestRelease.version} · {new Date(channel.latestRelease.publishedAt).toLocaleString("zh-CN")}</span>}</div><div className="release-channel-actions"><button className="button small secondary" onClick={() => setManualUpload({ channel, version: channel.latestRelease?.version || "1.0.0", file: null, busy: false, error: "", progress: 0 })}><CloudArrowUp size={15} /> 手动上传</button><button className="button small primary" onClick={() => release(channel)}><RocketLaunch size={15} /> 手动打包发布</button></div></article>)}{!filtered.length && <p className="release-picker-empty">没有匹配的用户分组。请先运行发行工作器同步桌面端权限文件。</p>}</div></div>}</div>
-    <div className="release-job-list"><h3>最近发版任务</h3>{jobs.length ? jobs.map((job) => <article key={job.id}><div className={`job-status ${job.status}`}><span /><strong>{job.status === "queued" ? "排队" : job.status === "building" ? "构建中" : job.status === "uploading" ? "上传中" : job.status === "completed" ? "已发布" : "失败"}</strong></div><div><strong>{job.channelName}</strong><small>{job.version ? `v${job.version}` : "等待生成版本号"} · {new Date(job.createdAt).toLocaleString("zh-CN")}</small></div>{job.error && <p>{localizeErrorMessage(job.error, "发行任务失败，请重新发起")}</p>}</article>) : <EmptyState icon={RocketLaunch} title="还没有发版任务" text="从上方用户分组列表选择一个渠道开始发版。" />}</div>
-    {manualUpload && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !manualUpload.busy && setManualUpload(null)}><form className="admin-form-modal release-upload-modal" onSubmit={uploadRelease}><button className="modal-close" type="button" disabled={manualUpload.busy} onClick={() => setManualUpload(null)}><X size={18} /></button><span>MANUAL COS RELEASE</span><h2>手动上传新版本</h2><p>发行渠道：<strong>{manualUpload.channel.name}</strong></p><div className="admin-form-grid"><label><span>版本号</span><input required maxLength={40} value={manualUpload.version} onChange={(event) => setManualUpload({ ...manualUpload, version: event.target.value })} placeholder="例如 1.6.0" /></label><label><span>Windows 安装包</span><input required type="file" accept=".exe,.msix,.msixbundle,.zip,application/octet-stream" onChange={(event) => setManualUpload({ ...manualUpload, file: event.target.files?.[0] || null })} /></label></div><AdminNotice>只有点击下方按钮后文件才会从浏览器直传成都 COS。新文件校验成功后替换线上版本，并清理该渠道旧安装包。</AdminNotice>{manualUpload.busy && <div className="upload-progress"><span style={{ width: `${manualUpload.progress}%` }} /><em>{manualUpload.progress}%</em></div>}{manualUpload.error && <div className="form-error">{manualUpload.error}</div>}<button className="button primary full" disabled={manualUpload.busy || !manualUpload.file}><CloudArrowUp size={18} /> {manualUpload.busy ? "正在上传并校验" : "确认手动上传并设为最新版"}</button></form></div>}
+    <div className="release-picker"><button className="release-picker-trigger" onClick={() => setOpen(!open)}><div><span>选择用户分组 / 发行渠道</span><strong>{channels.length ? `${channels.length} 个可用渠道` : "等待工作器同步分组"}</strong></div><MagnifyingGlass size={19} /></button>{open && <div className="release-picker-menu"><label><MagnifyingGlass size={16} /><input autoFocus value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="输入用户分组或产品版本关键词" /></label><div>{filtered.map((channel) => <article key={channel.id}><div><strong>{releaseProductName(channel)}</strong><small>内部渠道：{channel.name} · 允许主题：{(channel.themeNames || []).join("、")}</small>{channel.latestRelease && <span>当前 v{channel.latestRelease.version} · {new Date(channel.latestRelease.publishedAt).toLocaleString("zh-CN")}</span>}</div><div className="release-channel-actions"><button className="button small secondary" onClick={() => setManualUpload({ channel, version: channel.latestRelease?.version || "1.0.0", file: null, busy: false, error: "", progress: 0 })}><CloudArrowUp size={15} /> 手动上传</button><button className="button small primary" onClick={() => release(channel)}><RocketLaunch size={15} /> 手动打包发布</button></div></article>)}{!filtered.length && <p className="release-picker-empty">没有匹配的用户分组。请先运行发行工作器同步桌面端权限文件。</p>}</div></div>}</div>
+    <div className="release-job-list"><h3>最近发版任务</h3>{jobs.length ? jobs.map((job) => { const channel = channels.find((item) => item.id === job.channelId) || { name: job.channelName }; return <article key={job.id}><div className={`job-status ${job.status}`}><span /><strong>{job.status === "queued" ? "排队" : job.status === "building" ? "构建中" : job.status === "uploading" ? "上传中" : job.status === "completed" ? "已发布" : "失败"}</strong></div><div><strong>{releaseProductName(channel)}</strong><small>{job.version ? `v${job.version}` : "等待生成版本号"} · {new Date(job.createdAt).toLocaleString("zh-CN")}</small></div>{job.error && <p>{localizeErrorMessage(job.error, "发行任务失败，请重新发起")}</p>}</article>; }) : <EmptyState icon={RocketLaunch} title="还没有发版任务" text="从上方用户分组列表选择一个渠道开始发版。" />}</div>
+    {manualUpload && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !manualUpload.busy && setManualUpload(null)}><form className="admin-form-modal release-upload-modal" onSubmit={uploadRelease}><button className="modal-close" type="button" disabled={manualUpload.busy} onClick={() => setManualUpload(null)}><X size={18} /></button><span>MANUAL COS RELEASE</span><h2>手动上传新版本</h2><p>发行渠道：<strong>{releaseProductName(manualUpload.channel)}</strong></p><div className="admin-form-grid"><label><span>版本号</span><input required maxLength={40} value={manualUpload.version} onChange={(event) => setManualUpload({ ...manualUpload, version: event.target.value })} placeholder="例如 1.6.0" /></label><label><span>Windows 安装包</span><input required type="file" accept=".exe,.msix,.msixbundle,.zip,application/octet-stream" onChange={(event) => setManualUpload({ ...manualUpload, file: event.target.files?.[0] || null })} /></label></div><AdminNotice>只有点击下方按钮后文件才会从浏览器直传成都 COS。新文件校验成功后替换线上版本，并清理该渠道旧安装包。</AdminNotice>{manualUpload.busy && <div className="upload-progress"><span style={{ width: `${manualUpload.progress}%` }} /><em>{manualUpload.progress}%</em></div>}{manualUpload.error && <div className="form-error">{manualUpload.error}</div>}<button className="button primary full" disabled={manualUpload.busy || !manualUpload.file}><CloudArrowUp size={18} /> {manualUpload.busy ? "正在上传并校验" : "确认手动上传并设为最新版"}</button></form></div>}
   </section>;
 }
 

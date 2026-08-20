@@ -28,6 +28,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { apiFetch, formatMoney, localizedFetch } from "../api.js";
 import { useConfirmDialog } from "./ConfirmDialog.jsx";
+import { AccountSecurityPanel } from "./AccountSecurityPanel.jsx";
 import { WorkerManagementPanel } from "./WorkerPages.jsx";
 
 const dashboardMenu = [
@@ -37,6 +38,7 @@ const dashboardMenu = [
   { id: "worker", label: "威客管理", icon: Briefcase },
   { id: "earnings", label: "我的收益", icon: ChartLineUp },
   { id: "billing", label: "会员与充值", icon: CreditCard },
+  { id: "security", label: "账号安全", icon: LockKey },
   { id: "profile", label: "个人资料", icon: UserCircle },
 ];
 
@@ -140,6 +142,7 @@ export function AccountDashboard({ user, openAuth, navigate, onUser }) {
   const [resubmission, setResubmission] = useState(null);
   const [recharge, setRecharge] = useState(null);
   const [rechargeAmount, setRechargeAmount] = useState("100");
+  const [securityRefresh, setSecurityRefresh] = useState(0);
 
   async function load() {
     if (!user) { setLoading(false); return; }
@@ -269,7 +272,7 @@ export function AccountDashboard({ user, openAuth, navigate, onUser }) {
       {isAdmin && <button className="account-admin-link" onClick={() => navigate("/admin")}><ShieldCheck size={20} /> 进入管理员后台 <ArrowRight size={17} /></button>}
     </aside>
     <section className="account-workspace">
-      <header className="account-workspace-head"><div><span>PERSONAL CONSOLE</span><h1>{dashboardMenu.find((item) => item.id === active)?.label}</h1></div><button className="button small ghost" onClick={active === "earnings" ? loadEarnings : load}>刷新数据</button></header>
+      <header className="account-workspace-head"><div><span>PERSONAL CONSOLE</span><h1>{dashboardMenu.find((item) => item.id === active)?.label}</h1></div><button className="button small ghost" onClick={active === "earnings" ? loadEarnings : active === "security" ? () => setSecurityRefresh((value) => value + 1) : load}>刷新数据</button></header>
       {message && <div className={`account-message ${message.includes("已") || message.includes("现在") ? "success" : "error"}`}>{message}</div>}
       {unreadNotifications.length > 0 && <div className="account-notification-stack">{unreadNotifications.map((notification) => <button key={notification.id} onClick={() => openNotification(notification)}><Bell size={21} weight="fill" /><span><strong>{notification.title}</strong><small>{notification.message}{notification.reason ? ` 原因：${notification.reason}` : ""}</small></span><ArrowRight size={18} /></button>)}</div>}
 
@@ -291,6 +294,8 @@ export function AccountDashboard({ user, openAuth, navigate, onUser }) {
         <div className="account-billing-grid"><article className={isMember || isAdmin ? "member active" : "member"}><ShieldCheck size={27} weight="duotone" /><span>当前身份 · {editionName}</span><h3>{identityLabel}</h3><p>{isAdmin ? "管理员拥有古龙官网全部后台权限，会员订阅状态不会覆盖管理员身份。" : isMember ? `会员权益有效至 ${new Date(subscription.currentPeriodEnd).toLocaleString("zh-CN")}` : "升级后解锁第二大脑、完整工作流和本地模型能力。订阅实付金额还会额外赠送 10% 创作余额。"}</p><button className="button primary full" onClick={() => isAdmin ? navigate("/admin") : navigate("/pricing")}>{isAdmin ? "进入管理员后台" : isMember ? "查看会员方案" : "立即订阅会员"}</button>{!isAdmin && isMember && subscription.autoRenew && !subscription.cancelAtPeriodEnd && <button className="text-button" onClick={cancelSubscription}>关闭到期自动续订</button>}</article><article className="wallet"><Wallet size={27} weight="duotone" /><span>可用余额</span><h3>{formatMoney(data?.balanceFen || 0)}</h3><p>单次充值满 500 元额外赠送 10% 余额；管理员确认到账后同步到网页端与桌面端。</p><button className="button secondary full" onClick={() => { setRecharge({ mode: "cashier" }); setMessage(""); }}><CreditCard size={17} /> 输入金额，线下充值</button></article></div>
         <div className="account-order-list"><h3><Receipt size={20} /> 最近订单</h3>{data?.orders?.length ? data.orders.map((order) => <article className={order.status === "rejected" ? "rejected" : ""} key={`${order.provider}-${order.id}`}><div className="account-order-main"><div><strong>{order.kind === "recharge" ? "账户充值" : order.cycle === "year" ? "年度会员" : "月度会员"}<small>{order.orderNo}</small></strong></div><span>{order.provider === "wechat" ? "微信" : order.provider === "alipay" ? "支付宝" : "线下支付"}</span><strong>{formatMoney(order.amountFen)}</strong><em>{order.provider === "offline" && order.status === "pending" ? "待审核" : statusText[order.status] || order.status}</em><time>{new Date(order.createdAt).toLocaleDateString("zh-CN")}</time></div>{order.status === "rejected" && <div className="account-order-rejection"><WarningCircle size={22} weight="fill" /><div><strong>审核未通过</strong><p>{order.reviewReason || "管理员暂未填写原因，请联系客服确认。"}</p></div><button className="button small primary" onClick={() => setResubmission({ order, note: "" })}>调整后重新申请</button></div>}{order.status === "pending" && order.resubmissionNote && <div className="account-order-resubmitted"><CheckCircle size={18} /> 已重新提交：{order.resubmissionNote}</div>}</article>) : <EmptyPanel icon={Receipt} title="还没有订单" text="订阅或充值完成后，交易记录会显示在这里。" />}</div>
       </section>}
+
+      {active === "security" && <AccountSecurityPanel refreshKey={securityRefresh} />}
 
       {active === "profile" && <section className="account-module"><header><div><span>PROFILE</span><h2>个人基本信息</h2><p>昵称会显示在网站右上角；头像保存到腾讯云 COS，并可同步到古龙桌面端。</p></div></header><form className="account-form" onSubmit={saveProfile}><label className="account-avatar-uploader"><div className="account-avatar-preview">{avatar ? <img src={avatar} alt="个人头像预览" /> : (profile.displayName || profile.username || "古").slice(0, 1).toUpperCase()}<span><Camera size={20} /></span></div><strong>{busy === "avatar" ? "正在上传" : "更换头像"}</strong><small>JPG / PNG / WebP / GIF，最大 10MB</small><input type="file" accept="image/jpeg,image/png,image/webp,image/gif" disabled={busy === "avatar"} onChange={uploadAvatar} /></label><div className="account-form-fields"><label><span>昵称</span><input required maxLength={64} value={profile.displayName} onChange={(event) => setProfile({ ...profile, displayName: event.target.value })} placeholder="你希望大家如何称呼你" /></label><label><span>用户名</span><input minLength={3} maxLength={32} value={profile.username} onChange={(event) => setProfile({ ...profile, username: event.target.value })} placeholder="用于账户识别" /></label><label><span>邮箱</span><input value={data?.profile.email || ""} disabled /><small>邮箱由 Chandler 账号中心维护，官网不会绕过统一身份修改。</small></label><label><span>微信号</span><input minLength={5} maxLength={64} value={profile.wechatId} onChange={(event) => setProfile({ ...profile, wechatId: event.target.value })} placeholder="发单或接单前必须填写" /><small>默认保密；任务另一方需支付 2 元并审核通过后才能查看。</small></label><label><span>个人简介</span><textarea maxLength={240} value={profile.bio} onChange={(event) => setProfile({ ...profile, bio: event.target.value })} placeholder="简单介绍你的工作与希望古龙帮助你的方向" /></label><button className="button primary" disabled={busy === "profile"}><FloppyDisk size={17} /> {busy === "profile" ? "正在保存" : "保存个人资料"}</button></div></form></section>}
 

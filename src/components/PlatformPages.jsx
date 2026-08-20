@@ -97,12 +97,12 @@ export function DownloadPage() {
     },
     {
       key: "yongshenghua",
-      eyebrow: "IMMORTAL FLOWER CUSTOM",
-      name: "永生花定制版",
-      tagline: "专属品牌、独立渠道、定制体验",
-      description: "面向永生花既有用户、品牌合作方与需要专属外观、权限策略和发行节奏的组织。",
-      suitable: "适合已通过永生花端注册，或需要品牌化部署与专属发行渠道的用户。",
-      features: ["继承古龙基础版核心引擎", "永生花品牌界面与专属配置", "独立权限分组与版本发行通道"],
+      eyebrow: "MINIMAX H3 TURBO VIDEO",
+      name: "MiniMax H3 极速视频版",
+      tagline: "本地生成、极速视频、共享节点",
+      description: "为 AI 视频创作者与算力节点打造的高性能桌面版，整合 MiniMax H3 本地视频链路、PromptEngine、Z-Image 与 ComfyUI，一套安装包即可进入创作。",
+      suitable: "适合配备 NVIDIA 显卡、重视本地隐私和视频生成效率，并希望参与 H3 共享节点接单收益的个人与团队。",
+      features: ["MiniMax H3 本地视频创作链路", "针对 16GB 显存场景持续优化", "PromptEngine、Z-Image 与 ComfyUI 一体化", "可作为共享节点接单并查看真实收益"],
       icon: "/assets/yongshenghua-edition-icon.png",
     },
   ];
@@ -131,9 +131,9 @@ export function DownloadPage() {
 
   return (
     <main id="main-content">
-      <PageIntro eyebrow="WINDOWS DESKTOP" title="选择适合你的古龙桌面版" description="两个版本共享可靠的古龙智能体核心。基础版适合绝大多数用户；永生花定制版为特定品牌、账号体系与发行渠道提供专属体验。" />
+      <PageIntro eyebrow="WINDOWS DESKTOP" title="选择适合你的古龙桌面版" description="古龙基础版适合通用智能体工作；MiniMax H3 极速视频版面向本地 AI 视频创作与共享节点计算，两条产品路线按你的主要任务选择。" />
       <section className="download-layout section-shell">
-        <div className="edition-choice-intro"><span>一分钟选对版本</span><strong>第一次使用选基础版；已有永生花账号或需要专属品牌体验，选定制版。</strong></div>
+        <div className="edition-choice-intro"><span>一分钟选对版本</span><strong>日常智能体与知识工作选基础版；本地生成 MiniMax H3 视频、参与共享节点计算，选极速视频版。</strong></div>
         <div className="download-edition-grid">
           {editions.map((edition) => {
             const release = releases[edition.key];
@@ -154,7 +154,7 @@ export function DownloadPage() {
             </article>;
           })}
         </div>
-        <div className="edition-decision-guide"><div><span>01</span><p><strong>个人首次使用</strong>选择古龙基础版，配置更直接，官方默认能力完整。</p></div><div><span>02</span><p><strong>已有永生花账号</strong>选择永生花定制版，登录后匹配对应品牌与权限。</p></div><div><span>03</span><p><strong>团队品牌化部署</strong>选择永生花定制版，使用独立发行节奏与定制配置。</p></div></div>
+        <div className="edition-decision-guide"><div><span>01</span><p><strong>日常智能体工作</strong>选择古龙基础版，配置直接，标准能力完整。</p></div><div><span>02</span><p><strong>本地视频创作</strong>选择 MiniMax H3 极速视频版，使用本地模型链路完成高质量视频任务。</p></div><div><span>03</span><p><strong>共享节点收益</strong>选择 MiniMax H3 极速视频版，将闲置算力接入平台任务队列并查看真实结算。</p></div></div>
         {downloadError && <div className="form-error">{downloadError}</div>}
         <div className="download-note"><ShieldCheck size={22} /><div><strong>安装包安全说明</strong><p>两个版本分别读取所属发行渠道的唯一最新版。直接下载链接为腾讯云 COS 的 15 分钟限时签名地址；下载后可核对页面公布的版本号、文件大小与 SHA-256。</p></div></div>
       </section>

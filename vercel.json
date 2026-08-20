@@ -21,6 +21,10 @@
   ],
   "rewrites": [
     {
+      "source": "/api/auth/:path*",
+      "destination": "/api/platform?_platform_path=auth/:path*"
+    },
+    {
       "source": "/api/agent/:path*",
       "destination": "/api/platform?_platform_path=agent/:path*"
     },

@@ -87,7 +87,14 @@ function friendlyMessage(status, payload) {
   if (code === "catalog.sku_inactive") return "该订阅套餐已经停售，请刷新套餐列表后重试";
   if (code === "catalog.price_not_found") return "该订阅套餐当前没有生效中的价格版本";
   if (code === "catalog.sku_exists") return "当前应用中已经存在相同编码的 SKU";
-  if (code === "auth.invalid_credentials") return "用户名、邮箱或密码不正确";
+  if (code === "auth.invalid_credentials") return "用户名、邮箱、手机号、密码或验证码不正确";
+  if (code === "auth.otp_delivery_failed") return "验证码暂时无法发送，请稍后重试";
+  if (code === "auth.sms_disabled") return "短信验证码服务暂时关闭，请改用邮箱或密码登录";
+  if (code === "auth.invalid_phone") return "请输入正确的大陆手机号或 E.164 国际手机号";
+  if (code === "auth.phone_register_disabled") return "暂不支持手机号注册，请先使用邮箱创建账号";
+  if (code === "auth.email_verification_required") return "请先完成注册邮箱验证，再绑定手机号";
+  if (code === "auth.identity_taken") return "该邮箱或手机号已经绑定到其他账号";
+  if (code === "auth.identity_not_found") return "没有找到这项账号身份，请刷新后重试";
   if (code === "auth.weak_password") return "统一账号服务判定密码过弱：请使用 8–255 个字符，并在小写字母、大写字母、数字、符号中至少包含三类";
   if (["auth.email_exists", "auth.user_exists", "account.exists"].includes(code)) return "该邮箱已经注册，请直接登录或找回密码";
   if (code === "token.invalid" || code === "auth.token_invalid") return "登录已失效，请重新登录";
@@ -213,6 +220,94 @@ export function loginWithChandler(identifier, password) {
   return chandlerRequest("/v1/auth/login", {
     method: "POST",
     body: { email: identifier.trim(), password, device_type: "web" },
+  });
+}
+
+export function getChandlerAuthCapabilities() {
+  return chandlerRequest("/v1/auth/capabilities", { timeoutMs: 8_000 });
+}
+
+export function sendLoginOtpWithChandler(target, targetType) {
+  return chandlerRequest("/v1/auth/otp/send", {
+    method: "POST",
+    body: { target: String(target || "").trim(), target_type: targetType },
+  });
+}
+
+export function loginWithChandlerOtp(target, targetType, code) {
+  return chandlerRequest("/v1/auth/otp/login", {
+    method: "POST",
+    body: {
+      target: String(target || "").trim(),
+      target_type: targetType,
+      code: String(code || "").trim(),
+      device_type: "web",
+    },
+  });
+}
+
+export function forgotPasswordWithChandlerPhone(phone) {
+  return chandlerRequest("/v1/auth/phone/forgot-password", {
+    method: "POST",
+    body: { phone: String(phone || "").trim() },
+  });
+}
+
+export function resetPasswordWithChandlerPhone(phone, code, newPassword) {
+  return chandlerRequest("/v1/auth/phone/reset-password", {
+    method: "POST",
+    body: {
+      phone: String(phone || "").trim(),
+      code: String(code || "").trim(),
+      new_password: newPassword,
+    },
+  });
+}
+
+export function listChandlerIdentities(accessToken) {
+  return chandlerRequest("/v1/me/identities", { accessToken, timeoutMs: 8_000 });
+}
+
+export function bindChandlerPhone(accessToken, { phone, currentPassword, reauthCode }) {
+  return chandlerRequest("/v1/me/identities", {
+    method: "POST",
+    accessToken,
+    body: {
+      provider: "phone",
+      value: String(phone || "").trim(),
+      ...(currentPassword ? { current_password: currentPassword } : {}),
+      ...(reauthCode ? { reauth_code: String(reauthCode).trim() } : {}),
+    },
+  });
+}
+
+export function verifyChandlerIdentity(accessToken, identityId, code) {
+  return chandlerRequest(`/v1/me/identities/${encodeURIComponent(identityId)}/verify`, {
+    method: "POST",
+    accessToken,
+    body: { code: String(code || "").trim() },
+  });
+}
+
+export function deleteChandlerIdentity(accessToken, identityId) {
+  return chandlerRequest(`/v1/me/identities/${encodeURIComponent(identityId)}`, {
+    method: "DELETE",
+    accessToken,
+  });
+}
+
+export function sendChandlerVerificationEmail(accessToken) {
+  return chandlerRequest("/v1/auth/send-verification-email", {
+    method: "POST",
+    accessToken,
+    body: {},
+  });
+}
+
+export function verifyChandlerEmail(token) {
+  return chandlerRequest("/v1/auth/verify-email", {
+    method: "POST",
+    body: { token: String(token || "").trim() },
   });
 }
 

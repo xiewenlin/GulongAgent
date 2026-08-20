@@ -3078,6 +3078,24 @@ textarea:focus {
   font-weight: 800;
 }
 
+.account-method-tabs,
+.account-target-tabs {
+  padding: 5px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-soft);
+}
+.account-method-tabs button,
+.account-target-tabs button { min-height: 43px; padding: 8px 12px; border: 0; border-radius: 9px; color: var(--muted); background: transparent; font: inherit; font-size: 18px; font-weight: 780; cursor: pointer; }
+.account-method-tabs button.active,
+.account-target-tabs button.active { color: var(--primary); background: var(--surface-strong); box-shadow: 0 5px 15px rgba(20,54,52,.08); }
+.otp-login-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 18px; line-height: 1.55; }
+.otp-login-actions button { flex: none; padding: 0; color: var(--primary); border: 0; background: transparent; font: inherit; font-size: 18px; font-weight: 800; cursor: pointer; }
+.otp-login-actions button:disabled { color: color-mix(in srgb, var(--muted) 62%, transparent); cursor: not-allowed; }
+
 .account-back-login { margin: 20px 0 17px; padding: 7px 0; display: inline-flex; align-items: center; gap: 7px; color: var(--jade); border: 0; background: transparent; font-size: 18px; font-weight: 800; cursor: pointer; }
 .account-label-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .account-password-field { display: grid; gap: 8px; }
@@ -4083,6 +4101,44 @@ textarea:focus {
 .account-form textarea { min-height: 105px; resize: vertical; }
 .account-form label > small { color: var(--muted); font-size: 18px; line-height: 1.6; }
 .account-form-actions { display: flex; gap: 8px; }
+.account-security-module > header p { max-width: 720px; margin: 7px 0 0; color: var(--muted); font-size: 18px; line-height: 1.7; }
+.account-security-shield { flex: none; padding: 10px 13px; display: flex; align-items: center; gap: 8px; color: var(--primary); border: 1px solid color-mix(in srgb, var(--primary) 24%, var(--line)); border-radius: 999px; background: color-mix(in srgb, var(--primary) 6%, var(--surface)); font-size: 18px; font-weight: 800; }
+.account-security-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px; }
+.account-security-grid > article { min-width: 0; padding: 21px; border: 1px solid var(--line); border-radius: 16px; background: var(--bg-soft); }
+.account-security-grid > article.verified { border-color: color-mix(in srgb, var(--primary) 28%, var(--line)); box-shadow: inset 0 3px 0 color-mix(in srgb, var(--primary) 62%, transparent); }
+.account-security-grid > article > header { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; }
+.security-icon { width: 47px; height: 47px; display: grid; place-items: center; color: var(--primary); border-radius: 14px; background: color-mix(in srgb, var(--primary) 10%, var(--surface)); }
+.account-security-grid header span,
+.account-security-grid header strong { display: block; }
+.account-security-grid header span { color: var(--muted); font-size: 18px; }
+.account-security-grid header strong { margin-top: 3px; overflow: hidden; font-size: 19px; text-overflow: ellipsis; white-space: nowrap; }
+.account-security-grid header em { display: inline-flex; align-items: center; gap: 5px; color: var(--primary); font-size: 18px; font-style: normal; font-weight: 800; white-space: nowrap; }
+.account-security-grid > article > p { min-height: 62px; margin: 15px 0; color: var(--muted); font-size: 18px; line-height: 1.72; }
+.security-inline-form,
+.security-phone-form { display: grid; gap: 12px; }
+.security-inline-form label,
+.security-phone-form label { display: grid; gap: 6px; color: var(--muted); font-size: 18px; font-weight: 760; }
+.security-inline-form label > div,
+.security-phone-form label > div { min-height: 49px; padding: 0 12px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--line-strong); border-radius: 10px; color: var(--primary); background: var(--surface); }
+.security-inline-form input,
+.security-phone-form input { min-width: 0; width: 100%; height: 46px; border: 0; outline: 0; color: var(--text); background: transparent; font: inherit; font-size: 18px; }
+.security-inline-form input:disabled,
+.security-phone-form input:disabled { color: var(--muted); cursor: not-allowed; }
+.security-identity-list { margin: 14px 0; display: grid; gap: 9px; }
+.security-identity-list > div { padding: 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); }
+.security-identity-list > div > span { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 2px 8px; }
+.security-identity-list > div > span svg { grid-row: 1 / 3; color: var(--primary); }
+.security-identity-list strong,
+.security-identity-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.security-identity-list strong { font-size: 18px; }
+.security-identity-list small { color: var(--muted); font-size: 18px; }
+.security-identity-list > div > div { flex: none; display: flex; gap: 7px; }
+.account-security-note { margin-top: 16px; padding: 14px 16px; display: flex; align-items: flex-start; gap: 10px; color: var(--primary); border: 1px solid color-mix(in srgb, var(--primary) 22%, var(--line)); border-radius: 13px; background: color-mix(in srgb, var(--primary) 5%, var(--surface)); }
+.account-security-note svg { flex: none; margin-top: 3px; }
+.account-security-note p { margin: 0; color: var(--muted); font-size: 18px; line-height: 1.7; }
+.account-security-note strong { color: var(--primary); }
+.account-security-loading { min-height: 320px; display: flex; align-items: center; justify-content: center; gap: 12px; color: var(--muted); font-size: 18px; }
+.account-security-loading span { width: 22px; height: 22px; border: 2px solid var(--line); border-top-color: var(--primary); border-radius: 50%; animation: account-spin .8s linear infinite; }
 .minimax-key-card { padding: 22px; align-content: start; border: 1px solid var(--line); border-radius: 15px; background: var(--bg-soft); }
 .minimax-card-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; }
 .minimax-card-title h3 { margin: 0; font-size: 23px; }
@@ -4131,7 +4187,7 @@ textarea:focus {
   .account-page { padding-top: 28px; }
   .account-sidebar nav { grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: visible; }
   .account-sidebar nav button { white-space: normal; }
-  .account-overview-grid, .account-billing-grid, .minimax-layout { grid-template-columns: 1fr; }
+  .account-overview-grid, .account-billing-grid, .account-security-grid, .minimax-layout { grid-template-columns: 1fr; }
   .account-module, .account-overview-grid > section { padding: 18px; }
   .account-module > header { flex-direction: column; }
   .account-form { grid-template-columns: 1fr; }
@@ -4145,6 +4201,9 @@ textarea:focus {
   .earnings-device-grid { grid-template-columns: 1fr; }
   .offline-review-actions { grid-template-columns: 1fr; }
   .account-resubmit-actions, .offline-reject-actions { flex-direction: column-reverse; }
+  .account-security-grid > article > header { grid-template-columns: auto minmax(0, 1fr); }
+  .account-security-grid > article > header em { grid-column: 2; }
+  .security-identity-list > div { align-items: flex-start; flex-direction: column; }
 }
 
 @media (max-width: 480px) {

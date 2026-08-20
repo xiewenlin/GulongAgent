@@ -7,10 +7,11 @@
 ## 已实现
 
 - 玉瓷、日出、青竹、鸢尾 4 套可持久化浅色主题，并配有独立 3D 圆形徽章
-- Chandler 公共 OpenAPI 统一账号：邮箱注册，用户名/邮箱 + 密码登录，服务端自动刷新令牌，官网不保存密码
+- Chandler v3.6 公共 OpenAPI 统一账号：只开放邮箱注册，支持用户名/邮箱密码登录、邮箱/短信验证码登录和邮箱/手机找回密码，官网不保存密码
+- 用户后台“账号安全”支持验证邮箱、绑定/验证/解绑手机号；手机号仅服务于既有邮箱账号，验证码采用 60 秒冷却、IP 与目标摘要双重限流和固定响应防枚举
 - Chandler 全局账号可在古龙桌面端、永生花桌面端与官网交叉登录；官网注册默认标记为“古龙版”
 - 用户后台明确区分“管理员/会员用户/普通用户”和“古龙版/永生花版”，管理员身份不会再被会员状态覆盖
-- 普通用户后台：第二大脑处理进度与反馈、会员与余额、订单、个人资料和 MiniMax 配置
+- 普通用户后台：第二大脑处理进度与反馈、会员与余额、订单、账号安全、个人资料和共享节点收益
 - 全站正文以 18px 为最低字号，账户侧栏、表格、表单和说明文字统一按可读性基线校正
 - 旧官网账号首次 Chandler 登录时按已验证邮箱安全归并，保留历史上传、订单、API Key 与反馈
 - Chandler 离线权益凭据：RS256 JWT、JWKS 离线验签与可选设备绑定
@@ -23,8 +24,9 @@
 - 腾讯云 COS 存储第二大脑 ZIP 和 Windows 安装包；MongoDB 提供关键词/日期检索索引
 - 第二大脑附件后台列表、手动下载及按日期拉取最新附件 API
 - 文字反馈与最多 9 张问题截图
-- Chandler v3.2 微信收银台、单次充值、自定义金额订单、月/年手动续费，以及线下支付申请与管理员确认到账
-- 官网后台通过服务端 API Key 直连 Chandler v3.2 管理接口：用户搜索、账号冻结/恢复、订阅查看、权益审批，以及应用级 SKU 单次价格版本发布与历史查询
+- Chandler v3.6 微信收银台、单次充值、自定义金额订单、月/年手动续费，以及线下支付申请与管理员确认到账
+- 官网后台通过 `Authorization: Apikey` 服务端凭据直连 Chandler v3.6 合作伙伴接口：用户同步、订阅查看、应用级 SKU 与不可变价格版本发布和历史查询
+- 下载中心的高性能桌面产品对外展示为“MiniMax H3 极速视频版”；内部继续使用兼容的 `yongshenghua` 发行键，避免已有渠道、账号和安装包映射失效
 - 管理员实时数据看板：7/30/90 天用户增长、访问来源、激活漏斗、功能采用、任务与第二大脑运营、收入结构和自动经营洞察
 - 官网访问、软件下载和发起支付采用匿名访客/会话 ID 做最小化埋点；登录用户活跃数据来自服务端会话，不采集页面输入内容
 - MongoDB Atlas 索引、会话 TTL、限流 TTL、连接池复用
@@ -42,11 +44,11 @@ flowchart LR
   G[第三方开发者] -->|Bearer API Key| B
 ```
 
-- 前端：React 19、Vite 6、Phosphor Icons，静态资源由 Vercel Edge CDN 分发。
-- 后端：Hono、Zod OpenAPI，运行在 Vercel Node Functions。
+- 前端：React 19、Vite 6、Phosphor Icons，静态资源可由 Vercel Edge CDN 或腾讯云 Debian 节点分发。
+- 后端：Hono、Zod OpenAPI，同时发布到 Vercel Node Functions 与腾讯云 systemd 服务。
 - 数据库：MongoDB Node.js 原生驱动，跨热实例复用连接池。
 - 文件：腾讯云 COS 私有对象，服务端签发短时 PUT/GET URL；MongoDB 只保存所有权、状态与搜索元数据。反馈截图仍可使用 Vercel Blob。
-- 安全：Chandler 统一身份；服务端优先读取 `GulongAgent` 环境变量作为 Chandler v3.2 API Key；支付通知按原始请求体执行 HMAC-SHA256 验签并二次查询订单；浏览器只接收微信预支付结果，永不接触平台密钥。另有 HttpOnly 会话、API Key 摘要、来源校验、限流与最小权限 CAM。
+- 安全：Chandler 统一身份；服务端优先读取 `GulongAgent` 环境变量作为 Chandler v3.6 API Key，并使用 `Authorization: Apikey`；支付通知按原始请求体执行 HMAC-SHA256 验签并二次查询订单；浏览器只接收微信预支付结果，永不接触平台密钥。另有 HttpOnly 会话、API Key 摘要、来源校验、验证码防轰炸限流与最小权限 CAM。
 
 ## 本地开发
 
@@ -65,12 +67,11 @@ npm run dev
 
 - `MONGODB_URI` / `MONGODB_DB`：MongoDB Atlas
 - `SESSION_SECRET` / `API_KEY_PEPPER`：会话与 API Key 摘要密钥
-- `CHANDLER_*`：Chandler API 地址、古龙/永生花应用 ID 与当前价格版本
+- `GulongAgent` / `CHANDLER_*`：Chandler v3.6 API Key、API 地址、古龙/永生花应用 ID 与当前价格版本
 - `TENCENT_SECRET_ID` / `TENCENT_SECRET_KEY`：仅授予目标 Bucket 所需操作的 CAM 子账号密钥
 - `COS_BUCKET` / `COS_REGION` / `COS_DOMAIN`：`gulong-1259744534`、`ap-chengdu` 与请求域名
 - `RELEASE_WORKER_KEY`：官网与受信任 Windows 发行工作器共享的长随机密钥
 - `BLOB_READ_WRITE_TOKEN`：仅用于问题反馈截图
-- `DOWNLOAD_*`：飞书、夸克与百度网盘链接
 
 支付商户参数、订阅、余额和权益由 Chandler 统一管理。线下支付在 MongoDB 中保留审核队列，并将审批结果同步到 Chandler 用户扩展属性。
 
@@ -85,10 +86,12 @@ npm run dev
 - 按日期下载附件：`GET /api/v1/brain/attachments/latest?date=YYYY-MM-DD`
 - 桌面端用户配置：`GET /api/v1/configuration/minimax`（需要 `configuration:read`）
 - 桌面端实时订阅价格：`GET /api/v1/pricing/subscriptions`（公开、禁止缓存，管理员修改后立即生效）
+- 登录能力：`GET /api/auth/capabilities`；发送/校验登录验证码：`POST /api/auth/otp/send`、`POST /api/auth/otp/login`
+- 账号安全：`GET /api/account/security`；邮箱验证、手机号绑定/验证/解绑接口见在线 OpenAPI
 - Chandler 管理接口：`/api/admin/chandler/users`、`/api/admin/chandler/catalog`、`/api/admin/chandler/prices`、`/api/admin/chandler/skus/{skuId}/prices`
 - 管理员经营分析：`GET /api/admin/analytics/dashboard?days=7|30|90`（管理员会话或管理员 API Key）
 
-完整集成边界与生产配置见 [docs/integration-deployment.md](docs/integration-deployment.md)，Windows 发行工作器说明见 [docs/release-worker.md](docs/release-worker.md)。
+完整集成边界与生产配置见 [docs/integration-deployment.md](docs/integration-deployment.md)，本次认证升级审计见 [docs/chandler-v3.6-auth-audit.md](docs/chandler-v3.6-auth-audit.md)，Windows 发行工作器说明见 [docs/release-worker.md](docs/release-worker.md)。
 
 ## 验证
 
