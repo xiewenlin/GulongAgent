@@ -6,6 +6,30 @@ const dbName = process.env.MONGODB_DB?.trim() || "gulong_platform";
 let clientPromise;
 let indexPromise;
 
+function createConcurrencyLimiter(limit) {
+  let active = 0;
+  const queue = [];
+
+  const runNext = () => {
+    while (active < limit && queue.length > 0) {
+      const entry = queue.shift();
+      active += 1;
+      Promise.resolve()
+        .then(entry.operation)
+        .then(entry.resolve, entry.reject)
+        .finally(() => {
+          active -= 1;
+          runNext();
+        });
+    }
+  };
+
+  return (operation) => new Promise((resolve, reject) => {
+    queue.push({ operation, resolve, reject });
+    runNext();
+  });
+}
+
 export class ConfigurationError extends Error {
   constructor(message) {
     super(message);
@@ -47,7 +71,18 @@ export async function getCollection(name) {
 export async function ensureIndexes() {
   if (!indexPromise) {
     indexPromise = (async () => {
-      const db = await getDb();
+      const rawDb = await getDb();
+      const runIndexOperation = createConcurrencyLimiter(4);
+      const db = {
+        collection(name) {
+          const collection = rawDb.collection(name);
+          return {
+            createIndex(...args) {
+              return runIndexOperation(() => collection.createIndex(...args));
+            },
+          };
+        },
+      };
       await Promise.all([
         db.collection("users").createIndex(
           { usernameNormalized: 1 },
