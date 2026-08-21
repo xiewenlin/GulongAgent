@@ -67,6 +67,7 @@ npm run dev
 
 - `MONGODB_URI` / `MONGODB_DB`：MongoDB Atlas
 - `SESSION_SECRET` / `API_KEY_PEPPER`：会话与 API Key 摘要密钥
+- `SESSION_COOKIE_SECURE`：通常留空，由反向代理协议自动决定；仅在临时 HTTP 直连环境显式设为 `false`，正式域名必须使用 HTTPS
 - `GulongAgent` / `CHANDLER_*`：Chandler v3.6 API Key、API 地址、古龙/永生花应用 ID 与当前价格版本
 - `TENCENT_SECRET_ID` / `TENCENT_SECRET_KEY`：仅授予目标 Bucket 所需操作的 CAM 子账号密钥
 - `COS_BUCKET` / `COS_REGION` / `COS_DOMAIN`：`gulong-1259744534`、`ap-chengdu` 与请求域名
@@ -87,7 +88,7 @@ npm run dev
 - 桌面端用户配置：`GET /api/v1/configuration/minimax`（需要 `configuration:read`）
 - 桌面端实时订阅价格：`GET /api/v1/pricing/subscriptions`（公开、禁止缓存，管理员修改后立即生效）
 - 登录能力：`GET /api/auth/capabilities`；发送/校验登录验证码：`POST /api/auth/otp/send`、`POST /api/auth/otp/login`
-- 账号安全：`GET /api/account/security`；邮箱验证、手机号绑定/验证/解绑接口见在线 OpenAPI
+- 账号安全：`GET /api/account/security`；邮箱验证、手机号绑定/验证/解绑、主身份切换、修改密码与注销全部设备接口见在线 OpenAPI
 - Chandler 管理接口：`/api/admin/chandler/users`、`/api/admin/chandler/catalog`、`/api/admin/chandler/prices`、`/api/admin/chandler/skus/{skuId}/prices`
 - 管理员经营分析：`GET /api/admin/analytics/dashboard?days=7|30|90`（管理员会话或管理员 API Key）
 

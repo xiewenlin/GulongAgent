@@ -43,6 +43,7 @@ import {
   createPartnerPriceVersion,
   createPartnerSku,
   createSubscriptionCheckout,
+  changeChandlerPassword,
   bindChandlerPhone,
   deleteChandlerIdentity,
   externalAuthFromResponse,
@@ -62,6 +63,7 @@ import {
   loginWithChandlerOtp,
   resolveWebsiteLoginEmail,
   logoutFromChandler,
+  logoutAllFromChandler,
   markChandlerProductEdition,
   productEditionFromChannel,
   registerWithChandler,
@@ -69,6 +71,8 @@ import {
   resetPasswordWithChandlerPhone,
   resolveChandlerIdentity,
   setPartnerSkuStatus,
+  setPrimaryChandlerIdentity,
+  sendChandlerReauthCode,
   sendChandlerVerificationEmail,
   sendLoginOtpWithChandler,
   upsertChandlerUser,
@@ -321,6 +325,10 @@ const BindPhoneSchema = z.object({
 });
 const VerifyCodeSchema = z.object({ code: z.string().trim().regex(/^\d{6}$/) });
 const VerifyEmailSchema = z.object({ token: z.string().trim().min(6).max(2048) });
+const ChangePasswordSchema = z.object({
+  oldPassword: z.string().min(1).max(255),
+  newPassword: z.string().min(8).max(255),
+});
 
 const ActivationRedeemRequestSchema = z.object({
   code: z.string().trim().regex(/^H3(?:-[A-HJ-NP-Z2-9]{5}){4}$/).openapi({ example: "H3-ABCDE-FGHJK-MNPQR-STUVW" }),
@@ -2394,6 +2402,55 @@ const deleteIdentityRoute = createRoute({
   responses: { 200: { description: "解绑成功", content: { "application/json": { schema: z.object({ status: z.literal("deleted") }) } } } },
 });
 
+const sendReauthCodeRoute = createRoute({
+  method: "post",
+  path: "/api/account/security/reauth/send",
+  tags: ["Account Security"],
+  summary: "发送敏感操作再认证码",
+  description: "用于无密码账号绑定新身份；验证码发送到当前已验证主身份。",
+  responses: {
+    200: { description: "验证码已发送", content: { "application/json": { schema: z.object({ status: z.string(), provider: z.string().optional(), value: z.string().optional(), retryAfter: z.literal(60) }) } } },
+    401: { description: "需要登录", content: { "application/json": { schema: ErrorSchema } } },
+    429: { description: "发送过于频繁", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const setPrimaryIdentityRoute = createRoute({
+  method: "post",
+  path: "/api/account/security/identities/{identityId}/primary",
+  tags: ["Account Security"],
+  summary: "设置已验证主身份",
+  request: { params: z.object({ identityId: z.string().min(1).max(128) }) },
+  responses: {
+    200: { description: "主身份已更新", content: { "application/json": { schema: z.object({ status: z.literal("primary") }) } } },
+    404: { description: "身份不存在", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const changePasswordRoute = createRoute({
+  method: "post",
+  path: "/api/account/security/password/change",
+  tags: ["Account Security"],
+  summary: "登录状态下修改密码",
+  request: { body: { content: { "application/json": { schema: ChangePasswordSchema } } } },
+  responses: {
+    200: { description: "密码已修改", content: { "application/json": { schema: z.object({ status: z.literal("changed") }) } } },
+    401: { description: "当前密码错误", content: { "application/json": { schema: ErrorSchema } } },
+    422: { description: "新密码强度不足", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const logoutAllRoute = createRoute({
+  method: "post",
+  path: "/api/account/security/sessions/logout-all",
+  tags: ["Account Security"],
+  summary: "注销账号的全部登录会话",
+  responses: {
+    200: { description: "全部会话已注销", content: { "application/json": { schema: z.object({ status: z.literal("logged_out") }) } } },
+    401: { description: "需要登录", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 function normalizedPhone(value) {
   const phone = String(value || "").trim().replace(/[\s()-]/g, "");
   return /^1[3-9]\d{9}$/.test(phone) ? `+86${phone}` : phone;
@@ -2880,6 +2937,58 @@ app.openapi(deleteIdentityRoute, async (c) => {
   );
   c.header("Cache-Control", "private, no-store, max-age=0");
   return c.json({ status: "deleted" });
+});
+
+app.openapi(sendReauthCodeRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const session = await requireChandlerAccountSession(c); if (session.error) return session.error;
+  const rate = await enforceRateLimit(`account-reauth:${session.auth.user.id}`, { limit: 3, windowMs: 30 * 60_000 });
+  if (!rate.allowed) {
+    c.header("Retry-After", "60");
+    return c.json({ code: "RATE_LIMITED", message: "再认证验证码发送过于频繁，请稍后重试" }, 429);
+  }
+  const result = await sendChandlerReauthCode(session.accessToken);
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  c.header("Retry-After", "60");
+  return c.json({
+    status: String(result?.status || "sent"),
+    provider: result?.provider ? String(result.provider) : undefined,
+    value: result?.value ? String(result.value) : undefined,
+    retryAfter: 60,
+  });
+});
+
+app.openapi(setPrimaryIdentityRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const session = await requireChandlerAccountSession(c); if (session.error) return session.error;
+  const identityId = c.req.valid("param").identityId;
+  const identitiesPayload = await listChandlerIdentities(session.accessToken);
+  const remoteIdentity = chandlerIdentities(identitiesPayload).find((item) => String(item.id) === identityId);
+  if (!remoteIdentity || !remoteIdentity.verified) return c.json({ code: "IDENTITY_NOT_FOUND", message: "只能将当前账号已验证的身份设为主身份" }, 404);
+  await setPrimaryChandlerIdentity(session.accessToken, identityId);
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  return c.json({ status: "primary" });
+});
+
+app.openapi(changePasswordRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const session = await requireChandlerAccountSession(c); if (session.error) return session.error;
+  const input = c.req.valid("json");
+  const rate = await enforceRateLimit(`change-password:${session.auth.user.id}`, { limit: 5, windowMs: 30 * 60_000 });
+  if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "密码修改尝试过于频繁，请稍后重试" }, 429);
+  await changeChandlerPassword(session.accessToken, input.oldPassword, input.newPassword);
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  return c.json({ status: "changed" });
+});
+
+app.openapi(logoutAllRoute, async (c) => {
+  const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+  const session = await requireChandlerAccountSession(c); if (session.error) return session.error;
+  await logoutAllFromChandler(session.accessToken);
+  await (await getCollection("sessions")).deleteMany({ userId: new ObjectId(session.auth.user.id) });
+  await revokeSession(c);
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  return c.json({ status: "logged_out" });
 });
 
 app.openapi(shortDramaSsoRoute, async (c) => {

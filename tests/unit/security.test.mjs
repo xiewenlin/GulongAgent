@@ -7,6 +7,7 @@ import {
   issueShortDramaSsoToken,
   normalizeEmail,
   normalizeUsername,
+  shouldUseSecureSessionCookie,
   verifyPassword,
 } from "../../server/security.js";
 import { createMockPaymentUrl, paymentCapabilities } from "../../server/payments.js";
@@ -29,6 +30,15 @@ test("opaque tokens and IPs are one-way deterministic fingerprints", () => {
   assert.notEqual(hashOpaqueToken("token-a"), hashOpaqueToken("token-b"));
   assert.equal(fingerprintIp("203.0.113.9"), fingerprintIp("203.0.113.9"));
   assert.equal(fingerprintIp("203.0.113.9").length, 24);
+});
+
+test("session cookies follow the externally visible protocol with an explicit override", () => {
+  const context = (url, forwardedProtocol = "") => ({ req: { url, header: (name) => name === "x-forwarded-proto" ? forwardedProtocol : "" } });
+  assert.equal(shouldUseSecureSessionCookie(context("http://111.229.70.235/api/auth/login", "http")), false);
+  assert.equal(shouldUseSecureSessionCookie(context("http://127.0.0.1:8787/api/auth/login", "https")), true);
+  assert.equal(shouldUseSecureSessionCookie(context("https://sologle.com/api/auth/login")), true);
+  assert.equal(shouldUseSecureSessionCookie(context("http://111.229.70.235/api/auth/login"), "true"), true);
+  assert.equal(shouldUseSecureSessionCookie(context("https://sologle.com/api/auth/login"), "false"), false);
 });
 
 test("short-drama SSO assertions are short-lived and carry the Gulong identity", () => {

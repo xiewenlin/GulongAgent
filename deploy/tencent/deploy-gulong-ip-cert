@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+SOURCE_DIR="/etc/letsencrypt/live/111.229.70.235"
+TARGET_DIR="/etc/caddy/certs"
+
+install -d -o root -g caddy -m 0750 "$TARGET_DIR"
+install -o root -g caddy -m 0640 "$SOURCE_DIR/fullchain.pem" "$TARGET_DIR/gulong-ip-fullchain.pem"
+install -o root -g caddy -m 0640 "$SOURCE_DIR/privkey.pem" "$TARGET_DIR/gulong-ip-privkey.pem"
+
+if systemctl is-active --quiet caddy; then
+	systemctl reload caddy
+fi

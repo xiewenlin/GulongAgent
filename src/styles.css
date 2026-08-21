@@ -175,12 +175,6 @@
 .agent-attach-button input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .agent-type-select select, .agent-model-select select, .agent-parameter-select select { min-width: 0; border: 0; outline: 0; color: inherit; background: transparent; font: inherit; cursor: pointer; }
 .agent-parameter-select { flex: none; color: var(--primary); background: color-mix(in srgb, var(--primary) 5%, var(--surface)); }
-.agent-h3-magic { min-height: 42px; padding: 0 13px; flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--line)); border-radius: 11px; color: color-mix(in srgb, var(--accent) 76%, var(--primary)); background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 9%, var(--surface)), color-mix(in srgb, var(--primary) 5%, var(--surface))); font: inherit; font-size: 18px; font-weight: 800; cursor: pointer; box-shadow: 0 7px 20px color-mix(in srgb, var(--accent) 10%, transparent); transition: transform .2s ease, border-color .2s ease, box-shadow .2s ease; }
-.agent-h3-magic:hover:not(:disabled) { transform: translateY(-1px); border-color: color-mix(in srgb, var(--accent) 66%, var(--line)); box-shadow: 0 10px 24px color-mix(in srgb, var(--accent) 18%, transparent); }
-.agent-h3-magic.processing { color: var(--primary); }
-.agent-h3-magic.success { color: #087b63; border-color: rgba(8, 123, 99, .34); background: linear-gradient(135deg, rgba(8, 123, 99, .10), color-mix(in srgb, var(--surface) 92%, white)); }
-.agent-h3-magic.failed { color: #b74731; border-color: rgba(183, 71, 49, .32); background: rgba(183, 71, 49, .07); }
-.agent-h3-magic:disabled { opacity: .52; cursor: not-allowed; box-shadow: none; }
 .agent-model-select { max-width: 300px; margin-left: auto; color: var(--primary); background: color-mix(in srgb, var(--primary) 6%, var(--surface)); }
 .agent-model-select select { width: 100%; text-overflow: ellipsis; }
 .agent-send-button { width: 44px; height: 44px; flex: none; display: grid; place-items: center; border: 0; border-radius: 13px; color: #fff; background: linear-gradient(145deg, var(--accent), color-mix(in srgb, var(--accent) 68%, var(--primary))); cursor: pointer; box-shadow: 0 10px 25px color-mix(in srgb, var(--accent) 26%, transparent); }
@@ -322,7 +316,6 @@
   .agent-composer-wrap { margin: 0 9px 9px; padding: 11px; border-radius: 18px; }
   .agent-composer-wrap > footer { flex-wrap: wrap; }
   .agent-model-select { max-width: none; flex: 1; order: 3; margin-left: 0; }
-  .agent-h3-magic { flex: 1; }
   .agent-send-button { margin-left: auto; }
   .agent-membership-gate { align-items: flex-start; flex-direction: column; }
   .agent-asset-drawer, .agent-skill-drawer { padding: 42px 20px 28px; }
@@ -4133,6 +4126,20 @@ textarea:focus {
 .security-identity-list strong { font-size: 18px; }
 .security-identity-list small { color: var(--muted); font-size: 18px; }
 .security-identity-list > div > div { flex: none; display: flex; gap: 7px; }
+.security-identity-list > div > div > em { padding: 7px 9px; display: inline-flex; align-items: center; gap: 5px; color: var(--primary); border: 1px solid color-mix(in srgb, var(--primary) 22%, var(--line)); border-radius: 999px; background: color-mix(in srgb, var(--primary) 6%, var(--surface)); font-size: 18px; font-style: normal; font-weight: 800; }
+.account-security-controls { margin-top: 16px; display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(270px, .65fr); gap: 15px; }
+.account-security-controls > form,
+.account-security-controls > div { padding: 21px; display: grid; align-content: start; gap: 12px; border: 1px solid var(--line); border-radius: 16px; background: var(--bg-soft); }
+.account-security-controls > form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.account-security-controls > form > div,
+.account-security-controls > form > button { grid-column: 1 / -1; }
+.account-security-controls h3 { margin: 4px 0 0; font-size: 21px; }
+.account-security-controls p { margin: 5px 0 0; color: var(--muted); font-size: 18px; line-height: 1.65; }
+.account-security-controls > form > div > span,
+.account-security-controls > div > div > span { color: var(--accent); font-size: 18px; font-weight: 850; letter-spacing: .12em; }
+.account-security-controls label { display: grid; gap: 6px; color: var(--muted); font-size: 18px; font-weight: 760; }
+.account-security-controls label > div { min-height: 49px; padding: 0 12px; display: flex; align-items: center; gap: 8px; color: var(--primary); border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface); }
+.account-security-controls input { min-width: 0; width: 100%; height: 46px; color: var(--text); border: 0; outline: 0; background: transparent; font: inherit; font-size: 18px; }
 .account-security-note { margin-top: 16px; padding: 14px 16px; display: flex; align-items: flex-start; gap: 10px; color: var(--primary); border: 1px solid color-mix(in srgb, var(--primary) 22%, var(--line)); border-radius: 13px; background: color-mix(in srgb, var(--primary) 5%, var(--surface)); }
 .account-security-note svg { flex: none; margin-top: 3px; }
 .account-security-note p { margin: 0; color: var(--muted); font-size: 18px; line-height: 1.7; }
@@ -4187,7 +4194,7 @@ textarea:focus {
   .account-page { padding-top: 28px; }
   .account-sidebar nav { grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: visible; }
   .account-sidebar nav button { white-space: normal; }
-  .account-overview-grid, .account-billing-grid, .account-security-grid, .minimax-layout { grid-template-columns: 1fr; }
+  .account-overview-grid, .account-billing-grid, .account-security-grid, .account-security-controls, .minimax-layout { grid-template-columns: 1fr; }
   .account-module, .account-overview-grid > section { padding: 18px; }
   .account-module > header { flex-direction: column; }
   .account-form { grid-template-columns: 1fr; }
@@ -4204,6 +4211,9 @@ textarea:focus {
   .account-security-grid > article > header { grid-template-columns: auto minmax(0, 1fr); }
   .account-security-grid > article > header em { grid-column: 2; }
   .security-identity-list > div { align-items: flex-start; flex-direction: column; }
+  .account-security-controls > form { grid-template-columns: 1fr; }
+  .account-security-controls > form > div,
+  .account-security-controls > form > button { grid-column: 1; }
 }
 
 @media (max-width: 480px) {

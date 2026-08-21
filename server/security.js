@@ -87,6 +87,16 @@ export function issueShortDramaSsoToken(user) {
   return `${signingInput}.${signature}`;
 }
 
+export function shouldUseSecureSessionCookie(c, configured = process.env.SESSION_COOKIE_SECURE) {
+  const setting = String(configured || "").trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(setting)) return true;
+  if (["0", "false", "no", "off"].includes(setting)) return false;
+  const forwardedProtocol = String(c?.req?.header?.("x-forwarded-proto") || "").split(",")[0].trim().toLowerCase();
+  if (forwardedProtocol) return forwardedProtocol === "https";
+  try { return new URL(c.req.url).protocol === "https:"; }
+  catch { return process.env.NODE_ENV === "production"; }
+}
+
 export async function issueSession(c, userId, { externalAuth } = {}) {
   await ensureIndexes();
   const raw = `gls_${randomBytes(32).toString("base64url")}`;
@@ -103,7 +113,7 @@ export async function issueSession(c, userId, { externalAuth } = {}) {
   });
   setCookie(c, SESSION_COOKIE, raw, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: shouldUseSecureSessionCookie(c),
     sameSite: "Lax",
     path: "/",
     maxAge: SESSION_AGE_SECONDS,

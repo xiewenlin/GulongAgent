@@ -1,0 +1,10 @@
+[Unit]
+Description=Check the Gulong short-lived IP certificate twice daily
+
+[Timer]
+OnCalendar=*-*-* 03,15:17:00
+RandomizedDelaySec=20m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

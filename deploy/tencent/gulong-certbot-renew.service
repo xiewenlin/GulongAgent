@@ -1,0 +1,12 @@
+[Unit]
+Description=Renew the short-lived Let's Encrypt certificate for the Gulong public IP
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/certbot/bin/certbot renew --quiet --deploy-hook /usr/local/sbin/deploy-gulong-ip-cert
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/etc/letsencrypt /etc/caddy/certs /var/lib/letsencrypt /var/log/letsencrypt

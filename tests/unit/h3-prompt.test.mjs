@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { OpenAPIHono } from "@hono/zod-openapi";
-import { ObjectId } from "mongodb";
 import {
   H3_DEFAULT_CONTROL_TEMPLATE,
   buildH3AuthoringPrompt,
@@ -13,7 +12,7 @@ import {
   stripH3ControlTemplate,
   validateH3CompiledPrompt,
 } from "../../server/h3-prompt.js";
-import { normalizeH3TaskInput, registerH3SharedRoutes, resolveH3TaskPrompt } from "../../server/h3-shared.js";
+import { normalizeH3TaskInput, registerH3SharedRoutes, toH3WorkerTask } from "../../server/h3-shared.js";
 
 function headers(prompt) {
   return [...prompt.matchAll(/^([a-z_]+):/gm)].map((match) => match[1]);
@@ -84,124 +83,57 @@ test("H3 existing official structure is re-hardened instead of trusted verbatim"
   assert.equal(hardened.validation.valid, true);
 });
 
-test("H3 shared resolver translates Chinese through the server model and returns authoring plus compiled prompts", async () => {
-  const translated = compileH3Prompt({ prompt: "A golden koi leaps over a stone gate in one continuous shot.", durationSeconds: 5, assets: {} }).prompt;
-  const input = normalizeH3TaskInput({ prompt: "金色鲤鱼跃过龙门", duration_seconds: 5, assets: { images: [], videos: [], audio: [] } });
-  const resolved = await resolveH3TaskPrompt(input, {
-    loadCredential: async () => ({ token: "test-token", tokenChannel: "免费" }),
-    callModel: async () => ({ text: translated }),
-  });
-  assert.equal(containsCjkText(resolved.compiledPrompt), false);
-  assert.ok(resolved.authoringPrompt.startsWith(H3_DEFAULT_CONTROL_TEMPLATE));
-  assert.equal(stripH3ControlTemplate(resolved.authoringPrompt), resolved.compiledPrompt);
-  assert.equal(resolved.promptCompilation.englishOnly, true);
-  assert.equal(resolved.promptCompilation.ambientOnly, true);
+test("website H3 input preserves the original Chinese prompt for desktop-local optimization", () => {
+  const input = normalizeH3TaskInput({ prompt: "让@图片1中的人物在竹林缓慢回头", authoring_prompt: "SHOULD NOT WIN", optimized_prompt: "SHOULD NOT WIN", duration_seconds: 5, assets: { images: [{ object_key: "h3/requesters/test/assets/picture-1.png" }], videos: [], audio: [] } });
+  assert.equal(input.prompt, "让@图片1中的人物在竹林缓慢回头");
+  assert.equal(input.originalPrompt, input.prompt);
+  assert.equal(input.sourcePrompt, input.prompt);
+  assert.equal(input.compiledPrompt, undefined);
+  assert.equal(input.localPromptOptimizationRequired, true);
+  assert.equal(input.promptMode, "desktop_local_magic_v1");
+  assert.deepEqual(input.promptCompilation, { mode: "desktop_local_magic_v1", source: "execution_node", validated: false, status: "pending" });
 });
 
-test("H3 shared resolver fails closed when Chinese translation service is unavailable", async () => {
-  const input = normalizeH3TaskInput({ prompt: "竹林中的人物缓慢回头", duration_seconds: 5, assets: { images: [], videos: [], audio: [] } });
-  await assert.rejects(
-    resolveH3TaskPrompt(input, { loadCredential: async () => null, callModel: async () => ({ text: "" }) }),
-    (error) => error.code === "H3_PROMPT_TRANSLATION_UNAVAILABLE" && error.status === 503,
-  );
-});
-
-test("web H3 composer keeps the lucide magic action after duration and fills editable authoring prompt", async () => {
+test("web H3 composer removes every magic optimization control and submits only the original prompt", async () => {
   const source = await readFile(new URL("../../src/components/WebAgentPage.jsx", import.meta.url), "utf8");
-  const durationSelect = source.indexOf("select value={duration}");
-  const magicButton = source.indexOf("agent-h3-magic", durationSelect);
-  const modelSelect = source.indexOf("agent-model-select", durationSelect);
-  assert.ok(durationSelect >= 0 && magicButton > durationSelect && modelSelect > magicButton);
-  assert.match(source, /import \{ WandSparkles \} from "lucide-react"/);
-  assert.match(source, /result\.authoring_prompt \|\| result\.optimized_prompt/);
-  assert.match(source, /setDraft\(optimized\)/);
-  assert.match(source, /authoring_prompt: content/);
+  assert.match(source, /model: H3_SHARED_MODEL\.id, prompt: content, conversation_id:/);
+  assert.doesNotMatch(source, /WandSparkles|agent-h3-magic|optimizeH3Prompt|h3PromptState|h3OriginalPrompt/);
+  assert.doesNotMatch(source, /authoring_prompt|optimized_prompt|\/api\/h3\/prompts\/optimize/);
 });
 
-test("H3 optimizer endpoint returns the editable control template and a separate pure-English compiled prompt", async () => {
+test("website H3 optimizer endpoint is retired with a Chinese migration response", async () => {
   const isolated = new OpenAPIHono();
-  const auditRows = [];
-  const modelPrompt = compileH3Prompt({ prompt: "Two people run through a bamboo grove in one continuous shot.", durationSeconds: 10, assets: { images: [{}, {}], videos: [], audio: [] } }).prompt;
   registerH3SharedRoutes(isolated, {
-    getCollection: async (name) => name === "h3TaskAudits"
-      ? { insertOne: async (row) => auditRows.push(row) }
-      : { findOne: async () => null, insertOne: async () => ({}), updateOne: async () => ({}), updateMany: async () => ({}), find: () => ({ sort() { return this; }, limit() { return this; }, async toArray() { return []; } }) },
+    getCollection: async () => ({ findOne: async () => null }),
     enforceRateLimit: async () => ({ allowed: true }),
-    authenticate: async () => ({ user: { id: new ObjectId().toString(), role: "user" } }),
+    authenticate: async () => ({ error: new Response(null, { status: 401 }) }),
     requireAdmin: async () => ({ error: new Response(null, { status: 403 }) }),
     requireTrustedMutation: () => null,
     verifyActivationReceipt: async () => null,
-    loadPearApiTextCredential: async () => ({ token: "test-token", tokenChannel: "免费" }),
-    callPearApiChat: async () => ({ text: modelPrompt }),
   });
   const response = await isolated.request("http://localhost/api/h3/prompts/optimize", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ prompt: "让@图片1和@图片2中的人物在竹林奔跑", duration_seconds: 10, aspect_ratio: "16:9", assets: { images: [{}, {}], videos: [], audio: [] } }),
+    body: JSON.stringify({ prompt: "原始中文提示词" }),
   });
-  assert.equal(response.status, 200);
+  assert.equal(response.status, 410);
   const payload = await response.json();
-  assert.ok(payload.authoring_prompt.startsWith(H3_DEFAULT_CONTROL_TEMPLATE));
-  assert.equal(payload.optimized_prompt, payload.authoring_prompt);
-  assert.equal(containsCjkText(payload.compiled_prompt), false);
-  assert.doesNotMatch(payload.compiled_prompt, /用户自定义控制|画外音/);
-  assert.match(payload.compiled_prompt, /<Subject 1>.*<Picture 1>/s);
-  assert.match(payload.compiled_prompt, /no dialogue, voice-over, narration/i);
-  assert.equal(payload.validation.ambient_only, true);
-  assert.equal(auditRows[0].event, "prompt_optimized");
+  assert.equal(payload.code, "PROMPT_OPTIMIZATION_MOVED_TO_DESKTOP");
+  assert.match(payload.message, /原始中文提示词.*桌面端.*本地自动优化/);
 });
 
-test("H3 optimizer endpoint refuses an invalid translation instead of falling back to Chinese", async () => {
-  const isolated = new OpenAPIHono();
-  registerH3SharedRoutes(isolated, {
-    getCollection: async () => ({ findOne: async () => null, insertOne: async () => ({}), updateOne: async () => ({}), updateMany: async () => ({}), find: () => ({ sort() { return this; }, limit() { return this; }, async toArray() { return []; } }) }),
-    enforceRateLimit: async () => ({ allowed: true }),
-    authenticate: async () => ({ user: { id: new ObjectId().toString(), role: "user" } }),
-    requireAdmin: async () => ({ error: new Response(null, { status: 403 }) }),
-    requireTrustedMutation: () => null,
-    verifyActivationReceipt: async () => null,
-    loadPearApiTextCredential: async () => ({ token: "test-token", tokenChannel: "免费" }),
-    callPearApiChat: async () => ({ text: "这是仍然包含中文的无效结果" }),
-  });
-  const response = await isolated.request("http://localhost/api/h3/prompts/optimize", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ prompt: "镜头缓慢推进", duration_seconds: 10, aspect_ratio: "16:9", assets: { images: [], videos: [], audio: [] } }),
-  });
-  assert.equal(response.status, 422);
-  const payload = await response.json();
-  assert.equal(payload.code, "H3_PROMPT_TRANSLATION_FAILED");
-  assert.match(payload.message, /已阻止|不会/);
-});
-
-test("POST /api/h3/tasks applies the same fail-closed compiler before task insert or wallet charge", async () => {
-  const isolated = new OpenAPIHono();
-  let taskInserts = 0;
-  let walletWrites = 0;
-  registerH3SharedRoutes(isolated, {
-    getCollection: async (name) => {
-      if (name === "h3SharedTasks") return { findOne: async () => null, insertOne: async () => { taskInserts += 1; } };
-      if (name === "wallets" || name === "h3WalletLedger") return { findOne: async () => null, updateOne: async () => { walletWrites += 1; } };
-      return { findOne: async () => null, insertOne: async () => ({}), updateOne: async () => ({}), updateMany: async () => ({}) };
-    },
-    queueCoordinator: { invalidate: async () => {} },
-    enforceRateLimit: async () => ({ allowed: true }),
-    authenticate: async () => ({ user: { id: new ObjectId().toString(), email: "member@example.com", role: "user" } }),
-    requireAdmin: async () => ({ error: new Response(null, { status: 403 }) }),
-    requireTrustedMutation: () => null,
-    verifyActivationReceipt: async () => null,
-    loadPearApiTextCredential: async () => ({ token: "test-token", tokenChannel: "免费" }),
-    callPearApiChat: async () => ({ text: "未翻译的中文模型结果" }),
-  });
-  const response = await isolated.request("http://localhost/api/h3/tasks", {
-    method: "POST",
-    headers: { "content-type": "application/json", "Idempotency-Key": "fail-closed-task-001" },
-    body: JSON.stringify({ source_channel: "website", model: "minimax_h3_shared", prompt: "人物走过竹林", duration_seconds: 5, aspect_ratio: "16:9", profile: "balanced", assets: { images: [], videos: [], audio: [] } }),
-  });
-  assert.equal(response.status, 422);
-  assert.equal((await response.json()).code, "H3_PROMPT_TRANSLATION_FAILED");
-  assert.equal(taskInserts, 0);
-  assert.equal(walletWrites, 0);
+test("worker task receives only the original prompt plus mandatory local optimization contract", () => {
+  const task = normalizeH3TaskInput({ prompt: "金色鲤鱼跃过龙门", duration_seconds: 5, assets: { images: [], videos: [], audio: [] } });
+  const dto = toH3WorkerTask({ _id: "task-1", orderNo: "H3-1", ...task });
+  assert.equal(dto.prompt, "金色鲤鱼跃过龙门");
+  assert.equal(dto.source_prompt, dto.prompt);
+  assert.equal(dto.original_prompt, dto.prompt);
+  assert.equal(dto.prompt_mode, "desktop_local_magic_v1");
+  assert.equal(dto.local_prompt_optimization_required, true);
+  assert.deepEqual(dto.progress_callback.first_required_fields, ["estimated_total_seconds", "compiled_prompt"]);
+  assert.equal(dto.progress_callback.optimization_status, "optimizing");
+  assert.equal(dto.compiled_prompt, undefined);
+  for (const forbidden of ["requester", "priceFen", "walletLedgerId", "bindingId"]) assert.equal(Object.hasOwn(dto, forbidden), false);
 });
 
 test("buildH3AuthoringPrompt never changes the compiled model body", () => {

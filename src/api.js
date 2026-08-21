@@ -66,12 +66,26 @@ export function formatMoney(fen) {
   }).format(Number(fen || 0) / 100);
 }
 
+export function createClientRequestId(cryptoSource = globalThis.crypto) {
+  const nativeId = cryptoSource?.randomUUID?.();
+  if (nativeId) return nativeId;
+  const bytes = new Uint8Array(16);
+  if (typeof cryptoSource?.getRandomValues === "function") cryptoSource.getRandomValues(bytes);
+  else {
+    const seed = `${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`.padEnd(32, "0");
+    for (let index = 0; index < bytes.length; index += 1) bytes[index] = Number.parseInt(seed.slice(index * 2, index * 2 + 2), 16) || 0;
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((value) => value.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 function analyticsId(storage, key) {
   try {
     const current = storage.getItem(key);
     if (current) return current;
-    const generated = globalThis.crypto?.randomUUID?.().replaceAll("-", "")
-      || `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+    const generated = createClientRequestId().replaceAll("-", "");
     storage.setItem(key, generated);
     return generated;
   } catch {

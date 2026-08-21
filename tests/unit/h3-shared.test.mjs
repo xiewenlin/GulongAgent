@@ -89,7 +89,11 @@ test("H3 worker task DTO excludes requester and billing identity", () => {
     _id: new ObjectId("66c000000000000000000010"),
     orderNo: "GLH3TEST",
     model: "minimax_h3_shared",
-    prompt: "render safely",
+    prompt: "让古龙跃过云海，保持原始中文",
+    sourcePrompt: "让古龙跃过云海，保持原始中文",
+    originalPrompt: "让古龙跃过云海，保持原始中文",
+    localPromptOptimizationRequired: true,
+    promptMode: "desktop_local_magic_v1",
     aspectRatio: "16:9",
     durationSeconds: 15,
     profile: "balanced",
@@ -105,8 +109,12 @@ test("H3 worker task DTO excludes requester and billing identity", () => {
     assets: [{ type: "image", download_url: "https://example.invalid/signed" }],
     outputUpload: { url: "https://example.invalid/upload", object_key: "h3/tasks/test/output.mp4" },
   });
-  assert.deepEqual(Object.keys(task), ["id", "orderNo", "model", "prompt", "aspectRatio", "durationSeconds", "profile", "imageCount", "videoCount", "audioCount", "assets", "output_upload", "progress_callback"]);
-  assert.deepEqual(task.progress_callback.first_required_fields, ["estimated_total_seconds"]);
+  assert.deepEqual(Object.keys(task), ["id", "orderNo", "model", "prompt", "source_prompt", "original_prompt", "prompt_mode", "local_prompt_optimization_required", "aspectRatio", "durationSeconds", "profile", "imageCount", "videoCount", "audioCount", "assets", "output_upload", "progress_callback"]);
+  assert.equal(task.prompt, "让古龙跃过云海，保持原始中文");
+  assert.equal(task.prompt_mode, "desktop_local_magic_v1");
+  assert.equal(task.local_prompt_optimization_required, true);
+  assert.deepEqual(task.progress_callback.first_required_fields, ["estimated_total_seconds", "compiled_prompt"]);
+  assert.equal(task.progress_callback.optimization_status, "optimizing");
   const serialized = JSON.stringify(task);
   assert.doesNotMatch(serialized, /requester|private@example\.com|priceFen|walletLedger|bindingId/);
 });
@@ -634,12 +642,17 @@ test("H3 OpenAPI publishes binding, assets, desktop tool, claim and callback con
   assert.deepEqual(document.paths["/api/desktop/earnings/summary"].get.security, [{ accountBinding: [] }]);
   assert.match(document.paths["/api/h3/tasks/claim"].post.description, /max_duration_seconds/);
   assert.match(document.paths["/api/h3/tasks/claim"].post.description, /oldest|从旧到新/);
-  assert.match(document.paths["/api/h3/tasks/claim"].post.description, /additional_tasks/);
+  assert.match(document.paths["/api/h3/tasks/claim"].post.description, /local_prompt_optimization_v1/);
   assert.equal(document.paths["/api/h3/tasks/claim"].post.requestBody.content["application/json"].schema.properties.capabilities.properties.batch_claim.type, "boolean");
+  assert.equal(document.paths["/api/h3/tasks/claim"].post.requestBody.content["application/json"].schema.properties.capabilities.properties.local_prompt_optimization_v1.type, "boolean");
   assert.match(document.paths["/api/h3/tasks/callback"].post.description, /HEAD/);
   assert.match(document.paths["/api/h3/tasks/callback"].post.description, /estimated_total_seconds/);
-  assert.match(document.paths["/api/h3/prompts/optimize"].post.description, /<Picture 1>/);
-  assert.match(document.paths["/api/h3/tasks"].post.description, /确定性编译/);
+  assert.match(document.paths["/api/h3/tasks/callback"].post.description, /compiled_prompt/);
+  assert.match(document.paths["/api/h3/tasks/callback"].post.description, /optimizing/);
+  assert.equal(document.paths["/api/h3/prompts/optimize"].post.deprecated, true);
+  assert.ok(document.paths["/api/h3/prompts/optimize"].post.responses["410"]);
+  assert.match(document.paths["/api/h3/tasks"].post.description, /原样保存 prompt/);
+  assert.match(document.paths["/api/h3/tasks"].post.description, /不翻译/);
   assert.match(document.paths["/api/h3/tasks/{id}/output"].get.description, /24 小时/);
 });
 
@@ -659,6 +672,8 @@ test("H3 implementation keeps identity, capability, COS ownership and ledger gat
   assert.ok(dryRunBranch > -1 && queueMutation > dryRunBranch, "dry-run returns before the first queue mutation so the queue cannot decrease");
   assert.match(source, /sort: \{ createdAt: 1, _id: 1 \}/);
   assert.match(source, /calculateH3ClaimPlan[\s\S]+additional_tasks:[\s\S]+poll_after_ms/);
+  assert.match(source, /localPromptOptimizationV1[\s\S]+localPromptOptimizationRequired: \{ \$ne: true \}/);
+  assert.match(source, /LOCAL_PROMPT_OPTIMIZATION_REQUIRED[\s\S]+compiled_prompt/);
   assert.match(source, /imageCount: \{ \$lte: maxImageCount \}[\s\S]+videoCount: \{ \$lte: maxVideoCount \}[\s\S]+audioCount: \{ \$lte: maxAudioCount \}/);
   assert.match(source, /OUTPUT_OBJECT_FORBIDDEN[\s\S]+inspectCosObject\(objectKey\)[\s\S]+x-cos-meta-sha256/);
   assert.match(source, /ledgerKeys: \{ \$ne: ledgerKey \}[\s\S]+balanceFen: -amountFen/);
@@ -673,6 +688,7 @@ test("H3 implementation keeps identity, capability, COS ownership and ledger gat
   assert.match(account, /kind: "recharge", provider: "offline"/);
   assert.match(agent, /source_channel: "website"/);
   assert.match(agent, /minimax_h3_shared/);
+  assert.doesNotMatch(agent, /WandSparkles|optimizeH3Prompt|h3PromptState|agent-h3-magic/);
   assert.match(agent, /请尽快下载，视频将在生成完成后 24 小时自动删除/);
   assert.match(agent, /expectedCompletedAt[\s\S]+progress/);
   assert.match(review, /账户余额充值/);

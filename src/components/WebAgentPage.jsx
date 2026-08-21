@@ -19,10 +19,9 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { WandSparkles } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { apiFetch, formatMoney } from "../api.js";
+import { apiFetch, createClientRequestId, formatMoney } from "../api.js";
 
 const MAX_ATTACHMENTS = 16;
 const MAX_ATTACHMENT_BYTES = 192 * 1024 * 1024;
@@ -128,9 +127,10 @@ function MediaResult({ item }) {
   if (item.h3Task && item.h3Task.status !== "completed") {
     const failed = ["failed", "cancelled", "rejected"].includes(item.h3Task.status);
     const progress = Math.min(99, Math.max(0, Number(item.h3Task.progress || 0)));
+    const optimizingPrompt = item.h3Task.progressStage === "prompt_optimization";
     return <section className={`agent-h3-progress ${failed ? "failed" : "running"}`}>
-      <header><span><SpinnerGap size={20} className={failed ? "" : "agent-spin"} />{failed ? "视频任务未完成" : "共享节点正在制作视频"}</span><strong>{failed ? "已结束" : `${progress}%`}</strong></header>
-      {!failed && <><div className="agent-h3-progress-track"><i style={{ width: `${Math.max(2, progress)}%` }} /></div><div className="agent-h3-progress-meta"><span>{item.h3Task.estimatedTotalSeconds ? `预计总耗时 ${Math.ceil(item.h3Task.estimatedTotalSeconds / 60)} 分钟` : "节点正在估算制作时间"}</span><span>{item.h3Task.expectedCompletedAt ? `预计完成：${new Date(item.h3Task.expectedCompletedAt).toLocaleString("zh-CN")}` : "等待节点首次耗时回调"}</span></div></>}
+      <header><span><SpinnerGap size={20} className={failed ? "" : "agent-spin"} />{failed ? "视频任务未完成" : optimizingPrompt ? "本地节点正在优化中文提示词" : "共享节点正在制作视频"}</span><strong>{failed ? "已结束" : optimizingPrompt ? "准备中" : `${progress}%`}</strong></header>
+      {!failed && <><div className="agent-h3-progress-track"><i style={{ width: `${Math.max(2, progress)}%` }} /></div><div className="agent-h3-progress-meta"><span>{optimizingPrompt ? "由 MiniMax H3 极速视频桌面端自动完成，无需手动优化" : item.h3Task.estimatedTotalSeconds ? `预计总耗时 ${Math.ceil(item.h3Task.estimatedTotalSeconds / 60)} 分钟` : "节点正在估算制作时间"}</span><span>{optimizingPrompt ? "优化完成后自动开始视频生成" : item.h3Task.expectedCompletedAt ? `预计完成：${new Date(item.h3Task.expectedCompletedAt).toLocaleString("zh-CN")}` : "等待节点首次耗时回调"}</span></div></>}
       <small>订单号：{item.h3Task.orderNo}{item.h3Task.progressUpdatedAt ? ` · 更新于 ${new Date(item.h3Task.progressUpdatedAt).toLocaleTimeString("zh-CN")}` : ""}</small>
     </section>;
   }
@@ -222,8 +222,6 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
   const [skillOpen, setSkillOpen] = useState(false);
   const [quotaPrompt, setQuotaPrompt] = useState("");
   const [liveWorkflow, setLiveWorkflow] = useState(null);
-  const [h3PromptState, setH3PromptState] = useState({ status: "idle", optimized: "" });
-  const [h3OriginalPrompt, setH3OriginalPrompt] = useState("");
   const inputRef = useRef(null);
   const endRef = useRef(null);
   const pollersRef = useRef(new Map());
@@ -306,8 +304,6 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
     setModel(nextType === "text" ? (bootstrap?.defaultModel || "glm-4-flash-250414") : nextType === "video" ? H3_SHARED_MODEL.id : (bootstrap?.mediaDefaults?.[nextType] || `auto-${nextType}`));
     if (nextType === "video") setDuration(5);
     setAttachments((current) => nextType === "text" ? current : current.filter((file) => file.type.startsWith("image/")));
-    setH3PromptState({ status: "idle", optimized: "" });
-    setH3OriginalPrompt("");
     setMessage("");
   }
 
@@ -319,28 +315,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
         setAttachments([]);
       } else if (!(bootstrap?.mediaOptions?.videoDurations || [5]).includes(duration)) setDuration(5);
     }
-    setH3PromptState({ status: "idle", optimized: "" });
-    setH3OriginalPrompt("");
     setMessage("");
-  }
-
-  async function optimizeH3Prompt() {
-    const original = draft.trim();
-    if (!isH3Video || !original || h3PromptState.status === "processing" || sending) return;
-    setH3PromptState({ status: "processing", optimized: "" });
-    setMessage("");
-    try {
-      const result = await apiFetch("/api/h3/prompts/optimize", { method: "POST", body: JSON.stringify({ prompt: original, duration_seconds: duration, aspect_ratio: aspectRatio, assets: { images: [], videos: [], audio: [] } }) });
-      const optimized = String(result.authoring_prompt || result.optimized_prompt || "").trim();
-      if (!optimized) throw new Error("提示词优化结果为空，请重试");
-      setH3OriginalPrompt(original);
-      setDraft(optimized);
-      setH3PromptState({ status: "success", optimized, fallback: Boolean(result.fallback) });
-      setTimeout(() => inputRef.current?.focus(), 0);
-    } catch (error) {
-      setH3PromptState({ status: "failed", optimized: "" });
-      setMessage(error.message || "提示词优化失败，请稍后重试");
-    }
   }
 
   function pollMedia(jobId) {
@@ -402,23 +377,21 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
       { id: "format", title: creationType === "text" ? "排版回复" : "生成结果", status: "pending", elapsedMs: null },
     ];
     setLiveWorkflow(operationId ? { operationId, totalMs: 0, nodes: workflowNodes } : null);
-    const visibleUser = { role: "user", content: isH3Video && h3OriginalPrompt ? h3OriginalPrompt : content, createdAt: new Date().toISOString(), attachments: attachments.map((file) => ({ name: file.name, size: file.size, type: file.type })) };
+    const visibleUser = { role: "user", content, createdAt: new Date().toISOString(), attachments: attachments.map((file) => ({ name: file.name, size: file.size, type: file.type })) };
     const nextMessages = [...messages, visibleUser];
     setMessages(nextMessages); setDraft(""); setAttachments([]);
     try {
       if (isH3Video) {
-        const idempotencyKey = crypto.randomUUID();
-        const result = await apiFetch("/api/h3/tasks", { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ source_channel: "website", model: H3_SHARED_MODEL.id, prompt: content, original_prompt: h3OriginalPrompt || content, authoring_prompt: content, optimized_prompt: h3OriginalPrompt ? content : undefined, conversation_id: conversationId || undefined, aspect_ratio: aspectRatio, duration_seconds: duration, profile: "balanced", assets: { images: [], videos: [], audio: [] } }) });
+        const idempotencyKey = createClientRequestId();
+        const result = await apiFetch("/api/h3/tasks", { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ source_channel: "website", model: H3_SHARED_MODEL.id, prompt: content, conversation_id: conversationId || undefined, aspect_ratio: aspectRatio, duration_seconds: duration, profile: "balanced", assets: { images: [], videos: [], audio: [] } }) });
         rememberConversation(result.task.conversationId);
-        setH3PromptState({ status: "idle", optimized: "" });
-        setH3OriginalPrompt("");
         setMessages((current) => [...current, { role: "assistant", content: `MiniMaxH3共享节点任务已创建。\n\n订单号：${result.task.orderNo}\n\n${user.role === "admin" ? "管理员免扣费，本任务不产生分佣。" : `已从余额预扣：${formatMoney(result.billing?.chargedFen ?? result.task.priceFen)}\n\n剩余余额：${formatMoney(result.billing?.remainingBalanceFen || 0)}`}\n\n状态：等待桌面节点领取。视频生成完成后会自动回到当前会话；最终失败会自动退款。`, createdAt: new Date().toISOString(), model: H3_SHARED_MODEL.id, h3TaskId: result.task.id, h3Task: { id: result.task.id, orderNo: result.task.orderNo, status: result.task.status, progress: 0, createdAt: result.task.createdAt } }]);
         apiFetch("/api/agent/bootstrap").then(setBootstrap).catch(() => {});
         return;
       }
       if (creationType !== "text") {
         const referenceImages = await Promise.all(attachments.filter((file) => file.type.startsWith("image/")).map(imageDataUrl));
-        const result = await apiFetch("/api/agent/media", { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({
+        const result = await apiFetch("/api/agent/media", { method: "POST", headers: { "Idempotency-Key": createClientRequestId() }, body: JSON.stringify({
           modality: creationType, model, prompt: content, conversationId: conversationId || undefined, referenceImages, imageSize, aspectRatio, duration,
         }) });
         rememberConversation(result.job.conversationId);
@@ -473,12 +446,12 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
           {!bootstrap?.subscription?.active && !loading && <div className="agent-membership-gate"><div><Coins size={24} weight="duotone" /><span><strong>会员订阅尚未生效</strong><small>免费文字对话需开通会员；付费图片与视频可使用已有余额按次创作。</small></span></div><button type="button" onClick={() => navigate("/pricing")}>查看会员 <ArrowRight size={16} /></button></div>}
           <div className="agent-mode-row"><div className="agent-creation-hint">{creationType === "text" ? "免费文字对话" : isH3Video ? `${formatMoney(Number(duration || 0) * 20)} · MiniMaxH3共享节点预估价` : (selectedModel?.priceLabel || "按实际模型计费")}</div><span>{draft.length} / {isH3Video ? 20000 : 4096}</span></div>
           {attachments.length > 0 && <div className="agent-attachment-row">{attachments.map((file, index) => <span key={`${file.name}-${index}`}><File size={16} /><b>{file.name}</b><small>{byteText(file.size)}</small><button type="button" aria-label={`移除 ${file.name}`} onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button></span>)}</div>}
-          <textarea ref={inputRef} maxLength={isH3Video ? 20000 : 4096} value={draft} onChange={(event) => { const next = event.target.value; setDraft(next); if (h3PromptState.status === "success" && next !== h3PromptState.optimized) { setH3PromptState({ status: "idle", optimized: "" }); setH3OriginalPrompt(""); } }} onKeyDown={keyDown} placeholder="描述任务；上传附件后输入你的要求。Enter 发送，Shift + Enter 换行" />
+          <textarea ref={inputRef} maxLength={isH3Video ? 20000 : 4096} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keyDown} placeholder="描述任务；上传附件后输入你的要求。Enter 发送，Shift + Enter 换行" />
           <footer>
             <label className="agent-attach-button" title={creationType === "text" ? "最多 12 个附件" : isH3Video ? "完整素材请从桌面 Agent 提交" : "上传参考图，每张不超过 600 KB"}><Paperclip size={20} /><span>{creationType === "text" ? "附件" : isH3Video ? "桌面素材" : "参考图"}</span><input type="file" multiple accept={creationType === "text" ? "image/*,video/*,.txt,.md,.csv,.json,.pdf,.docx,.xlsx,.pptx" : "image/jpeg,image/png,image/webp"} onChange={pickAttachments} /></label>
             <div className="agent-type-select"><span>{creationType === "text" ? <TextT size={18} /> : creationType === "image" ? <ImageSquare size={18} /> : <VideoCamera size={18} />}</span><select value={creationType} onChange={(event) => changeCreationType(event.target.value)}><option value="text">文字</option><option value="image">图片</option><option value="video">视频</option></select></div>
             {creationType === "image" && <div className="agent-parameter-select"><select value={imageSize} onChange={(event) => setImageSize(event.target.value)}>{(bootstrap?.mediaOptions?.imageSizes || ["1:1"]).map((value) => <option key={value} value={value}>{value}</option>)}</select></div>}
-            {creationType === "video" && <><div className="agent-parameter-select"><select value={aspectRatio} onChange={(event) => { setAspectRatio(event.target.value); setH3PromptState({ status: "idle", optimized: "" }); setH3OriginalPrompt(""); }}><option value="16:9">16:9 横屏</option><option value="9:16">9:16 竖屏</option></select></div><div className="agent-parameter-select"><select value={duration} onChange={(event) => { setDuration(Number(event.target.value)); setH3PromptState({ status: "idle", optimized: "" }); setH3OriginalPrompt(""); }}>{(isH3Video ? H3_VIDEO_DURATIONS : bootstrap?.mediaOptions?.videoDurations || [5]).map((value) => <option key={value} value={value}>{value} 秒</option>)}</select></div>{isH3Video && <button className={`agent-h3-magic ${h3PromptState.status}`} type="button" onClick={optimizeH3Prompt} disabled={!draft.trim() || sending || h3PromptState.status === "processing"} aria-label="魔法提示词优化" title="魔法提示词优化">{h3PromptState.status === "processing" ? <SpinnerGap size={18} className="agent-spin" /> : <WandSparkles size={18} aria-hidden="true" />}<span>{h3PromptState.status === "processing" ? "优化中" : h3PromptState.status === "success" ? "已优化" : h3PromptState.status === "failed" ? "重试" : "魔法优化"}</span></button>}</>}
+            {creationType === "video" && <><div className="agent-parameter-select"><select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)}><option value="16:9">16:9 横屏</option><option value="9:16">9:16 竖屏</option></select></div><div className="agent-parameter-select"><select value={duration} onChange={(event) => setDuration(Number(event.target.value))}>{(isH3Video ? H3_VIDEO_DURATIONS : bootstrap?.mediaOptions?.videoDurations || [5]).map((value) => <option key={value} value={value}>{value} 秒</option>)}</select></div></>}
             <div className="agent-model-select"><select value={model} onChange={(event) => changeModel(event.target.value)}>{availableModels.map((item) => <option value={item.id} key={item.id}>{item.name}{creationType === "text" ? " · 免费" : ` · ${item.priceLabel}`}</option>)}</select><Check size={15} weight="bold" /></div>
             <button className="agent-send-button" type="button" aria-label="发送" disabled={!draft.trim() || sending || loading} onClick={send}>{sending ? <SpinnerGap size={22} className="agent-spin" /> : <PaperPlaneRight size={22} weight="fill" />}</button>
           </footer>

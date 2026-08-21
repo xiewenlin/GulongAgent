@@ -48,6 +48,10 @@ Chandler 用户是全局账号：在古龙版桌面端或永生花版桌面端�
 - 邮箱验证：`POST /api/account/security/email/send-verification`、`POST /api/account/security/email/verify`
 - 手机号绑定：`POST /api/account/security/phone/bind`
 - 手机号验证 / 解绑：`POST` / `DELETE /api/account/security/identities/{identityId}`
+- 设置主身份：`POST /api/account/security/identities/{identityId}/primary`
+- 发送敏感操作再认证码：`POST /api/account/security/reauth/send`
+- 登录态修改密码：`POST /api/account/security/password/change`
+- 注销全部设备：`POST /api/account/security/sessions/logout-all`
 
 注册表单只接受邮箱，不提供手机号注册。手机号绑定要求 Chandler 邮箱已验证，并再次校验当前密码或短期再认证码。公开发送接口采用固定响应语义、60 秒客户端冷却、IP 和目标摘要双重限流，避免账号枚举与短信轰炸；账号安全接口只接受当前 Chandler 登录会话，响应禁止缓存。
 
@@ -97,9 +101,15 @@ COS_BUCKET=gulong-1259744534
 COS_REGION=ap-chengdu
 COS_DOMAIN=gulong-1259744534.cos.ap-chengdu.myqcloud.com
 RELEASE_WORKER_KEY=<官网与工作器共享的随机密钥>
+# 通常留空：按 X-Forwarded-Proto/请求 URL 决定。临时 HTTP 直连可设 false；HTTPS 必须为 true。
+SESSION_COOKIE_SECURE=
 ```
 
 所有敏感变量只进入 Vercel Environment Variables 或受保护的本机用户环境，不能写入 Git、前端 `VITE_*` 变量、日志或截图。
+
+腾讯云服务器如果暂时只能通过 `http://服务器IP` 访问，会话 Cookie 必须跟随外部 HTTP 协议且不能携带 `Secure`，否则登录接口虽然成功，后续管理员请求不会带回会话，页面就会提示“请先登录或提供有效管理员凭据”。本项目默认自动读取反向代理的 `X-Forwarded-Proto` 解决该问题。
+
+当前腾讯云直连入口使用 Let’s Encrypt 免费公有 IP 短期证书，通过 Certbot 5.4+ 的 `--ip-address` 与 `--preferred-profile shortlived` 签发；Caddy 加载证书并把 HTTP 308 跳转到 HTTPS。证书有效期约 6 天，因此 `gulong-certbot-renew.timer` 每天检查两次，并在续签成功后执行 `/usr/local/sbin/deploy-gulong-ip-cert` 原子覆盖 Caddy 证书副本和热重载。配置模板位于 `deploy/tencent/`。正式域名备案完成后仍应迁移到自有域名证书，不再长期依赖 IP 入口。
 
 ## 8. 管理员数据看板与统计口径
 

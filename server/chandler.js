@@ -296,6 +296,35 @@ export function deleteChandlerIdentity(accessToken, identityId) {
   });
 }
 
+export function setPrimaryChandlerIdentity(accessToken, identityId) {
+  return chandlerRequest(`/v1/me/identities/${encodeURIComponent(identityId)}/primary`, {
+    method: "POST",
+    accessToken,
+  });
+}
+
+export function sendChandlerReauthCode(accessToken) {
+  return chandlerRequest("/v1/auth/reauth/send", {
+    method: "POST",
+    accessToken,
+  });
+}
+
+export function changeChandlerPassword(accessToken, oldPassword, newPassword) {
+  return chandlerRequest("/v1/auth/change-password", {
+    method: "POST",
+    accessToken,
+    body: { old_password: oldPassword, new_password: newPassword },
+  });
+}
+
+export function logoutAllFromChandler(accessToken) {
+  return chandlerRequest("/v1/auth/logout-all", {
+    method: "POST",
+    accessToken,
+  });
+}
+
 export function sendChandlerVerificationEmail(accessToken) {
   return chandlerRequest("/v1/auth/send-verification-email", {
     method: "POST",

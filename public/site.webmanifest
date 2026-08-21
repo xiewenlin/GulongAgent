@@ -1,0 +1,18 @@
+{
+  "name": "古龙 Gulong Agent Engine｜让每个人都拥有自己的 AI 团队",
+  "short_name": "古龙 Gulong Agent Engine",
+  "description": "让每个人都拥有自己的 AI 团队",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#fbfaf6",
+  "theme_color": "#fbfaf6",
+  "icons": [
+    {
+      "src": "/assets/themes/gulong-theme-yuci-3d-v2.png",
+      "sizes": "any",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

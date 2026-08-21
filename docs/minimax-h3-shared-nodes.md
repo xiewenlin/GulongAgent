@@ -148,6 +148,8 @@ priceFen = duration_seconds * 20 + image_count * 5 + video_count * 20
 
 创建时钱包原子预扣。余额不足：HTTP 402。
 
+官网只保存并排队用户输入的原始中文 `prompt`，不提供“魔法优化”按钮，也不会在服务器端翻译或编译。新任务会标记 `prompt_mode=desktop_local_magic_v1`，由领取任务的 MiniMax H3 极速视频桌面端在本地自动优化；原文始终保留用于审计。
+
 ```json
 {
   "code": "INSUFFICIENT_BALANCE",
@@ -173,12 +175,13 @@ priceFen = duration_seconds * 20 + image_count * 5 + video_count * 20
     "vram_mb": 24576,
     "max_image_count": 9,
     "max_video_count": 3,
-    "max_audio_count": 3
+    "max_audio_count": 3,
+    "local_prompt_optimization_v1": true
   }
 }
 ```
 
-领取使用单次 `findOneAndUpdate`，筛选 `queued`、模型、最大时长、profile 以及三类素材上限。没有适配任务时返回 `{ "task": null }`。
+领取使用单次 `findOneAndUpdate`，筛选 `queued`、模型、最大时长、profile、三类素材上限和本地提示词优化能力。未声明 `local_prompt_optimization_v1=true` 的旧节点不会领取新任务。没有适配任务时返回 `{ "task": null }`。
 
 “测试连接”必须发送 `dry_run: true`。服务端完成绑定身份、能力和限流校验后直接返回：
 
@@ -188,7 +191,9 @@ priceFen = duration_seconds * 20 + image_count * 5 + video_count * 20
 
 此分支不会读取或减少队列，不会改变任何任务状态，也不会签发输入下载或输出上传票据。正式轮询发送 `dry_run: false`。
 
-正式领取返回的是专用的最小权限 `workerTask`，仅包含 `id`、`orderNo`、`model`、`prompt`、`aspectRatio`、`durationSeconds`、`profile`、三类素材数量、短时素材下载票据和 `output_upload`。它不会包含 `requester`、需求用户邮箱或 ID、`priceFen`、`walletLedgerId`、内部账号绑定、领取节点身份等字段，局域网渲染节点因此看不到需求用户的账号信息。管理员和订单本人通过各自受权查询接口查看完整订单。
+正式领取返回的是专用的最小权限 `workerTask`，仅包含 `id`、`orderNo`、`model`、原始中文 `prompt` / `source_prompt` / `original_prompt`、`prompt_mode=desktop_local_magic_v1`、`local_prompt_optimization_required=true`、视频参数、三类素材数量、短时素材下载票据和 `output_upload`。它不会包含 `requester`、需求用户邮箱或 ID、`priceFen`、`walletLedgerId`、内部账号绑定、领取节点身份等字段，局域网渲染节点因此看不到需求用户的账号信息。管理员和订单本人通过各自受权查询接口查看完整订单。
+
+节点领取后必须先回调 `status=optimizing`，在本机调用 PromptEngine 完成魔法优化；成功后再回调 `status=started`，并提交本地产生的 `compiled_prompt`、`estimated_total_seconds` 和可选的 `prompt_optimization.engine/version/elapsed_seconds`。服务端收到并保存编译结果前，不接受生成进度或成功回调；本地优化失败时节点直接回调 `failed`，不得启动 H3 推理。
 
 有任务时，每个输入素材带 15 分钟下载票据：
 

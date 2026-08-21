@@ -6,6 +6,7 @@ import app from "../../server/app.js";
 import platform from "../../api/platform.js";
 import {
   bindChandlerPhone,
+  changeChandlerPassword,
   chandlerConfig,
   createDirectPaymentOrder,
   createPartnerPriceVersion,
@@ -19,6 +20,7 @@ import {
   listChandlerIdentities,
   listPartnerSubscriptionPlans,
   loginWithChandlerOtp,
+  logoutAllFromChandler,
   productEdition,
   productEditionFromChannel,
   refreshChandlerLogin,
@@ -26,8 +28,10 @@ import {
   resetPasswordWithChandler,
   resetPasswordWithChandlerPhone,
   resolveWebsiteLoginEmail,
+  sendChandlerReauthCode,
   sendChandlerVerificationEmail,
   sendLoginOtpWithChandler,
+  setPrimaryChandlerIdentity,
   verifyChandlerEmail,
   verifyChandlerIdentity,
   verifyChandlerWebhook,
@@ -173,6 +177,10 @@ test("Chandler v3.6 OTP, phone recovery and account identities follow the offici
     await deleteChandlerIdentity("user-access", "identity-phone");
     await sendChandlerVerificationEmail("user-access");
     await verifyChandlerEmail("email-token");
+    await sendChandlerReauthCode("user-access");
+    await setPrimaryChandlerIdentity("user-access", "identity-phone");
+    await changeChandlerPassword("user-access", "Current-Pass", "New-Pass-2026!");
+    await logoutAllFromChandler("user-access");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -188,6 +196,10 @@ test("Chandler v3.6 OTP, phone recovery and account identities follow the offici
     "https://api.chandler.work/v1/me/identities/identity-phone",
     "https://api.chandler.work/v1/auth/send-verification-email",
     "https://api.chandler.work/v1/auth/verify-email",
+    "https://api.chandler.work/v1/auth/reauth/send",
+    "https://api.chandler.work/v1/me/identities/identity-phone/primary",
+    "https://api.chandler.work/v1/auth/change-password",
+    "https://api.chandler.work/v1/auth/logout-all",
   ]);
   assert.deepEqual(calls[1].body, { target: "member@example.com", target_type: "email" });
   assert.deepEqual(calls[2].body, { target: "+8613800000000", target_type: "phone", code: "123456", device_type: "web" });
@@ -197,6 +209,7 @@ test("Chandler v3.6 OTP, phone recovery and account identities follow the offici
   assert.deepEqual(calls[7].body, { code: "123456" });
   assert.equal(calls[8].method, "DELETE");
   assert.deepEqual(calls[10].body, { token: "email-token" });
+  assert.deepEqual(calls[13].body, { old_password: "Current-Pass", new_password: "New-Pass-2026!" });
 });
 
 test("website authentication exposes email-only registration and rate-limited Chandler v3.6 security flows", async () => {
@@ -221,6 +234,10 @@ test("website authentication exposes email-only registration and rate-limited Ch
     "/api/account/security/phone/bind",
     "/api/account/security/identities/{identityId}/verify",
     "/api/account/security/identities/{identityId}",
+    "/api/account/security/reauth/send",
+    "/api/account/security/identities/{identityId}/primary",
+    "/api/account/security/password/change",
+    "/api/account/security/sessions/logout-all",
   ]) assert.ok(spec.paths[path], `OpenAPI missing ${path}`);
   assert.match(serverSource, /auth-otp-send-ip/);
   assert.match(serverSource, /auth-otp-send-target/);

@@ -1,0 +1,33 @@
+{
+	auto_https off
+	default_sni 111.229.70.235
+}
+
+http://111.229.70.235 {
+	encode zstd gzip
+
+	handle /.well-known/acme-challenge/* {
+		root * /var/www/letsencrypt
+		file_server
+	}
+
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8787
+	}
+
+	handle {
+		root * /opt/gulong/current/dist/client
+		try_files {path} /index.html
+		file_server
+	}
+
+	header {
+		-Server
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "DENY"
+	}
+}

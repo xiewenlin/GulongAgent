@@ -7,8 +7,10 @@
 - 官网继续只允许邮箱注册，不增加手机号注册入口；Chandler 对手机号注册返回 `auth.phone_register_disabled`。
 - 登录新增邮箱验证码与短信验证码两种方式，分别代理到 `/v1/auth/otp/send` 和 `/v1/auth/otp/login`。
 - 找回密码新增已绑定手机号路径，代理到 `/v1/auth/phone/forgot-password` 和 `/v1/auth/phone/reset-password`。
-- 用户后台新增“账号安全”，接入 `/v1/me`、`/v1/me/identities`、身份验证与解绑接口，以及邮箱验证接口。
+- 用户后台新增“账号安全”，接入 `/v1/me`、`/v1/me/identities`、身份验证、主身份切换与解绑接口，以及邮箱验证接口。
 - 手机号绑定必须建立在已验证邮箱账号上；官网只允许删除 `phone` 身份，不能删除注册邮箱。
+- 无密码账号可先通过 `/v1/auth/reauth/send` 获取短期再认证码，再绑定手机号；有密码账号继续使用当前密码再认证。
+- 登录后的密码修改接入 `/v1/auth/change-password`，设备丢失场景接入 `/v1/auth/logout-all`，并同步撤销官网本地会话。
 
 ## 安全收口
 
@@ -24,6 +26,9 @@
 - 密码登录：`POST /v1/auth/login`
 - OAuth 刷新：`POST /v1/oauth/token`，表单 `grant_type=refresh_token`
 - 退出登录：`POST /v1/auth/logout`
+- 主身份设置：`POST /v1/me/identities/{identity_id}/primary`
+- 敏感操作再认证：`POST /v1/auth/reauth/send`
+- 修改密码与全部会话注销：`POST /v1/auth/change-password`、`POST /v1/auth/logout-all`
 - 微信收银台、订阅 SKU、不可变价格版本、订单查询与 Webhook 验签调用保持当前正式合同。
 - Chandler API Key 环境变量仍优先读取 `GulongAgent`，兼容 `CHANDLER_API_KEY`。
 
