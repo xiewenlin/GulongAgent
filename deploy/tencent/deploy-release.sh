@@ -38,6 +38,10 @@ if [[ "$mode" == "prepare" ]]; then
   if [[ -e "$stage" ]]; then
     rm -rf -- "$stage"
   fi
+  if [[ -d "$target" && "$target" != "$previous" ]]; then
+    failed_target="$release_root/.failed-${commit_sha}-$(date -u +%Y%m%dT%H%M%SZ)"
+    mv "$target" "$failed_target"
+  fi
   install -d -m 0755 "$stage"
   if [[ -n "$previous" && -d "$previous" ]]; then
     cp -al "$previous/." "$stage/"
@@ -78,7 +82,8 @@ if [[ -d "$target" ]]; then
 else
   if [[ ! -d "$stage" || ! -f "$stage/.deploy-commit" ]] \
     || [[ "$(tr -d '\r\n' < "$stage/.deploy-commit")" != "$commit_sha" ]] \
-    || [[ ! -f "$stage/package-lock.json" || ! -f "$stage/dist/client/index.html" || ! -f "$stage/server/local.js" ]]; then
+    || [[ ! -f "$stage/package-lock.json" || ! -f "$stage/dist/client/index.html" || ! -f "$stage/server/local.js" ]] \
+    || [[ ! -f "$stage/shared/error-messages.js" ]]; then
     echo "Synchronized release is incomplete or does not match the requested commit." >&2
     exit 3
   fi

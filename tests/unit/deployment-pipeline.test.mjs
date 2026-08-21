@@ -17,6 +17,7 @@ test("production workflow gates both hosting targets behind tests and an immutab
   assert.match(source, /vercel@50\.28\.0 deploy --prebuilt --prod/);
   assert.match(source, /StrictHostKeyChecking=yes/g);
   assert.match(source, /rsync --archive --compress --checksum --delete/);
+  assert.match(source, /cp -a shared "\$bundle\/shared"/);
   assert.match(source, /cancel-in-progress: false/);
   assert.match(source, /curl --fail --silent --show-error[\s\S]*\/api\/health/);
   assert.doesNotMatch(source, /BEGIN (?:RSA |OPENSSH )?PRIVATE KEY/);
@@ -31,6 +32,8 @@ test("Tencent deployment validates its target and rolls back an unhealthy activa
   assert.match(source, /\.staging-\$commit_sha/);
   assert.match(source, /tr -d '\\r'/);
   assert.match(source, /npm_config_cache="\$stage\/\.npm-cache"/);
+  assert.match(source, /\.failed-\$\{commit_sha\}/);
+  assert.match(source, /shared\/error-messages\.js/);
   assert.match(source, /mv -Tf "\$next_link" "\$current_link"/);
   assert.match(source, /health_check/);
   assert.match(source, /rollback/);

@@ -52,6 +52,7 @@ jobs:
           mkdir -p "$bundle"
           cp package.json package-lock.json "$bundle/"
           cp -a server "$bundle/server"
+          cp -a shared "$bundle/shared"
           cp -a dist "$bundle/dist"
           printf '%s\n' "$GITHUB_SHA" > "$bundle/.deploy-commit"
           tar -czf "$archive" -C "$bundle" .
