@@ -4,7 +4,7 @@
 
 `.github/workflows/deploy-production.yml` 在 `main` 每次更新或管理员手动触发时执行：
 
-1. 使用锁文件安装依赖，依次执行 `npm test`、`npm run build`、`npm run test:sites`。
+1. 使用锁文件安装依赖，先执行 `npm run build` 生成 Sites 测试需要的生产产物，再执行 `npm test`、`npm run test:sites`。
 2. 从当前 Git commit 和刚生成的 `dist/` 打包不可变发布物，制品保留 3 天。
 3. Vercel 使用 Production 环境变量构建并发布，随后检查 `https://sologle.com/api/health`。
 4. 腾讯云把同一制品上传到 `/opt/gulong/releases/<commit>`，复用未变化的生产依赖或执行 `npm ci --omit=dev`，通过结构和 Node 语法检查后再原子切换 `/opt/gulong/current`。

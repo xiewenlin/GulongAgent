@@ -34,11 +34,11 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
-      - name: Run the full test suite
-        run: npm test
-
       - name: Build the production bundle
         run: npm run build
+
+      - name: Run the full test suite
+        run: npm test
 
       - name: Verify the Sites bundle
         run: npm run test:sites
