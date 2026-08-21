@@ -16,6 +16,7 @@ test("production workflow gates both hosting targets behind tests and an immutab
   assert.equal((source.match(/if: github\.ref == 'refs\/heads\/main'/g) || []).length, 2);
   assert.match(source, /vercel@50\.28\.0 deploy --prebuilt --prod/);
   assert.match(source, /StrictHostKeyChecking=yes/g);
+  assert.match(source, /rsync --archive --compress --checksum --delete/);
   assert.match(source, /cancel-in-progress: false/);
   assert.match(source, /curl --fail --silent --show-error[\s\S]*\/api\/health/);
   assert.doesNotMatch(source, /BEGIN (?:RSA |OPENSSH )?PRIVATE KEY/);
@@ -26,6 +27,8 @@ test("Tencent deployment validates its target and rolls back an unhealthy activa
 
   assert.match(source, /\^\[0-9a-f\]\{40\}\$/);
   assert.match(source, /release_root="\/opt\/gulong\/releases"/);
+  assert.match(source, /mode="\$\{1:-\}"/);
+  assert.match(source, /\.staging-\$commit_sha/);
   assert.match(source, /mv -Tf "\$next_link" "\$current_link"/);
   assert.match(source, /health_check/);
   assert.match(source, /rollback/);

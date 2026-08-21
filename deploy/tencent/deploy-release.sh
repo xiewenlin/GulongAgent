@@ -1,28 +1,27 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-commit_sha="${1:-}"
-archive_path="${2:-}"
+mode="${1:-}"
+commit_sha="${2:-}"
 release_root="/opt/gulong/releases"
 current_link="/opt/gulong/current"
 service_name="gulong"
 local_health_url="http://127.0.0.1:8787/api/health"
+
+if [[ "$mode" != "prepare" && "$mode" != "activate" ]]; then
+  echo "Deployment mode must be prepare or activate." >&2
+  exit 2
+fi
 
 if [[ ! "$commit_sha" =~ ^[0-9a-f]{40}$ ]]; then
   echo "Invalid immutable commit SHA." >&2
   exit 2
 fi
 
-expected_archive="/tmp/gulong-release-${commit_sha}.tar.gz"
-if [[ "$archive_path" != "$expected_archive" || ! -f "$archive_path" ]]; then
-  echo "Release archive is missing or outside the approved path." >&2
-  exit 2
-fi
-
 install -d -m 0755 "$release_root"
 target="$release_root/$commit_sha"
+stage="$release_root/.staging-$commit_sha"
 previous="$(readlink -f "$current_link" 2>/dev/null || true)"
-stage=""
 activated=0
 
 if [[ -n "$previous" && "$previous" != "$release_root"/* ]]; then
@@ -30,15 +29,22 @@ if [[ -n "$previous" && "$previous" != "$release_root"/* ]]; then
   exit 2
 fi
 
-cleanup() {
-  local exit_code=$?
-  rm -f "$archive_path" "/tmp/deploy-release.sh"
-  if [[ -n "$stage" && -d "$stage" ]]; then
+if [[ "$stage" != "$release_root/.staging-$commit_sha" || "$target" != "$release_root/$commit_sha" ]]; then
+  echo "Resolved release paths are outside the approved scope." >&2
+  exit 2
+fi
+
+if [[ "$mode" == "prepare" ]]; then
+  if [[ -e "$stage" ]]; then
     rm -rf -- "$stage"
   fi
-  return "$exit_code"
-}
-trap cleanup EXIT
+  install -d -m 0755 "$stage"
+  if [[ -n "$previous" && -d "$previous" ]]; then
+    cp -al "$previous/." "$stage/"
+  fi
+  echo "Tencent staging release $stage is ready for checksum synchronization."
+  exit 0
+fi
 
 health_check() {
   local attempt
@@ -68,28 +74,32 @@ if [[ -d "$target" ]]; then
     echo "Existing target does not contain the expected commit marker." >&2
     exit 3
   fi
+  rm -rf -- "$stage"
 else
-  stage="$(mktemp -d "$release_root/.staging-${commit_sha}.XXXXXX")"
-  tar -xzf "$archive_path" -C "$stage"
-
-  if [[ ! -f "$stage/package-lock.json" || ! -f "$stage/dist/client/index.html" || ! -f "$stage/server/local.js" ]]; then
-    echo "Release artifact is incomplete." >&2
+  if [[ ! -d "$stage" || ! -f "$stage/.deploy-commit" ]] \
+    || [[ "$(tr -d '\r\n' < "$stage/.deploy-commit")" != "$commit_sha" ]] \
+    || [[ ! -f "$stage/package-lock.json" || ! -f "$stage/dist/client/index.html" || ! -f "$stage/server/local.js" ]]; then
+    echo "Synchronized release is incomplete or does not match the requested commit." >&2
     exit 3
   fi
 
-  if [[ -n "$previous" && -d "$previous/node_modules" && -f "$previous/package-lock.json" ]] \
-    && cmp -s "$previous/package-lock.json" "$stage/package-lock.json"; then
-    cp -al "$previous/node_modules" "$stage/node_modules"
-  else
+  install_dependencies=0
+  if [[ ! -d "$stage/node_modules" ]]; then
+    install_dependencies=1
+  elif [[ -n "$previous" && -f "$previous/package-lock.json" ]] \
+    && ! cmp -s "$previous/package-lock.json" "$stage/package-lock.json"; then
+    install_dependencies=1
+  fi
+
+  if [[ "$install_dependencies" -eq 1 ]]; then
+    rm -rf -- "$stage/node_modules"
     chown -R gulong:gulong "$stage"
     runuser -u gulong -- bash -c "cd '$stage' && npm ci --omit=dev --ignore-scripts"
   fi
 
   node --check "$stage/server/local.js"
-  printf '%s\n' "$commit_sha" > "$stage/.deploy-commit"
   chown -R gulong:gulong "$stage"
   mv "$stage" "$target"
-  stage=""
 fi
 
 next_link="/opt/gulong/.current-next-${commit_sha}"
@@ -107,4 +117,5 @@ if ! systemctl restart "$service_name" || ! health_check; then
   exit 4
 fi
 
+rm -f /tmp/deploy-release.sh
 echo "Tencent release $commit_sha is active and healthy."

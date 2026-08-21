@@ -50,8 +50,8 @@ jobs:
           bundle="$RUNNER_TEMP/gulong-release"
           archive="$RUNNER_TEMP/gulong-release-${GITHUB_SHA}.tar.gz"
           mkdir -p "$bundle"
-          git archive "$GITHUB_SHA" | tar -x -C "$bundle"
-          rm -rf "$bundle/dist"
+          cp package.json package-lock.json "$bundle/"
+          cp -a server "$bundle/server"
           cp -a dist "$bundle/dist"
           printf '%s\n' "$GITHUB_SHA" > "$bundle/.deploy-commit"
           tar -czf "$archive" -C "$bundle" .
@@ -162,7 +162,15 @@ jobs:
           printf '%s\n' "$TENCENT_SSH_KNOWN_HOSTS" > "$known_hosts"
           printf 'port=%s\nkey=%s\nknown_hosts=%s\n' "$port" "$key" "$known_hosts" >> "$GITHUB_OUTPUT"
 
-      - name: Upload the release and audited deploy script
+      - name: Expand the immutable release locally
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bundle="$RUNNER_TEMP/gulong-release-expanded"
+          mkdir -p "$bundle"
+          tar -xzf "$RUNNER_TEMP/gulong-artifact/gulong-release-${GITHUB_SHA}.tar.gz" -C "$bundle"
+
+      - name: Prepare an isolated Tencent staging release
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -170,9 +178,24 @@ jobs:
             -i "${{ steps.ssh.outputs.key }}" \
             -o UserKnownHostsFile="${{ steps.ssh.outputs.known_hosts }}" \
             -o StrictHostKeyChecking=yes \
-            "$RUNNER_TEMP/gulong-artifact/gulong-release-${GITHUB_SHA}.tar.gz" \
             "deploy/tencent/deploy-release.sh" \
             "$TENCENT_SSH_USER@$TENCENT_SSH_HOST:/tmp/"
+          ssh -p "${{ steps.ssh.outputs.port }}" \
+            -i "${{ steps.ssh.outputs.key }}" \
+            -o UserKnownHostsFile="${{ steps.ssh.outputs.known_hosts }}" \
+            -o StrictHostKeyChecking=yes \
+            "$TENCENT_SSH_USER@$TENCENT_SSH_HOST" \
+            "bash /tmp/deploy-release.sh prepare '$GITHUB_SHA'"
+
+      - name: Synchronize only changed release files
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rsync --archive --compress --checksum --delete \
+            --exclude node_modules \
+            -e "ssh -p ${{ steps.ssh.outputs.port }} -i ${{ steps.ssh.outputs.key }} -o UserKnownHostsFile=${{ steps.ssh.outputs.known_hosts }} -o StrictHostKeyChecking=yes" \
+            "$RUNNER_TEMP/gulong-release-expanded/" \
+            "$TENCENT_SSH_USER@$TENCENT_SSH_HOST:/opt/gulong/releases/.staging-${GITHUB_SHA}/"
 
       - name: Atomically activate the Tencent release
         shell: bash
@@ -183,7 +206,7 @@ jobs:
             -o UserKnownHostsFile="${{ steps.ssh.outputs.known_hosts }}" \
             -o StrictHostKeyChecking=yes \
             "$TENCENT_SSH_USER@$TENCENT_SSH_HOST" \
-            "bash /tmp/deploy-release.sh '$GITHUB_SHA' '/tmp/gulong-release-${GITHUB_SHA}.tar.gz'"
+            "bash /tmp/deploy-release.sh activate '$GITHUB_SHA'"
 
       - name: Verify the public Tencent health endpoint
         shell: bash
