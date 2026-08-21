@@ -87,14 +87,17 @@ else
   if [[ ! -d "$stage/node_modules" ]]; then
     install_dependencies=1
   elif [[ -n "$previous" && -f "$previous/package-lock.json" ]] \
-    && ! cmp -s "$previous/package-lock.json" "$stage/package-lock.json"; then
+    && ! cmp -s <(tr -d '\r' < "$previous/package-lock.json") <(tr -d '\r' < "$stage/package-lock.json"); then
     install_dependencies=1
   fi
 
   if [[ "$install_dependencies" -eq 1 ]]; then
     rm -rf -- "$stage/node_modules"
+    install -d -m 0755 "$stage/.npm-cache"
     chown -R gulong:gulong "$stage"
-    runuser -u gulong -- bash -c "cd '$stage' && npm ci --omit=dev --ignore-scripts"
+    runuser -u gulong -- env HOME="$stage" npm_config_cache="$stage/.npm-cache" \
+      bash -c "cd '$stage' && npm ci --omit=dev --ignore-scripts"
+    rm -rf -- "$stage/.npm-cache"
   fi
 
   node --check "$stage/server/local.js"

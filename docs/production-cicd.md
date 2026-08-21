@@ -21,9 +21,6 @@
 | `VERCEL_TOKEN` | 仅允许部署该项目的 Vercel Token |
 | `VERCEL_ORG_ID` | Vercel 团队 ID |
 | `VERCEL_PROJECT_ID` | 古龙官网 Vercel Project ID |
-| `TENCENT_SSH_HOST` | 腾讯云服务器地址 |
-| `TENCENT_SSH_PORT` | SSH 端口，当前为 `22` |
-| `TENCENT_SSH_USER` | 具备发布权限的用户；现有节点可暂用 `root`，后续建议改成最小权限部署用户 |
 | `TENCENT_SSH_PRIVATE_KEY` | 与服务器公钥配对的 PEM 私钥完整内容 |
 | `TENCENT_SSH_KNOWN_HOSTS` | 管理员核验过指纹的 OpenSSH known_hosts 行；工作流严格禁止自动接受陌生主机 |
 
@@ -31,6 +28,9 @@
 
 | Variable | 内容 |
 | --- | --- |
+| `TENCENT_SSH_HOST` | 腾讯云服务器地址 |
+| `TENCENT_SSH_PORT` | SSH 端口，当前为 `22` |
+| `TENCENT_SSH_USER` | 具备发布权限的用户；现有节点可暂用 `root`，后续建议改成最小权限部署用户 |
 | `TENCENT_HEALTH_URL` | `https://111.229.70.235/api/health` |
 
 应用自己的 MongoDB、COS、Chandler、激活签名与会话密钥继续分别保存在 Vercel Production Environment Variables 和腾讯云 `/etc/gulong/gulong.env`；CI 不复制、不回显这些业务密钥。

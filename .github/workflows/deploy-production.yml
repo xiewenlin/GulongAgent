@@ -129,9 +129,9 @@ jobs:
       name: production
       url: https://111.229.70.235
     env:
-      TENCENT_SSH_HOST: ${{ secrets.TENCENT_SSH_HOST }}
-      TENCENT_SSH_PORT: ${{ secrets.TENCENT_SSH_PORT }}
-      TENCENT_SSH_USER: ${{ secrets.TENCENT_SSH_USER }}
+      TENCENT_SSH_HOST: ${{ vars.TENCENT_SSH_HOST }}
+      TENCENT_SSH_PORT: ${{ vars.TENCENT_SSH_PORT }}
+      TENCENT_SSH_USER: ${{ vars.TENCENT_SSH_USER }}
       TENCENT_SSH_PRIVATE_KEY: ${{ secrets.TENCENT_SSH_PRIVATE_KEY }}
       TENCENT_SSH_KNOWN_HOSTS: ${{ secrets.TENCENT_SSH_KNOWN_HOSTS }}
       TENCENT_HEALTH_URL: ${{ vars.TENCENT_HEALTH_URL }}

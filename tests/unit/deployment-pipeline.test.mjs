@@ -29,6 +29,8 @@ test("Tencent deployment validates its target and rolls back an unhealthy activa
   assert.match(source, /release_root="\/opt\/gulong\/releases"/);
   assert.match(source, /mode="\$\{1:-\}"/);
   assert.match(source, /\.staging-\$commit_sha/);
+  assert.match(source, /tr -d '\\r'/);
+  assert.match(source, /npm_config_cache="\$stage\/\.npm-cache"/);
   assert.match(source, /mv -Tf "\$next_link" "\$current_link"/);
   assert.match(source, /health_check/);
   assert.match(source, /rollback/);
