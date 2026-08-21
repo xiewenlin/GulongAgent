@@ -94,6 +94,12 @@ npm run dev
 
 完整集成边界与生产配置见 [docs/integration-deployment.md](docs/integration-deployment.md)，本次认证升级审计见 [docs/chandler-v3.6-auth-audit.md](docs/chandler-v3.6-auth-audit.md)，Windows 发行工作器说明见 [docs/release-worker.md](docs/release-worker.md)。
 
+## 双目标生产发布
+
+`main` 分支每次更新都会触发 `.github/workflows/deploy-production.yml`：先执行完整测试、生产构建和 Sites 产物校验，再并行发布到 Vercel Production 与腾讯云 Debian 节点。腾讯云采用 `/opt/gulong/releases/<commit>` 不可变目录和 `/opt/gulong/current` 原子软链接；新版本重启或健康检查失败时自动恢复上一版本，避免把故障版本继续暴露给用户。
+
+部署密钥只存放在 GitHub `production` Environment / Actions Secrets，不进入 Git、构建产物或日志。首次启用需要配置的变量、环境保护和 SSH 主机指纹见 [双目标 CI/CD 部署说明](docs/production-cicd.md)。
+
 ## 验证
 
 ```bash

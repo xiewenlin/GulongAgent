@@ -1,0 +1,196 @@
+name: Deploy production to Vercel and Tencent Cloud
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gulong-production
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "22"
+
+jobs:
+  quality:
+    name: Test, build, and package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the exact commit
+        uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run the full test suite
+        run: npm test
+
+      - name: Build the production bundle
+        run: npm run build
+
+      - name: Verify the Sites bundle
+        run: npm run test:sites
+
+      - name: Package the immutable Tencent release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bundle="$RUNNER_TEMP/gulong-release"
+          archive="$RUNNER_TEMP/gulong-release-${GITHUB_SHA}.tar.gz"
+          mkdir -p "$bundle"
+          git archive "$GITHUB_SHA" | tar -x -C "$bundle"
+          rm -rf "$bundle/dist"
+          cp -a dist "$bundle/dist"
+          printf '%s\n' "$GITHUB_SHA" > "$bundle/.deploy-commit"
+          tar -czf "$archive" -C "$bundle" .
+
+      - name: Upload the production release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gulong-production-${{ github.sha }}
+          path: ${{ runner.temp }}/gulong-release-${{ github.sha }}.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+
+  vercel-production:
+    name: Deploy Vercel production
+    needs: quality
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: https://sologle.com
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - name: Check out the exact commit
+        uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Validate Vercel credentials
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$VERCEL_TOKEN"
+          test -n "$VERCEL_ORG_ID"
+          test -n "$VERCEL_PROJECT_ID"
+
+      - name: Build with the production environment
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npx --yes vercel@50.28.0 pull --yes --environment=production --token="$VERCEL_TOKEN"
+          npx --yes vercel@50.28.0 build --prod --token="$VERCEL_TOKEN"
+
+      - name: Publish Vercel production
+        id: deploy
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          deployment_url="$(npx --yes vercel@50.28.0 deploy --prebuilt --prod --token="$VERCEL_TOKEN")"
+          printf 'deployment_url=%s\n' "$deployment_url" >> "$GITHUB_OUTPUT"
+          printf '### Vercel production\n\n- Deployment: %s\n- Commit: `%s`\n' "$deployment_url" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify the public Vercel health endpoint
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl --fail --silent --show-error \
+            --retry 8 --retry-delay 3 --retry-all-errors \
+            https://sologle.com/api/health >/dev/null
+
+  tencent-production:
+    name: Deploy Tencent Cloud production
+    needs: quality
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: https://111.229.70.235
+    env:
+      TENCENT_SSH_HOST: ${{ secrets.TENCENT_SSH_HOST }}
+      TENCENT_SSH_PORT: ${{ secrets.TENCENT_SSH_PORT }}
+      TENCENT_SSH_USER: ${{ secrets.TENCENT_SSH_USER }}
+      TENCENT_SSH_PRIVATE_KEY: ${{ secrets.TENCENT_SSH_PRIVATE_KEY }}
+      TENCENT_SSH_KNOWN_HOSTS: ${{ secrets.TENCENT_SSH_KNOWN_HOSTS }}
+      TENCENT_HEALTH_URL: ${{ vars.TENCENT_HEALTH_URL }}
+    steps:
+      - name: Check out the deployment script
+        uses: actions/checkout@v4
+
+      - name: Download the immutable release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: gulong-production-${{ github.sha }}
+          path: ${{ runner.temp }}/gulong-artifact
+
+      - name: Prepare the pinned SSH connection
+        id: ssh
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$TENCENT_SSH_HOST"
+          test -n "$TENCENT_SSH_USER"
+          test -n "$TENCENT_SSH_PRIVATE_KEY"
+          test -n "$TENCENT_SSH_KNOWN_HOSTS"
+          port="${TENCENT_SSH_PORT:-22}"
+          key="$RUNNER_TEMP/gulong-deploy-key"
+          known_hosts="$RUNNER_TEMP/gulong-known-hosts"
+          install -m 600 /dev/null "$key"
+          printf '%s\n' "$TENCENT_SSH_PRIVATE_KEY" > "$key"
+          printf '%s\n' "$TENCENT_SSH_KNOWN_HOSTS" > "$known_hosts"
+          printf 'port=%s\nkey=%s\nknown_hosts=%s\n' "$port" "$key" "$known_hosts" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the release and audited deploy script
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          scp -P "${{ steps.ssh.outputs.port }}" \
+            -i "${{ steps.ssh.outputs.key }}" \
+            -o UserKnownHostsFile="${{ steps.ssh.outputs.known_hosts }}" \
+            -o StrictHostKeyChecking=yes \
+            "$RUNNER_TEMP/gulong-artifact/gulong-release-${GITHUB_SHA}.tar.gz" \
+            "deploy/tencent/deploy-release.sh" \
+            "$TENCENT_SSH_USER@$TENCENT_SSH_HOST:/tmp/"
+
+      - name: Atomically activate the Tencent release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ssh -p "${{ steps.ssh.outputs.port }}" \
+            -i "${{ steps.ssh.outputs.key }}" \
+            -o UserKnownHostsFile="${{ steps.ssh.outputs.known_hosts }}" \
+            -o StrictHostKeyChecking=yes \
+            "$TENCENT_SSH_USER@$TENCENT_SSH_HOST" \
+            "bash /tmp/deploy-release.sh '$GITHUB_SHA' '/tmp/gulong-release-${GITHUB_SHA}.tar.gz'"
+
+      - name: Verify the public Tencent health endpoint
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          health_url="${TENCENT_HEALTH_URL:-https://${TENCENT_SSH_HOST}/api/health}"
+          curl --fail --silent --show-error \
+            --retry 8 --retry-delay 3 --retry-all-errors \
+            "$health_url" >/dev/null
+          printf '### Tencent Cloud production\n\n- Health: %s\n- Commit: `%s`\n' "$health_url" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"

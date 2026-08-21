@@ -111,6 +111,8 @@ SESSION_COOKIE_SECURE=
 
 当前腾讯云直连入口使用 Let’s Encrypt 免费公有 IP 短期证书，通过 Certbot 5.4+ 的 `--ip-address` 与 `--preferred-profile shortlived` 签发；Caddy 加载证书并把 HTTP 308 跳转到 HTTPS。证书有效期约 6 天，因此 `gulong-certbot-renew.timer` 每天检查两次，并在续签成功后执行 `/usr/local/sbin/deploy-gulong-ip-cert` 原子覆盖 Caddy 证书副本和热重载。配置模板位于 `deploy/tencent/`。正式域名备案完成后仍应迁移到自有域名证书，不再长期依赖 IP 入口。
 
+官网后续发布统一使用 [Vercel 与腾讯云双目标 CI/CD](production-cicd.md)。GitHub Actions 只传输当前 commit 的不可变应用制品，不读取或覆盖腾讯云 `/etc/gulong/gulong.env`，因此 MongoDB、COS、Chandler、激活签名和登录密钥始终留在服务器的受保护配置中。
+
 ## 8. 管理员数据看板与统计口径
 
 - 页面入口：`/admin` → `数据看板`
