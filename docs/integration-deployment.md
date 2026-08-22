@@ -135,3 +135,14 @@ SESSION_COOKIE_SECURE=
 | 新用户激活 | 周期新增用户中，至少创建任务、提交第二大脑、配置 MiniMax 或创建有效 API Key 的人数 |
 
 匿名分析只保存随机访客 ID、随机会话 ID、页面路径、来源类型、设备类型和 UTM 来源，不保存 IP 原文、表单内容、密码、MiniMax Key 或第二大脑文件内容。`analyticsEvents` 按事件/访客与时间建立 MongoDB 索引；管理员接口每次实时聚合，不向公共缓存写入经营数据。
+
+## 9. 短视频包月与桌面同步
+
+短视频包月使用独立计划标识 `short_video_monthly`，月费 599900 分、年费 5999900 分，只通过线下支付审核开通。审核通过后，钱包会把实付金额与 100% 套餐赠送额一次性幂等入账；套餐额度是总余额中的可到期组成部分，不会覆盖用户另外充值的余额。
+
+- 定价：`GET /api/v1/pricing/subscriptions`，读取 `shortVideo`。
+- 订阅状态：`GET /api/v1/desktop/account/subscription`，沿用桌面 Chandler Bearer，读取 `subscription.plan`、`balanceFen` 与 `shortVideoPackage`。
+- H3 任务：`POST /api/h3/tasks`，继续提交 `model=minimax_h3_shared` 与 `source_channel=website|desktop_agent`，计费结果以响应 `billing.chargedFen` 为准。
+- 管理员设置：`PUT /api/admin/users/{id}/subscription-period`，`plan` 可为 `member` 或 `short_video_monthly`。
+
+有效期内，H3 先原子扣减套餐余额并按实际扣款执行节点与平台 50/50 分账；不足一个任务费用时只扣剩余额度。套餐额度归零后仍可无限创建 H3 任务，但 `chargedFen=0`，不生成节点或平台佣金。有效期结束时，服务端幂等清除尚未使用的套餐组成部分；普通充值所得余额不会被清除。桌面端不得仅凭本地余额阻止 H3，必须以 `shortVideoPackage.active && shortVideoPackage.unlimitedH3` 和任务创建接口的服务端响应为准。

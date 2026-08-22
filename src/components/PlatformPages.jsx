@@ -277,8 +277,8 @@ export function PricingPage({ user, openAuth, navigate }) {
   useEffect(() => {
     apiFetch("/api/billing/plans")
       .then((result) => {
-        const liveMember = (result.plans || []).find((item) => item.id === "member");
-        if (liveMember) setPricingPlans(sitePlans.map((item) => item.id === "member" ? { ...item, monthlyFen: liveMember.monthlyFen, yearlyFen: liveMember.yearlyFen } : item));
+        const livePlans = new Map((result.plans || []).map((item) => [item.id, item]));
+        setPricingPlans(sitePlans.map((item) => livePlans.has(item.id) ? { ...item, ...livePlans.get(item.id), features: item.features } : item));
         if (result.providers?.availability) setPaymentAvailability(result.providers.availability);
         if (result.walletPromotion) setWalletPromotion(result.walletPromotion);
       })
@@ -301,14 +301,20 @@ export function PricingPage({ user, openAuth, navigate }) {
   const memberPayableFen = cycle === "year" ? Math.max(monthlyUpgrade ? 100 : 0, memberPlan.yearlyFen - upgradeCreditFen) : memberPlan.monthlyFen;
   const yearlySavingsFen = Math.max(0, memberPlan.monthlyFen * 12 - memberPlan.yearlyFen);
   const memberBonusFen = Math.floor(memberPayableFen * walletPromotion.subscriptionBonusRate);
+  const planAmountFen = (plan) => plan.id === "member"
+    ? memberPayableFen
+    : cycle === "year" ? plan.yearlyFen : plan.monthlyFen;
 
   async function startPayment(plan) {
     if (!user) return openAuth("login");
     if (plan.id === "free") return navigate("/download");
     if (plan.id === "custom") { setCustomContactOpen(true); return; }
     trackAnalyticsEvent("CHECKOUT_START", { path: "/pricing" });
-    if (paymentMode === "offline") {
-      setPayment({ mode: "offline-cashier", cycle, amountFen: plan.id === "member" ? memberPayableFen : cycle === "year" ? plan.yearlyFen : plan.monthlyFen, bonusFen: plan.id === "member" ? memberBonusFen : 0, creditedFen: plan.id === "member" ? memberPayableFen + memberBonusFen : 0, upgradeCreditFen, planName: plan.name });
+    const shortVideoPlan = plan.id === "short_video_monthly";
+    if (paymentMode === "offline" || shortVideoPlan) {
+      const amountFen = planAmountFen(plan);
+      const bonusFen = shortVideoPlan ? amountFen : plan.id === "member" ? memberBonusFen : 0;
+      setPayment({ mode: "offline-cashier", cycle, planType: shortVideoPlan ? "short_video_monthly" : "member", amountFen, bonusFen, creditedFen: amountFen + bonusFen, upgradeCreditFen: shortVideoPlan ? 0 : upgradeCreditFen, planName: plan.name });
       return;
     }
     setBusy(true);
@@ -338,13 +344,14 @@ export function PricingPage({ user, openAuth, navigate }) {
           <article key={plan.id} className={plan.featured ? "featured" : ""}>
             {plan.featured && <span className="plan-ribbon">推荐</span>}
             <small>{plan.eyebrow}</small><h2>{plan.name}</h2>
-            <div className="plan-price">{plan.pricing || formatMoney(plan.id === "member" ? memberPayableFen : cycle === "year" ? plan.yearlyFen : plan.monthlyFen)}{!plan.pricing && <em>/{cycle === "year" ? "年" : "月"}</em>}</div>
+            <div className="plan-price">{plan.pricing || formatMoney(planAmountFen(plan))}{!plan.pricing && <em>/{cycle === "year" ? "年" : "月"}</em>}</div>
             {plan.id === "member" && monthlyUpgrade && <div className="upgrade-credit"><CheckCircle size={19} weight="fill" /><div><strong>月度会员升级抵扣 {formatMoney(upgradeCreditFen)}</strong><span>年度原价 {formatMoney(plan.yearlyFen)}，本次只需补足剩余费用。</span></div></div>}
             {plan.id === "member" && <div className="wallet-promotion-note"><Coins size={20} weight="duotone" /><span><strong>订阅即送 10% 创作余额</strong><small>本次实付 {formatMoney(memberPayableFen)}，到账余额 {formatMoney(memberPayableFen + memberBonusFen)}，其中赠送 {formatMoney(memberBonusFen)}。</small></span></div>}
+            {plan.id === "short_video_monthly" && <div className="wallet-promotion-note short-video"><Coins size={20} weight="duotone" /><span><strong>充多少送多少 · 额度翻倍</strong><small>本次实付 {formatMoney(planAmountFen(plan))}，有效期内可用额度 {formatMoney(planAmountFen(plan) * 2)}；用完后 H3 继续无限生成。</small></span></div>}
             {plan.subpricing && <p className="plan-subprice">{plan.subpricing}</p>}
             <ul>{plan.features.map((feature) => <li key={feature}><Check size={17} weight="bold" /> {feature}</li>)}</ul>
-            {plan.id === "member" && paymentMode === "offline" && <div className="manual-renew-note"><Clock size={20} /><span><strong>人工审核到账</strong><small>付款后提交审核，确认到账后同步官网与桌面端。</small></span></div>}
-            {plan.id === "custom" ? <div className="custom-plan-actions"><button className="button secondary full" disabled={busy} onClick={() => setCustomContactOpen(true)}>联系定制</button><button className="button primary full" disabled={busy} onClick={() => user ? setCustomOrderOpen(true) : openAuth("login")}><Plus size={18} />新建订单</button></div> : <button className={`button full ${plan.featured ? "primary" : "secondary"}`} disabled={busy} onClick={() => startPayment(plan)}>{plan.id === "free" ? "免费下载" : busy ? "正在创建微信订单" : monthlyUpgrade ? "补差价升级年度会员" : paymentMode === "online" ? "微信支付开通" : "线下申请开通"}</button>}
+            {(plan.id === "member" && paymentMode === "offline" || plan.id === "short_video_monthly") && <div className="manual-renew-note"><Clock size={20} /><span><strong>人工审核到账</strong><small>付款后提交审核，确认到账后同步官网与桌面端。</small></span></div>}
+            {plan.id === "custom" ? <div className="custom-plan-actions"><button className="button secondary full" disabled={busy} onClick={() => setCustomContactOpen(true)}>联系定制</button><button className="button primary full" disabled={busy} onClick={() => user ? setCustomOrderOpen(true) : openAuth("login")}><Plus size={18} />新建订单</button></div> : <button className={`button full ${plan.featured ? "primary" : "secondary"}`} disabled={busy} onClick={() => startPayment(plan)}>{plan.id === "free" ? "免费下载" : busy ? "正在创建订单" : plan.id === "short_video_monthly" ? "线下申请开通" : monthlyUpgrade ? "补差价升级年度会员" : paymentMode === "online" ? "微信支付开通" : "线下申请开通"}</button>}
           </article>
         ))}
       </section>
@@ -379,16 +386,17 @@ function PaymentDialog({ payment, provider, availability, onPayment, onClose }) 
   async function confirmOffline() {
     setBusy(true); setError("");
     try {
-      const result = await apiFetch("/api/billing/orders", { method: "POST", body: JSON.stringify({ kind: "subscription", cycle: payment.cycle, provider: "offline", autoRenew: false }) });
+      const result = await apiFetch("/api/billing/orders", { method: "POST", body: JSON.stringify({ kind: "subscription", cycle: payment.cycle, planType: payment.planType || "member", provider: "offline", autoRenew: false }) });
       onPayment(result);
     } catch (reason) { setError(reason.message); }
     finally { setBusy(false); }
   }
   if (payment.mode === "offline-cashier") {
-    return <div className="modal-backdrop"><section className="payment-modal offline-payment-modal" role="dialog" aria-modal="true"><button className="modal-close" disabled={busy} onClick={onClose}><X size={19} /></button><div className="payment-logo"><ShieldCheck size={28} /></div><span className="payment-eyebrow">OFFLINE PAYMENT</span><h2>扫码支付后提交人工审核</h2><p>请扫描企业收款码完成付款。付款后点击“我已支付”，系统会创建待审核订单。</p><img className="payment-qr enterprise-qr" src="/assets/enterprise-payment-qr.jpg" alt="古龙企业微信收款码" /><div className="offline-payment-summary"><span>{payment.cycle === "year" ? "年度会员" : "月度会员"}</span><strong>{formatMoney(payment.amountFen)}</strong></div>{payment.bonusFen > 0 && <p className="payment-bonus-note"><Coins size={19} />到账后额外赠送 {formatMoney(payment.bonusFen)}，可用余额合计 {formatMoney(payment.creditedFen)}</p>}{payment.upgradeCreditFen > 0 && <p className="offline-upgrade-note">已按月度会员升级规则抵扣 {formatMoney(payment.upgradeCreditFen)}</p>}{error && <div className="form-error">{error}</div>}<div className="payment-dialog-actions"><button className="button secondary" disabled={busy} onClick={onClose}>返回套餐</button><button className="button primary" disabled={busy} onClick={confirmOffline}>{busy ? "正在提交" : "我已支付"}</button></div></section></div>;
+    return <div className="modal-backdrop"><section className="payment-modal offline-payment-modal" role="dialog" aria-modal="true"><button className="modal-close" disabled={busy} onClick={onClose}><X size={19} /></button><div className="payment-logo"><ShieldCheck size={28} /></div><span className="payment-eyebrow">OFFLINE PAYMENT</span><h2>扫码支付后提交人工审核</h2><p>请扫描企业收款码完成付款。付款后点击“我已支付”，系统会创建待审核订单。</p><img className="payment-qr enterprise-qr" src="/assets/enterprise-payment-qr.jpg" alt="古龙企业微信收款码" /><div className="offline-payment-summary"><span>{payment.planType === "short_video_monthly" ? `短视频包月 · ${payment.cycle === "year" ? "年度" : "月度"}` : payment.cycle === "year" ? "年度会员" : "月度会员"}</span><strong>{formatMoney(payment.amountFen)}</strong></div>{payment.bonusFen > 0 && <p className="payment-bonus-note"><Coins size={19} />到账后额外赠送 {formatMoney(payment.bonusFen)}，可用余额合计 {formatMoney(payment.creditedFen)}</p>}{payment.upgradeCreditFen > 0 && <p className="offline-upgrade-note">已按月度会员升级规则抵扣 {formatMoney(payment.upgradeCreditFen)}</p>}{error && <div className="form-error">{error}</div>}<div className="payment-dialog-actions"><button className="button secondary" disabled={busy} onClick={onClose}>返回套餐</button><button className="button primary" disabled={busy} onClick={confirmOffline}>{busy ? "正在提交" : "我已支付"}</button></div></section></div>;
   }
   if (payment.mode === "offline") {
-    return <div className="modal-backdrop"><section className="payment-modal offline-payment-modal" role="dialog" aria-modal="true"><button className="modal-close" onClick={onClose}><X size={19} /></button><div className="payment-logo"><ShieldCheck size={28} /></div><span className="payment-eyebrow">PAYMENT SUBMITTED</span><h2>已提交，等待管理员审核</h2><p>订单 <strong>{payment.orderNo}</strong> 已进入审核队列。到账确认后，会员权益会同步到古龙官网与桌面端。</p><div className="form-success">待审核 · {formatMoney(payment.amountFen)}</div><p className="offline-payment-urgent">请尽快添加客服微信，发送支付截图，以加速审核进度。</p><img className="payment-qr service-qr" src="/assets/customer-service-wechat.jpg" alt="古龙客服微信二维码" /><small>扫码添加古龙客服，并发送本订单的支付截图。</small><button className="button primary full" onClick={onClose}>我知道了</button></section></div>;
+    const shortVideoPlan = payment.planType === "short_video_monthly";
+    return <div className="modal-backdrop"><section className="payment-modal offline-payment-modal" role="dialog" aria-modal="true"><button className="modal-close" onClick={onClose}><X size={19} /></button><div className="payment-logo"><ShieldCheck size={28} /></div><span className="payment-eyebrow">PAYMENT SUBMITTED</span><h2>{shortVideoPlan ? "短视频包月申请已提交" : "已提交，等待管理员审核"}</h2><p>订单 <strong>{payment.orderNo}</strong> 已进入审核队列。到账确认后，{shortVideoPlan ? "短视频包月权益与双倍额度" : "会员权益"}会同步到古龙官网与桌面端。</p><div className="form-success">待审核 · {formatMoney(payment.amountFen)}{shortVideoPlan ? ` · 审核后额度 ${formatMoney(payment.creditedFen || payment.amountFen * 2)}` : ""}</div><p className="offline-payment-urgent">请尽快添加客服微信，发送支付截图，以加速审核进度。</p><img className="payment-qr service-qr" src="/assets/customer-service-wechat.jpg" alt="古龙客服微信二维码" /><small>扫码添加古龙客服，并发送本订单的支付截图。</small><button className="button primary full" onClick={onClose}>我知道了</button></section></div>;
   }
   if (status === "paid") {
     return <div className="modal-backdrop"><section className="payment-modal payment-success-modal" role="dialog" aria-modal="true"><button className="modal-close" onClick={onClose}><X size={19} /></button><div className="payment-logo"><CheckCircle size={30} weight="fill" /></div><span className="payment-eyebrow">PAYMENT SUCCEEDED</span><h2>微信支付成功</h2><p>订单 <strong>{payment.orderNo}</strong> 已到账。会员权益、充值余额或定制订单状态已经写入官网，并同步提供给桌面端。</p><div className="form-success">已支付 · {formatMoney(payment.amountFen)}{payment.bonusFen > 0 ? ` · 赠送 ${formatMoney(payment.bonusFen)}` : ""}</div><button className="button primary full" onClick={onClose}>完成</button></section></div>;

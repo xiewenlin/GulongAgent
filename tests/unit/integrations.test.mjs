@@ -725,6 +725,9 @@ test("OpenAPI document includes Chandler admin, offline credentials, dated attac
   assert.ok(document.paths["/api/release-worker/releases/prepare"]);
   assert.ok(document.paths["/api/release-worker/releases/{publishId}/complete"]);
   assert.ok(document.paths["/api/release-worker/releases/{publishId}/fail"]);
+  assert.equal(document.paths["/api/billing/orders"].post.requestBody.content["application/json"].schema.properties.planType.enum.includes("short_video_monthly"), true);
+  assert.deepEqual(document.paths["/api/v1/pricing/subscriptions"].get.responses["200"].content["application/json"].schema.properties.shortVideo.properties.walletCreditMultiplier.enum, [2]);
+  assert.equal(document.paths["/api/v1/desktop/account/subscription"].get.responses["200"].content["application/json"].schema.properties.shortVideoPackage.properties.unlimitedH3.type, "boolean");
   for (const path of [
     "/api/release-worker/releases/prepare",
     "/api/release-worker/releases/{publishId}/complete",
@@ -923,6 +926,7 @@ test("desktop Chandler offline orders normalize into the website review queue", 
     chandlerUserId: "chandler-user-1",
     userEmail: "member@example.com",
     cycle: "year",
+    subscriptionPlan: "member",
     amountFen: 298000,
     reviewStatus: "pending",
     partnerData: items[0].partner_data,
@@ -999,7 +1003,8 @@ test("admin subscriptions localize review state and keep the three-column detail
   assert.match(adminSource, /label:\s*"订阅用户"/);
   assert.match(adminSource, /pending_review:\s*"待人工审核"/);
   assert.match(adminSource, /<h2>订阅用户<\/h2>/);
-  assert.match(adminSource, /修改有效期/);
+  assert.match(adminSource, /修改类型与有效期/);
+  assert.match(adminSource, /<option value="short_video_monthly">短视频包月用户<\/option>/);
   assert.match(adminSource, /<span>生效时间<\/span>/);
   assert.match(adminSource, /<span>到期时间<\/span>/);
   assert.match(css, /\.admin-detail-panel\s*>\s*article\s*\{[^}]*grid-template-columns:\s*minmax\(132px,[^;]+minmax\(180px,[^;]+minmax\(230px,\s*auto\)/s);
@@ -1050,11 +1055,11 @@ test("administrator subscription periods are authoritative across website and de
   assert.match(serverSource, /type:\s*"subscription_period_updated"|"subscription_period_updated"/);
   assert.doesNotMatch(serverSource, /safeDate\(subscription\.currentPeriodEnd\)/);
   assert.match(dbSource, /subscription_period_audits_by_user/);
-  assert.match(serverSource, /account_type: user\.role === "admin" \? "administrator" : isMember \? "subscription_member" : "standard_user"/);
+  assert.match(serverSource, /account_type: user\.role === "admin" \? "administrator" : isMember && subscription\?\.plan === SHORT_VIDEO_PLAN_ID \? "short_video_member" : isMember \? "subscription_member" : "standard_user"/);
   assert.match(serverSource, /membership_status: membershipStatus/);
-  assert.match(adminSource, /user\.is_member \? "订阅会员" : "普通用户"/);
+  assert.match(adminSource, /user\.is_member && user\.subscription_plan === "short_video_monthly" \? "短视频包月用户" : user\.is_member \? "订阅会员" : "普通用户"/);
   assert.match(adminSource, /Promise\.all\(\[inspect\(user\), load\(\)\]\)/);
-  assert.match(accountSource, /isMember \? "订阅会员" : "普通用户"/);
+  assert.match(accountSource, /isShortVideoMember \? "短视频包月用户" : isMember \? "订阅会员" : "普通用户"/);
 });
 
 test("Chandler v3.2 pricing uses application-level price versions before the local mirror", async () => {

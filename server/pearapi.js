@@ -6,6 +6,11 @@ import { enforceRateLimit } from "./rate-limit.js";
 import { readUserSecret, sealUserSecret } from "./security.js";
 import { localizeErrorMessage } from "../shared/error-messages.js";
 import {
+  SHORT_VIDEO_PLAN_ID,
+  expireShortVideoPackageAllowance,
+  shortVideoPackageView,
+} from "./short-video-subscription.js";
+import {
   PEAR_API_IMAGE_MODELS,
   PEAR_API_MEDIA_MODEL_MAP,
   PEAR_API_VIDEO_MODELS,
@@ -604,12 +609,17 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     const auth = await authenticate(c); if (auth.error) return auth.error;
     const ownerId = new ObjectId(auth.user.id);
     const now = new Date();
-    const [subscription, wallet, credential, assets] = await Promise.all([
+    const [subscription, initialWallet, credential, assets] = await Promise.all([
       (await getCollection("subscriptions")).findOne({ ownerId }),
       (await getCollection("wallets")).findOne({ ownerId }),
       credentialRecord(),
       (await getCollection("agentMediaJobs")).find({ ownerId, status: "succeeded" }).sort({ completedAt: -1 }).limit(12).toArray(),
     ]);
+    let wallet = initialWallet;
+    if (subscription?.plan === SHORT_VIDEO_PLAN_ID && !shortVideoPackageView(subscription, wallet, now).active && Number(wallet?.shortVideoPackageBalanceFen || 0) > 0) {
+      await expireShortVideoPackageAllowance({ getCollection, ownerId, subscription, now });
+      wallet = await (await getCollection("wallets")).findOne({ ownerId });
+    }
     const active = auth.user.role === "admin" || Boolean(subscription?.currentPeriodStart <= now && subscription?.currentPeriodEnd > now && !["cancelled", "canceled"].includes(subscription?.status));
     const pricing = normalizedPricing(credential?.pricing || DEFAULT_PRICING);
     const quota = await usageSnapshot(ownerId, Number(wallet?.balanceFen || 0), pricing, now);
@@ -617,7 +627,8 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     return c.json({
       configured: Boolean(credentialSecrets(credential).token),
       mediaConfigured: Boolean(credentialSecrets(credential).key),
-      subscription: { active, restricted: !active, currentPeriodEnd: subscription?.currentPeriodEnd || null },
+      subscription: { active, restricted: !active, plan: subscription?.plan || null, currentPeriodEnd: subscription?.currentPeriodEnd || null },
+      shortVideoPackage: shortVideoPackageView(subscription, wallet, now),
       models: PEAR_API_FREE_MODELS.map((model) => ({ ...model, free: true })),
       defaultModel: PEAR_API_FREE_MODELS[0].id,
       mediaModels: {
@@ -729,6 +740,12 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     const ownerId = new ObjectId(auth.user.id);
     const now = new Date();
     const unlimited = auth.user.role === "admin";
+    if (!unlimited) {
+      const subscription = await (await getCollection("subscriptions")).findOne({ ownerId });
+      if (subscription?.plan === SHORT_VIDEO_PLAN_ID && !shortVideoPackageView(subscription, null, now).active) {
+        await expireShortVideoPackageAllowance({ getCollection, ownerId, subscription, now });
+      }
+    }
     const record = await credentialRecord();
     const key = credentialSecrets(record).key;
     if (!key) return c.json({ code: "PEAR_API_KEY_NOT_CONFIGURED", message: "管理员尚未配置 PearAPI Key" }, 503);

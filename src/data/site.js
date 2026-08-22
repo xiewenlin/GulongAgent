@@ -38,6 +38,14 @@ export const plans = [
     features: ["第二大脑与长期记忆", "微信接 Codex", "图文与短视频自动化", "本地模型与会员能力包"],
   },
   {
+    id: "short_video_monthly",
+    name: "短视频包月",
+    eyebrow: "H3 无限创作",
+    monthlyFen: 599900,
+    yearlyFen: 5999900,
+    features: ["无限使用 MiniMaxH3共享节点", "实付多少再赠送多少额度", "额度内照常扣费并给节点分佣", "额度用完后继续生成且不再扣费"],
+  },
+  {
     id: "custom",
     name: "深度定制",
     eyebrow: "共同增长",

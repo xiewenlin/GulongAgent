@@ -392,6 +392,10 @@ export async function ensureIndexes() {
           { status: 1, currentPeriodEnd: 1 },
           { name: "subscriptions_active" },
         ),
+        db.collection("subscriptions").createIndex(
+          { plan: 1, currentPeriodEnd: 1, allowanceExpiredAt: 1 },
+          { name: "subscriptions_short_video_expiry" },
+        ),
         db.collection("walletCreditLedger").createIndex(
           { creditKey: 1 },
           { unique: true, name: "uniq_wallet_credit_ledger" },

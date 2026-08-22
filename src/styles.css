@@ -2487,7 +2487,7 @@ textarea:focus {
 .pricing-grid {
   padding: 30px 0 100px;
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 18px;
 }
 
@@ -2559,6 +2559,7 @@ textarea:focus {
 .wallet-promotion-note strong, .wallet-promotion-note small { display: block; }
 .wallet-promotion-note strong { font-size: 18px; }
 .wallet-promotion-note small { margin-top: 4px; color: var(--muted); font-size: 18px; line-height: 1.55; }
+.wallet-promotion-note.short-video { color: var(--jade); border-color: color-mix(in srgb, var(--jade) 35%, var(--line)); background: color-mix(in srgb, var(--jade) 9%, var(--surface)); }
 
 .pricing-grid ul {
   min-height: 170px;
@@ -3555,6 +3556,10 @@ textarea:focus {
 
   .capability-strip {
     grid-template-columns: repeat(2, 1fr);
+  }
+
+  .pricing-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .capability-strip article:nth-child(2) {

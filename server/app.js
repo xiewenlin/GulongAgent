@@ -95,6 +95,16 @@ import { buildAdminAnalyticsDashboard, recordAnalyticsEvent } from "./analytics.
 import { recoverExpiredDirectReleaseLock } from "./release-lock.js";
 import { creditPaymentBalanceWithPromotion, paymentPromotionBonusFen, registerPearApiRoutes } from "./pearapi.js";
 import { registerH3SharedRoutes } from "./h3-shared.js";
+import {
+  SHORT_VIDEO_MONTHLY_PRICE_FEN,
+  SHORT_VIDEO_PLAN_ID,
+  SHORT_VIDEO_PLAN_NAME,
+  SHORT_VIDEO_YEARLY_PRICE_FEN,
+  creditShortVideoSubscriptionBalance,
+  expireShortVideoPackageAllowance,
+  shortVideoPackageView,
+  shortVideoSubscriptionPriceFen,
+} from "./short-video-subscription.js";
 import { localizeErrorMessage } from "../shared/error-messages.js";
 import {
   OFFLINE_REVIEW_REJECTION_REASON,
@@ -149,7 +159,7 @@ const FEEDBACK_RESPONSE_MAX_BYTES = 200 * 1024 * 1024;
 const WORKFLOW_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
 const WORKFLOW_IMAGE_CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 const SUBSCRIPTION_PRICE_MIN_FEN = 100;
-const SUBSCRIPTION_PRICE_MAX_FEN = 5_000_000;
+const SUBSCRIPTION_PRICE_MAX_FEN = 10_000_000;
 const CUSTOM_ORDER_MAX_FEN = 10_000_000;
 const ACTIVATION_CODE_MAX_BATCH = 500;
 const ACTIVATION_PRODUCT_DEFAULT = "minimax-h3-universal";
@@ -550,7 +560,10 @@ function adminSubscriptionJson(subscription) {
   return {
     id: subscription._id.toString(),
     status,
-    sku_name: subscription.cycle === "year" ? "古龙年度会员" : subscription.cycle === "month" ? "古龙月度会员" : "古龙会员",
+    plan: subscription.plan || "member",
+    sku_name: subscription.plan === SHORT_VIDEO_PLAN_ID
+      ? `${SHORT_VIDEO_PLAN_NAME} · ${subscription.cycle === "year" ? "年度" : "月度"}`
+      : subscription.cycle === "year" ? "古龙年度会员" : subscription.cycle === "month" ? "古龙月度会员" : "古龙会员",
     current_period_start: subscription.currentPeriodStart || null,
     current_period_end: subscription.currentPeriodEnd || null,
     provider: subscription.provider || "admin",
@@ -576,8 +589,11 @@ function chandlerAttributePeriod(attributes = {}) {
   if (!end || Number.isNaN(end.getTime()) || (start && Number.isNaN(start.getTime()))) return null;
   const marker = `${attributes.plan_kind || ""} ${attributes.billing_interval || ""} ${attributes.product_id || ""} ${attributes.sku_id || ""}`.toLowerCase();
   const cycle = marker.includes("year") || marker.includes("annual") ? "year" : marker.includes("month") ? "month" : "custom";
+  const plan = attributes.subscription_plan === SHORT_VIDEO_PLAN_ID || attributes.plan_kind === SHORT_VIDEO_PLAN_ID
+    ? SHORT_VIDEO_PLAN_ID
+    : attributes.product_id || attributes.plan || "member";
   return {
-    plan: attributes.product_id || attributes.plan || "member",
+    plan,
     cycle,
     status: subscriptionPeriodState(start, end),
     currentPeriodStart: start,
@@ -604,6 +620,7 @@ async function synchronizeChandlerAttributeSubscription(ownerId, attributes, app
         chandlerSynchronizedAt: now,
         updatedAt: now,
       },
+      ...(period.plan === SHORT_VIDEO_PLAN_ID ? { $unset: { allowanceExpiredAt: "", allowanceClearedFen: "" } } : {}),
       $setOnInsert: { createdAt: now },
     },
     { upsert: true },
@@ -730,8 +747,9 @@ function adminUserDirectoryItem(user, subscription = null, now = new Date()) {
     display_name: user.displayName || user.username || null,
     status: user.status || "active",
     role: user.role || "user",
-    account_type: user.role === "admin" ? "administrator" : isMember ? "subscription_member" : "standard_user",
+    account_type: user.role === "admin" ? "administrator" : isMember && subscription?.plan === SHORT_VIDEO_PLAN_ID ? "short_video_member" : isMember ? "subscription_member" : "standard_user",
     is_member: isMember,
+    subscription_plan: subscription?.plan || null,
     membership_status: membershipStatus,
     membership_valid_from: subscription?.currentPeriodStart || null,
     membership_valid_until: subscription?.currentPeriodEnd || null,
@@ -967,6 +985,7 @@ function subscriptionLifecycle(subscription, now = new Date()) {
   const daysRemaining = remainingMs === null ? null : Math.max(0, Math.ceil(remainingMs / 86_400_000));
   return {
     status,
+    plan: subscription?.plan || null,
     restricted: status === "expired",
     renewalDue: status === "active" && daysRemaining !== null && daysRemaining <= RENEWAL_REMINDER_DAYS,
     daysRemaining,
@@ -980,6 +999,10 @@ async function refreshSubscriptionLifecycle(ownerId, now = new Date()) {
   const subscription = await subscriptions.findOne({ ownerId });
   const lifecycle = subscriptionLifecycle(subscription, now);
   if (!subscription) return lifecycle;
+
+  if (subscription.plan === SHORT_VIDEO_PLAN_ID && lifecycle.status === "expired") {
+    await expireShortVideoPackageAllowance({ getCollection, ownerId, subscription, now });
+  }
 
   if (subscription.status !== lifecycle.status || subscription.autoRenew) {
     await subscriptions.updateOne(
@@ -1016,11 +1039,17 @@ async function sendDailyRenewalReminders(now = new Date()) {
     status: { $nin: ["cancelled", "canceled", "expired"] },
   }, { projection: { ownerId: 1 } }).limit(10_000).toArray();
   await mapWithConcurrency(expiring, 12, (item) => refreshSubscriptionLifecycle(item.ownerId, now));
+  const expiredShortVideo = await subscriptions.find({
+    plan: SHORT_VIDEO_PLAN_ID,
+    currentPeriodEnd: { $lte: now },
+    allowanceExpiredAt: { $exists: false },
+  }, { projection: { ownerId: 1 } }).limit(10_000).toArray();
+  await mapWithConcurrency(expiredShortVideo, 12, (item) => refreshSubscriptionLifecycle(item.ownerId, now));
   const expired = await subscriptions.updateMany(
     { currentPeriodEnd: { $lte: now }, status: { $nin: ["expired", "cancelled", "canceled"] } },
     { $set: { status: "expired", autoRenew: false, statusEvaluatedAt: now, updatedAt: now } },
   );
-  return { reminded: expiring.length, expired: expired.modifiedCount, evaluatedAt: now };
+  return { reminded: expiring.length, expired: expired.modifiedCount, shortVideoAllowancesCleared: expiredShortVideo.length, evaluatedAt: now };
 }
 
 async function workerTaskDetails(task) {
@@ -1272,8 +1301,12 @@ async function synchronizeChandlerOfflinePayments(accessToken) {
         ownerId: owner._id,
         chandlerUserId: candidate.chandlerUserId,
         userEmail: candidate.userEmail,
+        kind: "subscription",
         cycle: candidate.cycle,
+        subscriptionPlan: candidate.subscriptionPlan,
         amountFen: candidate.amountFen,
+        promotionBonusFen: Number(candidate.partnerData.promotion_bonus_fen || 0),
+        creditedFen: Number(candidate.partnerData.wallet_credit_fen || candidate.amountFen),
         plan: {
           productId: candidate.partnerData.product_id || "subscription",
           productName: candidate.partnerData.product_name || (candidate.cycle === "year" ? "年度订阅会员" : "月度订阅会员"),
@@ -1342,7 +1375,10 @@ async function approveOfflinePayment({ orderId, actorUserId, actorChandlerUserId
   if (!order || !["pending", "approved"].includes(order.status)) return { error: { code: "ORDER_STATE_CHANGED", message: "申请不存在或已经被拒绝", status: 409 } };
   const alreadyApproved = order.status === "approved";
   const isRecharge = order.kind === "recharge";
-  const promotionBonusFen = paymentPromotionBonusFen({ amountFen: order.amountFen, kind: isRecharge ? "recharge" : "subscription_payment" });
+  const isShortVideoSubscription = !isRecharge && (order.subscriptionPlan === SHORT_VIDEO_PLAN_ID || order.partnerData?.subscription_plan === SHORT_VIDEO_PLAN_ID);
+  const promotionBonusFen = isShortVideoSubscription
+    ? order.amountFen
+    : paymentPromotionBonusFen({ amountFen: order.amountFen, kind: isRecharge ? "recharge" : "subscription_payment" });
   const storedStart = alreadyApproved ? new Date(order.validFrom) : null;
   const storedEnd = alreadyApproved ? new Date(order.validUntil) : null;
   const start = storedStart && !Number.isNaN(storedStart.getTime())
@@ -1368,15 +1404,19 @@ async function approveOfflinePayment({ orderId, actorUserId, actorChandlerUserId
   await Promise.all([
     ...(!isRecharge ? [(await getCollection("subscriptions")).updateOne(
       { ownerId: order.ownerId },
-      { $set: { plan: "member", cycle: order.cycle, provider: "offline", status: "active", currentPeriodStart: start, currentPeriodEnd: end, autoRenew: false, updatedAt: now }, $setOnInsert: { createdAt: now } },
+      { $set: { plan: isShortVideoSubscription ? SHORT_VIDEO_PLAN_ID : "member", cycle: order.cycle, provider: "offline", status: "active", currentPeriodStart: start, currentPeriodEnd: end, autoRenew: false, updatedAt: now }, $unset: { allowanceExpiredAt: "", allowanceClearedFen: "" }, $setOnInsert: { createdAt: now } },
       { upsert: true },
     )] : []),
     (await getCollection("notifications")).updateOne(
       { ownerId: order.ownerId, type: "offline_payment_approved", orderId: order._id },
-      { $set: { title: "线下支付审核已通过", message: isRecharge ? `订单 ${order.orderNo} 已确认到账，实付余额${promotionBonusFen ? `及赠送的 ${(promotionBonusFen / 100).toFixed(2)} 元` : ""}已经入账。` : `订单 ${order.orderNo} 已确认到账，会员权益与赠送的 ${(promotionBonusFen / 100).toFixed(2)} 元余额已经生效。`, orderNo: order.orderNo, readAt: null, updatedAt: now }, $setOnInsert: { createdAt: now } },
+      { $set: { title: "线下支付审核已通过", message: isRecharge ? `订单 ${order.orderNo} 已确认到账，实付余额${promotionBonusFen ? `及赠送的 ${(promotionBonusFen / 100).toFixed(2)} 元` : ""}已经入账。` : isShortVideoSubscription ? `订单 ${order.orderNo} 已确认到账，短视频包月权益已生效，可用额度为实付金额的 2 倍。` : `订单 ${order.orderNo} 已确认到账，会员权益与赠送的 ${(promotionBonusFen / 100).toFixed(2)} 元余额已经生效。`, orderNo: order.orderNo, readAt: null, updatedAt: now }, $setOnInsert: { createdAt: now } },
       { upsert: true },
     ),
-    ...(isRecharge ? [creditPaymentBalanceWithPromotion({ ownerId: order.ownerId, amountFen: order.amountFen, source: "offline_recharge", sourceId: order.orderNo, kind: "recharge" })] : [creditPaymentBalanceWithPromotion({ ownerId: order.ownerId, amountFen: order.amountFen, source: "offline_subscription", sourceId: order.orderNo, kind: "subscription_payment" })]),
+    ...(isRecharge
+      ? [creditPaymentBalanceWithPromotion({ ownerId: order.ownerId, amountFen: order.amountFen, source: "offline_recharge", sourceId: order.orderNo, kind: "recharge" })]
+      : isShortVideoSubscription
+        ? [creditShortVideoSubscriptionBalance({ getCollection, ownerId: order.ownerId, amountFen: order.amountFen, source: "offline_short_video_subscription", sourceId: order.orderNo, expiresAt: end })]
+        : [creditPaymentBalanceWithPromotion({ ownerId: order.ownerId, amountFen: order.amountFen, source: "offline_subscription", sourceId: order.orderNo, kind: "subscription_payment" })]),
   ]);
   if (accessToken && order.chandlerOrderNo) {
     const applicationId = order.applicationId || chandlerConfig().applicationId;
@@ -1388,10 +1428,10 @@ async function approveOfflinePayment({ orderId, actorUserId, actorChandlerUserId
       const path = `/v1/me/oauth/clients/${encodeURIComponent(applicationId)}/users/${encodeURIComponent(order.chandlerUserId)}/attributes`;
       const current = await chandlerRequest(path, { accessToken });
       const attributes = current.attributes && typeof current.attributes === "object" ? current.attributes : {};
-      await chandlerRequest(path, { method: "PUT", accessToken, body: { attributes: { ...attributes, subscription_status: "active", subscription_source: "offline_review", subscription_order_no: order.orderNo, subscription_valid_from: start.toISOString(), subscription_valid_until: end.toISOString(), subscription_valid_from_unix_ms: start.getTime(), subscription_valid_until_unix_ms: end.getTime(), subscription_reviewed_at_unix_ms: now.getTime() } } });
+      await chandlerRequest(path, { method: "PUT", accessToken, body: { attributes: { ...attributes, subscription_status: "active", subscription_plan: isShortVideoSubscription ? SHORT_VIDEO_PLAN_ID : "member", plan_kind: isShortVideoSubscription ? SHORT_VIDEO_PLAN_ID : order.cycle === "year" ? "yearly" : "monthly", subscription_source: "offline_review", subscription_order_no: order.orderNo, subscription_valid_from: start.toISOString(), subscription_valid_until: end.toISOString(), subscription_valid_from_unix_ms: start.getTime(), subscription_valid_until_unix_ms: end.getTime(), subscription_reviewed_at_unix_ms: now.getTime() } } });
     } catch { /* Website MongoDB remains authoritative and desktop reads it directly. */ }
   }
-  return { ok: true, orderNo: order.orderNo, status: "approved", creditedFen: order.amountFen + promotionBonusFen, bonusFen: promotionBonusFen, ...(isRecharge ? {} : { validFrom: start, validUntil: end }), message: isRecharge ? "审核已通过，充值余额与符合条件的赠送金额已经入账并可由桌面端立即同步" : "审核已通过，会员权益与 10% 赠送余额已经生效并可由桌面端立即同步" };
+  return { ok: true, orderNo: order.orderNo, status: "approved", planType: isShortVideoSubscription ? SHORT_VIDEO_PLAN_ID : isRecharge ? null : "member", creditedFen: order.amountFen + promotionBonusFen, bonusFen: promotionBonusFen, ...(isRecharge ? {} : { validFrom: start, validUntil: end }), message: isRecharge ? "审核已通过，充值余额与符合条件的赠送金额已经入账并可由桌面端立即同步" : isShortVideoSubscription ? "审核已通过，短视频包月权益与双倍额度已经生效并可由桌面端立即同步" : "审核已通过，会员权益与 10% 赠送余额已经生效并可由桌面端立即同步" };
 }
 
 async function rejectOfflinePayment({ orderId, actorUserId, actorChandlerUserId, accessToken, reason }) {
@@ -1650,11 +1690,12 @@ const adminUpdateSubscriptionPeriodRoute = createRoute({
   method: "put",
   path: "/api/admin/users/{id}/subscription-period",
   tags: ["Admin · Users"],
-  summary: "修改用户会员有效期",
-  description: "由管理员精确设置官网会员的生效时间和到期时间；官网与桌面端均以该时间段为准，并尽力同步 Chandler 用户属性。",
+  summary: "修改用户订阅类型与会员有效期",
+  description: "由管理员设置会员用户或短视频包月用户，并精确配置生效与到期时间；官网与桌面端均以该时间段为准，并尽力同步 Chandler 用户属性。",
   request: {
     params: z.object({ id: z.string().min(1).max(100) }),
     body: { content: { "application/json": { schema: z.object({
+      plan: z.enum(["member", SHORT_VIDEO_PLAN_ID]).optional(),
       currentPeriodStart: z.string().datetime(),
       currentPeriodEnd: z.string().datetime(),
     }) } } },
@@ -1663,6 +1704,7 @@ const adminUpdateSubscriptionPeriodRoute = createRoute({
     200: { description: "会员有效期已更新", content: { "application/json": { schema: z.object({
       ok: z.literal(true),
       userId: z.string(),
+      plan: z.enum(["member", SHORT_VIDEO_PLAN_ID]),
       status: z.enum(["scheduled", "active", "expired"]),
       currentPeriodStart: z.string().datetime(),
       currentPeriodEnd: z.string().datetime(),
@@ -1805,10 +1847,10 @@ const getSubscriptionPricingRoute = createRoute({
   path: "/api/v1/pricing/subscriptions",
   tags: ["Desktop Synchronization"],
   summary: "桌面端实时同步订阅价格",
-  description: "公开返回古龙官网当前生效的月度与年度会员价格。管理员发布后立即更新；响应禁止缓存，桌面端应在打开订阅页时重新拉取。",
+  description: "公开返回古龙官网当前生效的会员价格及短视频包月固定价格。管理员发布会员价格后立即更新；响应禁止缓存，桌面端应在打开订阅页时重新拉取。",
   security: [],
   responses: {
-    200: { description: "当前生效的订阅价格与支付渠道快照", content: { "application/json": { schema: z.object({ revision: z.string(), currency: z.literal("CNY"), monthly: SubscriptionPricePointSchema, yearly: SubscriptionPricePointSchema, updatedAt: z.coerce.date(), paymentAvailability: PaymentAvailabilitySchema }) } } },
+    200: { description: "当前生效的订阅价格与支付渠道快照", content: { "application/json": { schema: z.object({ revision: z.string(), currency: z.literal("CNY"), monthly: SubscriptionPricePointSchema, yearly: SubscriptionPricePointSchema, shortVideo: z.object({ id: z.literal("short_video_monthly"), name: z.literal("短视频包月"), monthlyFen: z.number().int(), yearlyFen: z.number().int(), paymentProviders: z.array(z.literal("offline")), walletCreditMultiplier: z.literal(2), unlimitedModel: z.literal("minimax_h3_shared") }), updatedAt: z.coerce.date(), paymentAvailability: PaymentAvailabilitySchema }) } } },
   },
 });
 
@@ -1948,9 +1990,9 @@ const desktopSubscriptionStatusRoute = createRoute({
   path: "/api/v1/desktop/account/subscription",
   tags: ["Desktop Synchronization"],
   summary: "桌面端读取官网实时会员权益",
-  description: "使用当前 Chandler Bearer Token 映射官网账号，返回 MongoDB 权威订阅状态；线下订单通过后桌面端下次轮询即可立即解锁。",
+  description: "使用当前 Chandler Bearer Token 映射官网账号，返回 MongoDB 权威订阅状态；短视频包月返回剩余套餐额度和 H3 无限使用标记，线下订单通过后桌面端下次轮询即可立即解锁。",
   security: [{ bearerAuth: [] }],
-  responses: { 200: { description: "实时订阅状态", content: { "application/json": { schema: z.object({ isMember: z.boolean(), subscription: z.record(z.string(), z.unknown()).nullable(), checkedAt: z.coerce.date() }) } } }, 401: { description: "Chandler 登录失效", content: { "application/json": { schema: ErrorSchema } } } },
+  responses: { 200: { description: "实时订阅状态", content: { "application/json": { schema: z.object({ isMember: z.boolean(), balanceFen: z.number().int(), shortVideoPackage: z.object({ active: z.boolean(), unlimitedH3: z.boolean(), packageBalanceFen: z.number().int(), packageExpiresAt: z.coerce.date().nullable(), chargeMode: z.literal("deduct_until_exhausted_then_free") }), subscription: z.record(z.string(), z.unknown()).nullable(), checkedAt: z.coerce.date() }) } } }, 401: { description: "Chandler 登录失效", content: { "application/json": { schema: ErrorSchema } } } },
 });
 
 const DesktopChandlerApplicationKeySchema = z.enum(["gulong", "airos-eternal-flower"]);
@@ -3342,6 +3384,7 @@ app.get("/api/account/dashboard", async (c) => {
     } : null,
     subscriptionLifecycle: lifecycle,
     balanceFen: wallet?.balanceFen || 0,
+    shortVideoPackage: shortVideoPackageView(effectiveSubscription, wallet),
     brainUploads: uploads.map((item) => ({
       id: item._id.toString(),
       originalName: item.originalName || item.pathname?.split("/").pop() || "第二大脑.zip",
@@ -3368,12 +3411,13 @@ app.get("/api/account/dashboard", async (c) => {
       resolvedAt: item.resolvedAt || null,
     })),
     orders: [
-      ...payments.map((item) => ({ id: item._id.toString(), orderNo: item.orderNo, kind: item.kind, cycle: item.cycle, provider: item.provider, amountFen: item.amountFen, bonusFen: item.promotionBonusFen || 0, creditedFen: item.creditedFen || item.amountFen, status: item.status, createdAt: item.createdAt })),
+      ...payments.map((item) => ({ id: item._id.toString(), orderNo: item.orderNo, kind: item.kind, cycle: item.cycle, subscriptionPlan: item.subscriptionPlan || null, provider: item.provider, amountFen: item.amountFen, bonusFen: item.promotionBonusFen || 0, creditedFen: item.creditedFen || item.amountFen, status: item.status, createdAt: item.createdAt })),
       ...offlineOrders.map((item) => ({
         id: item._id.toString(),
         orderNo: item.orderNo,
         kind: item.kind || "subscription",
         cycle: item.cycle,
+        subscriptionPlan: item.subscriptionPlan || item.partnerData?.subscription_plan || null,
         provider: "offline",
         amountFen: item.amountFen,
         bonusFen: item.promotionBonusFen || 0,
@@ -3791,11 +3835,15 @@ app.openapi(adminUpdateSubscriptionPeriodRoute, async (c) => {
   const status = subscriptionPeriodState(currentPeriodStart, currentPeriodEnd, now);
   const subscriptions = await getCollection("subscriptions");
   const previous = await subscriptions.findOne({ ownerId: target._id });
+  const plan = body.plan || previous?.plan || "member";
+  if (previous?.plan === SHORT_VIDEO_PLAN_ID && plan !== SHORT_VIDEO_PLAN_ID) {
+    await expireShortVideoPackageAllowance({ getCollection, ownerId: target._id, subscription: previous, now, force: true });
+  }
   await subscriptions.updateOne(
     { ownerId: target._id },
     {
       $set: {
-        plan: previous?.plan || "member",
+        plan,
         cycle: previous?.cycle || "custom",
         provider: previous?.provider || "admin",
         status,
@@ -3808,6 +3856,7 @@ app.openapi(adminUpdateSubscriptionPeriodRoute, async (c) => {
         periodUpdatedBy: new ObjectId(auth.user.id),
         updatedAt: now,
       },
+      ...(plan === SHORT_VIDEO_PLAN_ID ? { $unset: { allowanceExpiredAt: "", allowanceClearedFen: "" } } : {}),
       $setOnInsert: { createdAt: now },
     },
     { upsert: true },
@@ -3817,11 +3866,12 @@ app.openapi(adminUpdateSubscriptionPeriodRoute, async (c) => {
     targetChandlerUserId: target.chandlerUserId || null,
     previous: previous ? {
       status: previous.status || null,
+      plan: previous.plan || "member",
       currentPeriodStart: previous.currentPeriodStart || null,
       currentPeriodEnd: previous.currentPeriodEnd || null,
       manualPeriodOverride: Boolean(previous.manualPeriodOverride),
     } : null,
-    next: { status, currentPeriodStart, currentPeriodEnd, manualPeriodOverride: true },
+    next: { plan, status, currentPeriodStart, currentPeriodEnd, manualPeriodOverride: true },
     actorId: new ObjectId(auth.user.id),
     createdAt: now,
   });
@@ -3831,9 +3881,9 @@ app.openapi(adminUpdateSubscriptionPeriodRoute, async (c) => {
   await notifyUser(
     target._id,
     "subscription_period_updated",
-    "会员有效期已调整",
-    `管理员已将你的会员有效期调整为 ${displayStart} 至 ${displayEnd}。`,
-    { currentPeriodStart, currentPeriodEnd, status, actorId: new ObjectId(auth.user.id) },
+    "订阅类型与有效期已调整",
+    `管理员已将你的订阅类型设置为${plan === SHORT_VIDEO_PLAN_ID ? "短视频包月" : "会员用户"}，有效期为 ${displayStart} 至 ${displayEnd}。`,
+    { plan, currentPeriodStart, currentPeriodEnd, status, actorId: new ObjectId(auth.user.id) },
   );
 
   let chandlerSynced = false;
@@ -3849,6 +3899,8 @@ app.openapi(adminUpdateSubscriptionPeriodRoute, async (c) => {
         body: { attributes: {
           ...attributes,
           subscription_status: status,
+          subscription_plan: plan,
+          plan_kind: plan,
           subscription_source: "website_admin_period",
           subscription_valid_from: currentPeriodStart.toISOString(),
           subscription_valid_until: currentPeriodEnd.toISOString(),
@@ -3866,6 +3918,7 @@ app.openapi(adminUpdateSubscriptionPeriodRoute, async (c) => {
   return c.json({
     ok: true,
     userId: target._id.toString(),
+    plan,
     status,
     currentPeriodStart: currentPeriodStart.toISOString(),
     currentPeriodEnd: currentPeriodEnd.toISOString(),
@@ -5875,6 +5928,7 @@ app.get("/api/billing/plans", async (c) => {
     plans: [
       { id: "free", name: "普通用户", monthlyFen: 0, yearlyFen: 0, autoRenew: false },
       { id: "member", name: "会员用户", monthlyFen: pricing.monthly.amountFen, yearlyFen: pricing.yearly.amountFen, autoRenew: false, renewalMode: "manual", reminderDays: RENEWAL_REMINDER_DAYS },
+      { id: SHORT_VIDEO_PLAN_ID, name: SHORT_VIDEO_PLAN_NAME, monthlyFen: SHORT_VIDEO_MONTHLY_PRICE_FEN, yearlyFen: SHORT_VIDEO_YEARLY_PRICE_FEN, autoRenew: false, renewalMode: "manual", paymentProviders: ["offline"], unlimitedModel: "minimax_h3_shared", walletCreditMultiplier: 2 },
       { id: "custom", name: "深度定制", pricing: "结果式付费 · 利润五五分", autoRenew: false },
     ],
     providers: {
@@ -5889,6 +5943,7 @@ app.get("/api/billing/plans", async (c) => {
       rechargeBonusRate: 0.1,
       rechargeThresholdFen: 50_000,
       thresholdInclusive: true,
+      shortVideoSubscriptionBonusRate: 1,
     },
     pricingRevision: pricing.revision,
   });
@@ -5918,6 +5973,9 @@ app.post("/api/billing/orders", async (c) => {
       : body.kind === "worker_task"
         ? "worker_task"
         : "subscription";
+  const subscriptionPlan = kind === "subscription" && body.planType === SHORT_VIDEO_PLAN_ID
+    ? SHORT_VIDEO_PLAN_ID
+    : "member";
   const now = new Date();
   const ownerId = new ObjectId(auth.user.id);
   const pricing = kind === "subscription" ? await currentSubscriptionPricing(now) : null;
@@ -5949,9 +6007,11 @@ app.post("/api/billing/orders", async (c) => {
     ? Number(workerTask.budgetFen)
     : kind === "recharge" || kind === "custom"
       ? Number(body.amountFen)
-      : cycle === "year"
-        ? pricing.yearly.amountFen
-        : pricing.monthly.amountFen;
+      : subscriptionPlan === SHORT_VIDEO_PLAN_ID
+        ? shortVideoSubscriptionPriceFen(cycle)
+        : cycle === "year"
+          ? pricing.yearly.amountFen
+          : pricing.monthly.amountFen;
   const maxAmountFen = kind === "custom"
     ? CUSTOM_ORDER_MAX_FEN
     : kind === "worker_task"
@@ -5962,9 +6022,10 @@ app.post("/api/billing/orders", async (c) => {
   }
   if (!cycle && kind === "subscription") return c.json({ code: "VALIDATION_ERROR", message: "订阅周期不正确" }, 400);
   if (provider === "offline" && !["subscription", "recharge"].includes(kind)) return c.json({ code: "VALIDATION_ERROR", message: "线下支付仅用于会员订阅或账户充值审核" }, 400);
+  if (subscriptionPlan === SHORT_VIDEO_PLAN_ID && provider !== "offline") return c.json({ code: "OFFLINE_PAYMENT_REQUIRED", message: "短视频包月当前仅支持线下支付" }, 400);
   const orderNo = `GL${Date.now()}${randomBytes(4).toString("hex").toUpperCase()}`;
   const autoRenewRequested = kind === "subscription" && Boolean(body.autoRenew);
-  const activeSubscription = kind === "subscription" && cycle === "year"
+  const activeSubscription = kind === "subscription" && subscriptionPlan === "member" && cycle === "year"
     ? await (await getCollection("subscriptions")).findOne({
       ownerId,
       cycle: "month",
@@ -5979,14 +6040,16 @@ app.post("/api/billing/orders", async (c) => {
     ? new Date(activeSubscription.currentPeriodStart || now)
     : null;
   if (isMonthlyUpgrade) amountFen = Math.max(100, pricing.yearly.amountFen - upgradeCreditFen);
-  const localPriceVersion = kind === "subscription" && !isMonthlyUpgrade
+  const localPriceVersion = kind === "subscription" && subscriptionPlan === "member" && !isMonthlyUpgrade
     ? await effectiveLocalPrice({ cycle, at: now })
     : null;
   if (localPriceVersion) amountFen = localPriceVersion.amountFen;
   const autoRenew = false;
 
   if (provider === "offline") {
-    const promotionBonusFen = paymentPromotionBonusFen({ amountFen, kind: kind === "recharge" ? "recharge" : "subscription_payment" });
+    const promotionBonusFen = subscriptionPlan === SHORT_VIDEO_PLAN_ID
+      ? amountFen
+      : paymentPromotionBonusFen({ amountFen, kind: kind === "recharge" ? "recharge" : "subscription_payment" });
     let plans = [];
     let offlineAccessToken = null;
     try {
@@ -6004,6 +6067,15 @@ app.post("/api/billing/orders", async (c) => {
       billingInterval: "one_time",
       amountFen,
       source: "website-offline-recharge",
+    } : subscriptionPlan === SHORT_VIDEO_PLAN_ID ? {
+      productId: SHORT_VIDEO_PLAN_ID,
+      productName: SHORT_VIDEO_PLAN_NAME,
+      skuId: cycle === "year" ? "gulong-short-video-year" : "gulong-short-video-month",
+      skuName: `${SHORT_VIDEO_PLAN_NAME} · ${cycle === "year" ? "年度" : "月度"}`,
+      skuType: cycle,
+      billingInterval: cycle,
+      amountFen,
+      source: "website-short-video-package",
     } : plans.find((item) => `${item.skuType} ${item.billingInterval}`.toLowerCase().includes(marker)) || {
       productId: "gulong-member",
       productName: "古龙会员",
@@ -6025,7 +6097,9 @@ app.post("/api/billing/orders", async (c) => {
       sku_id: plan.skuId,
       sku_name: plan.skuName,
       kind,
-      plan_kind: kind === "recharge" ? "recharge" : cycle === "year" ? "yearly" : "monthly",
+      subscription_plan: kind === "subscription" ? subscriptionPlan : null,
+      plan_kind: kind === "recharge" ? "recharge" : subscriptionPlan === SHORT_VIDEO_PLAN_ID ? SHORT_VIDEO_PLAN_ID : cycle === "year" ? "yearly" : "monthly",
+      billing_interval: kind === "subscription" ? cycle : "one_time",
       amount_fen: amountFen,
       promotion_bonus_fen: promotionBonusFen,
       wallet_credit_fen: amountFen + promotionBonusFen,
@@ -6044,7 +6118,7 @@ app.post("/api/billing/orders", async (c) => {
         channel: "wechat",
         amountFen,
         ...(plan.priceId && !isMonthlyUpgrade ? { skuId: plan.skuId } : {}),
-        subject: kind === "recharge" ? "古龙账户余额充值（线下审核）" : cycle === "year" ? "年度订阅会员（线下审核）" : "月度订阅会员（线下审核）",
+        subject: kind === "recharge" ? "古龙账户余额充值（线下审核）" : subscriptionPlan === SHORT_VIDEO_PLAN_ID ? `${SHORT_VIDEO_PLAN_NAME}（线下审核）` : cycle === "year" ? "年度订阅会员（线下审核）" : "月度订阅会员（线下审核）",
         source: "gulong-web-offline-review",
         partnerData,
         prepay: false,
@@ -6059,6 +6133,7 @@ app.post("/api/billing/orders", async (c) => {
       userEmail: auth.user.email,
       kind,
       cycle,
+      subscriptionPlan,
       amountFen,
       promotionBonusFen,
       creditedFen: amountFen + promotionBonusFen,
@@ -6074,7 +6149,7 @@ app.post("/api/billing/orders", async (c) => {
     // write must never turn a durably created payment order into a client-side
     // failure that the user may submit twice.
     await enqueueOfflineReviewEvent({ _id: result.insertedId, orderNo }, "new-order").catch(() => null);
-    return c.json({ id: result.insertedId.toString(), orderNo, status: "pending_review", mode: "offline", amountFen, bonusFen: promotionBonusFen, creditedFen: amountFen + promotionBonusFen, upgradeCreditFen }, 201);
+    return c.json({ id: result.insertedId.toString(), orderNo, status: "pending_review", mode: "offline", planType: subscriptionPlan, amountFen, bonusFen: promotionBonusFen, creditedFen: amountFen + promotionBonusFen, upgradeCreditFen }, 201);
   }
 
   // Creating an order is a service-side, role-guarded operation and is
@@ -6360,6 +6435,7 @@ app.get("/api/billing/subscription", async (c) => {
     subscription: subscription ? { ...subscription, status: subscriptionStatus, id: subscription._id.toString(), _id: undefined, ownerId: undefined } : null,
     subscriptionLifecycle: lifecycle,
     balanceFen: wallet?.balanceFen || 0,
+    shortVideoPackage: shortVideoPackageView(subscription, wallet),
   });
 });
 
@@ -6831,6 +6907,7 @@ app.openapi(desktopSubscriptionStatusRoute, async (c) => {
   const now = new Date();
   const lifecycle = await refreshSubscriptionLifecycle(auth.user._id, now);
   const subscription = await (await getCollection("subscriptions")).findOne({ ownerId: auth.user._id });
+  const wallet = await (await getCollection("wallets")).findOne({ ownerId: auth.user._id });
   const status = subscription
     ? subscriptionPeriodState(subscription.currentPeriodStart, subscription.currentPeriodEnd, now)
     : "inactive";
@@ -6853,6 +6930,8 @@ app.openapi(desktopSubscriptionStatusRoute, async (c) => {
       autoRenew: false,
       renewalMode: "manual",
     } : null,
+    balanceFen: wallet?.balanceFen || 0,
+    shortVideoPackage: shortVideoPackageView(subscription, wallet, now),
     checkedAt: now,
   });
 });
@@ -7120,7 +7199,11 @@ app.openapi(getSubscriptionPricingRoute, async (c) => {
   c.header("Cache-Control", "no-store, max-age=0");
   c.header("Pragma", "no-cache");
   c.header("Access-Control-Allow-Origin", "*");
-  return c.json({ ...pricing, paymentAvailability: ONLINE_PAYMENT_AVAILABILITY });
+  return c.json({
+    ...pricing,
+    shortVideo: { id: SHORT_VIDEO_PLAN_ID, name: SHORT_VIDEO_PLAN_NAME, monthlyFen: SHORT_VIDEO_MONTHLY_PRICE_FEN, yearlyFen: SHORT_VIDEO_YEARLY_PRICE_FEN, paymentProviders: ["offline"], walletCreditMultiplier: 2, unlimitedModel: "minimax_h3_shared" },
+    paymentAvailability: ONLINE_PAYMENT_AVAILABILITY,
+  });
 });
 
 app.openapi(getMiniMaxConfigurationRoute, async (c) => {
@@ -7173,8 +7256,8 @@ app.openAPIRegistry.registerPath({
   path: "/api/billing/orders",
   tags: ["Billing"],
   summary: "创建微信支付或线下审核订单",
-  description: "线上仅支持微信。subscription 创建月/年手动续费订单，成功后实付金额计入钱包并额外赠送 10%；recharge 创建自定义金额充值订单，单次实付满 500 元额外赠送 10%，未满 500 元不赠送。provider=offline 会进入管理员到账审核。基础入账与赠送入账使用独立幂等流水。custom 创建自定义金额深度定制订单；worker_task 按服务端任务预算创建一次性托管订单。线下渠道只允许 subscription 和 recharge。金额单位为整数分。",
-  request: { body: { content: { "application/json": { schema: z.object({ kind: z.enum(["subscription", "recharge", "custom", "worker_task"]), provider: z.enum(["wechat", "offline"]), cycle: z.enum(["month", "year"]).optional(), amountFen: z.number().int().min(100).optional(), subject: z.string().max(80).optional(), taskId: z.string().optional() }) } } } },
+  description: "线上仅支持微信。subscription 默认创建普通会员月/年订单；planType=short_video_monthly 创建短视频包月订单且仅允许 provider=offline，月费 599900 分、年费 5999900 分，审核后按实付金额 100% 赠送套餐额度。普通会员实付金额额外赠送 10%；recharge 单次实付满 500 元额外赠送 10%。金额单位均为整数分。",
+  request: { body: { content: { "application/json": { schema: z.object({ kind: z.enum(["subscription", "recharge", "custom", "worker_task"]), planType: z.enum(["member", "short_video_monthly"]).optional(), provider: z.enum(["wechat", "offline"]), cycle: z.enum(["month", "year"]).optional(), amountFen: z.number().int().min(100).optional(), subject: z.string().max(80).optional(), taskId: z.string().optional() }) } } } },
   responses: { 201: { description: "Chandler 微信预支付信息，或线下待审核订单" }, 400: { description: "参数或渠道不受支持" }, 401: { description: "未登录" } },
 });
 
@@ -7237,7 +7320,7 @@ app.doc("/api/openapi.json", {
   info: {
     title: "古龙 Gulong Agent Engine API",
     version: "2.1.0",
-    description: "已按 Chandler v3.2 与 PearAPI 统一接入升级：服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费；会员实付额外赠送 10% 钱包余额，单次充值满 500 元同样赠送 10%，基础入账与赠送入账均使用独立幂等流水。MiniMax H3 共享节点支持钱包预扣、幂等退款与 50% 节点分成、激活设备账号绑定、按能力原子领取、腾讯云 COS 输入下载和输出直传票据，并提供仅按绑定账户聚合的桌面收益接口；工作器领取 DTO 不含需求用户身份和内部计费信息。另提供永久离线授权兑换、第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
+    description: "已按 Chandler v3.2 与 PearAPI 统一接入升级：服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。普通会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费；实付额外赠送 10% 钱包余额，单次充值满 500 元同样赠送 10%。短视频包月固定月费 5999 元、年费 59999 元，只支持线下审核，审核后实付与等额赠送组成可到期套餐余额；有效期内 MiniMaxH3 套餐余额归零后仍可无限生成，但不再扣费或分佣。所有入账、扣款、退款和分账均使用独立幂等流水。MiniMax H3 共享节点支持钱包预扣、幂等退款与 50% 节点分成、激活设备账号绑定、按能力原子领取、腾讯云 COS 输入下载和输出直传票据，并提供仅按绑定账户聚合的桌面收益接口；工作器领取 DTO 不含需求用户身份和内部计费信息。另提供永久离线授权兑换、第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
   },
   servers: [
     { url: "/", description: "当前环境" },

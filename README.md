@@ -25,6 +25,7 @@
 - 第二大脑附件后台列表、手动下载及按日期拉取最新附件 API
 - 文字反馈与最多 9 张问题截图
 - Chandler v3.6 微信收银台、单次充值、自定义金额订单、月/年手动续费，以及线下支付申请与管理员确认到账
+- 独立“短视频包月”用户类型：月付 5999 元、年付 59999 元，线下审核到账后实付与赠送等额入账；有效期内 MiniMaxH3 额度用完仍可无限生成，零扣费阶段不产生分佣
 - 官网后台通过 `Authorization: Apikey` 服务端凭据直连 Chandler v3.6 合作伙伴接口：用户同步、订阅查看、应用级 SKU 与不可变价格版本发布和历史查询
 - 下载中心的高性能桌面产品对外展示为“MiniMax H3 极速视频版”；内部继续使用兼容的 `yongshenghua` 发行键，避免已有渠道、账号和安装包映射失效
 - 管理员实时数据看板：7/30/90 天用户增长、访问来源、激活漏斗、功能采用、任务与第二大脑运营、收入结构和自动经营洞察
@@ -87,6 +88,7 @@ npm run dev
 - 按日期下载附件：`GET /api/v1/brain/attachments/latest?date=YYYY-MM-DD`
 - 桌面端用户配置：`GET /api/v1/configuration/minimax`（需要 `configuration:read`）
 - 桌面端实时订阅价格：`GET /api/v1/pricing/subscriptions`（公开、禁止缓存，管理员修改后立即生效）
+- 桌面端实时订阅与短视频套餐状态：`GET /api/v1/desktop/account/subscription`；`shortVideoPackage` 明确返回无限 H3、剩余额度、到期时间和扣费模式
 - 登录能力：`GET /api/auth/capabilities`；发送/校验登录验证码：`POST /api/auth/otp/send`、`POST /api/auth/otp/login`
 - 账号安全：`GET /api/account/security`；邮箱验证、手机号绑定/验证/解绑、主身份切换、修改密码与注销全部设备接口见在线 OpenAPI
 - Chandler 管理接口：`/api/admin/chandler/users`、`/api/admin/chandler/catalog`、`/api/admin/chandler/prices`、`/api/admin/chandler/skus/{skuId}/prices`

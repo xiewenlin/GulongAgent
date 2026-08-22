@@ -306,7 +306,7 @@ test("H3 completion credits node and platform wallets once with separate auditab
   const requesterId = new ObjectId();
   const nodeUserId = new ObjectId();
   const platformAdminId = new ObjectId();
-  let task = { _id: taskId, orderNo: "H3SPLIT001", requesterUserId: requesterId, requesterRoleSnapshot: "user", status: "completed", chargeStatus: "settled", revenueStatus: "pending", priceFen: 205, retryCount: 0 };
+  let task = { _id: taskId, orderNo: "H3SPLIT001", requesterUserId: requesterId, requesterRoleSnapshot: "user", status: "completed", chargeStatus: "settled", revenueStatus: "pending", priceFen: 205, chargedFen: 101, retryCount: 0 };
   const walletState = new Map();
   const ledgerState = new Map();
   const sameId = (left, right) => left?.toString?.() === right?.toString?.();
@@ -355,13 +355,31 @@ test("H3 completion credits node and platform wallets once with separate auditab
   const getCollection = async (name) => collections[name];
   await settleH3Revenue({ getCollection, task, executorUserId: nodeUserId, platformAdminUserId: platformAdminId });
   await settleH3Revenue({ getCollection, task, executorUserId: nodeUserId, platformAdminUserId: platformAdminId });
-  assert.equal(walletState.get(nodeUserId.toString()).balanceFen, 102);
-  assert.equal(walletState.get(platformAdminId.toString()).balanceFen, 103);
+  assert.equal(walletState.get(nodeUserId.toString()).balanceFen, 50);
+  assert.equal(walletState.get(platformAdminId.toString()).balanceFen, 51);
   assert.equal(walletState.get(nodeUserId.toString()).ledgerEntries[0].kind, "h3_node_commission");
   assert.equal(walletState.get(platformAdminId.toString()).ledgerEntries[0].kind, "h3_platform_commission");
   assert.equal(ledgerState.size, 2);
   assert.equal(task.revenueStatus, "settled");
-  assert.equal(task.settlement.grossFen, 205);
+  assert.equal(task.settlement.grossFen, 101);
+});
+
+test("H3 套餐额度归零后的免费任务不产生节点或平台分佣", async () => {
+  const task = { _id: new ObjectId(), orderNo: "H3PACKAGEFREE", status: "completed", chargeStatus: "package_no_charge", revenueStatus: "not_earned", billingMode: "short_video_package", chargedFen: 0, priceFen: 300 };
+  let financialCollectionReads = 0;
+  const getCollection = async (name) => {
+    if (name !== "h3SharedTasks") {
+      financialCollectionReads += 1;
+      throw new Error(`unexpected financial collection: ${name}`);
+    }
+    return {
+      findOne: async () => task,
+      updateOne: async (_filter, update) => { Object.assign(task, update.$set); return { modifiedCount: 1 }; },
+    };
+  };
+  const settled = await settleH3Revenue({ getCollection, task, executorUserId: new ObjectId() });
+  assert.equal(settled.revenueStatus, "not_earned");
+  assert.equal(financialCollectionReads, 0);
 });
 
 test("H3 administrator exemption never opens a commission wallet ledger", async () => {
@@ -414,7 +432,7 @@ test("administrator-created H3 tasks queue without wallet deduction or revenue s
   });
   assert.equal(response.status, 201);
   const payload = await response.json();
-  assert.deepEqual(payload.billing, { chargedFen: 0, remainingBalanceFen: 999, exempt: true });
+  assert.deepEqual(payload.billing, { chargedFen: 0, remainingBalanceFen: 999, packageBalanceFen: 0, billingMode: "administrator_exempt", exempt: true });
   assert.equal(payload.task.chargeStatus, "exempt");
   assert.equal(payload.task.revenueStatus, "exempt");
   assert.equal(walletMutations, 0);

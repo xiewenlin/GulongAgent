@@ -163,7 +163,7 @@ function AssetPanel({ bootstrap, onClose, navigate }) {
     <aside className="agent-asset-drawer">
       <button className="modal-close" type="button" onClick={onClose}><X size={20} /></button>
       <span>REMAINING USAGE</span><h2>剩余用量</h2><p>查看当前余额、预计创作数量和滚动用量记录。</p>
-      <div className="agent-balance-card"><div><Wallet size={29} weight="duotone" /><span>{quota?.unlimited ? "管理员创作权限" : "当前可用余额"}</span></div><strong>{quota?.unlimited ? "不限额" : formatMoney(quota?.balanceFen || 0)}</strong><small>{quota?.unlimited ? "管理员角色调用图片和视频模型不检查额度，也不会扣减余额" : "会员实付金额与额外赠送的 10% 已合并为可用余额"}</small></div>
+      <div className="agent-balance-card"><div><Wallet size={29} weight="duotone" /><span>{quota?.unlimited ? "管理员创作权限" : "当前可用余额"}</span></div><strong>{quota?.unlimited ? "不限额" : formatMoney(quota?.balanceFen || 0)}</strong><small>{quota?.unlimited ? "管理员角色调用图片和视频模型不检查额度，也不会扣减余额" : bootstrap?.shortVideoPackage?.active ? `短视频包月剩余额度 ${formatMoney(bootstrap.shortVideoPackage.packageBalanceFen || 0)}；额度归零后 H3 仍可无限生成` : "会员实付金额与额外赠送的 10% 已合并为可用余额"}</small></div>
       {!quota?.unlimited && <div className="agent-estimate-grid"><EstimateCard icon={ImageSquare} title="预计可创作图片" value={quota?.estimates?.images} unit="张" /><EstimateCard icon={VideoCamera} title="预计可创作视频" value={quota?.estimates?.videos} unit="条" /></div>}
       <RollingUsage title="本周滚动用量" data={quota?.weekly} />
       <RollingUsage title="本月滚动用量" data={quota?.monthly} />
@@ -363,7 +363,8 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
       const balanceFen = Number(bootstrap?.quota?.balanceFen || 0);
       const durationFactor = creationType === "video" ? Math.max(1, Number(duration || 5) / 5) : 1;
       const expectedFen = isH3Video ? Number(duration || 5) * 20 : selectedModel?.chargedFen == null ? 0 : Math.ceil(Number(selectedModel.chargedFen) * durationFactor);
-      if (balanceFen <= 0 || (expectedFen > 0 && balanceFen < expectedFen)) { setQuotaPrompt(bootstrap?.subscription?.active ? "recharge" : "subscription"); return; }
+      const shortVideoUnlimited = isH3Video && bootstrap?.shortVideoPackage?.active && bootstrap?.shortVideoPackage?.unlimitedH3;
+      if (!shortVideoUnlimited && (balanceFen <= 0 || (expectedFen > 0 && balanceFen < expectedFen))) { setQuotaPrompt(bootstrap?.subscription?.active ? "recharge" : "subscription"); return; }
     }
     if (creationType === "text" && !bootstrap?.configured) { setMessage("管理员尚未完成 PearAPI 免费渠道令牌配置，请稍后再试。"); return; }
     if (creationType !== "text" && !isH3Video && !bootstrap?.mediaConfigured) { setMessage("管理员尚未完成 PearAPI Key 配置，请稍后再试。"); return; }
@@ -385,7 +386,12 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
         const idempotencyKey = createClientRequestId();
         const result = await apiFetch("/api/h3/tasks", { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ source_channel: "website", model: H3_SHARED_MODEL.id, prompt: content, conversation_id: conversationId || undefined, aspect_ratio: aspectRatio, duration_seconds: duration, profile: "balanced", assets: { images: [], videos: [], audio: [] } }) });
         rememberConversation(result.task.conversationId);
-        setMessages((current) => [...current, { role: "assistant", content: `MiniMaxH3共享节点任务已创建。\n\n订单号：${result.task.orderNo}\n\n${user.role === "admin" ? "管理员免扣费，本任务不产生分佣。" : `已从余额预扣：${formatMoney(result.billing?.chargedFen ?? result.task.priceFen)}\n\n剩余余额：${formatMoney(result.billing?.remainingBalanceFen || 0)}`}\n\n状态：等待桌面节点领取。视频生成完成后会自动回到当前会话；最终失败会自动退款。`, createdAt: new Date().toISOString(), model: H3_SHARED_MODEL.id, h3TaskId: result.task.id, h3Task: { id: result.task.id, orderNo: result.task.orderNo, status: result.task.status, progress: 0, createdAt: result.task.createdAt } }]);
+        const billingText = user.role === "admin"
+          ? "管理员免扣费，本任务不产生分佣。"
+          : result.billing?.billingMode === "short_video_package" && Number(result.billing?.chargedFen || 0) === 0
+            ? "短视频包月额度已用完，本任务继续免费生成，不产生节点或平台分佣。"
+            : `已从余额预扣：${formatMoney(result.billing?.chargedFen ?? result.task.priceFen)}\n\n剩余余额：${formatMoney(result.billing?.remainingBalanceFen || 0)}`;
+        setMessages((current) => [...current, { role: "assistant", content: `MiniMaxH3共享节点任务已创建。\n\n订单号：${result.task.orderNo}\n\n${billingText}\n\n状态：等待桌面节点领取。视频生成完成后会自动回到当前会话；最终失败会自动退款。`, createdAt: new Date().toISOString(), model: H3_SHARED_MODEL.id, h3TaskId: result.task.id, h3Task: { id: result.task.id, orderNo: result.task.orderNo, status: result.task.status, progress: 0, createdAt: result.task.createdAt } }]);
         apiFetch("/api/agent/bootstrap").then(setBootstrap).catch(() => {});
         return;
       }
