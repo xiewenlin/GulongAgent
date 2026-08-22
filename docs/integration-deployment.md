@@ -4,7 +4,7 @@
 
 ## 1. 系统边界
 
-- Chandler v3.6：邮箱注册、密码与验证码登录、邮箱验证、手机号绑定、微信预支付、用户订阅、离线权益凭据和合作伙伴管理能力。
+- Chandler v3.7：邮箱注册、6 位邮箱/短信验证码、已激活桌面手机号注册、邮箱验证、手机号绑定、微信预支付、用户订阅、离线权益凭据和合作伙伴管理能力。
 - 古龙官网 MongoDB：加密会话引用、开发者 API Key、用户加密模型配置、合作伙伴、第二大脑文件索引、线下支付审核队列、发行渠道与发版任务。
 - 腾讯云 COS：第二大脑 ZIP 与 Windows 安装包的私有对象存储。
 - Windows 发行工作器：读取桌面端主题权限文件，领取官网发版任务，调用既有发布工作流并直传 COS。
@@ -24,6 +24,7 @@ Chandler 用户是全局账号：在古龙版桌面端或永生花版桌面端�
 | 邮箱 / 短信验证码登录 | `/v1/auth/otp/send`、`/v1/auth/otp/login` |
 | 邮箱找回密码 | `/v1/auth/forgot-password`、`/v1/auth/reset-password` |
 | 手机找回密码 | `/v1/auth/phone/forgot-password`、`/v1/auth/phone/reset-password` |
+| 已激活桌面手机号注册 | `/v1/auth/phone/send-otp`、`/v1/auth/phone/register`（OAuth 密钥仅在官网服务端使用） |
 | 邮箱验证 | `/v1/auth/send-verification-email`、`/v1/auth/verify-email` |
 | 手机号绑定 / 验证 / 解绑 | `/v1/me/identities`、`/v1/me/identities/{id}/verify`、`DELETE /v1/me/identities/{id}` |
 | 月 / 年订阅 | `/v1/checkout/subscriptions` + `/v1/pay/orders/{order}/prepay` |
@@ -44,6 +45,7 @@ Chandler 用户是全局账号：在古龙版桌面端或永生花版桌面端�
 - 认证能力：`GET /api/auth/capabilities`
 - 邮箱 / 短信验证码登录：`POST /api/auth/otp/send`、`POST /api/auth/otp/login`
 - 手机找回密码：`POST /api/auth/phone/forgot-password`、`POST /api/auth/phone/reset-password`
+- 已激活桌面手机号注册：`POST /api/v1/desktop/auth/phone/send-otp`、`POST /api/v1/desktop/auth/phone/register`
 - 安全概览：`GET /api/account/security`
 - 邮箱验证：`POST /api/account/security/email/send-verification`、`POST /api/account/security/email/verify`
 - 手机号绑定：`POST /api/account/security/phone/bind`
@@ -53,7 +55,7 @@ Chandler 用户是全局账号：在古龙版桌面端或永生花版桌面端�
 - 登录态修改密码：`POST /api/account/security/password/change`
 - 注销全部设备：`POST /api/account/security/sessions/logout-all`
 
-注册表单只接受邮箱，不提供手机号注册。手机号绑定要求 Chandler 邮箱已验证，并再次校验当前密码或短期再认证码。公开发送接口采用固定响应语义、60 秒客户端冷却、IP 和目标摘要双重限流，避免账号枚举与短信轰炸；账号安全接口只接受当前 Chandler 登录会话，响应禁止缓存。
+官网注册表单只接受邮箱。已激活桌面客户端可提交 RS256 激活回执，由官网服务端代理手机号注册；客户端永远不会拿到 Chandler OAuth `client_secret`。手机号绑定要求 Chandler 邮箱已验证，并再次校验当前密码或短期再认证码。验证码均为 6 位数字。公开发送接口采用固定响应语义、60 秒客户端冷却、IP 和目标摘要双重限流；桌面注册再增加激活设备摘要限流，避免账号枚举与短信轰炸。账号安全接口只接受当前 Chandler 登录会话，响应禁止缓存。
 
 ## 4. COS 对象布局
 
@@ -95,6 +97,7 @@ Bucket CORS 至少允许：
 ```text
 CHANDLER_API_BASE=https://api.chandler.work
 CHANDLER_APPLICATION_ID=cm_89be865af1af48f4a83406f0cf1a472e
+CHANDLER_CLIENT_SECRET=<Chandler 古龙 OAuth 客户端密钥，仅服务端保存>
 TENCENT_SECRET_ID=<CAM 子账号 SecretId>
 TENCENT_SECRET_KEY=<CAM 子账号 SecretKey>
 COS_BUCKET=gulong-1259744534

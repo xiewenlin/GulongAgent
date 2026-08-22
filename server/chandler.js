@@ -49,7 +49,7 @@ export function chandlerConfig() {
     monthlyPriceFen: Number(process.env.CHANDLER_MONTHLY_PRICE_FEN || 29_800),
     yearlyPriceFen: Number(process.env.CHANDLER_YEARLY_PRICE_FEN || 298_000),
     apiKey: process.env.GulongAgent?.trim() || process.env.CHANDLER_API_KEY?.trim() || "",
-    clientSecret: process.env.CHANDLER_CLIENT_SECRET?.trim() || "",
+    clientSecret: process.env.CHANDLER_CLIENT_SECRET?.trim() || process.env.CHANDLER_OAUTH_CLIENT_SECRET?.trim() || "",
     webhookHmacKey: process.env.CHANDLER_WEBHOOK_HMAC_KEY?.trim() || "",
   };
 }
@@ -91,7 +91,9 @@ function friendlyMessage(status, payload) {
   if (code === "auth.otp_delivery_failed") return "验证码暂时无法发送，请稍后重试";
   if (code === "auth.sms_disabled") return "短信验证码服务暂时关闭，请改用邮箱或密码登录";
   if (code === "auth.invalid_phone") return "请输入正确的大陆手机号或 E.164 国际手机号";
-  if (code === "auth.phone_register_disabled") return "暂不支持手机号注册，请先使用邮箱创建账号";
+  if (code === "auth.phone_register_disabled") return "当前桌面客户端暂未开通手机号注册，请联系管理员检查 Chandler OAuth 客户端配置";
+  if (code === "auth.phone_taken") return "该手机号已经注册，请直接使用手机验证码登录";
+  if (["auth.invalid_code", "auth.otp_invalid", "auth.otp_expired"].includes(code)) return "6 位验证码不正确或已过期，请重新获取";
   if (code === "auth.email_verification_required") return "请先完成注册邮箱验证，再绑定手机号";
   if (code === "auth.identity_taken") return "该邮箱或手机号已经绑定到其他账号";
   if (code === "auth.identity_not_found") return "没有找到这项账号身份，请刷新后重试";
@@ -246,6 +248,54 @@ export function loginWithChandlerOtp(target, targetType, code) {
   });
 }
 
+function phoneRegistrationCredential() {
+  const config = chandlerConfig();
+  if (!config.applicationId || !config.clientSecret) {
+    throw new ChandlerError("桌面手机号注册服务尚未完成安全配置，请联系管理员", {
+      status: 503,
+      code: "CHANDLER_PHONE_REGISTRATION_NOT_CONFIGURED",
+    });
+  }
+  return { clientId: config.applicationId, clientSecret: config.clientSecret };
+}
+
+export function isChandlerPhoneRegistrationConfigured() {
+  const config = chandlerConfig();
+  return Boolean(config.applicationId && config.clientSecret);
+}
+
+export function sendPhoneRegistrationOtpWithChandler(phone) {
+  const credential = phoneRegistrationCredential();
+  return chandlerRequest("/v1/auth/phone/send-otp", {
+    method: "POST",
+    body: {
+      phone: String(phone || "").trim(),
+      purpose: "register",
+      client_id: credential.clientId,
+      client_secret: credential.clientSecret,
+    },
+  });
+}
+
+export function registerPhoneWithChandler({ phone, code, displayName, installId, deviceName, osVersion, appVersion }) {
+  const credential = phoneRegistrationCredential();
+  return chandlerRequest("/v1/auth/phone/register", {
+    method: "POST",
+    body: {
+      phone: String(phone || "").trim(),
+      code: String(code || "").trim(),
+      ...(displayName ? { display_name: String(displayName).trim() } : {}),
+      client_id: credential.clientId,
+      client_secret: credential.clientSecret,
+      install_id: String(installId || "").trim(),
+      ...(deviceName ? { device_name: String(deviceName).trim() } : {}),
+      device_type: "desktop",
+      ...(osVersion ? { os_version: String(osVersion).trim() } : {}),
+      ...(appVersion ? { app_version: String(appVersion).trim() } : {}),
+    },
+  });
+}
+
 export function forgotPasswordWithChandlerPhone(phone) {
   return chandlerRequest("/v1/auth/phone/forgot-password", {
     method: "POST",
@@ -347,11 +397,11 @@ export function forgotPasswordWithChandler(email) {
   });
 }
 
-export async function resetPasswordWithChandler(token, newPassword) {
+export async function resetPasswordWithChandler(email, code, newPassword) {
   try {
     return await chandlerRequest("/v1/auth/reset-password", {
       method: "POST",
-      body: { token: token.trim(), new_password: newPassword },
+      body: { email: email.trim().toLowerCase(), code: code.trim(), new_password: newPassword },
     });
   } catch (error) {
     if (error instanceof ChandlerError && ["token.invalid", "auth.token_invalid"].includes(error.code)) {

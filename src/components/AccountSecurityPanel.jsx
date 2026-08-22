@@ -146,7 +146,7 @@ export function AccountSecurityPanel({ refreshKey = 0 }) {
   if (loading && !data) return <section className="account-module account-security-module"><div className="account-security-loading"><span /><strong>正在读取账号安全状态</strong></div></section>;
 
   return <section className="account-module account-security-module">
-    <header><div><span>ACCOUNT SECURITY</span><h2>账号安全</h2><p>账号只通过邮箱注册；验证邮箱后可绑定手机号，用于短信验证码登录和找回密码。</p></div><div className="account-security-shield"><ShieldCheck size={24} weight="duotone" /> Chandler v3.6 安全认证</div></header>
+    <header><div><span>ACCOUNT SECURITY</span><h2>账号安全</h2><p>官网账号通过邮箱注册；验证邮箱后可绑定手机号，用于短信验证码登录和找回密码。</p></div><div className="account-security-shield"><ShieldCheck size={24} weight="duotone" /> Chandler v3.7 安全认证</div></header>
     {message && <div className="account-message success">{message}</div>}
     {error && <div className="account-message error">{error}</div>}
 

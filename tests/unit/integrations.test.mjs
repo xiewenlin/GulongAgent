@@ -16,6 +16,7 @@ import {
   forgotPasswordWithChandlerPhone,
   getChandlerAuthCapabilities,
   isChandlerBootstrapAdmin,
+  isChandlerPhoneRegistrationConfigured,
   listAllPartnerClientUsers,
   listChandlerIdentities,
   listPartnerSubscriptionPlans,
@@ -24,6 +25,7 @@ import {
   productEdition,
   productEditionFromChannel,
   refreshChandlerLogin,
+  registerPhoneWithChandler,
   registerWithChandler,
   resetPasswordWithChandler,
   resetPasswordWithChandlerPhone,
@@ -31,6 +33,7 @@ import {
   sendChandlerReauthCode,
   sendChandlerVerificationEmail,
   sendLoginOtpWithChandler,
+  sendPhoneRegistrationOtpWithChandler,
   setPrimaryChandlerIdentity,
   verifyChandlerEmail,
   verifyChandlerIdentity,
@@ -128,7 +131,7 @@ test("Chandler login refresh uses the v3.3 form-encoded OAuth contract", async (
   assert.equal(call.body.get("refresh_token"), "current-refresh");
 });
 
-test("Chandler password recovery sends mail and resets with the one-time token", async () => {
+test("Chandler v3.7 password recovery sends mail and resets with the 6 digit code", async () => {
   const originalFetch = globalThis.fetch;
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
@@ -137,17 +140,17 @@ test("Chandler password recovery sends mail and resets with the one-time token",
   };
   try {
     await forgotPasswordWithChandler(" Member@Example.com ");
-    await resetPasswordWithChandler(" reset-token-123 ", "New-Strong-Pass456!");
+    await resetPasswordWithChandler(" Member@Example.com ", " 123456 ", "New-Strong-Pass456!");
   } finally {
     globalThis.fetch = originalFetch;
   }
   assert.equal(calls[0].url, "https://api.chandler.work/v1/auth/forgot-password");
   assert.deepEqual(calls[0].body, { email: "member@example.com" });
   assert.equal(calls[1].url, "https://api.chandler.work/v1/auth/reset-password");
-  assert.deepEqual(calls[1].body, { token: "reset-token-123", new_password: "New-Strong-Pass456!" });
+  assert.deepEqual(calls[1].body, { email: "member@example.com", code: "123456", new_password: "New-Strong-Pass456!" });
 });
 
-test("Chandler v3.6 OTP, phone recovery and account identities follow the official contracts", async () => {
+test("Chandler v3.7 OTP, phone recovery and account identities follow the official contracts", async () => {
   const originalFetch = globalThis.fetch;
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
@@ -212,7 +215,32 @@ test("Chandler v3.6 OTP, phone recovery and account identities follow the offici
   assert.deepEqual(calls[13].body, { old_password: "Current-Pass", new_password: "New-Pass-2026!" });
 });
 
-test("website authentication exposes email-only registration and rate-limited Chandler v3.6 security flows", async () => {
+test("Chandler v3.7 desktop phone registration keeps OAuth credentials server-side", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalSecret = process.env.CHANDLER_CLIENT_SECRET;
+  const calls = [];
+  process.env.CHANDLER_CLIENT_SECRET = "server-only-oauth-secret";
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), body: JSON.parse(options.body) });
+    return new Response(JSON.stringify({ data: { access_token: "desktop-access", refresh_token: "desktop-refresh", expires_in: 3600, user: { id: "phone-user", display_name: "手机用户" } } }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    assert.equal(isChandlerPhoneRegistrationConfigured(), true);
+    await sendPhoneRegistrationOtpWithChandler("+8613800000000");
+    const result = await registerPhoneWithChandler({ phone: "+8613800000000", code: "123456", displayName: "手机用户", installId: "a".repeat(64), deviceName: "创作电脑", osVersion: "Windows 11", appVersion: "2.1.0" });
+    assert.equal(result.access_token, "desktop-access");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalSecret === undefined) delete process.env.CHANDLER_CLIENT_SECRET;
+    else process.env.CHANDLER_CLIENT_SECRET = originalSecret;
+  }
+  assert.equal(calls[0].url, "https://api.chandler.work/v1/auth/phone/send-otp");
+  assert.deepEqual(calls[0].body, { phone: "+8613800000000", purpose: "register", client_id: chandlerConfig().applicationId, client_secret: "server-only-oauth-secret" });
+  assert.equal(calls[1].url, "https://api.chandler.work/v1/auth/phone/register");
+  assert.deepEqual(calls[1].body, { phone: "+8613800000000", code: "123456", display_name: "手机用户", client_id: chandlerConfig().applicationId, client_secret: "server-only-oauth-secret", install_id: "a".repeat(64), device_name: "创作电脑", device_type: "desktop", os_version: "Windows 11", app_version: "2.1.0" });
+});
+
+test("website authentication keeps public registration email-only and exposes activated desktop phone registration", async () => {
   const [serverSource, modalSource, dashboardSource, securitySource, vercel, specResponse] = await Promise.all([
     readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
     readFile(new URL("../../src/components/AccountModal.jsx", import.meta.url), "utf8"),
@@ -228,6 +256,8 @@ test("website authentication exposes email-only registration and rate-limited Ch
     "/api/auth/otp/login",
     "/api/auth/phone/forgot-password",
     "/api/auth/phone/reset-password",
+    "/api/v1/desktop/auth/phone/send-otp",
+    "/api/v1/desktop/auth/phone/register",
     "/api/account/security",
     "/api/account/security/email/send-verification",
     "/api/account/security/email/verify",
@@ -242,7 +272,11 @@ test("website authentication exposes email-only registration and rate-limited Ch
   assert.match(serverSource, /auth-otp-send-ip/);
   assert.match(serverSource, /auth-otp-send-target/);
   assert.match(serverSource, /phone-bind-target/);
-  assert.match(serverSource, /phoneRegistrationEnabled: false/);
+  assert.match(serverSource, /desktopPhoneRegistrationRequiresActivation: true/);
+  assert.match(serverSource, /phoneRegistrationEnabled: smsOtpEnabled && isChandlerPhoneRegistrationConfigured\(\)/);
+  assert.match(serverSource, /verifyActivationReceipt\(input\.activation_receipt\)/);
+  assert.match(serverSource, /activation\.payload\.deviceId/);
+  assert.doesNotMatch(serverSource, /client_secret:\s*input/);
   assert.match(modalSource, /仅支持邮箱注册/);
   assert.match(modalSource, /setCooldown\(60\)/);
   assert.match(modalSource, /秒后可重发/);
@@ -512,6 +546,9 @@ test("email verification-code password recovery is wired end to end", async () =
   assert.match(modalSource, /\/api\/auth\/forgot-password/);
   assert.match(modalSource, /\/api\/auth\/reset-password/);
   assert.match(modalSource, /autoComplete="one-time-code"/);
+  assert.match(modalSource, /maxLength=\{6\}/);
+  assert.match(modalSource, /pattern="\[0-9\]\{6\}"/);
+  assert.doesNotMatch(modalSource, /重置令牌|2048/);
   assert.match(modalSource, /两次输入的新密码不一致/);
   assert.match(modalSource, /const RESET_MIN_PASSWORD_LENGTH = 8/);
   assert.match(modalSource, /function PasswordVisibilityButton/);
@@ -524,6 +561,8 @@ test("email verification-code password recovery is wired end to end", async () =
   assert.match(modalSource, /官网不预先限制字符类型/);
   assert.match(serverSource, /password: z\.string\(\)\.min\(1\)\.max\(255\)/);
   assert.match(serverSource, /newPassword: z\.string\(\)\.min\(8\)\.max\(255\)/);
+  assert.match(serverSource, /code: z\.string\(\)\.trim\(\)\.regex\(\/\^\\d\{6\}\$\//);
+  assert.match(serverSource, /resetPasswordWithChandler\(email, input\.code, input\.newPassword\)/);
   assert.match(serverSource, /password-forgot-email:/);
   assert.match(serverSource, /password-reset-code:/);
   assert.match(serverSource, /deleteMany\(\{ userId: user\._id \}\)/);

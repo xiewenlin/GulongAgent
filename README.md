@@ -7,7 +7,7 @@
 ## 已实现
 
 - 玉瓷、日出、青竹、鸢尾 4 套可持久化浅色主题，并配有独立 3D 圆形徽章
-- Chandler v3.6 公共 OpenAPI 统一账号：只开放邮箱注册，支持用户名/邮箱密码登录、邮箱/短信验证码登录和邮箱/手机找回密码，官网不保存密码
+- Chandler v3.7 公共 OpenAPI 统一账号：官网开放邮箱注册，已激活桌面客户端支持手机号注册；支持用户名/邮箱密码登录、6 位邮箱/短信验证码登录和邮箱/手机找回密码，官网不保存密码
 - 用户后台“账号安全”支持验证邮箱、绑定/验证/解绑手机号；手机号仅服务于既有邮箱账号，验证码采用 60 秒冷却、IP 与目标摘要双重限流和固定响应防枚举
 - Chandler 全局账号可在古龙桌面端、永生花桌面端与官网交叉登录；官网注册默认标记为“古龙版”
 - 用户后台明确区分“管理员/会员用户/普通用户”和“古龙版/永生花版”，管理员身份不会再被会员状态覆盖
@@ -24,9 +24,9 @@
 - 腾讯云 COS 存储第二大脑 ZIP 和 Windows 安装包；MongoDB 提供关键词/日期检索索引
 - 第二大脑附件后台列表、手动下载及按日期拉取最新附件 API
 - 文字反馈与最多 9 张问题截图
-- Chandler v3.6 微信收银台、单次充值、自定义金额订单、月/年手动续费，以及线下支付申请与管理员确认到账
+- Chandler v3.7 微信收银台、单次充值、自定义金额订单、月/年手动续费，以及线下支付申请与管理员确认到账
 - 独立“短视频包月”用户类型：月付 5999 元、年付 59999 元，线下审核到账后实付与赠送等额入账；有效期内 MiniMaxH3 额度用完仍可无限生成，零扣费阶段不产生分佣
-- 官网后台通过 `Authorization: Apikey` 服务端凭据直连 Chandler v3.6 合作伙伴接口：用户同步、订阅查看、应用级 SKU 与不可变价格版本发布和历史查询
+- 官网后台通过 `Authorization: Apikey` 服务端凭据直连 Chandler v3.7 合作伙伴接口：用户同步、订阅查看、应用级 SKU 与不可变价格版本发布和历史查询
 - 下载中心的高性能桌面产品对外展示为“MiniMax H3 极速视频版”；内部继续使用兼容的 `yongshenghua` 发行键，避免已有渠道、账号和安装包映射失效
 - 管理员实时数据看板：7/30/90 天用户增长、访问来源、激活漏斗、功能采用、任务与第二大脑运营、收入结构和自动经营洞察
 - 官网访问、软件下载和发起支付采用匿名访客/会话 ID 做最小化埋点；登录用户活跃数据来自服务端会话，不采集页面输入内容
@@ -49,7 +49,7 @@ flowchart LR
 - 后端：Hono、Zod OpenAPI，同时发布到 Vercel Node Functions 与腾讯云 systemd 服务。
 - 数据库：MongoDB Node.js 原生驱动，跨热实例复用连接池。
 - 文件：腾讯云 COS 私有对象，服务端签发短时 PUT/GET URL；MongoDB 只保存所有权、状态与搜索元数据。反馈截图仍可使用 Vercel Blob。
-- 安全：Chandler 统一身份；服务端优先读取 `GulongAgent` 环境变量作为 Chandler v3.6 API Key，并使用 `Authorization: Apikey`；支付通知按原始请求体执行 HMAC-SHA256 验签并二次查询订单；浏览器只接收微信预支付结果，永不接触平台密钥。另有 HttpOnly 会话、API Key 摘要、来源校验、验证码防轰炸限流与最小权限 CAM。
+- 安全：Chandler 统一身份；服务端优先读取 `GulongAgent` 环境变量作为 Chandler v3.7 API Key，并使用 `Authorization: Apikey`；桌面手机号注册 OAuth 密钥仅保存在服务端；支付通知按原始请求体执行 HMAC-SHA256 验签并二次查询订单；浏览器只接收微信预支付结果，永不接触平台密钥。另有 HttpOnly 会话、API Key 摘要、来源校验、验证码防轰炸限流与最小权限 CAM。
 
 ## 本地开发
 
@@ -69,7 +69,7 @@ npm run dev
 - `MONGODB_URI` / `MONGODB_DB`：MongoDB Atlas
 - `SESSION_SECRET` / `API_KEY_PEPPER`：会话与 API Key 摘要密钥
 - `SESSION_COOKIE_SECURE`：通常留空，由反向代理协议自动决定；仅在临时 HTTP 直连环境显式设为 `false`，正式域名必须使用 HTTPS
-- `GulongAgent` / `CHANDLER_*`：Chandler v3.6 API Key、API 地址、古龙/永生花应用 ID 与当前价格版本
+- `GulongAgent` / `CHANDLER_*`：Chandler v3.7 API Key、OAuth 客户端密钥、API 地址、古龙/永生花应用 ID 与当前价格版本
 - `TENCENT_SECRET_ID` / `TENCENT_SECRET_KEY`：仅授予目标 Bucket 所需操作的 CAM 子账号密钥
 - `COS_BUCKET` / `COS_REGION` / `COS_DOMAIN`：`gulong-1259744534`、`ap-chengdu` 与请求域名
 - `RELEASE_WORKER_KEY`：官网与受信任 Windows 发行工作器共享的长随机密钥
@@ -90,11 +90,12 @@ npm run dev
 - 桌面端实时订阅价格：`GET /api/v1/pricing/subscriptions`（公开、禁止缓存，管理员修改后立即生效）
 - 桌面端实时订阅与短视频套餐状态：`GET /api/v1/desktop/account/subscription`；`shortVideoPackage` 明确返回无限 H3、剩余额度、到期时间和扣费模式
 - 登录能力：`GET /api/auth/capabilities`；发送/校验登录验证码：`POST /api/auth/otp/send`、`POST /api/auth/otp/login`
+- 已激活桌面客户端手机号注册：`POST /api/v1/desktop/auth/phone/send-otp`、`POST /api/v1/desktop/auth/phone/register`（6 位验证码；OAuth 密钥只保存在官网服务端）
 - 账号安全：`GET /api/account/security`；邮箱验证、手机号绑定/验证/解绑、主身份切换、修改密码与注销全部设备接口见在线 OpenAPI
 - Chandler 管理接口：`/api/admin/chandler/users`、`/api/admin/chandler/catalog`、`/api/admin/chandler/prices`、`/api/admin/chandler/skus/{skuId}/prices`
 - 管理员经营分析：`GET /api/admin/analytics/dashboard?days=7|30|90`（管理员会话或管理员 API Key）
 
-完整集成边界与生产配置见 [docs/integration-deployment.md](docs/integration-deployment.md)，本次认证升级审计见 [docs/chandler-v3.6-auth-audit.md](docs/chandler-v3.6-auth-audit.md)，Windows 发行工作器说明见 [docs/release-worker.md](docs/release-worker.md)。
+完整集成边界与生产配置见 [docs/integration-deployment.md](docs/integration-deployment.md)，本次认证升级审计见 [docs/chandler-v3.7-auth-audit.md](docs/chandler-v3.7-auth-audit.md)，Windows 发行工作器说明见 [docs/release-worker.md](docs/release-worker.md)。
 
 ## 双目标生产发布
 

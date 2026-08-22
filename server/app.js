@@ -54,6 +54,7 @@ import {
   getDirectPaymentOrder,
   issueOfflineCredential,
   isChandlerBootstrapAdmin,
+  isChandlerPhoneRegistrationConfigured,
   getPartnerClientUserAttributes,
   listAllPartnerClientUsers,
   listChandlerIdentities,
@@ -66,6 +67,7 @@ import {
   logoutAllFromChandler,
   markChandlerProductEdition,
   productEditionFromChannel,
+  registerPhoneWithChandler,
   registerWithChandler,
   resetPasswordWithChandler,
   resetPasswordWithChandlerPhone,
@@ -75,6 +77,7 @@ import {
   sendChandlerReauthCode,
   sendChandlerVerificationEmail,
   sendLoginOtpWithChandler,
+  sendPhoneRegistrationOtpWithChandler,
   upsertChandlerUser,
   verifyChandlerEmail,
   verifyChandlerIdentity,
@@ -135,6 +138,10 @@ function requestValidationMessage(error) {
   if (field === "target") return "请输入正确的邮箱或手机号";
   if (field === "targetType") return "验证码登录类型不正确";
   if (field === "code") return "请输入 6 位数字验证码";
+  if (field === "activation_receipt") return "请提供当前设备的有效激活回执";
+  if (field === "app_version") return "请提供桌面客户端版本号";
+  if (field === "device_name") return "设备名称最多允许 120 个字符";
+  if (field === "os_version") return "系统版本最多允许 120 个字符";
   if (field === "token") return "请输入邮件中的完整验证码或验证令牌";
   return "请检查填写内容是否正确";
 }
@@ -307,7 +314,7 @@ const ForgotPasswordSchema = z.object({
 
 const ResetPasswordSchema = z.object({
   email: z.email(),
-  code: z.string().trim().min(6).max(2048),
+  code: z.string().trim().regex(/^\d{6}$/),
   newPassword: z.string().min(8).max(255),
 });
 
@@ -357,6 +364,19 @@ const ActivationReceiptSchema = z.object({
   perpetual: z.literal(true),
   algorithm: z.literal("RS256"),
   signature: z.string(),
+});
+
+const DesktopPhoneRegistrationBaseSchema = z.object({
+  phone: PhoneSchema,
+  activation_receipt: z.union([z.string().trim().min(32).max(16_384), ActivationReceiptSchema]),
+  app_version: z.string().trim().min(1).max(40),
+  device_name: z.string().trim().min(1).max(120).optional(),
+  os_version: z.string().trim().min(1).max(120).optional(),
+});
+const DesktopPhoneRegistrationSendSchema = DesktopPhoneRegistrationBaseSchema;
+const DesktopPhoneRegistrationSchema = DesktopPhoneRegistrationBaseSchema.extend({
+  code: z.string().trim().regex(/^\d{6}$/),
+  display_name: z.string().trim().min(1).max(64).optional(),
 });
 
 async function requireAdmin(c) {
@@ -1495,6 +1515,16 @@ async function publicEditionChannels() {
 }
 
 const AuthResponseSchema = z.object({ user: PublicUserSchema });
+const DesktopPhoneRegistrationResponseSchema = z.object({
+  status: z.literal("registered"),
+  auth: z.object({
+    access_token: z.string(),
+    refresh_token: z.string().nullable(),
+    token_type: z.string(),
+    expires_in: z.number().int().positive(),
+  }),
+  user: PublicUserSchema,
+});
 
 const TaskSchema = z.object({
   id: z.string(),
@@ -2272,7 +2302,7 @@ const forgotPasswordRoute = createRoute({
   path: "/api/auth/forgot-password",
   tags: ["Authentication"],
   summary: "发送找回密码邮件",
-  description: "通过 Chandler 统一身份服务向邮箱发送一次性验证码或重置令牌。无论邮箱是否存在，成功受理时都返回相同响应，防止账号枚举。",
+  description: "通过 Chandler v3.7 统一身份服务向邮箱发送 6 位数字验证码。无论邮箱是否存在，成功受理时都返回相同响应，防止账号枚举。",
   request: { body: { content: { "application/json": { schema: ForgotPasswordSchema } } } },
   responses: {
     202: { description: "邮件请求已受理", content: { "application/json": { schema: z.object({ status: z.literal("accepted"), message: z.string() }) } } },
@@ -2285,7 +2315,7 @@ const resetPasswordRoute = createRoute({
   path: "/api/auth/reset-password",
   tags: ["Authentication"],
   summary: "使用邮箱验证码重置密码",
-  description: "校验邮件中的一次性验证码或重置令牌并设置新密码。成功后吊销该用户在古龙官网与 Chandler 的既有登录会话。",
+  description: "校验邮件中的 6 位数字验证码并设置新密码。成功后吊销该用户在古龙官网与 Chandler 的既有登录会话。",
   request: { body: { content: { "application/json": { schema: ResetPasswordSchema } } } },
   responses: {
     200: { description: "密码已重置", content: { "application/json": { schema: z.object({ status: z.literal("reset"), message: z.string() }) } } },
@@ -2298,7 +2328,9 @@ const resetPasswordRoute = createRoute({
 const AuthCapabilitiesResponseSchema = z.object({
   smsOtpEnabled: z.boolean(),
   emailOtpEnabled: z.literal(true),
-  phoneRegistrationEnabled: z.literal(false),
+  phoneRegistrationEnabled: z.boolean(),
+  desktopPhoneRegistrationRequiresActivation: z.literal(true),
+  otpCodeLength: z.literal(6),
 });
 const IdentitySchema = z.object({
   id: z.string(),
@@ -2323,7 +2355,7 @@ const authCapabilitiesRoute = createRoute({
   path: "/api/auth/capabilities",
   tags: ["Authentication"],
   summary: "查询验证码登录能力",
-  description: "实时读取 Chandler v3.6 能力开关。手机号仅支持已绑定账号登录，不支持手机号注册。",
+  description: "实时读取 Chandler v3.7 能力开关。官网仍只开放邮箱注册；已激活桌面客户端可通过受控服务端代理使用手机号注册，OAuth 客户端密钥不会下发到桌面端。",
   responses: { 200: { description: "认证能力", content: { "application/json": { schema: AuthCapabilitiesResponseSchema } } } },
 });
 
@@ -2377,6 +2409,40 @@ const phoneResetPasswordRoute = createRoute({
     200: { description: "密码已重置", content: { "application/json": { schema: z.object({ status: z.literal("reset"), message: z.string() }) } } },
     401: { description: "验证码错误或过期", content: { "application/json": { schema: ErrorSchema } } },
     422: { description: "新密码强度不足", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const desktopPhoneRegistrationSendRoute = createRoute({
+  method: "post",
+  path: "/api/v1/desktop/auth/phone/send-otp",
+  tags: ["Desktop Authentication"],
+  summary: "已激活桌面客户端发送手机号注册验证码",
+  description: "先校验 RS256 激活回执，再由古龙服务端代持 Chandler OAuth 客户端密钥发送 6 位短信验证码。响应与日志不会返回 OAuth 密钥，也不会保存原始设备 MAC。",
+  request: { body: { required: true, content: { "application/json": { schema: DesktopPhoneRegistrationSendSchema } } } },
+  responses: {
+    202: { description: "短信发送请求已受理", content: { "application/json": { schema: z.object({ status: z.literal("accepted"), retryAfter: z.literal(60), codeLength: z.literal(6) }) } } },
+    400: { description: "手机号或参数不正确", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "激活回执无效", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "手机号已经注册，请改用手机号验证码登录", content: { "application/json": { schema: ErrorSchema } } },
+    429: { description: "发送过于频繁", content: { "application/json": { schema: ErrorSchema } } },
+    503: { description: "短信能力或服务端 OAuth 配置未启用", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const desktopPhoneRegistrationRoute = createRoute({
+  method: "post",
+  path: "/api/v1/desktop/auth/phone/register",
+  tags: ["Desktop Authentication"],
+  summary: "已激活桌面客户端使用手机号和 6 位验证码注册",
+  description: "服务端以激活回执中的稳定匿名 deviceId 作为 Chandler install_id；客户端上报内容不能覆盖该设备身份。成功后返回可由桌面端安全存储的 Chandler 登录令牌与古龙用户摘要。",
+  request: { body: { required: true, content: { "application/json": { schema: DesktopPhoneRegistrationSchema } } } },
+  responses: {
+    201: { description: "手机号账号注册成功", content: { "application/json": { schema: DesktopPhoneRegistrationResponseSchema } } },
+    400: { description: "验证码或参数不正确", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "激活回执无效", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "手机号已经注册", content: { "application/json": { schema: ErrorSchema } } },
+    429: { description: "验证尝试过于频繁", content: { "application/json": { schema: ErrorSchema } } },
+    503: { description: "服务端 OAuth 配置未启用", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
@@ -2554,9 +2620,38 @@ async function currentAuthCapabilities({ fresh = false } = {}) {
     // Fail closed: a Chandler outage must hide the SMS entry instead of
     // presenting a flow that cannot deliver a code.
   }
-  const value = { smsOtpEnabled, emailOtpEnabled: true, phoneRegistrationEnabled: false };
+  const value = {
+    smsOtpEnabled,
+    emailOtpEnabled: true,
+    phoneRegistrationEnabled: smsOtpEnabled && isChandlerPhoneRegistrationConfigured(),
+    desktopPhoneRegistrationRequiresActivation: true,
+    otpCodeLength: 6,
+  };
   authCapabilitiesCache = { value, expiresAt: now + 60_000 };
   return value;
+}
+
+async function recordDesktopPhoneAuthAudit(action, activationPayload, phone, details = {}) {
+  try {
+    await (await getCollection("authAudit")).insertOne({
+      action,
+      product: activationPayload.product,
+      licenseId: new ObjectId(activationPayload.licenseId),
+      deviceIdHash: hashOpaqueToken(activationPayload.deviceId, "desktop-phone-auth-device"),
+      phoneHash: hashOpaqueToken(normalizedPhone(phone), "desktop-phone-auth-phone"),
+      ...details,
+      createdAt: new Date(),
+    });
+  } catch {
+    // Authentication must not fail solely because the audit sink is briefly unavailable.
+  }
+}
+
+async function verifiedDesktopPhoneRegistrationRequest(input, action) {
+  const activation = await verifyActivationReceipt(input.activation_receipt);
+  const phone = normalizedPhone(input.phone);
+  await recordDesktopPhoneAuthAudit(`${action}_requested`, activation.payload, phone, { appVersion: input.app_version });
+  return { activation, phone };
 }
 
 function publicWebsiteUser(user) {
@@ -2617,6 +2712,12 @@ app.onError((error, c) => {
     return c.json(
       { code: "CONFIG_REQUIRED", message: localizeErrorMessage(error, "服务配置尚未完成，请联系管理员"), requestId: c.get("requestId") },
       503,
+    );
+  }
+  if (Number.isInteger(error?.status) && error.status >= 400 && error.status < 500 && typeof error?.code === "string") {
+    return c.json(
+      { code: error.code, message: localizeErrorMessage(error, "请求未通过安全校验，请检查后重试"), requestId: c.get("requestId") },
+      error.status,
     );
   }
   if (error?.name === "MongoServerError" && error.code === 11000) {
@@ -2843,6 +2944,85 @@ app.openapi(phoneResetPasswordRoute, async (c) => {
   }
   c.header("Cache-Control", "no-store, max-age=0");
   return c.json({ status: "reset", message: "密码已重置，请使用新密码重新登录" });
+});
+
+app.openapi(desktopPhoneRegistrationSendRoute, async (c) => {
+  const input = c.req.valid("json");
+  const { activation, phone } = await verifiedDesktopPhoneRegistrationRequest(input, "desktop_phone_register_send");
+  const capabilities = await currentAuthCapabilities();
+  if (!capabilities.smsOtpEnabled) {
+    return c.json({ code: "SMS_OTP_DISABLED", message: "短信验证码服务暂时关闭，请稍后重试" }, 503);
+  }
+  if (!capabilities.phoneRegistrationEnabled) {
+    return c.json({ code: "PHONE_REGISTRATION_NOT_CONFIGURED", message: "桌面手机号注册服务尚未完成安全配置，请联系管理员" }, 503);
+  }
+  const ipKey = fingerprintIp(c.req.header("x-forwarded-for") || "local");
+  const phoneKey = hashOpaqueToken(phone, "desktop-phone-register-target").slice(0, 32);
+  const deviceKey = hashOpaqueToken(activation.payload.deviceId, "desktop-phone-register-device").slice(0, 32);
+  const [ipRate, phoneRate, deviceRate] = await Promise.all([
+    enforceRateLimit(`desktop-phone-register-send-ip:${ipKey}`, { limit: 10, windowMs: 30 * 60_000 }),
+    enforceRateLimit(`desktop-phone-register-send-target:${phoneKey}`, { limit: 3, windowMs: 30 * 60_000 }),
+    enforceRateLimit(`desktop-phone-register-send-device:${deviceKey}`, { limit: 5, windowMs: 30 * 60_000 }),
+  ]);
+  if (!ipRate.allowed || !phoneRate.allowed || !deviceRate.allowed) {
+    c.header("Retry-After", "60");
+    return c.json({ code: "RATE_LIMITED", message: "短信验证码发送过于频繁，请稍后再试" }, 429);
+  }
+  await sendPhoneRegistrationOtpWithChandler(phone);
+  await recordDesktopPhoneAuthAudit("desktop_phone_register_send_accepted", activation.payload, phone, { appVersion: input.app_version });
+  c.header("Cache-Control", "no-store, max-age=0");
+  c.header("Retry-After", "60");
+  return c.json({ status: "accepted", retryAfter: 60, codeLength: 6 }, 202);
+});
+
+app.openapi(desktopPhoneRegistrationRoute, async (c) => {
+  const input = c.req.valid("json");
+  const { activation, phone } = await verifiedDesktopPhoneRegistrationRequest(input, "desktop_phone_register");
+  if (!isChandlerPhoneRegistrationConfigured()) {
+    return c.json({ code: "PHONE_REGISTRATION_NOT_CONFIGURED", message: "桌面手机号注册服务尚未完成安全配置，请联系管理员" }, 503);
+  }
+  const ipKey = fingerprintIp(c.req.header("x-forwarded-for") || "local");
+  const attemptKey = hashOpaqueToken(`${phone}:${input.code}`, "desktop-phone-register-attempt").slice(0, 32);
+  const deviceKey = hashOpaqueToken(activation.payload.deviceId, "desktop-phone-register-device").slice(0, 32);
+  const [ipRate, attemptRate, deviceRate] = await Promise.all([
+    enforceRateLimit(`desktop-phone-register-ip:${ipKey}`, { limit: 12, windowMs: 30 * 60_000 }),
+    enforceRateLimit(`desktop-phone-register-attempt:${attemptKey}`, { limit: 5, windowMs: 30 * 60_000 }),
+    enforceRateLimit(`desktop-phone-register-device:${deviceKey}`, { limit: 8, windowMs: 30 * 60_000 }),
+  ]);
+  if (!ipRate.allowed || !attemptRate.allowed || !deviceRate.allowed) {
+    return c.json({ code: "RATE_LIMITED", message: "验证码校验尝试过多，请重新获取验证码" }, 429);
+  }
+  const chandlerAuth = await registerPhoneWithChandler({
+    phone,
+    code: input.code,
+    displayName: input.display_name,
+    installId: activation.payload.deviceId,
+    deviceName: input.device_name,
+    osVersion: input.os_version,
+    appVersion: input.app_version,
+  });
+  if (!chandlerAuth?.access_token || !chandlerAuth?.user?.id) {
+    throw Object.assign(new Error("统一账号服务返回的注册结果不完整，请稍后重试"), { code: "CHANDLER_AUTH_RESPONSE_INVALID", status: 502 });
+  }
+  await markChandlerProductEdition(chandlerAuth.access_token, chandlerAuth.user.id, "gulong", "desktop-phone-registration").catch(() => null);
+  const identity = { role: chandlerAuth.user.is_admin || isChandlerBootstrapAdmin(chandlerAuth.user) ? "admin" : "user", editionKey: "gulong", editionName: "古龙版", editionSource: "desktop-phone-registration" };
+  const user = await upsertChandlerUser(chandlerAuth.user, { identity, defaultEdition: "gulong", forceEdition: true });
+  await (await getCollection("users")).updateOne(
+    { _id: user._id },
+    { $set: { chandlerPhoneHash: hashOpaqueToken(phone, "chandler-phone"), updatedAt: new Date() } },
+  );
+  await recordDesktopPhoneAuthAudit("desktop_phone_register_succeeded", activation.payload, phone, { userId: user._id, chandlerUserId: chandlerAuth.user.id, appVersion: input.app_version });
+  c.header("Cache-Control", "no-store, max-age=0");
+  return c.json({
+    status: "registered",
+    auth: {
+      access_token: chandlerAuth.access_token,
+      refresh_token: chandlerAuth.refresh_token || null,
+      token_type: chandlerAuth.token_type || "Bearer",
+      expires_in: Math.max(60, Number(chandlerAuth.expires_in || 3600)),
+    },
+    user: publicWebsiteUser(user),
+  }, 201);
 });
 
 app.openapi(accountSecurityRoute, async (c) => {
@@ -3078,7 +3258,7 @@ app.openapi(resetPasswordRoute, async (c) => {
     return c.json({ code: "RATE_LIMITED", message: "验证码校验尝试过多，请重新获取验证码" }, 429);
   }
 
-  await resetPasswordWithChandler(input.code, input.newPassword);
+  await resetPasswordWithChandler(email, input.code, input.newPassword);
   const users = await getCollection("users");
   const user = await users.findOne({ emailNormalized: email }, { projection: { _id: 1 } });
   if (user) {
@@ -7319,8 +7499,8 @@ app.doc("/api/openapi.json", {
   openapi: "3.1.0",
   info: {
     title: "古龙 Gulong Agent Engine API",
-    version: "2.1.0",
-    description: "已按 Chandler v3.2 与 PearAPI 统一接入升级：服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。普通会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费；实付额外赠送 10% 钱包余额，单次充值满 500 元同样赠送 10%。短视频包月固定月费 5999 元、年费 59999 元，只支持线下审核，审核后实付与等额赠送组成可到期套餐余额；有效期内 MiniMaxH3 套餐余额归零后仍可无限生成，但不再扣费或分佣。所有入账、扣款、退款和分账均使用独立幂等流水。MiniMax H3 共享节点支持钱包预扣、幂等退款与 50% 节点分成、激活设备账号绑定、按能力原子领取、腾讯云 COS 输入下载和输出直传票据，并提供仅按绑定账户聚合的桌面收益接口；工作器领取 DTO 不含需求用户身份和内部计费信息。另提供永久离线授权兑换、第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
+    version: "2.2.0",
+    description: "已按 Chandler v3.7 与 PearAPI 统一接入升级：邮箱和短信验证码统一为 6 位数字；官网保持邮箱注册，已激活桌面客户端可通过受控服务端代理手机号注册，OAuth 客户端密钥不会下发客户端。服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。普通会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费；实付额外赠送 10% 钱包余额，单次充值满 500 元同样赠送 10%。短视频包月固定月费 5999 元、年费 59999 元，只支持线下审核，审核后实付与等额赠送组成可到期套餐余额；有效期内 MiniMaxH3 套餐余额归零后仍可无限生成，但不再扣费或分佣。所有入账、扣款、退款和分账均使用独立幂等流水。MiniMax H3 共享节点支持钱包预扣、幂等退款与 50% 节点分成、激活设备账号绑定、按能力原子领取、腾讯云 COS 输入下载和输出直传票据，并提供仅按绑定账户聚合的桌面收益接口；工作器领取 DTO 不含需求用户身份和内部计费信息。另提供永久离线授权兑换、第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
   },
   servers: [
     { url: "/", description: "当前环境" },
