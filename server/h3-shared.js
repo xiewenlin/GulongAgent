@@ -90,15 +90,19 @@ export function normalizeH3TaskInput(body = {}) {
   const audio = assetManifest(assets.audio || body.audio_assets, "audio", 3);
   const durationSeconds = integer(body.duration_seconds ?? body.durationSeconds, -1);
   const priceFen = calculateH3SharedPrice({ durationSeconds, imageCount: images.length, videoCount: videos.length });
+  const promptOptimizationEnabled = body.prompt_optimization_enabled === false || body.promptOptimizationEnabled === false ? false : true;
   return {
     sourceChannel,
     model,
     prompt: originalPrompt,
     sourcePrompt: originalPrompt,
     originalPrompt,
-    localPromptOptimizationRequired: true,
-    promptMode: "desktop_local_magic_v1",
-    promptCompilation: { mode: "desktop_local_magic_v1", source: "execution_node", validated: false, status: "pending" },
+    promptOptimizationEnabled,
+    localPromptOptimizationRequired: promptOptimizationEnabled,
+    promptMode: promptOptimizationEnabled ? "desktop_local_magic_v1" : "raw_prompt_v1",
+    promptCompilation: promptOptimizationEnabled
+      ? { mode: "desktop_local_magic_v1", source: "execution_node", validated: false, status: "pending" }
+      : { mode: "raw_prompt_v1", source: "requester", validated: false, status: "skipped" },
     aspectRatio: String(body.aspect_ratio || body.aspectRatio || "16:9").trim().slice(0, 24),
     durationSeconds,
     profile: String(body.profile || "balanced").trim().toLowerCase().slice(0, 60),
@@ -236,6 +240,7 @@ function publicH3Output(task, now = new Date()) {
 }
 
 function publicTask(task, { includePrompt = true } = {}) {
+  const promptOptimizationEnabled = task.promptOptimizationEnabled !== false && task.localPromptOptimizationRequired !== false;
   return {
     id: task._id.toString(),
     orderNo: task.orderNo,
@@ -243,7 +248,8 @@ function publicTask(task, { includePrompt = true } = {}) {
     model: task.model,
     ...(includePrompt ? { prompt: task.originalPrompt || task.prompt, compiledPrompt: task.compiledPrompt || null, originalPrompt: task.originalPrompt || task.prompt } : { promptSummary: String(task.originalPrompt || task.prompt || "").slice(0, 120) }),
     promptCompilation: task.promptCompilation || null,
-    promptMode: task.promptMode || (task.localPromptOptimizationRequired ? "desktop_local_magic_v1" : null),
+    promptOptimizationEnabled,
+    promptMode: task.promptMode || (promptOptimizationEnabled ? "desktop_local_magic_v1" : "raw_prompt_v1"),
     aspectRatio: task.aspectRatio,
     durationSeconds: task.durationSeconds,
     profile: task.profile,
@@ -431,7 +437,7 @@ function taskBilling(task, wallet) {
 
 export function toH3WorkerTask(task, { assets = [], outputUpload = null } = {}) {
   const sourcePrompt = String(task.originalPrompt || task.sourcePrompt || task.prompt || "");
-  const localPromptOptimizationRequired = task.localPromptOptimizationRequired === true;
+  const promptOptimizationEnabled = task.promptOptimizationEnabled !== false && task.localPromptOptimizationRequired !== false;
   return {
     id: task._id.toString(),
     orderNo: task.orderNo,
@@ -439,8 +445,9 @@ export function toH3WorkerTask(task, { assets = [], outputUpload = null } = {}) 
     prompt: sourcePrompt,
     source_prompt: sourcePrompt,
     original_prompt: sourcePrompt,
-    prompt_mode: localPromptOptimizationRequired ? "desktop_local_magic_v1" : "legacy_precompiled",
-    local_prompt_optimization_required: localPromptOptimizationRequired,
+    prompt_mode: promptOptimizationEnabled ? "desktop_local_magic_v1" : "raw_prompt_v1",
+    prompt_optimization_enabled: promptOptimizationEnabled,
+    local_prompt_optimization_required: promptOptimizationEnabled,
     aspectRatio: task.aspectRatio,
     durationSeconds: task.durationSeconds,
     profile: task.profile,
@@ -453,9 +460,9 @@ export function toH3WorkerTask(task, { assets = [], outputUpload = null } = {}) 
       method: "POST",
       url: "/api/h3/tasks/callback",
       content_type: "multipart/form-data",
-      ...(localPromptOptimizationRequired ? { optimization_status: "optimizing" } : {}),
+      ...(promptOptimizationEnabled ? { optimization_status: "optimizing" } : {}),
       first_status: "started",
-      first_required_fields: localPromptOptimizationRequired ? ["estimated_total_seconds", "compiled_prompt"] : ["estimated_total_seconds"],
+      first_required_fields: promptOptimizationEnabled ? ["estimated_total_seconds", "compiled_prompt"] : ["estimated_total_seconds"],
       progress_fields: ["progress", "remaining_seconds"],
     },
   };
@@ -982,7 +989,7 @@ export function registerH3SharedRoutes(app, dependencies) {
 
   app.post("/api/h3/prompts/optimize", async (c) => {
     c.header("Cache-Control", "no-store, max-age=0");
-    return c.json({ code: "PROMPT_OPTIMIZATION_MOVED_TO_DESKTOP", message: "网页版魔法优化已停用；请直接提交原始中文提示词，MiniMax H3 极速视频桌面端会在本地自动优化" }, 410);
+    return c.json({ code: "PROMPT_OPTIMIZATION_MOVED_TO_DESKTOP", message: "服务端提示词优化接口已停用；请在创建任务时通过 prompt_optimization_enabled 选择是否由 MiniMax H3 极速视频桌面端执行本地魔法优化" }, 410);
   });
 
   app.post("/api/h3/assets/presign", async (c) => {
@@ -1190,7 +1197,7 @@ export function registerH3SharedRoutes(app, dependencies) {
         sourceChannel: "desktop_agent",
         createTask: { method: "POST", url: "/api/h3/tasks", scope: "tasks:write" },
         assetUpload: { presign: "/api/h3/assets/presign", complete: "/api/h3/assets/{asset_id}/complete", scope: "tasks:write" },
-        promptProcessing: { mode: "desktop_local_magic_v1", inputField: "prompt", preserveOriginal: true, requiredWorkerCapability: "local_prompt_optimization_v1" },
+        promptProcessing: { mode: "requester_choice", enableField: "prompt_optimization_enabled", defaultEnabledForLegacyClients: true, inputField: "prompt", preserveOriginal: true, optimizationWorkerCapability: "local_prompt_optimization_v1" },
         limits: { durationSeconds: { min: 1, max: H3_MAX_DURATION_SECONDS }, imageCount: 9, videoCount: 3, audioCount: 3 },
         pricingFen: { perSecond: 20, perImage: 5, perVideo: 20, perAudio: 0 },
       },
@@ -1265,7 +1272,7 @@ export function registerH3SharedRoutes(app, dependencies) {
     try {
       for (let index = 0; index < claimPlan.recommendedBatchSize; index += 1) {
         const task = await tasks.findOneAndUpdate(
-          { status: "queued", model: H3_SHARED_MODEL, durationSeconds: { $lte: maxDurationSeconds }, profile: { $in: profiles }, imageCount: { $lte: maxImageCount }, videoCount: { $lte: maxVideoCount }, audioCount: { $lte: maxAudioCount }, ...(localPromptOptimizationV1 ? {} : { localPromptOptimizationRequired: { $ne: true } }) },
+          { status: "queued", model: H3_SHARED_MODEL, durationSeconds: { $lte: maxDurationSeconds }, profile: { $in: profiles }, imageCount: { $lte: maxImageCount }, videoCount: { $lte: maxVideoCount }, audioCount: { $lte: maxAudioCount }, ...(localPromptOptimizationV1 ? {} : { promptOptimizationEnabled: false, localPromptOptimizationRequired: false }) },
           { $set: { status: "claimed", claimedByNode: { ...node, capabilities: reportedCapabilities }, claimedAt: now, claimLeaseUntil: new Date(now.getTime() + H3_CLAIM_LEASE_MS), updatedAt: now } },
           { sort: { createdAt: 1, _id: 1 }, returnDocument: "after" },
         );
@@ -1353,20 +1360,27 @@ export function registerH3SharedRoutes(app, dependencies) {
       await ensureH3ConversationMessages({ getCollection, task, now });
       return c.json({ ok: true, idempotent: true, task: workerCallbackTask(task) });
     }
+    const promptOptimizationEnabled = task.promptOptimizationEnabled !== false && task.localPromptOptimizationRequired !== false;
+    const suppliedCompiledPrompt = String(metadata.compiled_prompt || metadata.compiledPrompt || "").trim();
+    if (!promptOptimizationEnabled && suppliedCompiledPrompt) {
+      return c.json({ code: "PROMPT_OPTIMIZATION_DISABLED", message: "用户未开启魔法提示词优化，不能提交 compiled_prompt" }, 400);
+    }
     if (status === "optimizing") {
+      if (!promptOptimizationEnabled) {
+        return c.json({ code: "PROMPT_OPTIMIZATION_DISABLED", message: "用户未开启魔法提示词优化，请直接使用原始提示词生成视频" }, 409);
+      }
       task = await tasks.findOneAndUpdate(
-        { _id: task._id, status: { $in: ["claimed", "processing"] }, localPromptOptimizationRequired: true },
-        { $set: { status: "processing", executedByNode: executionNode, progress: Math.max(1, integer(metadata.progress, 1)), progressStage: "prompt_optimization", progressUpdatedAt: now, claimLeaseUntil: new Date(now.getTime() + H3_CLAIM_LEASE_MS), updatedAt: now } },
+        { _id: task._id, status: { $in: ["claimed", "processing"] }, promptOptimizationEnabled: { $ne: false }, localPromptOptimizationRequired: { $ne: false } },
+        { $set: { promptOptimizationEnabled: true, localPromptOptimizationRequired: true, promptMode: "desktop_local_magic_v1", status: "processing", executedByNode: executionNode, progress: Math.max(1, integer(metadata.progress, 1)), progressStage: "prompt_optimization", progressUpdatedAt: now, claimLeaseUntil: new Date(now.getTime() + H3_CLAIM_LEASE_MS), updatedAt: now } },
         { returnDocument: "after" },
       ) || task;
       return c.json({ ok: true, idempotent: H3_TERMINAL_STATUSES.has(task.status), task: workerCallbackTask(task) });
     }
     if (["started", "processing", "progress"].includes(status)) {
-      const suppliedCompiledPrompt = String(metadata.compiled_prompt || metadata.compiledPrompt || "").trim();
-      if (task.localPromptOptimizationRequired && status === "started" && (!suppliedCompiledPrompt || suppliedCompiledPrompt.length > 20_000)) {
+      if (promptOptimizationEnabled && status === "started" && (!suppliedCompiledPrompt || suppliedCompiledPrompt.length > 20_000)) {
         return c.json({ code: "LOCAL_PROMPT_OPTIMIZATION_REQUIRED", message: "本任务必须先由桌面端完成本地魔法优化，并在 started 回调中提供 compiled_prompt" }, 400);
       }
-      if (task.localPromptOptimizationRequired && status !== "started" && !task.compiledPrompt) {
+      if (promptOptimizationEnabled && status !== "started" && !task.compiledPrompt) {
         return c.json({ code: "LOCAL_PROMPT_OPTIMIZATION_REQUIRED", message: "尚未收到桌面端本地魔法优化结果，不能上报视频生成进度" }, 409);
       }
       const normalizedProgress = normalizeH3ProgressCallback(task, metadata);
@@ -1391,7 +1405,7 @@ export function registerH3SharedRoutes(app, dependencies) {
       return c.json({ ok: true, idempotent: H3_TERMINAL_STATUSES.has(task.status), task: workerCallbackTask(task) });
     }
     if (["completed", "succeeded"].includes(status)) {
-      if (task.localPromptOptimizationRequired && !task.compiledPrompt) return c.json({ code: "LOCAL_PROMPT_OPTIMIZATION_REQUIRED", message: "缺少桌面端本地魔法优化结果，不能完成任务" }, 409);
+      if (promptOptimizationEnabled && !task.compiledPrompt) return c.json({ code: "LOCAL_PROMPT_OPTIMIZATION_REQUIRED", message: "缺少桌面端本地魔法优化结果，不能完成任务" }, 409);
       const video = metadata.video && typeof metadata.video === "object" ? metadata.video : {};
       const sha256 = String(video.sha256 || metadata["video.sha256"] || "").trim().toUpperCase();
       const bytes = integer(video.bytes ?? metadata["video.bytes"], -1);
@@ -1542,17 +1556,17 @@ export function registerH3SharedRoutes(app, dependencies) {
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/desktop/account-bindings/unbind", tags: ["Desktop Account Binding"], summary: "撤销当前节点账号绑定", security: [{ accountBinding: [] }], responses: { 200: { description: "已撤销" }, 401: { description: "绑定令牌无效" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/desktop/earnings/summary", tags: ["Desktop Earnings"], summary: "读取当前绑定账户的 MiniMax H3 节点收益", description: "仅接受 X-Gulong-Account-Binding。可选 node_id 必须属于令牌对应账户，否则返回 403。金额均为人民币整数分。收益只聚合服务端 h3_node_commission 结算流水；平均每天收益=已结算累计收益÷max(1, 从首个成功结算的中国自然日到当前中国自然日的天数)。", security: [{ accountBinding: [] }], request: { query: z.object({ node_id: z.string().optional() }) }, responses: { 200: { description: "账户与设备收益汇总", content: { "application/json": { schema: earningsSummarySchema } } }, 401: { description: "未绑定或绑定令牌失效", content: { "application/json": { schema: errorSchema } } }, 403: { description: "node_id 不属于当前账户", content: { "application/json": { schema: errorSchema } } } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/account/earnings/summary", tags: ["Account"], summary: "用户后台读取自己的共享节点收益", description: "使用官网登录会话或账户 API Key，仅返回当前账户；网页端 node_id 已脱敏。", responses: { 200: { description: "账户收益和脱敏设备列表", content: { "application/json": { schema: earningsSummarySchema } } }, 401: { description: "未登录" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/prompts/optimize", tags: ["MiniMax H3 Shared Nodes"], summary: "已停用：网页版提示词优化", description: "网页版不再执行或展示魔法优化。调用方直接在创建任务时提交原始中文 prompt；领取任务的 MiniMax H3 极速视频桌面端在本地自动优化。", deprecated: true, responses: { 410: { description: "PROMPT_OPTIMIZATION_MOVED_TO_DESKTOP" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/prompts/optimize", tags: ["MiniMax H3 Shared Nodes"], summary: "已停用：服务端提示词优化", description: "官网服务端不执行提示词优化。网页版通过 prompt_optimization_enabled 让用户选择是否由 MiniMax H3 极速视频桌面端执行本地魔法优化。", deprecated: true, responses: { 410: { description: "PROMPT_OPTIMIZATION_MOVED_TO_DESKTOP" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/assets/presign", tags: ["MiniMax H3 Shared Nodes"], summary: "为输入素材签发账号专属 COS 直传票据", request: { body: { required: true, content: { "application/json": { schema: z.object({ kind: z.enum(["image", "video", "audio"]), filename: z.string(), content_type: z.string(), bytes: z.number().int().positive(), sha256: z.string().regex(/^[A-Fa-f0-9]{64}$/) }) } } } }, responses: { 201: { description: "返回 PUT URL、固定 headers、asset_id 与 object_key" }, 409: { description: "COS 回执不匹配" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/assets/{id}/complete", tags: ["MiniMax H3 Shared Nodes"], summary: "校验并完成 H3 输入素材上传", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "返回可用于任务 assets manifest 的素材记录" }, 409: { description: "对象大小、摘要或归属不匹配" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "使用原始中文提示词创建共享节点任务并原子预扣余额", description: "实际价格（分）= 时长秒数×20 + 图片数×5 + 视频数×20；音频免费。普通用户与会员用户原子预扣钱包余额；有效期内的短视频包月用户优先扣套餐额度并按实际扣款 50/50 分账，套餐额度归零后仍可无限创建 H3 任务且本次扣款、节点分佣和平台分佣均为 0。管理员始终免扣费且不参与分佣。服务端原样保存 prompt，不翻译、不做网页端魔法优化；兼容桌面节点须在本地自动完成魔法优化并回调 compiled_prompt。必须提供 Idempotency-Key。", request: { body: { required: true, content: { "application/json": { schema: z.object({ source_channel: z.enum(["website", "desktop_agent"]), model: z.literal(H3_SHARED_MODEL), prompt: z.string().min(1).max(20_000), conversation_id: z.string().optional(), aspect_ratio: z.string(), duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profile: z.string(), assets: z.object({ images: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(9), videos: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3), audio: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3) }), idempotency_key: z.string().min(8).max(160).optional() }) } } } }, responses: { 201: { description: "原始提示词已保存并按账号类型完成扣费或零扣费排队" }, 402: { description: "非套餐用户余额不足" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "使用原始中文提示词创建共享节点任务并原子预扣余额", description: "实际价格（分）= 时长秒数×20 + 图片数×5 + 视频数×20；音频免费。普通用户与会员用户原子预扣钱包余额；有效期内的短视频包月用户优先扣套餐额度并按实际扣款 50/50 分账，套餐额度归零后仍可无限创建 H3 任务且本次扣款、节点分佣和平台分佣均为 0。管理员始终免扣费且不参与分佣。服务端始终原样保存 prompt，不翻译；prompt_optimization_enabled=true 时由桌面节点执行本地魔法优化并回调 compiled_prompt，false 时必须直接使用原始提示词且禁止回传 compiled_prompt。旧客户端省略字段时按 true 兼容。必须提供 Idempotency-Key。", request: { body: { required: true, content: { "application/json": { schema: z.object({ source_channel: z.enum(["website", "desktop_agent"]), model: z.literal(H3_SHARED_MODEL), prompt: z.string().min(1).max(20_000), prompt_optimization_enabled: z.boolean().optional(), conversation_id: z.string().optional(), aspect_ratio: z.string(), duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profile: z.string(), assets: z.object({ images: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(9), videos: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3), audio: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3) }), idempotency_key: z.string().min(8).max(160).optional() }) } } } }, responses: { 201: { description: "原始提示词与用户优化选择已保存，并按账号类型完成扣费或零扣费排队" }, 402: { description: "非套餐用户余额不足" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "查看当前账号的共享节点订单", responses: { 200: { description: "最多返回最近 50 个订单" }, 401: { description: "未认证" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/conversations/recent", tags: ["MiniMax H3 Shared Nodes"], summary: "读取当前用户会话中的 H3 视频结果", description: "仅返回当前登录用户的 H3 assistant 结果消息；历史已完成任务会先进行同用户安全幂等回填。消息不包含 COS 永久地址。", request: { query: z.object({ conversation_id: z.string().optional() }) }, responses: { 200: { description: "当前会话及其 H3 视频结果" }, 401: { description: "未认证" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}", tags: ["MiniMax H3 Shared Nodes"], summary: "查看共享节点订单详情", description: "输出只包含受控 previewPath/downloadPath 和 24 小时到期状态，不返回 COS objectKey 或永久 URL。", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "订单详情" }, 404: { description: "订单不存在或无权查看" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}/output", tags: ["MiniMax H3 Shared Nodes"], summary: "鉴权预览或下载 H3 输出视频", description: "仅任务请求用户或管理员可访问。服务端按次签发不超过 5 分钟且不越过 24 小时保留截止时间的 COS GET 地址；disposition=attachment 用于下载。过期返回 410 并触发幂等删除。", request: { params: z.object({ id: z.string() }), query: z.object({ disposition: z.enum(["inline", "attachment"]).optional() }) }, responses: { 302: { description: "跳转到短时 COS 签名地址" }, 404: { description: "视频不存在或无权访问" }, 410: { description: "视频已过期并删除" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/desktop/agent/tools/minimax-h3-shared", tags: ["Desktop Agent Tools"], summary: "读取桌面古龙智能体的 H3 共享节点工具合同", description: "使用现有古龙会话或具有 tasks:read 的 API Key。返回 createTask、素材上传 URL、本地提示词处理合同、9图3视频3音频限制、整数分价格与当前余额；不再返回网页 optimizePrompt。管理员响应 wallet.unlimited=true，桌面端不得按余额拦截。桌面创建任务时 source_channel 必须为 desktop_agent。", responses: { 200: { description: "工具合同、本地提示词处理要求、钱包余额与管理员不限额标记" }, 401: { description: "未认证" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/claim", tags: ["MiniMax H3 Shared Nodes"], summary: "桌面节点按能力与队列压力原子领取任务", description: "capabilities 必须上报 max_duration_seconds、profiles、素材上限，并以 local_prompt_optimization_v1=true 声明本地魔法优化能力；未声明该能力的旧节点不会领取新任务。服务端按 createdAt、_id 从旧到新原子领取并返回最小化 workerTask DTO。新任务的 prompt/source_prompt/original_prompt 都是用户原始中文，prompt_mode=desktop_local_magic_v1，local_prompt_optimization_required=true。节点先发送 optimizing 回调，在本地生成 compiled_prompt，再以 started + compiled_prompt + estimated_total_seconds 上报后开始 H3 推理。dry_run=true 绝不领取任务或执行优化。DTO 不含 requester、价格、钱包流水或内部绑定信息。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "application/json": { schema: z.object({ bound_account_email: z.string().optional(), bound_account_id: z.string().optional(), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: z.object({ max_duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profiles: z.array(z.string()).min(1), gpu_name: z.string().max(160).optional(), vram_mb: z.number().int().min(0).optional(), max_image_count: z.number().int().min(0).max(9), max_video_count: z.number().int().min(0).max(3), max_audio_count: z.number().int().min(0).max(3), local_prompt_optimization_v1: z.boolean().optional(), batch_claim: z.boolean().optional(), max_concurrent_tasks: z.number().int().min(1).max(8).optional() }) }) } } } }, responses: { 200: { description: "dry_run 返回可达状态；正式领取返回原始提示词、素材下载票据、output_upload、进度回调合同和动态 claim_plan" }, 400: { description: "节点能力无效" }, 401: { description: "绑定无效" }, 429: { description: "未遵循轮询退避或请求频率过高" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/callback", tags: ["MiniMax H3 Shared Nodes"], summary: "执行节点回调本地优化、生成进度或结果", description: "multipart/form-data 仅发送 metadata 字段，不得上传 video 文件。节点领取新任务后先发送 status=optimizing；本地魔法优化成功后发送 status=started、compiled_prompt、estimated_total_seconds，以及可选 prompt_optimization.engine/version/elapsed_seconds。服务端仅接受当前绑定执行节点的结果并保存为审计字段，未收到 compiled_prompt 时拒绝生成进度和成功回调。后续 progress 回调发送 progress（0–99）与可选 remaining_seconds。成功状态还需 video.sha256/bytes/filename/object_key，服务端 HEAD 校验对象归属。优化失败可直接发送 failed + error_code/error_message，任务会按既有幂等规则退款。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "multipart/form-data": { schema: z.object({ metadata: z.string() }) } } } }, responses: { 200: { description: "本地优化阶段、生成进度或最终结果已幂等处理" }, 400: { description: "回执不完整或缺少 compiled_prompt" }, 401: { description: "绑定无效" }, 409: { description: "本地优化、COS 回执、上传票据或结算状态不匹配" }, 413: { description: "禁止把视频文件经 Vercel 中转" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/claim", tags: ["MiniMax H3 Shared Nodes"], summary: "桌面节点按能力与队列压力原子领取任务", description: "capabilities 必须上报 max_duration_seconds、profiles 与素材上限；local_prompt_optimization_v1=true 表示节点能够处理用户开启魔法优化的任务，未声明该能力的节点仍可领取 raw_prompt_v1 原始提示词任务。服务端按 createdAt、_id 从旧到新原子领取并返回最小化 workerTask DTO。DTO 通过 prompt_optimization_enabled、prompt_mode 和 local_prompt_optimization_required 明确用户选择；开启时节点先 optimizing，再以 started + compiled_prompt + estimated_total_seconds 上报，关闭时直接以 started + estimated_total_seconds 开始生成且禁止改写 prompt。历史缺失选择字段的任务按开启兼容。dry_run=true 绝不领取任务或执行优化。DTO 不含 requester、价格、钱包流水或内部绑定信息。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "application/json": { schema: z.object({ bound_account_email: z.string().optional(), bound_account_id: z.string().optional(), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: z.object({ max_duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profiles: z.array(z.string()).min(1), gpu_name: z.string().max(160).optional(), vram_mb: z.number().int().min(0).optional(), max_image_count: z.number().int().min(0).max(9), max_video_count: z.number().int().min(0).max(3), max_audio_count: z.number().int().min(0).max(3), local_prompt_optimization_v1: z.boolean().optional(), batch_claim: z.boolean().optional(), max_concurrent_tasks: z.number().int().min(1).max(8).optional() }) }) } } } }, responses: { 200: { description: "dry_run 返回可达状态；正式领取返回原始提示词、用户优化选择、素材下载票据、output_upload、进度回调合同和动态 claim_plan" }, 400: { description: "节点能力无效" }, 401: { description: "绑定无效" }, 429: { description: "未遵循轮询退避或请求频率过高" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/callback", tags: ["MiniMax H3 Shared Nodes"], summary: "执行节点回调可选本地优化、生成进度或结果", description: "multipart/form-data 仅发送 metadata 字段，不得上传 video 文件。prompt_optimization_enabled=true 的任务先发送 status=optimizing，成功后以 status=started、compiled_prompt、estimated_total_seconds 上报；false 的任务不得发送 optimizing 或 compiled_prompt，直接以原始 prompt 执行并在 started 中提交 estimated_total_seconds。后续 progress 回调发送 progress（0–99）与可选 remaining_seconds。成功状态还需 video.sha256/bytes/filename/object_key，服务端 HEAD 校验对象归属。失败任务按既有幂等规则退款。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "multipart/form-data": { schema: z.object({ metadata: z.string() }) } } } }, responses: { 200: { description: "可选本地优化阶段、生成进度或最终结果已幂等处理" }, 400: { description: "回执不完整、缺少必需 compiled_prompt 或在关闭优化时非法提交 compiled_prompt" }, 401: { description: "绑定无效" }, 409: { description: "用户优化选择、本地优化、COS 回执、上传票据或结算状态不匹配" }, 413: { description: "禁止把视频文件经 Vercel 中转" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/admin/h3/tasks", tags: ["Administration"], summary: "管理员筛选共享节点任务派单", responses: { 200: { description: "任务列表" }, 403: { description: "需要管理员角色" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/admin/h3/tasks/{id}", tags: ["Administration"], summary: "管理员查看共享节点任务、回调和审计详情", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "任务详情、回调和审计时间线" }, 404: { description: "任务不存在" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/admin/h3/tasks/{id}/cancel", tags: ["Administration"], summary: "管理员幂等取消任务并退款", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "取消状态和退款结果" }, 409: { description: "已完成任务不能取消" } } });

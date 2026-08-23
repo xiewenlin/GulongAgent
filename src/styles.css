@@ -176,6 +176,12 @@
 .agent-attach-button input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .agent-type-select select, .agent-model-select select, .agent-parameter-select select { min-width: 0; border: 0; outline: 0; color: inherit; background: transparent; font: inherit; cursor: pointer; }
 .agent-parameter-select { flex: none; color: var(--primary); background: color-mix(in srgb, var(--primary) 5%, var(--surface)); }
+.agent-h3-prompt-toggle { min-height: 42px; padding: 0 10px; display: inline-flex; align-items: center; gap: 7px; flex: none; border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line)); border-radius: 11px; color: var(--muted); background: color-mix(in srgb, var(--accent) 4%, var(--surface)); font-size: 18px; font-weight: 760; cursor: pointer; transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease, color .18s ease; }
+.agent-h3-prompt-toggle:hover { border-color: var(--accent); color: var(--primary); transform: translateY(-1px); }
+.agent-h3-prompt-toggle em { min-width: 25px; padding: 2px 6px; border-radius: 999px; color: var(--muted); background: color-mix(in srgb, var(--muted) 10%, transparent); font-size: 18px; font-style: normal; text-align: center; }
+.agent-h3-prompt-toggle.active { border-color: color-mix(in srgb, var(--accent) 70%, var(--primary)); color: var(--primary); background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 18%, var(--surface)), color-mix(in srgb, var(--primary) 9%, var(--surface))); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent), 0 9px 24px color-mix(in srgb, var(--accent) 18%, transparent); }
+.agent-h3-prompt-toggle.active em { color: #fff; background: linear-gradient(135deg, var(--accent), var(--primary)); }
+.agent-h3-prompt-toggle:disabled { cursor: wait; opacity: .58; transform: none; }
 .agent-model-select { max-width: 300px; margin-left: auto; color: var(--primary); background: color-mix(in srgb, var(--primary) 6%, var(--surface)); }
 .agent-model-select select { width: 100%; text-overflow: ellipsis; }
 .agent-send-button { width: 44px; height: 44px; flex: none; display: grid; place-items: center; border: 0; border-radius: 13px; color: #fff; background: linear-gradient(145deg, var(--accent), color-mix(in srgb, var(--accent) 68%, var(--primary))); cursor: pointer; box-shadow: 0 10px 25px color-mix(in srgb, var(--accent) 26%, transparent); }

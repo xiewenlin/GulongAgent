@@ -127,6 +127,7 @@ X-Gulong-Account-Binding: gab_...
   "source_channel": "website",
   "model": "minimax_h3_shared",
   "prompt": "生成一段产品发布视频",
+  "prompt_optimization_enabled": false,
   "aspect_ratio": "16:9",
   "duration_seconds": 15,
   "profile": "balanced",
@@ -150,7 +151,7 @@ priceFen = duration_seconds * 20 + image_count * 5 + video_count * 20
 
 创建时钱包原子预扣。余额不足：HTTP 402。
 
-官网只保存并排队用户输入的原始中文 `prompt`，不提供“魔法优化”按钮，也不会在服务器端翻译或编译。新任务会标记 `prompt_mode=desktop_local_magic_v1`，由领取任务的 MiniMax H3 极速视频桌面端在本地自动优化；原文始终保留用于审计。
+官网只保存并排队用户输入的原始中文 `prompt`，不会在服务器端翻译或编译。网页版在“时长”后提供“魔法优化”图标，由用户自主开启或关闭，并把选择写入 `prompt_optimization_enabled`。开启时任务标记为 `prompt_mode=desktop_local_magic_v1`，由领取任务的 MiniMax H3 极速视频桌面端在本地优化；关闭时标记为 `prompt_mode=raw_prompt_v1`，桌面节点必须原样使用提示词且不得回传 `compiled_prompt`。为兼容旧客户端，省略该字段时按开启处理；新版网页默认关闭并始终显式提交布尔值。原文始终保留用于审计。
 
 ```json
 {
@@ -183,7 +184,7 @@ priceFen = duration_seconds * 20 + image_count * 5 + video_count * 20
 }
 ```
 
-领取使用单次 `findOneAndUpdate`，筛选 `queued`、模型、最大时长、profile、三类素材上限和本地提示词优化能力。未声明 `local_prompt_optimization_v1=true` 的旧节点不会领取新任务。没有适配任务时返回 `{ "task": null }`。
+领取使用单次 `findOneAndUpdate`，筛选 `queued`、模型、最大时长、profile、三类素材上限和本地提示词优化能力。开启优化的任务只会分配给声明 `local_prompt_optimization_v1=true` 的节点；未声明该能力的节点仍可领取用户明确关闭优化的 `raw_prompt_v1` 任务。没有适配任务时返回 `{ "task": null }`。
 
 “测试连接”必须发送 `dry_run: true`。服务端完成绑定身份、能力和限流校验后直接返回：
 
@@ -193,9 +194,9 @@ priceFen = duration_seconds * 20 + image_count * 5 + video_count * 20
 
 此分支不会读取或减少队列，不会改变任何任务状态，也不会签发输入下载或输出上传票据。正式轮询发送 `dry_run: false`。
 
-正式领取返回的是专用的最小权限 `workerTask`，仅包含 `id`、`orderNo`、`model`、原始中文 `prompt` / `source_prompt` / `original_prompt`、`prompt_mode=desktop_local_magic_v1`、`local_prompt_optimization_required=true`、视频参数、三类素材数量、短时素材下载票据和 `output_upload`。它不会包含 `requester`、需求用户邮箱或 ID、`priceFen`、`walletLedgerId`、内部账号绑定、领取节点身份等字段，局域网渲染节点因此看不到需求用户的账号信息。管理员和订单本人通过各自受权查询接口查看完整订单。
+正式领取返回的是专用的最小权限 `workerTask`，仅包含 `id`、`orderNo`、`model`、原始中文 `prompt` / `source_prompt` / `original_prompt`、`prompt_optimization_enabled`、`prompt_mode`、`local_prompt_optimization_required`、视频参数、三类素材数量、短时素材下载票据和 `output_upload`。开启时三个选择字段分别为 `true`、`desktop_local_magic_v1`、`true`；关闭时分别为 `false`、`raw_prompt_v1`、`false`。它不会包含 `requester`、需求用户邮箱或 ID、`priceFen`、`walletLedgerId`、内部账号绑定、领取节点身份等字段，局域网渲染节点因此看不到需求用户的账号信息。管理员和订单本人通过各自受权查询接口查看完整订单。
 
-节点领取后必须先回调 `status=optimizing`，在本机调用 PromptEngine 完成魔法优化；成功后再回调 `status=started`，并提交本地产生的 `compiled_prompt`、`estimated_total_seconds` 和可选的 `prompt_optimization.engine/version/elapsed_seconds`。服务端收到并保存编译结果前，不接受生成进度或成功回调；本地优化失败时节点直接回调 `failed`，不得启动 H3 推理。
+开启魔法优化时，节点领取后必须先回调 `status=optimizing`，在本机调用 PromptEngine 完成优化；成功后再回调 `status=started`，并提交本地产生的 `compiled_prompt`、`estimated_total_seconds` 和可选的 `prompt_optimization.engine/version/elapsed_seconds`。服务端收到并保存编译结果前，不接受生成进度或成功回调；本地优化失败时节点直接回调 `failed`，不得启动 H3 推理。关闭魔法优化时，节点不得发送 `optimizing` 或 `compiled_prompt`，应直接用原始 `prompt` 生成，并以 `status=started` + `estimated_total_seconds` 开始上报进度；服务端会拒绝违背用户选择的回调。
 
 有任务时，每个输入素材带 15 分钟下载票据：
 
