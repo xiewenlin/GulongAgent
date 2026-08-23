@@ -17,7 +17,7 @@ export function shortVideoSubscriptionPriceFen(cycle) {
 }
 
 export function shortVideoSubscriptionCreditFen(amountFen) {
-  return safeFen(amountFen) * 2;
+  return safeFen(amountFen);
 }
 
 export function isActiveShortVideoSubscription(subscription, now = new Date()) {
@@ -58,26 +58,39 @@ export async function creditShortVideoSubscriptionBalance({
   const creditedFen = shortVideoSubscriptionCreditFen(paidFen);
   const expiry = new Date(expiresAt);
   if (!ownerId || !sourceId || !creditedFen || Number.isNaN(expiry.getTime())) {
-    return { applied: false, reason: "invalid", paidFen, bonusFen: paidFen, creditedFen };
+    return { applied: false, reason: "invalid", paidFen, bonusFen: 0, creditedFen };
   }
   const key = `${source}:${sourceId}`;
   const now = new Date();
   const wallets = await getCollection("wallets");
   const ledgers = await getCollection("walletCreditLedger");
-  const credit = { key, kind: "short_video_subscription", amountFen: creditedFen, paidFen, bonusFen: paidFen, expiresAt: expiry, createdAt: now };
+  const credit = { key, kind: "short_video_subscription", amountFen: creditedFen, paidFen, bonusFen: 0, expiresAt: expiry, createdAt: now };
   await ledgers.updateOne(
     { creditKey: key },
-    { $setOnInsert: { creditKey: key, ownerId, source, sourceId, kind: "short_video_subscription", amountFen: creditedFen, paidFen, bonusFen: paidFen, expiresAt: expiry, status: "pending", createdAt: now }, $set: { updatedAt: now } },
+    { $setOnInsert: { creditKey: key, ownerId, source, sourceId, kind: "short_video_subscription", amountFen: creditedFen, paidFen, bonusFen: 0, expiresAt: expiry, status: "pending", createdAt: now }, $set: { updatedAt: now } },
     { upsert: true },
   );
-  const ledger = await ledgers.findOne({ creditKey: key });
+  let ledger = await ledgers.findOne({ creditKey: key });
+  const existing = await wallets.findOne({ ownerId });
+  const appliedCredit = existing?.credits?.find((item) => item.key === key);
+  if (appliedCredit) {
+    if (!ledger || !sameOwner(ledger.ownerId, ownerId) || ledger.kind !== "short_video_subscription") {
+      throw Object.assign(new Error("短视频包月额度流水内容冲突"), { code: "SHORT_VIDEO_CREDIT_CONFLICT", status: 409 });
+    }
+    const historicalCreditedFen = safeFen(appliedCredit.amountFen || ledger.amountFen);
+    const historicalBonusFen = safeFen(appliedCredit.bonusFen ?? ledger.bonusFen ?? Math.max(0, historicalCreditedFen - paidFen));
+    await ledgers.updateOne({ creditKey: key }, { $set: { status: "settled", settledAt: ledger.settledAt || now, updatedAt: now } });
+    return { applied: false, reason: "already_applied", paidFen, bonusFen: historicalBonusFen, creditedFen: historicalCreditedFen };
+  }
+  if (ledger && sameOwner(ledger.ownerId, ownerId) && ledger.kind === "short_video_subscription" && ledger.status === "pending" && safeFen(ledger.amountFen) !== creditedFen) {
+    await ledgers.updateOne(
+      { creditKey: key, status: "pending" },
+      { $set: { amountFen: creditedFen, paidFen, bonusFen: 0, policyVersion: 2, updatedAt: now } },
+    );
+    ledger = await ledgers.findOne({ creditKey: key });
+  }
   if (!ledger || !sameOwner(ledger.ownerId, ownerId) || safeFen(ledger.amountFen) !== creditedFen || ledger.kind !== "short_video_subscription") {
     throw Object.assign(new Error("短视频包月额度流水内容冲突"), { code: "SHORT_VIDEO_CREDIT_CONFLICT", status: 409 });
-  }
-  const existing = await wallets.findOne({ ownerId });
-  if (existing?.credits?.some((item) => item.key === key)) {
-    await ledgers.updateOne({ creditKey: key }, { $set: { status: "settled", settledAt: ledger.settledAt || now, updatedAt: now } });
-    return { applied: false, reason: "already_applied", paidFen, bonusFen: paidFen, creditedFen };
   }
   const update = {
     $inc: { balanceFen: creditedFen, shortVideoPackageBalanceFen: creditedFen },
@@ -101,7 +114,7 @@ export async function creditShortVideoSubscriptionBalance({
   const confirmed = applied || await wallets.findOne({ ownerId, "credits.key": key }, { projection: { _id: 1 } });
   if (!confirmed) throw Object.assign(new Error("短视频包月额度入账状态冲突"), { code: "SHORT_VIDEO_WALLET_CONFLICT", status: 409 });
   await ledgers.updateOne({ creditKey: key }, { $set: { status: "settled", settledAt: now, updatedAt: now } });
-  return { applied, paidFen, bonusFen: paidFen, creditedFen };
+  return { applied, paidFen, bonusFen: 0, creditedFen };
 }
 
 export async function expireShortVideoPackageAllowance({ getCollection, ownerId, subscription = null, now = new Date(), force = false }) {

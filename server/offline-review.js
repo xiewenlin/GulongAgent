@@ -2,8 +2,8 @@ export const OFFLINE_REVIEW_REJECTION_REASON = "管理员通过微信端拒绝�
 
 export function offlineReviewWechatMessage(order) {
   const amount = `¥${(Number(order.amountFen || 0) / 100).toFixed(2)}`;
-  const bonusFen = Number(order.promotionBonusFen || order.partnerData?.promotion_bonus_fen || 0);
   const shortVideo = order.subscriptionPlan === "short_video_monthly" || order.partnerData?.subscription_plan === "short_video_monthly";
+  const bonusFen = shortVideo ? 0 : Number(order.promotionBonusFen || order.partnerData?.promotion_bonus_fen || 0);
   const cycle = order.kind === "recharge" ? "账户余额充值" : shortVideo ? `短视频包月 · ${order.cycle === "year" ? "年度" : "月度"}` : order.cycle === "year" ? "年度会员" : "月度会员";
   const lines = [
     "【古龙官网 · 新的线下支付待审核订单】",

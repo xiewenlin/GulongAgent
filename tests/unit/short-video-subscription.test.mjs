@@ -6,6 +6,7 @@ import {
   SHORT_VIDEO_MONTHLY_PRICE_FEN,
   SHORT_VIDEO_PLAN_ID,
   SHORT_VIDEO_YEARLY_PRICE_FEN,
+  creditShortVideoSubscriptionBalance,
   expireShortVideoPackageAllowance,
   isActiveShortVideoSubscription,
   reserveShortVideoPackageAllowance,
@@ -14,13 +15,63 @@ import {
   shortVideoSubscriptionPriceFen,
 } from "../../server/short-video-subscription.js";
 
-test("短视频包月使用固定月年价并按实付 100% 赠送", () => {
+test("短视频包月使用固定月年价且实付多少到账多少", () => {
   assert.equal(SHORT_VIDEO_PLAN_ID, "short_video_monthly");
   assert.equal(SHORT_VIDEO_MONTHLY_PRICE_FEN, 599_900);
   assert.equal(SHORT_VIDEO_YEARLY_PRICE_FEN, 5_999_900);
   assert.equal(shortVideoSubscriptionPriceFen("month"), 599_900);
   assert.equal(shortVideoSubscriptionPriceFen("year"), 5_999_900);
-  assert.equal(shortVideoSubscriptionCreditFen(599_900), 1_199_800);
+  assert.equal(shortVideoSubscriptionCreditFen(599_900), 599_900);
+});
+
+test("短视频包月入账不赠送并保留历史已结算流水的幂等语义", async () => {
+  const ownerId = new ObjectId();
+  const ledgers = new Map();
+  let wallet = null;
+  const collections = {
+    wallets: {
+      findOne: async () => wallet,
+      insertOne: async (document) => {
+        wallet = { _id: new ObjectId(), ...document };
+        return { insertedId: wallet._id };
+      },
+      updateOne: async () => ({ modifiedCount: 0 }),
+    },
+    walletCreditLedger: {
+      findOne: async ({ creditKey }) => ledgers.get(creditKey) || null,
+      updateOne: async ({ creditKey }, update) => {
+        const current = ledgers.get(creditKey) || { ...update.$setOnInsert };
+        Object.assign(current, update.$set || {});
+        ledgers.set(creditKey, current);
+        return { acknowledged: true };
+      },
+    },
+  };
+  const getCollection = async (name) => collections[name];
+  const credited = await creditShortVideoSubscriptionBalance({
+    getCollection,
+    ownerId,
+    amountFen: 599_900,
+    source: "offline_short_video_subscription",
+    sourceId: "GL-NEW-POLICY",
+    expiresAt: new Date(Date.now() + 86_400_000),
+  });
+  assert.deepEqual({ paidFen: credited.paidFen, bonusFen: credited.bonusFen, creditedFen: credited.creditedFen }, { paidFen: 599_900, bonusFen: 0, creditedFen: 599_900 });
+  assert.equal(wallet.balanceFen, 599_900);
+  assert.equal(wallet.shortVideoPackageBalanceFen, 599_900);
+
+  const historicalKey = "offline_short_video_subscription:GL-HISTORICAL";
+  wallet.credits.push({ key: historicalKey, kind: "short_video_subscription", amountFen: 1_199_800, paidFen: 599_900, bonusFen: 599_900 });
+  ledgers.set(historicalKey, { creditKey: historicalKey, ownerId, kind: "short_video_subscription", amountFen: 1_199_800, paidFen: 599_900, bonusFen: 599_900, status: "settled" });
+  const historical = await creditShortVideoSubscriptionBalance({
+    getCollection,
+    ownerId,
+    amountFen: 599_900,
+    source: "offline_short_video_subscription",
+    sourceId: "GL-HISTORICAL",
+    expiresAt: new Date(Date.now() + 86_400_000),
+  });
+  assert.deepEqual({ applied: historical.applied, reason: historical.reason, bonusFen: historical.bonusFen, creditedFen: historical.creditedFen }, { applied: false, reason: "already_applied", bonusFen: 599_900, creditedFen: 1_199_800 });
 });
 
 test("短视频包月只在有效期内开放 H3 无限生成", () => {

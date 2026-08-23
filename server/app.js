@@ -1397,7 +1397,7 @@ async function approveOfflinePayment({ orderId, actorUserId, actorChandlerUserId
   const isRecharge = order.kind === "recharge";
   const isShortVideoSubscription = !isRecharge && (order.subscriptionPlan === SHORT_VIDEO_PLAN_ID || order.partnerData?.subscription_plan === SHORT_VIDEO_PLAN_ID);
   const promotionBonusFen = isShortVideoSubscription
-    ? order.amountFen
+    ? 0
     : paymentPromotionBonusFen({ amountFen: order.amountFen, kind: isRecharge ? "recharge" : "subscription_payment" });
   const storedStart = alreadyApproved ? new Date(order.validFrom) : null;
   const storedEnd = alreadyApproved ? new Date(order.validUntil) : null;
@@ -1429,7 +1429,7 @@ async function approveOfflinePayment({ orderId, actorUserId, actorChandlerUserId
     )] : []),
     (await getCollection("notifications")).updateOne(
       { ownerId: order.ownerId, type: "offline_payment_approved", orderId: order._id },
-      { $set: { title: "线下支付审核已通过", message: isRecharge ? `订单 ${order.orderNo} 已确认到账，实付余额${promotionBonusFen ? `及赠送的 ${(promotionBonusFen / 100).toFixed(2)} 元` : ""}已经入账。` : isShortVideoSubscription ? `订单 ${order.orderNo} 已确认到账，短视频包月权益已生效，可用额度为实付金额的 2 倍。` : `订单 ${order.orderNo} 已确认到账，会员权益与赠送的 ${(promotionBonusFen / 100).toFixed(2)} 元余额已经生效。`, orderNo: order.orderNo, readAt: null, updatedAt: now }, $setOnInsert: { createdAt: now } },
+      { $set: { title: "线下支付审核已通过", message: isRecharge ? `订单 ${order.orderNo} 已确认到账，实付余额${promotionBonusFen ? `及赠送的 ${(promotionBonusFen / 100).toFixed(2)} 元` : ""}已经入账。` : isShortVideoSubscription ? `订单 ${order.orderNo} 已确认到账，短视频包月权益已生效，实付金额已按 1:1 计入可用余额。` : `订单 ${order.orderNo} 已确认到账，会员权益与赠送的 ${(promotionBonusFen / 100).toFixed(2)} 元余额已经生效。`, orderNo: order.orderNo, readAt: null, updatedAt: now }, $setOnInsert: { createdAt: now } },
       { upsert: true },
     ),
     ...(isRecharge
@@ -1451,7 +1451,7 @@ async function approveOfflinePayment({ orderId, actorUserId, actorChandlerUserId
       await chandlerRequest(path, { method: "PUT", accessToken, body: { attributes: { ...attributes, subscription_status: "active", subscription_plan: isShortVideoSubscription ? SHORT_VIDEO_PLAN_ID : "member", plan_kind: isShortVideoSubscription ? SHORT_VIDEO_PLAN_ID : order.cycle === "year" ? "yearly" : "monthly", subscription_source: "offline_review", subscription_order_no: order.orderNo, subscription_valid_from: start.toISOString(), subscription_valid_until: end.toISOString(), subscription_valid_from_unix_ms: start.getTime(), subscription_valid_until_unix_ms: end.getTime(), subscription_reviewed_at_unix_ms: now.getTime() } } });
     } catch { /* Website MongoDB remains authoritative and desktop reads it directly. */ }
   }
-  return { ok: true, orderNo: order.orderNo, status: "approved", planType: isShortVideoSubscription ? SHORT_VIDEO_PLAN_ID : isRecharge ? null : "member", creditedFen: order.amountFen + promotionBonusFen, bonusFen: promotionBonusFen, ...(isRecharge ? {} : { validFrom: start, validUntil: end }), message: isRecharge ? "审核已通过，充值余额与符合条件的赠送金额已经入账并可由桌面端立即同步" : isShortVideoSubscription ? "审核已通过，短视频包月权益与双倍额度已经生效并可由桌面端立即同步" : "审核已通过，会员权益与 10% 赠送余额已经生效并可由桌面端立即同步" };
+  return { ok: true, orderNo: order.orderNo, status: "approved", planType: isShortVideoSubscription ? SHORT_VIDEO_PLAN_ID : isRecharge ? null : "member", creditedFen: order.amountFen + promotionBonusFen, bonusFen: promotionBonusFen, ...(isRecharge ? {} : { validFrom: start, validUntil: end }), message: isRecharge ? "审核已通过，充值余额与符合条件的赠送金额已经入账并可由桌面端立即同步" : isShortVideoSubscription ? "审核已通过，短视频包月权益与实付等额余额已经生效并可由桌面端立即同步" : "审核已通过，会员权益与 10% 赠送余额已经生效并可由桌面端立即同步" };
 }
 
 async function rejectOfflinePayment({ orderId, actorUserId, actorChandlerUserId, accessToken, reason }) {
@@ -1880,7 +1880,7 @@ const getSubscriptionPricingRoute = createRoute({
   description: "公开返回古龙官网当前生效的会员价格及短视频包月固定价格。管理员发布会员价格后立即更新；响应禁止缓存，桌面端应在打开订阅页时重新拉取。",
   security: [],
   responses: {
-    200: { description: "当前生效的订阅价格与支付渠道快照", content: { "application/json": { schema: z.object({ revision: z.string(), currency: z.literal("CNY"), monthly: SubscriptionPricePointSchema, yearly: SubscriptionPricePointSchema, shortVideo: z.object({ id: z.literal("short_video_monthly"), name: z.literal("短视频包月"), monthlyFen: z.number().int(), yearlyFen: z.number().int(), paymentProviders: z.array(z.literal("offline")), walletCreditMultiplier: z.literal(2), unlimitedModel: z.literal("minimax_h3_shared") }), updatedAt: z.coerce.date(), paymentAvailability: PaymentAvailabilitySchema }) } } },
+    200: { description: "当前生效的订阅价格与支付渠道快照", content: { "application/json": { schema: z.object({ revision: z.string(), currency: z.literal("CNY"), monthly: SubscriptionPricePointSchema, yearly: SubscriptionPricePointSchema, shortVideo: z.object({ id: z.literal("short_video_monthly"), name: z.literal("短视频包月"), monthlyFen: z.number().int(), yearlyFen: z.number().int(), paymentProviders: z.array(z.literal("offline")), walletCreditMultiplier: z.literal(1), unlimitedModel: z.literal("minimax_h3_shared") }), updatedAt: z.coerce.date(), paymentAvailability: PaymentAvailabilitySchema }) } } },
   },
 });
 
@@ -6108,7 +6108,7 @@ app.get("/api/billing/plans", async (c) => {
     plans: [
       { id: "free", name: "普通用户", monthlyFen: 0, yearlyFen: 0, autoRenew: false },
       { id: "member", name: "会员用户", monthlyFen: pricing.monthly.amountFen, yearlyFen: pricing.yearly.amountFen, autoRenew: false, renewalMode: "manual", reminderDays: RENEWAL_REMINDER_DAYS },
-      { id: SHORT_VIDEO_PLAN_ID, name: SHORT_VIDEO_PLAN_NAME, monthlyFen: SHORT_VIDEO_MONTHLY_PRICE_FEN, yearlyFen: SHORT_VIDEO_YEARLY_PRICE_FEN, autoRenew: false, renewalMode: "manual", paymentProviders: ["offline"], unlimitedModel: "minimax_h3_shared", walletCreditMultiplier: 2 },
+      { id: SHORT_VIDEO_PLAN_ID, name: SHORT_VIDEO_PLAN_NAME, monthlyFen: SHORT_VIDEO_MONTHLY_PRICE_FEN, yearlyFen: SHORT_VIDEO_YEARLY_PRICE_FEN, autoRenew: false, renewalMode: "manual", paymentProviders: ["offline"], unlimitedModel: "minimax_h3_shared", walletCreditMultiplier: 1 },
       { id: "custom", name: "深度定制", pricing: "结果式付费 · 利润五五分", autoRenew: false },
     ],
     providers: {
@@ -6228,7 +6228,7 @@ app.post("/api/billing/orders", async (c) => {
 
   if (provider === "offline") {
     const promotionBonusFen = subscriptionPlan === SHORT_VIDEO_PLAN_ID
-      ? amountFen
+      ? 0
       : paymentPromotionBonusFen({ amountFen, kind: kind === "recharge" ? "recharge" : "subscription_payment" });
     let plans = [];
     let offlineAccessToken = null;
@@ -7381,7 +7381,7 @@ app.openapi(getSubscriptionPricingRoute, async (c) => {
   c.header("Access-Control-Allow-Origin", "*");
   return c.json({
     ...pricing,
-    shortVideo: { id: SHORT_VIDEO_PLAN_ID, name: SHORT_VIDEO_PLAN_NAME, monthlyFen: SHORT_VIDEO_MONTHLY_PRICE_FEN, yearlyFen: SHORT_VIDEO_YEARLY_PRICE_FEN, paymentProviders: ["offline"], walletCreditMultiplier: 2, unlimitedModel: "minimax_h3_shared" },
+    shortVideo: { id: SHORT_VIDEO_PLAN_ID, name: SHORT_VIDEO_PLAN_NAME, monthlyFen: SHORT_VIDEO_MONTHLY_PRICE_FEN, yearlyFen: SHORT_VIDEO_YEARLY_PRICE_FEN, paymentProviders: ["offline"], walletCreditMultiplier: 1, unlimitedModel: "minimax_h3_shared" },
     paymentAvailability: ONLINE_PAYMENT_AVAILABILITY,
   });
 });
@@ -7436,7 +7436,7 @@ app.openAPIRegistry.registerPath({
   path: "/api/billing/orders",
   tags: ["Billing"],
   summary: "创建微信支付或线下审核订单",
-  description: "线上仅支持微信。subscription 默认创建普通会员月/年订单；planType=short_video_monthly 创建短视频包月订单且仅允许 provider=offline，月费 599900 分、年费 5999900 分，审核后按实付金额 100% 赠送套餐额度。普通会员实付金额额外赠送 10%；recharge 单次实付满 500 元额外赠送 10%。金额单位均为整数分。",
+  description: "线上仅支持微信。subscription 默认创建普通会员月/年订单；planType=short_video_monthly 创建短视频包月订单且仅允许 provider=offline，月费 599900 分、年费 5999900 分，审核后按实付金额 1:1 计入套餐余额，不额外赠送。普通会员实付金额额外赠送 10%；recharge 单次实付满 500 元额外赠送 10%。金额单位均为整数分。",
   request: { body: { content: { "application/json": { schema: z.object({ kind: z.enum(["subscription", "recharge", "custom", "worker_task"]), planType: z.enum(["member", "short_video_monthly"]).optional(), provider: z.enum(["wechat", "offline"]), cycle: z.enum(["month", "year"]).optional(), amountFen: z.number().int().min(100).optional(), subject: z.string().max(80).optional(), taskId: z.string().optional() }) } } } },
   responses: { 201: { description: "Chandler 微信预支付信息，或线下待审核订单" }, 400: { description: "参数或渠道不受支持" }, 401: { description: "未登录" } },
 });
@@ -7500,7 +7500,7 @@ app.doc("/api/openapi.json", {
   info: {
     title: "古龙 Gulong Agent Engine API",
     version: "2.2.0",
-    description: "已按 Chandler v3.7 与 PearAPI 统一接入升级：邮箱和短信验证码统一为 6 位数字；官网保持邮箱注册，已激活桌面客户端可通过受控服务端代理手机号注册，OAuth 客户端密钥不会下发客户端。服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。普通会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费；实付额外赠送 10% 钱包余额，单次充值满 500 元同样赠送 10%。短视频包月固定月费 5999 元、年费 59999 元，只支持线下审核，审核后实付与等额赠送组成可到期套餐余额；有效期内 MiniMaxH3 套餐余额归零后仍可无限生成，但不再扣费或分佣。所有入账、扣款、退款和分账均使用独立幂等流水。MiniMax H3 共享节点支持钱包预扣、幂等退款与 50% 节点分成、激活设备账号绑定、按能力原子领取、腾讯云 COS 输入下载和输出直传票据，并提供仅按绑定账户聚合的桌面收益接口；工作器领取 DTO 不含需求用户身份和内部计费信息。另提供永久离线授权兑换、第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
+    description: "已按 Chandler v3.7 与 PearAPI 统一接入升级：邮箱和短信验证码统一为 6 位数字；官网保持邮箱注册，已激活桌面客户端可通过受控服务端代理手机号注册，OAuth 客户端密钥不会下发客户端。服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。普通会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费；实付额外赠送 10% 钱包余额，单次充值满 500 元同样赠送 10%。短视频包月固定月费 5999 元、年费 59999 元，只支持线下审核，审核后实付金额按 1:1 组成可到期套餐余额，不额外赠送；有效期内 MiniMaxH3 套餐余额归零后仍可无限生成，但不再扣费或分佣。所有入账、扣款、退款和分账均使用独立幂等流水。MiniMax H3 共享节点支持钱包预扣、幂等退款与 50% 节点分成、激活设备账号绑定、按能力原子领取、腾讯云 COS 输入下载和输出直传票据，并提供仅按绑定账户聚合的桌面收益接口；工作器领取 DTO 不含需求用户身份和内部计费信息。另提供永久离线授权兑换、第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
   },
   servers: [
     { url: "/", description: "当前环境" },

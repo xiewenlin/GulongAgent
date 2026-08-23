@@ -765,7 +765,7 @@ test("OpenAPI document includes Chandler admin, offline credentials, dated attac
   assert.ok(document.paths["/api/release-worker/releases/{publishId}/complete"]);
   assert.ok(document.paths["/api/release-worker/releases/{publishId}/fail"]);
   assert.equal(document.paths["/api/billing/orders"].post.requestBody.content["application/json"].schema.properties.planType.enum.includes("short_video_monthly"), true);
-  assert.deepEqual(document.paths["/api/v1/pricing/subscriptions"].get.responses["200"].content["application/json"].schema.properties.shortVideo.properties.walletCreditMultiplier.enum, [2]);
+  assert.deepEqual(document.paths["/api/v1/pricing/subscriptions"].get.responses["200"].content["application/json"].schema.properties.shortVideo.properties.walletCreditMultiplier.enum, [1]);
   assert.equal(document.paths["/api/v1/desktop/account/subscription"].get.responses["200"].content["application/json"].schema.properties.shortVideoPackage.properties.unlimitedH3.type, "boolean");
   for (const path of [
     "/api/release-worker/releases/prepare",

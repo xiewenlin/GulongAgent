@@ -43,7 +43,7 @@ export const plans = [
     eyebrow: "H3 无限创作",
     monthlyFen: 599900,
     yearlyFen: 5999900,
-    features: ["无限使用 MiniMaxH3共享节点", "实付多少再赠送多少额度", "额度内照常扣费并给节点分佣", "额度用完后继续生成且不再扣费"],
+    features: ["无限使用 MiniMaxH3共享节点", "实付多少，余额到账多少", "余额内照常扣费并给节点分佣", "余额用完后无限免费且不再分佣"],
   },
   {
     id: "custom",

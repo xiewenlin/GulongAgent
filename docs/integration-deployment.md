@@ -141,7 +141,7 @@ SESSION_COOKIE_SECURE=
 
 ## 9. 短视频包月与桌面同步
 
-短视频包月使用独立计划标识 `short_video_monthly`，月费 599900 分、年费 5999900 分，只通过线下支付审核开通。审核通过后，钱包会把实付金额与 100% 套餐赠送额一次性幂等入账；套餐额度是总余额中的可到期组成部分，不会覆盖用户另外充值的余额。
+短视频包月使用独立计划标识 `short_video_monthly`，月费 599900 分、年费 5999900 分，只通过线下支付审核开通。审核通过后，钱包按实付金额 1:1 幂等入账，不额外赠送；套餐额度是总余额中的可到期组成部分，不会覆盖用户另外充值的余额。
 
 - 定价：`GET /api/v1/pricing/subscriptions`，读取 `shortVideo`。
 - 订阅状态：`GET /api/v1/desktop/account/subscription`，沿用桌面 Chandler Bearer，读取 `subscription.plan`、`balanceFen` 与 `shortVideoPackage`。
