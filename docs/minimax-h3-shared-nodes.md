@@ -140,6 +140,8 @@ X-Gulong-Account-Binding: gab_...
 
 `source_channel` 可为 `website` 或 `desktop_agent`。服务端只统计已经完成、属于当前账号的资产记录：
 
+网页版与桌面端均支持最多 9 张图片、3 个视频、3 个音频。每一类素材按照任务 manifest 中的顺序独立编号，用户可在原始提示词中使用 `@图片1`、`@视频1`、`@音频1` 引用；桌面执行节点本地优化时会将这些引用编译为 H3 所需的精确模型标签。素材先通过上一节的短时票据直接上传 COS，网页请求体只提交已完成的 `asset_id`，不承载大文件。
+
 ```text
 priceFen = duration_seconds * 20 + image_count * 5 + video_count * 20
 ```
