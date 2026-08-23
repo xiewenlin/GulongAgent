@@ -59,7 +59,7 @@ function CustomizationContactDialog({ onClose }) {
         <h2 id="custom-contact-title">微信沟通深度定制</h2>
         <p>扫描二维码添加施富，发送你的业务目标与期望结果，我们会一起梳理适合的智能体与自动化方案。</p>
         <figure className="custom-contact-qr-shell">
-          <img src="/assets/deep-customization-wechat.jpg" alt="深度定制联系人施富的微信二维码" />
+          <img src="/assets/deep-customization-wechat.jpg?v=20260823" alt="深度定制联系人施富的微信二维码" />
           <figcaption>打开微信扫一扫，添加好友后备注“古龙深度定制”</figcaption>
         </figure>
         <button className="button primary full" type="button" onClick={onClose}>我已保存二维码</button>
