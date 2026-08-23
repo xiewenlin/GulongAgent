@@ -109,9 +109,10 @@ test("H3 worker task DTO excludes requester and billing identity", () => {
     assets: [{ type: "image", download_url: "https://example.invalid/signed" }],
     outputUpload: { url: "https://example.invalid/upload", object_key: "h3/tasks/test/output.mp4" },
   });
-  assert.deepEqual(Object.keys(task), ["id", "orderNo", "model", "prompt", "source_prompt", "original_prompt", "prompt_mode", "local_prompt_optimization_required", "aspectRatio", "durationSeconds", "profile", "imageCount", "videoCount", "audioCount", "assets", "output_upload", "progress_callback"]);
+  assert.deepEqual(Object.keys(task), ["id", "orderNo", "model", "prompt", "source_prompt", "original_prompt", "prompt_mode", "prompt_optimization_enabled", "local_prompt_optimization_required", "aspectRatio", "durationSeconds", "profile", "imageCount", "videoCount", "audioCount", "assets", "output_upload", "progress_callback"]);
   assert.equal(task.prompt, "让古龙跃过云海，保持原始中文");
   assert.equal(task.prompt_mode, "desktop_local_magic_v1");
+  assert.equal(task.prompt_optimization_enabled, true);
   assert.equal(task.local_prompt_optimization_required, true);
   assert.deepEqual(task.progress_callback.first_required_fields, ["estimated_total_seconds", "compiled_prompt"]);
   assert.equal(task.progress_callback.optimization_status, "optimizing");
@@ -663,6 +664,9 @@ test("H3 OpenAPI publishes binding, assets, desktop tool, claim and callback con
   assert.match(document.paths["/api/h3/tasks/claim"].post.description, /local_prompt_optimization_v1/);
   assert.equal(document.paths["/api/h3/tasks/claim"].post.requestBody.content["application/json"].schema.properties.capabilities.properties.batch_claim.type, "boolean");
   assert.equal(document.paths["/api/h3/tasks/claim"].post.requestBody.content["application/json"].schema.properties.capabilities.properties.local_prompt_optimization_v1.type, "boolean");
+  assert.equal(document.paths["/api/h3/tasks"].post.requestBody.content["application/json"].schema.properties.prompt_optimization_enabled.type, "boolean");
+  assert.match(document.paths["/api/h3/tasks"].post.description, /prompt_optimization_enabled=true/);
+  assert.match(document.paths["/api/h3/tasks/claim"].post.description, /raw_prompt_v1/);
   assert.match(document.paths["/api/h3/tasks/callback"].post.description, /HEAD/);
   assert.match(document.paths["/api/h3/tasks/callback"].post.description, /estimated_total_seconds/);
   assert.match(document.paths["/api/h3/tasks/callback"].post.description, /compiled_prompt/);
@@ -690,7 +694,8 @@ test("H3 implementation keeps identity, capability, COS ownership and ledger gat
   assert.ok(dryRunBranch > -1 && queueMutation > dryRunBranch, "dry-run returns before the first queue mutation so the queue cannot decrease");
   assert.match(source, /sort: \{ createdAt: 1, _id: 1 \}/);
   assert.match(source, /calculateH3ClaimPlan[\s\S]+additional_tasks:[\s\S]+poll_after_ms/);
-  assert.match(source, /localPromptOptimizationV1[\s\S]+localPromptOptimizationRequired: \{ \$ne: true \}/);
+  assert.match(source, /localPromptOptimizationV1[\s\S]+promptOptimizationEnabled: false, localPromptOptimizationRequired: false/);
+  assert.match(source, /!promptOptimizationEnabled && suppliedCompiledPrompt[\s\S]+PROMPT_OPTIMIZATION_DISABLED/);
   assert.match(source, /LOCAL_PROMPT_OPTIMIZATION_REQUIRED[\s\S]+compiled_prompt/);
   assert.match(source, /imageCount: \{ \$lte: maxImageCount \}[\s\S]+videoCount: \{ \$lte: maxVideoCount \}[\s\S]+audioCount: \{ \$lte: maxAudioCount \}/);
   assert.match(source, /OUTPUT_OBJECT_FORBIDDEN[\s\S]+inspectCosObject\(objectKey\)[\s\S]+x-cos-meta-sha256/);
@@ -706,6 +711,9 @@ test("H3 implementation keeps identity, capability, COS ownership and ledger gat
   assert.match(account, /kind: "recharge", provider: "offline"/);
   assert.match(agent, /source_channel: "website"/);
   assert.match(agent, /minimax_h3_shared/);
+  assert.match(agent, /MagicWand/);
+  assert.match(agent, /agent-h3-prompt-toggle/);
+  assert.match(agent, /prompt_optimization_enabled: h3PromptOptimizationEnabled/);
   assert.doesNotMatch(agent, /WandSparkles|optimizeH3Prompt|h3PromptState|agent-h3-magic/);
   assert.match(agent, /请尽快下载，视频将在生成完成后 24 小时自动删除/);
   assert.match(agent, /expectedCompletedAt[\s\S]+progress/);

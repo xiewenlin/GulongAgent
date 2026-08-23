@@ -83,20 +83,32 @@ test("H3 existing official structure is re-hardened instead of trusted verbatim"
   assert.equal(hardened.validation.valid, true);
 });
 
-test("website H3 input preserves the original Chinese prompt for desktop-local optimization", () => {
+test("website H3 input preserves the original Chinese prompt and keeps legacy clients opted into desktop-local optimization", () => {
   const input = normalizeH3TaskInput({ prompt: "让@图片1中的人物在竹林缓慢回头", authoring_prompt: "SHOULD NOT WIN", optimized_prompt: "SHOULD NOT WIN", duration_seconds: 5, assets: { images: [{ object_key: "h3/requesters/test/assets/picture-1.png" }], videos: [], audio: [] } });
   assert.equal(input.prompt, "让@图片1中的人物在竹林缓慢回头");
   assert.equal(input.originalPrompt, input.prompt);
   assert.equal(input.sourcePrompt, input.prompt);
   assert.equal(input.compiledPrompt, undefined);
+  assert.equal(input.promptOptimizationEnabled, true);
   assert.equal(input.localPromptOptimizationRequired, true);
   assert.equal(input.promptMode, "desktop_local_magic_v1");
   assert.deepEqual(input.promptCompilation, { mode: "desktop_local_magic_v1", source: "execution_node", validated: false, status: "pending" });
 });
 
-test("web H3 composer removes every magic optimization control and submits only the original prompt", async () => {
+test("website H3 input can explicitly keep the raw prompt and skip desktop-local optimization", () => {
+  const input = normalizeH3TaskInput({ prompt: "让@图片1中的人物在竹林缓慢回头", prompt_optimization_enabled: false, duration_seconds: 5, assets: { images: [{ object_key: "h3/requesters/test/assets/picture-1.png" }], videos: [], audio: [] } });
+  assert.equal(input.prompt, "让@图片1中的人物在竹林缓慢回头");
+  assert.equal(input.promptOptimizationEnabled, false);
+  assert.equal(input.localPromptOptimizationRequired, false);
+  assert.equal(input.promptMode, "raw_prompt_v1");
+  assert.deepEqual(input.promptCompilation, { mode: "raw_prompt_v1", source: "requester", validated: false, status: "skipped" });
+});
+
+test("web H3 composer exposes an opt-in magic control and submits the explicit user choice", async () => {
   const source = await readFile(new URL("../../src/components/WebAgentPage.jsx", import.meta.url), "utf8");
-  assert.match(source, /model: H3_SHARED_MODEL\.id, prompt: content, conversation_id:/);
+  assert.match(source, /useState\(false\)[\s\S]+prompt_optimization_enabled: h3PromptOptimizationEnabled/);
+  assert.match(source, /MagicWand[\s\S]+agent-h3-prompt-toggle[\s\S]+aria-pressed=\{h3PromptOptimizationEnabled\}/);
+  assert.match(source, /<span>魔法优化<\/span>[\s\S]+\? "开" : "关"/);
   assert.doesNotMatch(source, /WandSparkles|agent-h3-magic|optimizeH3Prompt|h3PromptState|h3OriginalPrompt/);
   assert.doesNotMatch(source, /authoring_prompt|optimized_prompt|\/api\/h3\/prompts\/optimize/);
 });
@@ -119,21 +131,31 @@ test("website H3 optimizer endpoint is retired with a Chinese migration response
   assert.equal(response.status, 410);
   const payload = await response.json();
   assert.equal(payload.code, "PROMPT_OPTIMIZATION_MOVED_TO_DESKTOP");
-  assert.match(payload.message, /原始中文提示词.*桌面端.*本地自动优化/);
+  assert.match(payload.message, /prompt_optimization_enabled.*桌面端.*本地魔法优化/);
 });
 
-test("worker task receives only the original prompt plus mandatory local optimization contract", () => {
+test("worker task receives the original prompt plus the selected local optimization contract", () => {
   const task = normalizeH3TaskInput({ prompt: "金色鲤鱼跃过龙门", duration_seconds: 5, assets: { images: [], videos: [], audio: [] } });
   const dto = toH3WorkerTask({ _id: "task-1", orderNo: "H3-1", ...task });
   assert.equal(dto.prompt, "金色鲤鱼跃过龙门");
   assert.equal(dto.source_prompt, dto.prompt);
   assert.equal(dto.original_prompt, dto.prompt);
   assert.equal(dto.prompt_mode, "desktop_local_magic_v1");
+  assert.equal(dto.prompt_optimization_enabled, true);
   assert.equal(dto.local_prompt_optimization_required, true);
   assert.deepEqual(dto.progress_callback.first_required_fields, ["estimated_total_seconds", "compiled_prompt"]);
   assert.equal(dto.progress_callback.optimization_status, "optimizing");
   assert.equal(dto.compiled_prompt, undefined);
   for (const forbidden of ["requester", "priceFen", "walletLedgerId", "bindingId"]) assert.equal(Object.hasOwn(dto, forbidden), false);
+
+  const rawTask = normalizeH3TaskInput({ prompt: "直接使用这一句中文", prompt_optimization_enabled: false, duration_seconds: 5, assets: { images: [], videos: [], audio: [] } });
+  const rawDto = toH3WorkerTask({ _id: "task-2", orderNo: "H3-2", ...rawTask });
+  assert.equal(rawDto.prompt, "直接使用这一句中文");
+  assert.equal(rawDto.prompt_mode, "raw_prompt_v1");
+  assert.equal(rawDto.prompt_optimization_enabled, false);
+  assert.equal(rawDto.local_prompt_optimization_required, false);
+  assert.deepEqual(rawDto.progress_callback.first_required_fields, ["estimated_total_seconds"]);
+  assert.equal(rawDto.progress_callback.optimization_status, undefined);
 });
 
 test("buildH3AuthoringPrompt never changes the compiled model body", () => {
