@@ -258,6 +258,9 @@ export function DeveloperPage({ user, openAuth }) {
 }
 
 export function PricingPage({ user, openAuth, navigate }) {
+  const query = new URLSearchParams(window.location.search);
+  const activeTab = query.get("tab") === "recharge" ? "recharge" : "subscription";
+  const desktopSource = query.get("source") === "desktop";
   const [cycle, setCycle] = useState("month");
   const [paymentMode, setPaymentMode] = useState("online");
   const [busy, setBusy] = useState(false);
@@ -267,6 +270,10 @@ export function PricingPage({ user, openAuth, navigate }) {
   const [pricingPlans, setPricingPlans] = useState(sitePlans);
   const [customContactOpen, setCustomContactOpen] = useState(false);
   const [customOrderOpen, setCustomOrderOpen] = useState(false);
+  const [rechargeAmount, setRechargeAmount] = useState("500");
+  const [rechargeOrders, setRechargeOrders] = useState([]);
+  const [rechargeOrdersBusy, setRechargeOrdersBusy] = useState(false);
+  const [rechargeOrdersRefresh, setRechargeOrdersRefresh] = useState(0);
   const [walletPromotion, setWalletPromotion] = useState({ subscriptionBonusRate: 0.1, rechargeBonusRate: 0.1, rechargeThresholdFen: 50_000 });
   const [paymentAvailability, setPaymentAvailability] = useState({
     notice: "微信在线支付已开通；到期前 7 天起每天提醒手动续费。",
@@ -292,6 +299,17 @@ export function PricingPage({ user, openAuth, navigate }) {
       .catch(() => setMembership(null));
   }, [user?.id]);
 
+  useEffect(() => {
+    if (!user || activeTab !== "recharge") { setRechargeOrders([]); return; }
+    let cancelled = false;
+    setRechargeOrdersBusy(true);
+    apiFetch("/api/billing/offline-orders?kind=recharge&limit=10")
+      .then((result) => { if (!cancelled) setRechargeOrders(result.orders || []); })
+      .catch(() => { if (!cancelled) setRechargeOrders([]); })
+      .finally(() => { if (!cancelled) setRechargeOrdersBusy(false); });
+    return () => { cancelled = true; };
+  }, [user?.id, activeTab, rechargeOrdersRefresh]);
+
   const memberPlan = pricingPlans.find((item) => item.id === "member");
   const monthlyUpgrade = cycle === "year"
     && membership?.status === "active"
@@ -304,6 +322,27 @@ export function PricingPage({ user, openAuth, navigate }) {
   const planAmountFen = (plan) => plan.id === "member"
     ? memberPayableFen
     : cycle === "year" ? plan.yearlyFen : plan.monthlyFen;
+  const rechargeAmountFen = Math.round(Number(rechargeAmount || 0) * 100);
+  const rechargeAmountValid = Number.isSafeInteger(rechargeAmountFen) && rechargeAmountFen >= 100 && rechargeAmountFen <= 10_000_000;
+  const rechargeBonusFen = rechargeAmountValid && rechargeAmountFen >= walletPromotion.rechargeThresholdFen
+    ? Math.floor(rechargeAmountFen * walletPromotion.rechargeBonusRate)
+    : 0;
+
+  function selectTab(tab) {
+    navigate(`/pricing?tab=${tab}${desktopSource ? "&source=desktop" : ""}`);
+  }
+
+  function openRechargeCashier() {
+    if (!user) return openAuth("login");
+    if (!rechargeAmountValid) return;
+    setPayment({
+      recharge: true,
+      mode: "offline-cashier",
+      amountFen: rechargeAmountFen,
+      bonusFen: rechargeBonusFen,
+      creditedFen: rechargeAmountFen + rechargeBonusFen,
+    });
+  }
 
   async function startPayment(plan) {
     if (!user) return openAuth("login");
@@ -334,33 +373,61 @@ export function PricingPage({ user, openAuth, navigate }) {
 
   return (
     <main id="main-content">
-      <PageIntro eyebrow="SIMPLE PRICING" title="把成本花在真正困难的任务上" description="普通能力永久免费；会员解锁第二大脑、多端消息、本地模型与完整创作流水线。" />
-      <section className="pricing-controls section-shell">
-        <div className="cycle-switch"><button className={cycle === "month" ? "active" : ""} onClick={() => setCycle("month")}>按月订阅</button><button className={cycle === "year" ? "active" : ""} onClick={() => setCycle("year")}>按年订阅 {yearlySavingsFen > 0 && <span>省 {formatMoney(yearlySavingsFen)}</span>}</button></div>
-        <div className="payment-method-control"><div className="provider-switch"><button className={paymentMode === "online" ? "active" : ""} onClick={() => setPaymentMode("online")}>线上支付</button><button className={paymentMode === "offline" ? "active" : ""} onClick={() => setPaymentMode("offline")}>线下支付</button></div></div>
+      <PageIntro eyebrow={activeTab === "recharge" ? "WALLET RECHARGE" : "SIMPLE PRICING"} title={activeTab === "recharge" ? "为下一次创作补充余额" : "把成本花在真正困难的任务上"} description={activeTab === "recharge" ? "自定义人民币金额，使用线下支付提交审核；到账后官网与桌面端读取同一份权威余额。" : "普通能力永久免费；会员解锁第二大脑、多端消息、本地模型与完整创作流水线。"} />
+      <section className="pricing-mode-tabs section-shell" aria-label="定价业务类型">
+        <button type="button" className={activeTab === "subscription" ? "active" : ""} aria-pressed={activeTab === "subscription"} onClick={() => selectTab("subscription")}><ShieldCheck size={21} weight="duotone" /><span><strong>会员订阅</strong><small>按月或按年开通会员权益</small></span></button>
+        <button type="button" className={activeTab === "recharge" ? "active" : ""} aria-pressed={activeTab === "recharge"} onClick={() => selectTab("recharge")}><Wallet size={21} weight="duotone" /><span><strong>充值</strong><small>自定义金额，线下支付审核入账</small></span></button>
       </section>
-      <section className="pricing-grid section-shell">
-        {pricingPlans.map((plan) => (
-          <article key={plan.id} className={plan.featured ? "featured" : ""}>
-            {plan.featured && <span className="plan-ribbon">推荐</span>}
-            <small>{plan.eyebrow}</small><h2>{plan.name}</h2>
-            <div className="plan-price">{plan.pricing || formatMoney(planAmountFen(plan))}{!plan.pricing && <em>/{cycle === "year" ? "年" : "月"}</em>}</div>
-            {plan.id === "member" && monthlyUpgrade && <div className="upgrade-credit"><CheckCircle size={19} weight="fill" /><div><strong>月度会员升级抵扣 {formatMoney(upgradeCreditFen)}</strong><span>年度原价 {formatMoney(plan.yearlyFen)}，本次只需补足剩余费用。</span></div></div>}
-            {plan.id === "member" && <div className="wallet-promotion-note"><Coins size={20} weight="duotone" /><span><strong>订阅即送 10% 创作余额</strong><small>本次实付 {formatMoney(memberPayableFen)}，到账余额 {formatMoney(memberPayableFen + memberBonusFen)}，其中赠送 {formatMoney(memberBonusFen)}。</small></span></div>}
-            {plan.id === "short_video_monthly" && <div className="wallet-promotion-note short-video"><Coins size={20} weight="duotone" /><span><strong>实付多少，余额到账多少</strong><small>本次实付 {formatMoney(planAmountFen(plan))}，到账余额 {formatMoney(planAmountFen(plan))}；余额用完后 H3 继续无限免费生成，不再扣费或分佣。</small></span></div>}
-            {plan.subpricing && <p className="plan-subprice">{plan.subpricing}</p>}
-            <ul>{plan.features.map((feature) => <li key={feature}><Check size={17} weight="bold" /> {feature}</li>)}</ul>
-            {(plan.id === "member" && paymentMode === "offline" || plan.id === "short_video_monthly") && <div className="manual-renew-note"><Clock size={20} /><span><strong>人工审核到账</strong><small>付款后提交审核，确认到账后同步官网与桌面端。</small></span></div>}
-            {plan.id === "custom" ? <div className="custom-plan-actions"><button className="button secondary full" disabled={busy} onClick={() => setCustomContactOpen(true)}>联系定制</button><button className="button primary full" disabled={busy} onClick={() => user ? setCustomOrderOpen(true) : openAuth("login")}><Plus size={18} />新建订单</button></div> : <button className={`button full ${plan.featured ? "primary" : "secondary"}`} disabled={busy} onClick={() => startPayment(plan)}>{plan.id === "free" ? "免费下载" : busy ? "正在创建订单" : plan.id === "short_video_monthly" ? "线下申请开通" : monthlyUpgrade ? "补差价升级年度会员" : paymentMode === "online" ? "微信支付开通" : "线下申请开通"}</button>}
-          </article>
-        ))}
-      </section>
+      {activeTab === "subscription" ? <>
+        <section className="pricing-controls section-shell">
+          <div className="cycle-switch"><button className={cycle === "month" ? "active" : ""} onClick={() => setCycle("month")}>按月订阅</button><button className={cycle === "year" ? "active" : ""} onClick={() => setCycle("year")}>按年订阅 {yearlySavingsFen > 0 && <span>省 {formatMoney(yearlySavingsFen)}</span>}</button></div>
+          <div className="payment-method-control"><div className="provider-switch"><button className={paymentMode === "online" ? "active" : ""} onClick={() => setPaymentMode("online")}>线上支付</button><button className={paymentMode === "offline" ? "active" : ""} onClick={() => setPaymentMode("offline")}>线下支付</button></div></div>
+        </section>
+        <section className="pricing-grid section-shell">
+          {pricingPlans.map((plan) => (
+            <article key={plan.id} className={plan.featured ? "featured" : ""}>
+              {plan.featured && <span className="plan-ribbon">推荐</span>}
+              <small>{plan.eyebrow}</small><h2>{plan.name}</h2>
+              <div className="plan-price">{plan.pricing || formatMoney(planAmountFen(plan))}{!plan.pricing && <em>/{cycle === "year" ? "年" : "月"}</em>}</div>
+              {plan.id === "member" && monthlyUpgrade && <div className="upgrade-credit"><CheckCircle size={19} weight="fill" /><div><strong>月度会员升级抵扣 {formatMoney(upgradeCreditFen)}</strong><span>年度原价 {formatMoney(plan.yearlyFen)}，本次只需补足剩余费用。</span></div></div>}
+              {plan.id === "member" && <div className="wallet-promotion-note"><Coins size={20} weight="duotone" /><span><strong>订阅即送 10% 创作余额</strong><small>本次实付 {formatMoney(memberPayableFen)}，到账余额 {formatMoney(memberPayableFen + memberBonusFen)}，其中赠送 {formatMoney(memberBonusFen)}。</small></span></div>}
+              {plan.id === "short_video_monthly" && <div className="wallet-promotion-note short-video"><Coins size={20} weight="duotone" /><span><strong>实付多少，余额到账多少</strong><small>本次实付 {formatMoney(planAmountFen(plan))}，到账余额 {formatMoney(planAmountFen(plan))}；余额用完后 H3 继续无限免费生成，不再扣费或分佣。</small></span></div>}
+              {plan.subpricing && <p className="plan-subprice">{plan.subpricing}</p>}
+              <ul>{plan.features.map((feature) => <li key={feature}><Check size={17} weight="bold" /> {feature}</li>)}</ul>
+              {(plan.id === "member" && paymentMode === "offline" || plan.id === "short_video_monthly") && <div className="manual-renew-note"><Clock size={20} /><span><strong>人工审核到账</strong><small>付款后提交审核，确认到账后同步官网与桌面端。</small></span></div>}
+              {plan.id === "custom" ? <div className="custom-plan-actions"><button className="button secondary full" disabled={busy} onClick={() => setCustomContactOpen(true)}>联系定制</button><button className="button primary full" disabled={busy} onClick={() => user ? setCustomOrderOpen(true) : openAuth("login")}><Plus size={18} />新建订单</button></div> : <button className={`button full ${plan.featured ? "primary" : "secondary"}`} disabled={busy} onClick={() => startPayment(plan)}>{plan.id === "free" ? "免费下载" : busy ? "正在创建订单" : plan.id === "short_video_monthly" ? "线下申请开通" : monthlyUpgrade ? "补差价升级年度会员" : paymentMode === "online" ? "微信支付开通" : "线下申请开通"}</button>}
+            </article>
+          ))}
+        </section>
+      </> : <section className="recharge-workspace section-shell">
+        <div className="recharge-entry-card">
+          <span className="recharge-kicker">OFFLINE WALLET TOP-UP</span>
+          <h2>自定义充值金额</h2>
+          <p>输入人民币金额后扫描企业收款码。管理员确认到账后，官网服务端会把余额幂等写入当前账号，桌面端下次刷新即可看到。</p>
+          <label className="recharge-amount-field"><span>充值金额（元）</span><div><b>¥</b><input type="number" min="1" max="100000" step="0.01" inputMode="decimal" value={rechargeAmount} onChange={(event) => setRechargeAmount(event.target.value)} aria-describedby="recharge-rule" /></div></label>
+          <div className="recharge-summary">
+            <div><span>应付金额</span><strong>{formatMoney(rechargeAmountValid ? rechargeAmountFen : 0)}</strong></div>
+            <div><span>赠送余额</span><strong>{formatMoney(rechargeBonusFen)}</strong></div>
+            <div className="credited"><span>审核后预计到账</span><strong>{formatMoney(rechargeAmountValid ? rechargeAmountFen + rechargeBonusFen : 0)}</strong></div>
+          </div>
+          <div id="recharge-rule" className={`recharge-bonus-preview ${rechargeBonusFen ? "active" : ""}`}><Coins size={22} weight="duotone" /><span><strong>{rechargeBonusFen ? `本次额外赠送 ${formatMoney(rechargeBonusFen)}` : "单次满 500 元赠送 10%"}</strong><small>{rechargeBonusFen ? "赠送余额与实付余额在同一次审核中入账" : "低于 500 元不享受赠送，按实付金额到账"}</small></span></div>
+          {!rechargeAmountValid && <div className="form-error">请输入 1–100,000 元之间的有效金额</div>}
+          <button className="button primary full recharge-submit" type="button" disabled={!rechargeAmountValid} onClick={openRechargeCashier}><ShieldCheck size={19} />{user ? `线下支付 ${formatMoney(rechargeAmountFen)}` : "登录后充值"}</button>
+          <small className="recharge-authority-note">支付与余额以官网服务端订单、人工审核和钱包流水为准；桌面端不会自行修改余额。</small>
+        </div>
+        <aside className="recharge-orders-card">
+          <header><div><span>RECHARGE ORDERS</span><h2>最近充值订单</h2></div>{user && <button type="button" onClick={() => setRechargeOrdersRefresh((value) => value + 1)}>刷新</button>}</header>
+          {!user ? <div className="recharge-orders-empty"><LockKey size={30} weight="duotone" /><strong>登录后自动识别账号</strong><p>如果浏览器已有登录状态，会直接显示你的充值订单；否则请先登录。</p><button className="button secondary" type="button" onClick={() => openAuth("login")}>登录当前账号</button></div>
+            : rechargeOrdersBusy ? <div className="recharge-orders-empty"><Clock size={28} /><strong>正在读取订单</strong></div>
+              : rechargeOrders.length === 0 ? <div className="recharge-orders-empty"><CreditCard size={30} weight="duotone" /><strong>还没有充值订单</strong><p>提交线下支付后，订单会显示在这里并持续保留审核结果。</p></div>
+                : <div className="recharge-order-list">{rechargeOrders.map((order) => <article key={order.id}><div><strong>{order.orderNo}</strong><small>{new Date(order.createdAt).toLocaleString("zh-CN", { hour12: false })}</small></div><span className={`recharge-order-status ${order.status}`}>{order.status === "approved" ? "已到账" : order.status === "rejected" ? "已拒绝" : "待审核"}</span><dl><div><dt>应付</dt><dd>{formatMoney(order.amountFen)}</dd></div><div><dt>到账</dt><dd>{formatMoney(order.creditedFen)}</dd></div></dl>{order.reviewReason && <p>审核说明：{order.reviewReason}</p>}</article>)}</div>}
+        </aside>
+      </section>}
       {error && <div className="page-error section-shell">{error}</div>}
-      <section className="recharge-callout section-shell" id="recharge"><div className="wallet-orb"><Wallet size={28} /></div><div><h3>单次充值</h3><p>实付满 {formatMoney(walletPromotion.rechargeThresholdFen)} 额外赠送 10% 余额；未满 500 元按实付金额到账。</p></div><button className="button secondary" onClick={() => user ? setPayment({ recharge: true }) : openAuth("login")}><CreditCard size={18} /> 微信充值</button></section>
       {customContactOpen && <CustomizationContactDialog onClose={() => setCustomContactOpen(false)} />}
       {customOrderOpen && <CustomOrderDialog onClose={() => setCustomOrderOpen(false)} onCreated={(result) => { setCustomOrderOpen(false); setPayment(result); }} />}
       {payment && !payment.recharge && <PaymentDialog payment={payment} provider="wechat" availability={paymentAvailability} onPayment={setPayment} onClose={() => setPayment(null)} />}
-      {payment?.recharge && <RechargeDialog provider="wechat" onClose={() => setPayment(null)} navigate={navigate} onCreated={(result) => setPayment(result)} />}
+      {payment?.recharge && <RechargeDialog payment={payment} onClose={() => { setPayment(null); setRechargeOrdersRefresh((value) => value + 1); }} onCreated={(result) => setPayment({ ...result, recharge: true })} />}
     </main>
   );
 }
@@ -422,21 +489,21 @@ function CustomOrderDialog({ onClose, onCreated }) {
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}><section className="payment-modal custom-order-modal" role="dialog" aria-modal="true" aria-labelledby="custom-order-title"><button className="modal-close" disabled={busy} onClick={onClose}><X size={19} /></button><div className="payment-logo"><Wallet size={28} /></div><span className="payment-eyebrow">CUSTOM SERVICE ORDER</span><h2 id="custom-order-title">新建深度定制订单</h2><p>与团队确认服务内容和金额后，在这里创建微信收款订单。支付成功会生成可追踪的线上订单记录。</p><form onSubmit={submit}><label><span>订单说明</span><input required minLength={2} maxLength={80} value={subject} onChange={(event) => setSubject(event.target.value)} /></label><label><span>自定义金额（元）</span><input type="number" min="1" max="100000" step="0.01" required value={amount} onChange={(event) => setAmount(event.target.value)} /></label>{error && <div className="form-error">{error}</div>}<button className="button primary full" disabled={busy}>{busy ? "正在创建微信订单" : `创建订单并支付 ${formatMoney(Math.round(Number(amount || 0) * 100))}`}</button></form><small>仅支持微信支付；请核对金额后再扫码付款。</small></section></div>;
 }
 
-function RechargeDialog({ provider, onClose, navigate, onCreated }) {
-  const [amount, setAmount] = useState(100);
+function RechargeDialog({ payment, onClose, onCreated }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  async function submit(event) {
-    event.preventDefault();
+  async function confirmOffline() {
     setBusy(true);
+    setError("");
     try {
-      const result = await apiFetch("/api/billing/orders", { method: "POST", body: JSON.stringify({ kind: "recharge", provider: provider === "offline" ? "wechat" : provider, amountFen: Math.round(amount * 100) }) });
+      const result = await apiFetch("/api/billing/orders", { method: "POST", body: JSON.stringify({ kind: "recharge", provider: "offline", amountFen: payment.amountFen }) });
       onCreated(result);
     } catch (reason) { setError(reason.message); } finally { setBusy(false); }
   }
-  const amountFen = Math.round(Number(amount || 0) * 100);
-  const bonusFen = amountFen >= 50_000 ? Math.floor(amountFen * 0.1) : 0;
-  return <div className="modal-backdrop"><section className="payment-modal"><button className="modal-close" onClick={onClose}><X size={19} /></button><div className="payment-logo"><Wallet size={28} /></div><h2>充值余额</h2><form onSubmit={submit}><label><span>充值金额（元）</span><input type="number" min="1" max="50000" step="0.01" value={amount} onChange={(event) => setAmount(Number(event.target.value))} /></label><div className={`recharge-bonus-preview ${bonusFen ? "active" : ""}`}><Coins size={21} weight="duotone" /><span><strong>{bonusFen ? `额外赠送 ${formatMoney(bonusFen)}` : "满 500 元赠送 10%"}</strong><small>{bonusFen ? `本次预计到账 ${formatMoney(amountFen + bonusFen)}` : "当前金额按实付金额到账"}</small></span></div>{error && <div className="form-error">{error}</div>}<button className="button primary full" disabled={busy}>{busy ? "正在创建订单" : `充值 ${formatMoney(amountFen)}`}</button></form></section></div>;
+  if (payment.mode === "offline") {
+    return <div className="modal-backdrop"><section className="payment-modal offline-payment-modal" role="dialog" aria-modal="true" aria-labelledby="recharge-submitted-title"><button className="modal-close" type="button" onClick={onClose}><X size={19} /></button><div className="payment-logo"><CheckCircle size={30} weight="fill" /></div><span className="payment-eyebrow">RECHARGE SUBMITTED</span><h2 id="recharge-submitted-title">充值订单已提交</h2><p>订单 <strong>{payment.orderNo}</strong> 已进入人工审核队列。管理员确认到账后，{formatMoney(payment.creditedFen || payment.amountFen)} 会写入当前账号钱包。</p><div className="form-success">待审核 · 应付 {formatMoney(payment.amountFen)}{payment.bonusFen > 0 ? ` · 赠送 ${formatMoney(payment.bonusFen)}` : ""}</div><p className="offline-payment-urgent">请尽快添加客服微信，发送支付截图，以加速审核进度。</p><img className="payment-qr service-qr" src="/assets/customer-service-wechat-20260823.jpg" alt="古龙客服微信二维码" /><small>桌面端无需自行记账；重新聚焦桌面端或稍后刷新账户状态，即可读取最新余额。</small><button className="button primary full" type="button" onClick={onClose}>查看充值订单</button></section></div>;
+  }
+  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}><section className="payment-modal offline-payment-modal" role="dialog" aria-modal="true" aria-labelledby="recharge-cashier-title"><button className="modal-close" type="button" disabled={busy} onClick={onClose}><X size={19} /></button><div className="payment-logo"><ShieldCheck size={28} /></div><span className="payment-eyebrow">OFFLINE RECHARGE</span><h2 id="recharge-cashier-title">扫码付款并提交审核</h2><p>请使用微信扫描企业收款码，严格按下方应付金额付款。付款完成后点击“我已支付”。</p><img className="payment-qr enterprise-qr" src="/assets/enterprise-payment-qr.jpg" alt="古龙企业微信收款码" /><div className="offline-payment-summary"><span>账户余额充值</span><strong>{formatMoney(payment.amountFen)}</strong></div>{payment.bonusFen > 0 && <p className="payment-bonus-note"><Coins size={19} />审核通过后赠送 {formatMoney(payment.bonusFen)}，预计到账 {formatMoney(payment.creditedFen)}</p>}{error && <div className="form-error">{error}</div>}<div className="payment-dialog-actions"><button className="button secondary" type="button" disabled={busy} onClick={onClose}>返回修改金额</button><button className="button primary" type="button" disabled={busy} onClick={confirmOffline}>{busy ? "正在提交" : "我已支付"}</button></div></section></div>;
 }
 
 export function BrainUploadPanel({ user, openAuth, embedded = false }) {

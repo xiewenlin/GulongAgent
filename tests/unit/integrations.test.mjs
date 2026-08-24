@@ -755,6 +755,8 @@ test("OpenAPI document includes Chandler admin, offline credentials, dated attac
   assert.ok(document.paths["/api/v1/admin/offline-payments"]);
   assert.ok(document.paths["/api/v1/admin/offline-payments/{orderId}/approve"]);
   assert.ok(document.paths["/api/v1/desktop/account/subscription"]);
+  assert.ok(document.paths["/api/v1/desktop/account/usage"]);
+  assert.ok(document.paths["/api/billing/offline-orders"]);
   assert.ok(document.paths["/api/v1/desktop/chandler/catalog"]);
   assert.ok(document.paths["/api/v1/desktop/chandler/prices"]);
   assert.ok(document.paths["/api/v1/desktop/chandler/checkout"]);
@@ -767,6 +769,10 @@ test("OpenAPI document includes Chandler admin, offline credentials, dated attac
   assert.equal(document.paths["/api/billing/orders"].post.requestBody.content["application/json"].schema.properties.planType.enum.includes("short_video_monthly"), true);
   assert.deepEqual(document.paths["/api/v1/pricing/subscriptions"].get.responses["200"].content["application/json"].schema.properties.shortVideo.properties.walletCreditMultiplier.enum, [1]);
   assert.equal(document.paths["/api/v1/desktop/account/subscription"].get.responses["200"].content["application/json"].schema.properties.shortVideoPackage.properties.unlimitedH3.type, "boolean");
+  const usageSchema = document.paths["/api/v1/desktop/account/usage"].get.responses["200"].content["application/json"].schema;
+  assert.deepEqual(usageSchema.properties.currency.enum, ["CNY"]);
+  assert.equal(usageSchema.properties.quota.properties.balanceFen.type, "integer");
+  assert.equal(usageSchema.properties.quota.properties.weekly.properties.days.type, "array");
   for (const path of [
     "/api/release-worker/releases/prepare",
     "/api/release-worker/releases/{publishId}/complete",
@@ -1132,6 +1138,29 @@ test("website pricing and desktop synchronization read the same MongoDB price ve
   assert.match(serverSource, /monthlyFen:\s*pricing\.monthly\.amountFen/);
   assert.match(serverSource, /yearlyFen:\s*pricing\.yearly\.amountFen/);
   assert.match(pricingPage, /apiFetch\("\/api\/billing\/plans"\)/);
+});
+
+test("pricing exposes stable subscription and recharge deep links with authoritative offline orders", async () => {
+  const [appSource, pricingPage, agentSource, serverSource, css] = await Promise.all([
+    readFile(new URL("../../src/App.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/PlatformPages.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/WebAgentPage.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/styles.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(appSource, /pathname === "\/pricing"/);
+  assert.match(pricingPage, /query\.get\("tab"\) === "recharge"/);
+  assert.match(pricingPage, /\/pricing\?tab=\$\{tab\}/);
+  assert.match(pricingPage, /自定义充值金额/);
+  assert.match(pricingPage, /应付金额/);
+  assert.match(pricingPage, /provider: "offline"/);
+  assert.match(pricingPage, /\/api\/billing\/offline-orders\?kind=recharge&limit=10/);
+  assert.match(agentSource, /\/pricing\?tab=recharge/);
+  assert.match(serverSource, /buildPearAccountUsageSnapshot/);
+  assert.match(serverSource, /path: "\/api\/v1\/desktop\/account\/usage"/);
+  assert.match(serverSource, /creditedFen: Number\(order\.creditedFen/);
+  assert.match(css, /\.pricing-mode-tabs\s*\{/);
+  assert.match(css, /\.recharge-workspace\s*\{/);
 });
 
 test("online payment exposes WeChat only and uses manual renewal lifecycle controls", async () => {

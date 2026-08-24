@@ -96,7 +96,7 @@ import {
 } from "./cos.js";
 import { buildAdminAnalyticsDashboard, recordAnalyticsEvent } from "./analytics.js";
 import { recoverExpiredDirectReleaseLock } from "./release-lock.js";
-import { creditPaymentBalanceWithPromotion, paymentPromotionBonusFen, registerPearApiRoutes } from "./pearapi.js";
+import { buildPearAccountUsageSnapshot, creditPaymentBalanceWithPromotion, paymentPromotionBonusFen, registerPearApiRoutes } from "./pearapi.js";
 import { registerH3SharedRoutes } from "./h3-shared.js";
 import {
   SHORT_VIDEO_MONTHLY_PRICE_FEN,
@@ -2023,6 +2023,62 @@ const desktopSubscriptionStatusRoute = createRoute({
   description: "使用当前 Chandler Bearer Token 映射官网账号，返回 MongoDB 权威订阅状态；短视频包月返回剩余套餐额度和 H3 无限使用标记，线下订单通过后桌面端下次轮询即可立即解锁。",
   security: [{ bearerAuth: [] }],
   responses: { 200: { description: "实时订阅状态", content: { "application/json": { schema: z.object({ isMember: z.boolean(), balanceFen: z.number().int(), shortVideoPackage: z.object({ active: z.boolean(), unlimitedH3: z.boolean(), packageBalanceFen: z.number().int(), packageExpiresAt: z.coerce.date().nullable(), chargeMode: z.literal("deduct_until_exhausted_then_free") }), subscription: z.record(z.string(), z.unknown()).nullable(), checkedAt: z.coerce.date() }) } } }, 401: { description: "Chandler 登录失效", content: { "application/json": { schema: ErrorSchema } } } },
+});
+
+const RollingUsageDaySchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  usedFen: z.number().int().min(0),
+  calls: z.number().int().min(0),
+});
+const RollingUsageWindowSchema = z.object({
+  rollingDays: z.number().int().min(1),
+  usedFen: z.number().int().min(0),
+  calls: z.number().int().min(0),
+  days: z.array(RollingUsageDaySchema),
+});
+const UsageEstimateSchema = z.object({
+  minimum: z.number().int().min(0),
+  maximum: z.number().int().min(0),
+  cheapestUnitFen: z.number().int().min(0),
+  mostExpensiveUnitFen: z.number().int().min(0),
+}).nullable();
+const desktopAccountUsageRoute = createRoute({
+  method: "get",
+  path: "/api/v1/desktop/account/usage",
+  tags: ["Desktop Synchronization"],
+  summary: "读取官网剩余用量面板数据",
+  description: "使用桌面端当前 Chandler Bearer Token，返回与官网右上角“剩余用量”面板同口径的钱包余额、图片/视频预计创作范围，以及滚动 7 天和 30 天真实用量。金额均为整数分。",
+  security: [{ bearerAuth: [] }],
+  responses: {
+    200: {
+      description: "当前账户剩余用量",
+      content: { "application/json": { schema: z.object({
+        currency: z.literal("CNY"),
+        quota: z.object({
+          balanceFen: z.number().int().min(0),
+          unlimited: z.boolean(),
+          estimates: z.object({ images: UsageEstimateSchema, videos: UsageEstimateSchema }),
+          weekly: RollingUsageWindowSchema,
+          monthly: RollingUsageWindowSchema,
+        }),
+        subscription: z.object({
+          active: z.boolean(),
+          restricted: z.boolean(),
+          plan: z.string().nullable(),
+          currentPeriodEnd: z.coerce.date().nullable(),
+        }),
+        shortVideoPackage: z.object({
+          active: z.boolean(),
+          unlimitedH3: z.boolean(),
+          packageBalanceFen: z.number().int().min(0),
+          packageExpiresAt: z.coerce.date().nullable(),
+          chargeMode: z.literal("deduct_until_exhausted_then_free"),
+        }),
+        checkedAt: z.coerce.date(),
+      }) } },
+    },
+    401: { description: "Chandler 登录失效", content: { "application/json": { schema: ErrorSchema } } },
+  },
 });
 
 const DesktopChandlerApplicationKeySchema = z.enum(["gulong", "airos-eternal-flower"]);
@@ -6634,12 +6690,42 @@ app.post("/api/billing/subscription/cancel", async (c) => {
 
 app.get("/api/billing/offline-orders", async (c) => {
   const auth = await authenticate(c); if (auth.error) return auth.error;
+  const requestedKind = String(c.req.query("kind") || "").trim();
+  if (requestedKind && !["recharge", "subscription"].includes(requestedKind)) {
+    return c.json({ code: "VALIDATION_ERROR", message: "订单类型只能是充值或订阅" }, 400);
+  }
+  const limit = Math.min(100, Math.max(1, Number.parseInt(c.req.query("limit") || "30", 10) || 30));
+  const filter = {
+    ownerId: new ObjectId(auth.user.id),
+    ...(requestedKind ? { kind: requestedKind } : {}),
+  };
   const orders = await (await getCollection("offlinePayments"))
-    .find({ ownerId: new ObjectId(auth.user.id) })
+    .find(filter)
     .sort({ createdAt: -1 })
-    .limit(30)
+    .limit(limit)
     .toArray();
-  return c.json({ orders: orders.map((order) => ({ id: order._id.toString(), orderNo: order.orderNo, cycle: order.cycle, amountFen: order.amountFen, status: order.status, reviewReason: order.reviewReason || null, previousReviewReason: order.previousReviewReason || null, resubmissionNote: order.resubmissionNote || null, createdAt: order.createdAt, validUntil: order.validUntil })) });
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  return c.json({
+    orders: orders.map((order) => ({
+      id: order._id.toString(),
+      orderNo: order.orderNo,
+      kind: order.kind || "subscription",
+      provider: "offline",
+      cycle: order.cycle || null,
+      amountFen: Number(order.amountFen || 0),
+      bonusFen: Number(order.promotionBonusFen || 0),
+      creditedFen: Number(order.creditedFen || order.amountFen || 0),
+      status: order.status,
+      reviewReason: order.reviewReason || null,
+      previousReviewReason: order.previousReviewReason || null,
+      resubmissionNote: order.resubmissionNote || null,
+      createdAt: order.createdAt,
+      updatedAt: order.updatedAt || order.createdAt,
+      reviewedAt: order.reviewedAt || null,
+      validUntil: order.validUntil || null,
+    })),
+    query: { kind: requestedKind || null, limit },
+  });
 });
 
 app.get("/api/admin/payments", async (c) => {
@@ -7099,7 +7185,7 @@ app.openapi(desktopSubscriptionStatusRoute, async (c) => {
     restricted: auth.identity.role === "admin" ? false : lifecycle.restricted,
     renewalDue: lifecycle.renewalDue,
     daysRemaining: lifecycle.daysRemaining,
-    renewalAction: lifecycle.restricted || lifecycle.renewalDue ? { type: "open_url", url: "https://www.sologle.com/pricing", paymentChannel: "wechat" } : null,
+    renewalAction: lifecycle.restricted || lifecycle.renewalDue ? { type: "open_url", url: "https://www.sologle.com/pricing?tab=subscription&source=desktop", paymentChannel: "wechat" } : null,
     subscription: subscription ? {
       plan: subscription.plan || "member",
       cycle: subscription.cycle || null,
@@ -7112,6 +7198,26 @@ app.openapi(desktopSubscriptionStatusRoute, async (c) => {
     } : null,
     balanceFen: wallet?.balanceFen || 0,
     shortVideoPackage: shortVideoPackageView(subscription, wallet, now),
+    checkedAt: now,
+  });
+});
+
+app.openapi(desktopAccountUsageRoute, async (c) => {
+  const auth = await authenticateDesktopChandler(c);
+  if (auth.error) return auth.error;
+  const now = new Date();
+  const usage = await buildPearAccountUsageSnapshot({
+    ownerId: auth.user._id,
+    unlimited: auth.identity.role === "admin",
+    now,
+  });
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  c.header("Pragma", "no-cache");
+  return c.json({
+    currency: "CNY",
+    quota: usage.quota,
+    subscription: usage.subscription,
+    shortVideoPackage: usage.shortVideoPackage,
     checkedAt: now,
   });
 });
@@ -7443,6 +7549,40 @@ app.openAPIRegistry.registerPath({
 
 app.openAPIRegistry.registerPath({
   method: "get",
+  path: "/api/billing/offline-orders",
+  tags: ["Billing"],
+  summary: "查询当前用户的线下充值或订阅订单",
+  description: "只返回当前登录账户的数据，按创建时间倒序。充值页使用 kind=recharge 展示可查询的充值订单；审核通过后 creditedFen 才会由服务端幂等计入钱包。金额均为整数分。",
+  request: { query: z.object({ kind: z.enum(["recharge", "subscription"]).optional(), limit: z.coerce.number().int().min(1).max(100).optional() }) },
+  responses: {
+    200: { description: "当前账户线下订单", content: { "application/json": { schema: z.object({
+      orders: z.array(z.object({
+        id: z.string(),
+        orderNo: z.string(),
+        kind: z.enum(["recharge", "subscription"]),
+        provider: z.literal("offline"),
+        cycle: z.enum(["month", "year"]).nullable(),
+        amountFen: z.number().int().min(0),
+        bonusFen: z.number().int().min(0),
+        creditedFen: z.number().int().min(0),
+        status: z.string(),
+        reviewReason: z.string().nullable(),
+        previousReviewReason: z.string().nullable(),
+        resubmissionNote: z.string().nullable(),
+        createdAt: z.coerce.date(),
+        updatedAt: z.coerce.date(),
+        reviewedAt: z.coerce.date().nullable(),
+        validUntil: z.coerce.date().nullable(),
+      })),
+      query: z.object({ kind: z.enum(["recharge", "subscription"]).nullable(), limit: z.number().int() }),
+    }) } } },
+    400: { description: "查询参数无效", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openAPIRegistry.registerPath({
+  method: "get",
   path: "/api/billing/payments/{orderNo}/status",
   tags: ["Billing"],
   summary: "查询并同步微信支付状态",
@@ -7499,7 +7639,7 @@ app.doc("/api/openapi.json", {
   openapi: "3.1.0",
   info: {
     title: "古龙 Gulong Agent Engine API",
-    version: "2.2.0",
+    version: "2.3.0",
     description: "已按 Chandler v3.7 与 PearAPI 统一接入升级：邮箱和短信验证码统一为 6 位数字；官网保持邮箱注册，已激活桌面客户端可通过受控服务端代理手机号注册，OAuth 客户端密钥不会下发客户端。服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。普通会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费；实付额外赠送 10% 钱包余额，单次充值满 500 元同样赠送 10%。短视频包月固定月费 5999 元、年费 59999 元，只支持线下审核，审核后实付金额按 1:1 组成可到期套餐余额，不额外赠送；有效期内 MiniMaxH3 套餐余额归零后仍可无限生成，但不再扣费或分佣。所有入账、扣款、退款和分账均使用独立幂等流水。MiniMax H3 共享节点支持钱包预扣、幂等退款与 50% 节点分成、激活设备账号绑定、按能力原子领取、腾讯云 COS 输入下载和输出直传票据，并提供仅按绑定账户聚合的桌面收益接口；工作器领取 DTO 不含需求用户身份和内部计费信息。另提供永久离线授权兑换、第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
   },
   servers: [

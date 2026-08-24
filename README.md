@@ -90,6 +90,7 @@ npm run dev
 - 桌面端用户配置：`GET /api/v1/configuration/minimax`（需要 `configuration:read`）
 - 桌面端实时订阅价格：`GET /api/v1/pricing/subscriptions`（公开、禁止缓存，管理员修改后立即生效）
 - 桌面端实时订阅与短视频套餐状态：`GET /api/v1/desktop/account/subscription`；`shortVideoPackage` 明确返回无限 H3、剩余额度、到期时间和扣费模式
+- [桌面订阅、充值与剩余用量合同](docs/desktop-billing-integration.md)：稳定官网深链、线下充值订单、桌面刷新机制，以及 `GET /api/v1/desktop/account/usage` 的完整字段
 - 登录能力：`GET /api/auth/capabilities`；发送/校验登录验证码：`POST /api/auth/otp/send`、`POST /api/auth/otp/login`
 - 已激活桌面客户端手机号注册：`POST /api/v1/desktop/auth/phone/send-otp`、`POST /api/v1/desktop/auth/phone/register`（6 位验证码；OAuth 密钥只保存在官网服务端）
 - 账号安全：`GET /api/account/security`；邮箱验证、手机号绑定/验证/解绑、主身份切换、修改密码与注销全部设备接口见在线 OpenAPI
