@@ -41,7 +41,7 @@ CHANDLER_AIROS_APPLICATION_ID=<MiniMax H3 极速视频版兼容应用 ID>
 CHANDLER_AIROS_CLIENT_SECRET=<对应 OAuth 密钥>
 ```
 
-任何目标应用缺少密钥时，注册代理返回 HTTP 503 `REGISTRATION_ATTRIBUTION_NOT_CONFIGURED`，不会回退为无来源注册。Chandler 文档说明错误凭据可能不阻止账号创建但会丢失归因，因此生产发布前必须用测试账号在 Chandler 应用用户统计中核验来源。
+任何目标应用缺少密钥时，受激活保护的桌面注册代理返回 HTTP 503 `REGISTRATION_ATTRIBUTION_NOT_CONFIGURED`，不会回退为无来源桌面注册。公开官网邮箱注册遵循 Chandler 的兼容合同保持可用，但在密钥补齐前不会产生应用归因；这是为避免生产账号系统因配置迁移整体中断。Chandler 文档说明错误凭据可能不阻止账号创建但会丢失归因，因此生产发布前必须用测试账号在 Chandler 应用用户统计中核验来源。
 
 ## 隐私与安全
 

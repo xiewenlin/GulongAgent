@@ -201,7 +201,7 @@ export function isChandlerRegistrationAttributionConfigured(edition = "gulong") 
 }
 
 export function registerWithChandler({ email, password, displayName, inviteCode, edition = "gulong", deviceType = "web", clientVersion = "gulong-web-1.1" }) {
-  const credential = registrationAttributionCredential(edition);
+  const credential = registrationAttributionCredential(edition, { required: deviceType === "desktop" });
   return chandlerRequest("/v1/auth/register", {
     method: "POST",
     body: {
@@ -210,8 +210,7 @@ export function registerWithChandler({ email, password, displayName, inviteCode,
       display_name: (displayName || email.split("@")[0]).trim(),
       ...(inviteCode ? { invite_code: inviteCode.trim() } : {}),
       agree_policies: true,
-      client_id: credential.clientId,
-      client_secret: credential.clientSecret,
+      ...(credential ? { client_id: credential.clientId, client_secret: credential.clientSecret } : {}),
       client_version: String(clientVersion || "gulong-web-1.1").trim(),
       device_type: deviceType === "desktop" ? "desktop" : "web",
     },

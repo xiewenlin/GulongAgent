@@ -50,7 +50,7 @@ flowchart LR
 - 后端：Hono、Zod OpenAPI，同时发布到 Vercel Node Functions 与腾讯云 systemd 服务。
 - 数据库：MongoDB Node.js 原生驱动，跨热实例复用连接池。
 - 文件：腾讯云 COS 私有对象，服务端签发短时 PUT/GET URL；MongoDB 只保存所有权、状态与搜索元数据。反馈截图仍可使用 Vercel Blob。
-- 安全：Chandler 统一身份；服务端优先读取 `GulongAgent` 环境变量作为 Chandler v3.9 API Key，并使用 `Authorization: Apikey`；官网与桌面端的邮箱/手机号注册均由官网服务端注入对应 OAuth 应用密钥完成来源归因，密钥不进入浏览器或安装包；支付通知按原始请求体执行 HMAC-SHA256 验签并二次查询订单。另有 HttpOnly 会话、API Key 摘要、来源校验、验证码防轰炸限流与最小权限 CAM。
+- 安全：Chandler 统一身份；服务端优先读取 `GulongAgent` 环境变量作为 Chandler v3.9 API Key，并使用 `Authorization: Apikey`；OAuth 应用密钥配置完成后，官网与桌面端的邮箱/手机号注册均由官网服务端注入对应密钥完成来源归因，密钥不进入浏览器或安装包；桌面端缺少密钥时故障关闭，官网公开邮箱注册按 Chandler 兼容合同保持可用但不伪造归因。支付通知按原始请求体执行 HMAC-SHA256 验签并二次查询订单。另有 HttpOnly 会话、API Key 摘要、来源校验、验证码防轰炸限流与最小权限 CAM。
 
 ## 本地开发
 

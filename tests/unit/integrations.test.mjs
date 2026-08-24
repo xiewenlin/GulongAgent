@@ -277,13 +277,36 @@ test("Chandler v3.9 registration fails closed when attribution credentials are a
   delete process.env.CHANDLER_AIROS_CLIENT_SECRET;
   try {
     assert.throws(
-      () => registerWithChandler({ email: "missing@example.com", password: "任意密码", edition: "yongshenghua" }),
+      () => registerWithChandler({ email: "missing@example.com", password: "任意密码", edition: "yongshenghua", deviceType: "desktop" }),
       (error) => error?.code === "CHANDLER_REGISTRATION_ATTRIBUTION_NOT_CONFIGURED" && error?.status === 503,
     );
   } finally {
     if (originalSecret === undefined) delete process.env.CHANDLER_AIROS_CLIENT_SECRET;
     else process.env.CHANDLER_AIROS_CLIENT_SECRET = originalSecret;
   }
+});
+
+test("public website registration remains available while attribution credentials are being provisioned", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalSecret = process.env.CHANDLER_CLIENT_SECRET;
+  let body;
+  delete process.env.CHANDLER_CLIENT_SECRET;
+  globalThis.fetch = async (_url, options = {}) => {
+    body = JSON.parse(options.body);
+    return new Response(JSON.stringify({ data: { access_token: "access", user: { id: "user-public" } } }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    await registerWithChandler({ email: "public@example.com", password: "任意密码" });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalSecret === undefined) delete process.env.CHANDLER_CLIENT_SECRET;
+    else process.env.CHANDLER_CLIENT_SECRET = originalSecret;
+  }
+  assert.equal(Object.hasOwn(body, "client_id"), false);
+  assert.equal(Object.hasOwn(body, "client_secret"), false);
 });
 
 test("website authentication keeps public registration email-only and exposes attributed activated desktop registration", async () => {
