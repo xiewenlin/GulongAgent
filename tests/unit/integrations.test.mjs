@@ -87,14 +87,16 @@ test("website login normalizes e-mail identifiers and resolves registered userna
   assert.match(chandlerSource, /auth\.invalid_credentials/);
 });
 
-test("website registration accepts arbitrary username aliases without sending them to Chandler", async () => {
+test("Chandler v3.9 website registration attributes the user without sending username aliases", async () => {
   const alias = websiteUsernameIdentity("  施 富 ✨ / 古龙（测试）  ");
   assert.equal(alias.username, "施 富 ✨ / 古龙（测试）");
   assert.equal(alias.lookupHash.length, 64);
   assert.deepEqual(websiteUsernameOwnerFilter(alias.username).$or[0], { usernameLookupHash: alias.lookupHash });
 
   const originalFetch = globalThis.fetch;
+  const originalSecret = process.env.CHANDLER_CLIENT_SECRET;
   let body;
+  process.env.CHANDLER_CLIENT_SECRET = "server-only-registration-secret";
   globalThis.fetch = async (_url, options = {}) => {
     body = JSON.parse(options.body);
     return new Response(JSON.stringify({ data: { access_token: "access", user: { id: "user-1", email: "member@example.com" } } }), {
@@ -106,9 +108,14 @@ test("website registration accepts arbitrary username aliases without sending th
     await registerWithChandler({ email: "member@example.com", password: "任意密码", displayName: "施富" });
   } finally {
     globalThis.fetch = originalFetch;
+    if (originalSecret === undefined) delete process.env.CHANDLER_CLIENT_SECRET;
+    else process.env.CHANDLER_CLIENT_SECRET = originalSecret;
   }
   assert.equal(Object.hasOwn(body, "username"), false);
   assert.equal(body.email, "member@example.com");
+  assert.equal(body.client_id, chandlerConfig().applicationId);
+  assert.equal(body.client_secret, "server-only-registration-secret");
+  assert.equal(body.device_type, "web");
 });
 
 test("Chandler login refresh uses the v3.3 form-encoded OAuth contract", async () => {
@@ -131,7 +138,7 @@ test("Chandler login refresh uses the v3.3 form-encoded OAuth contract", async (
   assert.equal(call.body.get("refresh_token"), "current-refresh");
 });
 
-test("Chandler v3.7 password recovery sends mail and resets with the 6 digit code", async () => {
+test("Chandler v3.9 password recovery sends mail and resets with the 6 digit code", async () => {
   const originalFetch = globalThis.fetch;
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
@@ -150,7 +157,7 @@ test("Chandler v3.7 password recovery sends mail and resets with the 6 digit cod
   assert.deepEqual(calls[1].body, { email: "member@example.com", code: "123456", new_password: "New-Strong-Pass456!" });
 });
 
-test("Chandler v3.7 OTP, phone recovery and account identities follow the official contracts", async () => {
+test("Chandler v3.9 OTP, phone recovery and account identities follow the official contracts", async () => {
   const originalFetch = globalThis.fetch;
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
@@ -215,7 +222,7 @@ test("Chandler v3.7 OTP, phone recovery and account identities follow the offici
   assert.deepEqual(calls[13].body, { old_password: "Current-Pass", new_password: "New-Pass-2026!" });
 });
 
-test("Chandler v3.7 desktop phone registration keeps OAuth credentials server-side", async () => {
+test("Chandler v3.9 desktop phone registration keeps OAuth credentials server-side", async () => {
   const originalFetch = globalThis.fetch;
   const originalSecret = process.env.CHANDLER_CLIENT_SECRET;
   const calls = [];
@@ -240,13 +247,54 @@ test("Chandler v3.7 desktop phone registration keeps OAuth credentials server-si
   assert.deepEqual(calls[1].body, { phone: "+8613800000000", code: "123456", display_name: "手机用户", client_id: chandlerConfig().applicationId, client_secret: "server-only-oauth-secret", install_id: "a".repeat(64), device_name: "创作电脑", device_type: "desktop", os_version: "Windows 11", app_version: "2.1.0" });
 });
 
-test("website authentication keeps public registration email-only and exposes activated desktop phone registration", async () => {
-  const [serverSource, modalSource, dashboardSource, securitySource, vercel, specResponse] = await Promise.all([
+test("Chandler v3.9 attributes the two desktop editions without exposing either secret", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalGulongSecret = process.env.CHANDLER_CLIENT_SECRET;
+  const originalAirosSecret = process.env.CHANDLER_AIROS_CLIENT_SECRET;
+  const calls = [];
+  process.env.CHANDLER_CLIENT_SECRET = "gulong-registration-secret";
+  process.env.CHANDLER_AIROS_CLIENT_SECRET = "airos-registration-secret";
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), body: JSON.parse(options.body) });
+    return new Response(JSON.stringify({ data: { access_token: "access", refresh_token: "refresh", user: { id: "user-1", email: "member@example.com" } } }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    await registerWithChandler({ email: "member@example.com", password: "1", displayName: "会员", edition: "gulong", deviceType: "desktop" });
+    await registerWithChandler({ email: "flower@example.com", password: "1", displayName: "花艺会员", edition: "yongshenghua", deviceType: "desktop" });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalGulongSecret === undefined) delete process.env.CHANDLER_CLIENT_SECRET; else process.env.CHANDLER_CLIENT_SECRET = originalGulongSecret;
+    if (originalAirosSecret === undefined) delete process.env.CHANDLER_AIROS_CLIENT_SECRET; else process.env.CHANDLER_AIROS_CLIENT_SECRET = originalAirosSecret;
+  }
+  assert.equal(calls[0].body.client_id, chandlerConfig().applicationId);
+  assert.equal(calls[0].body.client_secret, "gulong-registration-secret");
+  assert.equal(calls[1].body.client_id, chandlerConfig().airosApplicationId);
+  assert.equal(calls[1].body.client_secret, "airos-registration-secret");
+});
+
+test("Chandler v3.9 registration fails closed when attribution credentials are absent", async () => {
+  const originalSecret = process.env.CHANDLER_AIROS_CLIENT_SECRET;
+  delete process.env.CHANDLER_AIROS_CLIENT_SECRET;
+  try {
+    assert.throws(
+      () => registerWithChandler({ email: "missing@example.com", password: "任意密码", edition: "yongshenghua" }),
+      (error) => error?.code === "CHANDLER_REGISTRATION_ATTRIBUTION_NOT_CONFIGURED" && error?.status === 503,
+    );
+  } finally {
+    if (originalSecret === undefined) delete process.env.CHANDLER_AIROS_CLIENT_SECRET;
+    else process.env.CHANDLER_AIROS_CLIENT_SECRET = originalSecret;
+  }
+});
+
+test("website authentication keeps public registration email-only and exposes attributed activated desktop registration", async () => {
+  const [serverSource, chandlerSource, modalSource, dashboardSource, securitySource, vercel, envExample, specResponse] = await Promise.all([
     readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../../server/chandler.js", import.meta.url), "utf8"),
     readFile(new URL("../../src/components/AccountModal.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../src/components/AccountDashboard.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../src/components/AccountSecurityPanel.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../vercel.json", import.meta.url), "utf8"),
+    readFile(new URL("../../.env.example", import.meta.url), "utf8"),
     app.request(new Request("http://localhost/api/openapi.json")),
   ]);
   const spec = await specResponse.json();
@@ -258,6 +306,7 @@ test("website authentication keeps public registration email-only and exposes ac
     "/api/auth/phone/reset-password",
     "/api/v1/desktop/auth/phone/send-otp",
     "/api/v1/desktop/auth/phone/register",
+    "/api/v1/desktop/auth/email/register",
     "/api/account/security",
     "/api/account/security/email/send-verification",
     "/api/account/security/email/verify",
@@ -276,7 +325,13 @@ test("website authentication keeps public registration email-only and exposes ac
   assert.match(serverSource, /phoneRegistrationEnabled: smsOtpEnabled && isChandlerPhoneRegistrationConfigured\(\)/);
   assert.match(serverSource, /verifyActivationReceipt\(input\.activation_receipt\)/);
   assert.match(serverSource, /activation\.payload\.deviceId/);
+  assert.match(serverSource, /CHANDLER_APPLICATION_ACTIVATION_MISMATCH/);
   assert.doesNotMatch(serverSource, /client_secret:\s*input/);
+  assert.match(chandlerSource, /client_secret: credential\.clientSecret/);
+  assert.match(chandlerSource, /CHANDLER_REGISTRATION_ATTRIBUTION_NOT_CONFIGURED/);
+  const desktopEmailSchema = spec.paths["/api/v1/desktop/auth/email/register"].post.requestBody.content["application/json"].schema;
+  assert.ok(desktopEmailSchema.required.includes("client_id"));
+  assert.equal(Object.hasOwn(desktopEmailSchema.properties, "client_secret"), false);
   assert.match(modalSource, /仅支持邮箱注册/);
   assert.match(modalSource, /setCooldown\(60\)/);
   assert.match(modalSource, /秒后可重发/);
@@ -284,6 +339,8 @@ test("website authentication keeps public registration email-only and exposes ac
   assert.match(securitySource, /手机号仅用于已注册账号/);
   assert.match(securitySource, /useConfirmDialog/);
   assert.match(vercel, /\/api\/auth\/:path\*/);
+  assert.match(vercel, /\/api\/v1\/desktop\/:path\*/);
+  assert.match(envExample, /CHANDLER_AIROS_CLIENT_SECRET=/);
 });
 
 test("user provider keys use purpose-bound encryption", () => {

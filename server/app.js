@@ -55,6 +55,7 @@ import {
   issueOfflineCredential,
   isChandlerBootstrapAdmin,
   isChandlerPhoneRegistrationConfigured,
+  isChandlerRegistrationAttributionConfigured,
   getPartnerClientUserAttributes,
   listAllPartnerClientUsers,
   listChandlerIdentities,
@@ -366,13 +367,21 @@ const ActivationReceiptSchema = z.object({
   signature: z.string(),
 });
 
-const DesktopPhoneRegistrationBaseSchema = z.object({
-  phone: PhoneSchema,
+const DesktopRegistrationContextSchema = z.object({
   activation_receipt: z.union([z.string().trim().min(32).max(16_384), ActivationReceiptSchema]),
   app_version: z.string().trim().min(1).max(40),
   device_name: z.string().trim().min(1).max(120).optional(),
   os_version: z.string().trim().min(1).max(120).optional(),
+  client_id: z.string().trim().min(3).max(128).optional(),
 });
+const DesktopEmailRegistrationSchema = DesktopRegistrationContextSchema.extend({
+  email: z.email(),
+  password: z.string().min(1).max(255),
+  display_name: z.string().trim().min(1).max(64).optional(),
+  invite_code: z.string().trim().max(64).optional(),
+  client_id: z.string().trim().min(3).max(128),
+});
+const DesktopPhoneRegistrationBaseSchema = DesktopRegistrationContextSchema.extend({ phone: PhoneSchema });
 const DesktopPhoneRegistrationSendSchema = DesktopPhoneRegistrationBaseSchema;
 const DesktopPhoneRegistrationSchema = DesktopPhoneRegistrationBaseSchema.extend({
   code: z.string().trim().regex(/^\d{6}$/),
@@ -2358,7 +2367,7 @@ const forgotPasswordRoute = createRoute({
   path: "/api/auth/forgot-password",
   tags: ["Authentication"],
   summary: "发送找回密码邮件",
-  description: "通过 Chandler v3.7 统一身份服务向邮箱发送 6 位数字验证码。无论邮箱是否存在，成功受理时都返回相同响应，防止账号枚举。",
+  description: "通过 Chandler v3.9 统一身份服务向邮箱发送 6 位数字验证码。无论邮箱是否存在，成功受理时都返回相同响应，防止账号枚举。",
   request: { body: { content: { "application/json": { schema: ForgotPasswordSchema } } } },
   responses: {
     202: { description: "邮件请求已受理", content: { "application/json": { schema: z.object({ status: z.literal("accepted"), message: z.string() }) } } },
@@ -2411,7 +2420,7 @@ const authCapabilitiesRoute = createRoute({
   path: "/api/auth/capabilities",
   tags: ["Authentication"],
   summary: "查询验证码登录能力",
-  description: "实时读取 Chandler v3.7 能力开关。官网仍只开放邮箱注册；已激活桌面客户端可通过受控服务端代理使用手机号注册，OAuth 客户端密钥不会下发到桌面端。",
+  description: "实时读取 Chandler v3.9 能力开关。官网仍只开放邮箱注册；已激活桌面客户端可通过受控服务端代理进行邮箱或手机号注册，OAuth 客户端密钥不会下发到桌面端。",
   responses: { 200: { description: "认证能力", content: { "application/json": { schema: AuthCapabilitiesResponseSchema } } } },
 });
 
@@ -2482,6 +2491,23 @@ const desktopPhoneRegistrationSendRoute = createRoute({
     409: { description: "手机号已经注册，请改用手机号验证码登录", content: { "application/json": { schema: ErrorSchema } } },
     429: { description: "发送过于频繁", content: { "application/json": { schema: ErrorSchema } } },
     503: { description: "短信能力或服务端 OAuth 配置未启用", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+const desktopEmailRegistrationRoute = createRoute({
+  method: "post",
+  path: "/api/v1/desktop/auth/email/register",
+  tags: ["Desktop Authentication"],
+  summary: "已激活桌面客户端代用户邮箱注册并记录应用来源",
+  description: "校验 RS256 激活回执后，由古龙官网服务端注入对应 Chandler OAuth 应用凭证。client_secret 永不进入桌面客户端。",
+  request: { body: { required: true, content: { "application/json": { schema: DesktopEmailRegistrationSchema } } } },
+  responses: {
+    201: { description: "邮箱账号注册成功", content: { "application/json": { schema: z.object({ access_token: z.string(), refresh_token: z.string().nullable(), token_type: z.string(), expires_in: z.number(), user: z.record(z.string(), z.unknown()) }) } } },
+    400: { description: "邮箱、应用或参数不正确", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "激活回执无效", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "邮箱已经注册", content: { "application/json": { schema: ErrorSchema } } },
+    429: { description: "注册尝试过于频繁", content: { "application/json": { schema: ErrorSchema } } },
+    503: { description: "对应应用的归因凭证未配置", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
@@ -2703,11 +2729,49 @@ async function recordDesktopPhoneAuthAudit(action, activationPayload, phone, det
   }
 }
 
+async function recordDesktopEmailAuthAudit(action, activationPayload, email, details = {}) {
+  try {
+    await (await getCollection("authAudit")).insertOne({
+      action,
+      product: activationPayload.product,
+      licenseId: new ObjectId(activationPayload.licenseId),
+      deviceIdHash: hashOpaqueToken(activationPayload.deviceId, "desktop-email-auth-device"),
+      emailHash: hashOpaqueToken(normalizeEmail(email), "desktop-email-auth-email"),
+      ...details,
+      createdAt: new Date(),
+    });
+  } catch {
+    // Authentication must not fail solely because the audit sink is briefly unavailable.
+  }
+}
+
 async function verifiedDesktopPhoneRegistrationRequest(input, action) {
   const activation = await verifyActivationReceipt(input.activation_receipt);
   const phone = normalizedPhone(input.phone);
-  await recordDesktopPhoneAuthAudit(`${action}_requested`, activation.payload, phone, { appVersion: input.app_version });
-  return { activation, phone };
+  const application = desktopRegistrationApplication(input.client_id, activation.payload);
+  await recordDesktopPhoneAuthAudit(`${action}_requested`, activation.payload, phone, { appVersion: input.app_version, applicationId: application.id });
+  return { activation, phone, application };
+}
+
+function activationRegistrationEdition(activationPayload) {
+  const product = String(activationPayload?.product || "").trim().toLowerCase();
+  if (!product) return null;
+  if (product.includes("minimax-h3") || product.includes("yongshenghua") || product.includes("airos")) return "yongshenghua";
+  if (product.includes("gulong") || product.includes("古龙")) return "gulong";
+  return null;
+}
+
+function desktopRegistrationApplication(clientId, activationPayload) {
+  const requested = String(clientId || chandlerConfig().applicationId || "").trim();
+  const target = chandlerApplicationTargets().find((item) => item.id === requested);
+  if (!target) {
+    throw new ChandlerError("桌面客户端提交了未登记的 Chandler 应用", { status: 400, code: "CHANDLER_APPLICATION_INVALID" });
+  }
+  const activationEdition = activationRegistrationEdition(activationPayload);
+  if (activationEdition && target.editionKey !== activationEdition) {
+    throw new ChandlerError("桌面客户端应用与激活授权不匹配", { status: 403, code: "CHANDLER_APPLICATION_ACTIVATION_MISMATCH" });
+  }
+  return target;
 }
 
 function publicWebsiteUser(user) {
@@ -3002,14 +3066,68 @@ app.openapi(phoneResetPasswordRoute, async (c) => {
   return c.json({ status: "reset", message: "密码已重置，请使用新密码重新登录" });
 });
 
+app.openapi(desktopEmailRegistrationRoute, async (c) => {
+  const input = c.req.valid("json");
+  const activation = await verifyActivationReceipt(input.activation_receipt);
+  const application = desktopRegistrationApplication(input.client_id, activation.payload);
+  if (!isChandlerRegistrationAttributionConfigured(application.editionKey)) {
+    return c.json({ code: "REGISTRATION_ATTRIBUTION_NOT_CONFIGURED", message: `${application.editionName}注册来源归因尚未完成安全配置，请联系管理员` }, 503);
+  }
+  const email = normalizeEmail(input.email);
+  const ipKey = fingerprintIp(c.req.header("x-forwarded-for") || "local");
+  const emailKey = hashOpaqueToken(email, "desktop-email-register-target").slice(0, 32);
+  const deviceKey = hashOpaqueToken(activation.payload.deviceId, "desktop-email-register-device").slice(0, 32);
+  const [ipRate, emailRate, deviceRate] = await Promise.all([
+    enforceRateLimit(`desktop-email-register-ip:${ipKey}`, { limit: 10, windowMs: 30 * 60_000 }),
+    enforceRateLimit(`desktop-email-register-target:${emailKey}`, { limit: 5, windowMs: 30 * 60_000 }),
+    enforceRateLimit(`desktop-email-register-device:${deviceKey}`, { limit: 8, windowMs: 30 * 60_000 }),
+  ]);
+  if (!ipRate.allowed || !emailRate.allowed || !deviceRate.allowed) {
+    return c.json({ code: "RATE_LIMITED", message: "注册尝试过多，请稍后重试" }, 429);
+  }
+  await recordDesktopEmailAuthAudit("desktop_email_register_requested", activation.payload, email, {
+    appVersion: input.app_version,
+    applicationId: application.id,
+  });
+  const chandlerAuth = await registerWithChandler({
+    email,
+    password: input.password,
+    displayName: input.display_name,
+    inviteCode: input.invite_code,
+    edition: application.editionKey,
+    deviceType: "desktop",
+    clientVersion: input.app_version,
+  });
+  if (!chandlerAuth?.access_token || !chandlerAuth?.user?.id) {
+    throw Object.assign(new Error("统一账号服务返回的注册结果不完整，请稍后重试"), { code: "CHANDLER_AUTH_RESPONSE_INVALID", status: 502 });
+  }
+  await markChandlerProductEdition(chandlerAuth.access_token, chandlerAuth.user.id, application.editionKey, "desktop-email-registration").catch(() => null);
+  const identity = { role: chandlerAuth.user.is_admin || isChandlerBootstrapAdmin(chandlerAuth.user) ? "admin" : "user", editionKey: application.editionKey, editionName: application.editionName, editionSource: "desktop-email-registration" };
+  const user = await upsertChandlerUser(chandlerAuth.user, { identity, defaultEdition: application.editionKey, forceEdition: true });
+  await recordDesktopEmailAuthAudit("desktop_email_register_succeeded", activation.payload, email, {
+    userId: user._id,
+    chandlerUserId: chandlerAuth.user.id,
+    appVersion: input.app_version,
+    applicationId: application.id,
+  });
+  c.header("Cache-Control", "no-store, max-age=0");
+  return c.json({
+    access_token: chandlerAuth.access_token,
+    refresh_token: chandlerAuth.refresh_token || null,
+    token_type: chandlerAuth.token_type || "Bearer",
+    expires_in: Math.max(60, Number(chandlerAuth.expires_in || 3600)),
+    user: chandlerAuth.user,
+  }, 201);
+});
+
 app.openapi(desktopPhoneRegistrationSendRoute, async (c) => {
   const input = c.req.valid("json");
-  const { activation, phone } = await verifiedDesktopPhoneRegistrationRequest(input, "desktop_phone_register_send");
+  const { activation, phone, application } = await verifiedDesktopPhoneRegistrationRequest(input, "desktop_phone_register_send");
   const capabilities = await currentAuthCapabilities();
   if (!capabilities.smsOtpEnabled) {
     return c.json({ code: "SMS_OTP_DISABLED", message: "短信验证码服务暂时关闭，请稍后重试" }, 503);
   }
-  if (!capabilities.phoneRegistrationEnabled) {
+  if (!isChandlerPhoneRegistrationConfigured(application.editionKey)) {
     return c.json({ code: "PHONE_REGISTRATION_NOT_CONFIGURED", message: "桌面手机号注册服务尚未完成安全配置，请联系管理员" }, 503);
   }
   const ipKey = fingerprintIp(c.req.header("x-forwarded-for") || "local");
@@ -3024,8 +3142,8 @@ app.openapi(desktopPhoneRegistrationSendRoute, async (c) => {
     c.header("Retry-After", "60");
     return c.json({ code: "RATE_LIMITED", message: "短信验证码发送过于频繁，请稍后再试" }, 429);
   }
-  await sendPhoneRegistrationOtpWithChandler(phone);
-  await recordDesktopPhoneAuthAudit("desktop_phone_register_send_accepted", activation.payload, phone, { appVersion: input.app_version });
+  await sendPhoneRegistrationOtpWithChandler(phone, application.editionKey);
+  await recordDesktopPhoneAuthAudit("desktop_phone_register_send_accepted", activation.payload, phone, { appVersion: input.app_version, applicationId: application.id });
   c.header("Cache-Control", "no-store, max-age=0");
   c.header("Retry-After", "60");
   return c.json({ status: "accepted", retryAfter: 60, codeLength: 6 }, 202);
@@ -3033,8 +3151,8 @@ app.openapi(desktopPhoneRegistrationSendRoute, async (c) => {
 
 app.openapi(desktopPhoneRegistrationRoute, async (c) => {
   const input = c.req.valid("json");
-  const { activation, phone } = await verifiedDesktopPhoneRegistrationRequest(input, "desktop_phone_register");
-  if (!isChandlerPhoneRegistrationConfigured()) {
+  const { activation, phone, application } = await verifiedDesktopPhoneRegistrationRequest(input, "desktop_phone_register");
+  if (!isChandlerPhoneRegistrationConfigured(application.editionKey)) {
     return c.json({ code: "PHONE_REGISTRATION_NOT_CONFIGURED", message: "桌面手机号注册服务尚未完成安全配置，请联系管理员" }, 503);
   }
   const ipKey = fingerprintIp(c.req.header("x-forwarded-for") || "local");
@@ -3056,18 +3174,19 @@ app.openapi(desktopPhoneRegistrationRoute, async (c) => {
     deviceName: input.device_name,
     osVersion: input.os_version,
     appVersion: input.app_version,
+    edition: application.editionKey,
   });
   if (!chandlerAuth?.access_token || !chandlerAuth?.user?.id) {
     throw Object.assign(new Error("统一账号服务返回的注册结果不完整，请稍后重试"), { code: "CHANDLER_AUTH_RESPONSE_INVALID", status: 502 });
   }
-  await markChandlerProductEdition(chandlerAuth.access_token, chandlerAuth.user.id, "gulong", "desktop-phone-registration").catch(() => null);
-  const identity = { role: chandlerAuth.user.is_admin || isChandlerBootstrapAdmin(chandlerAuth.user) ? "admin" : "user", editionKey: "gulong", editionName: "古龙版", editionSource: "desktop-phone-registration" };
-  const user = await upsertChandlerUser(chandlerAuth.user, { identity, defaultEdition: "gulong", forceEdition: true });
+  await markChandlerProductEdition(chandlerAuth.access_token, chandlerAuth.user.id, application.editionKey, "desktop-phone-registration").catch(() => null);
+  const identity = { role: chandlerAuth.user.is_admin || isChandlerBootstrapAdmin(chandlerAuth.user) ? "admin" : "user", editionKey: application.editionKey, editionName: application.editionName, editionSource: "desktop-phone-registration" };
+  const user = await upsertChandlerUser(chandlerAuth.user, { identity, defaultEdition: application.editionKey, forceEdition: true });
   await (await getCollection("users")).updateOne(
     { _id: user._id },
     { $set: { chandlerPhoneHash: hashOpaqueToken(phone, "chandler-phone"), updatedAt: new Date() } },
   );
-  await recordDesktopPhoneAuthAudit("desktop_phone_register_succeeded", activation.payload, phone, { userId: user._id, chandlerUserId: chandlerAuth.user.id, appVersion: input.app_version });
+  await recordDesktopPhoneAuthAudit("desktop_phone_register_succeeded", activation.payload, phone, { userId: user._id, chandlerUserId: chandlerAuth.user.id, appVersion: input.app_version, applicationId: application.id });
   c.header("Cache-Control", "no-store, max-age=0");
   return c.json({
     status: "registered",
@@ -7639,8 +7758,8 @@ app.doc("/api/openapi.json", {
   openapi: "3.1.0",
   info: {
     title: "古龙 Gulong Agent Engine API",
-    version: "2.3.0",
-    description: "已按 Chandler v3.7 与 PearAPI 统一接入升级：邮箱和短信验证码统一为 6 位数字；官网保持邮箱注册，已激活桌面客户端可通过受控服务端代理手机号注册，OAuth 客户端密钥不会下发客户端。服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。普通会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费；实付额外赠送 10% 钱包余额，单次充值满 500 元同样赠送 10%。短视频包月固定月费 5999 元、年费 59999 元，只支持线下审核，审核后实付金额按 1:1 组成可到期套餐余额，不额外赠送；有效期内 MiniMaxH3 套餐余额归零后仍可无限生成，但不再扣费或分佣。所有入账、扣款、退款和分账均使用独立幂等流水。MiniMax H3 共享节点支持钱包预扣、幂等退款与 50% 节点分成、激活设备账号绑定、按能力原子领取、腾讯云 COS 输入下载和输出直传票据，并提供仅按绑定账户聚合的桌面收益接口；工作器领取 DTO 不含需求用户身份和内部计费信息。另提供永久离线授权兑换、第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
+    version: "2.4.0",
+    description: "已按 Chandler v3.9 与 PearAPI 统一接入升级：官网邮箱注册和已激活桌面客户端的邮箱/手机号注册均由官网服务端注入对应 OAuth 应用凭据，写入 Chandler 应用来源归因；client_secret 永不进入浏览器或桌面客户端。邮箱和短信验证码统一为 6 位数字；服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。普通会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费；实付额外赠送 10% 钱包余额，单次充值满 500 元同样赠送 10%。短视频包月固定月费 5999 元、年费 59999 元，只支持线下审核，审核后实付金额按 1:1 组成可到期套餐余额，不额外赠送；有效期内 MiniMaxH3 套餐余额归零后仍可无限生成，但不再扣费或分佣。所有入账、扣款、退款和分账均使用独立幂等流水。MiniMax H3 共享节点支持钱包预扣、幂等退款与 50% 节点分成、激活设备账号绑定、按能力原子领取、腾讯云 COS 输入下载和输出直传票据，并提供仅按绑定账户聚合的桌面收益接口；工作器领取 DTO 不含需求用户身份和内部计费信息。另提供永久离线授权兑换、第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
   },
   servers: [
     { url: "/", description: "当前环境" },

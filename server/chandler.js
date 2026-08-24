@@ -50,6 +50,7 @@ export function chandlerConfig() {
     yearlyPriceFen: Number(process.env.CHANDLER_YEARLY_PRICE_FEN || 298_000),
     apiKey: process.env.GulongAgent?.trim() || process.env.CHANDLER_API_KEY?.trim() || "",
     clientSecret: process.env.CHANDLER_CLIENT_SECRET?.trim() || process.env.CHANDLER_OAUTH_CLIENT_SECRET?.trim() || "",
+    airosClientSecret: process.env.CHANDLER_AIROS_CLIENT_SECRET?.trim() || "",
     webhookHmacKey: process.env.CHANDLER_WEBHOOK_HMAC_KEY?.trim() || "",
   };
 }
@@ -180,7 +181,27 @@ export function verifyChandlerWebhook(rawBody, signature) {
   return timingSafeEqual(Buffer.from(received, "hex"), Buffer.from(expected, "hex"));
 }
 
-export function registerWithChandler({ email, password, displayName, inviteCode }) {
+function registrationAttributionCredential(edition = "gulong", { required = true } = {}) {
+  const config = chandlerConfig();
+  const product = productEdition(edition);
+  const credential = product.key === "yongshenghua"
+    ? { clientId: config.airosApplicationId, clientSecret: config.airosClientSecret }
+    : { clientId: config.applicationId, clientSecret: config.clientSecret };
+  if (required && (!credential.clientId || !credential.clientSecret)) {
+    throw new ChandlerError(`${product.name}注册来源归因尚未完成安全配置，请联系管理员`, {
+      status: 503,
+      code: "CHANDLER_REGISTRATION_ATTRIBUTION_NOT_CONFIGURED",
+    });
+  }
+  return credential.clientId && credential.clientSecret ? credential : null;
+}
+
+export function isChandlerRegistrationAttributionConfigured(edition = "gulong") {
+  return Boolean(registrationAttributionCredential(edition, { required: false }));
+}
+
+export function registerWithChandler({ email, password, displayName, inviteCode, edition = "gulong", deviceType = "web", clientVersion = "gulong-web-1.1" }) {
+  const credential = registrationAttributionCredential(edition);
   return chandlerRequest("/v1/auth/register", {
     method: "POST",
     body: {
@@ -189,8 +210,10 @@ export function registerWithChandler({ email, password, displayName, inviteCode 
       display_name: (displayName || email.split("@")[0]).trim(),
       ...(inviteCode ? { invite_code: inviteCode.trim() } : {}),
       agree_policies: true,
-      client_version: "gulong-web-1.1",
-      device_type: "web",
+      client_id: credential.clientId,
+      client_secret: credential.clientSecret,
+      client_version: String(clientVersion || "gulong-web-1.1").trim(),
+      device_type: deviceType === "desktop" ? "desktop" : "web",
     },
   });
 }
@@ -248,24 +271,23 @@ export function loginWithChandlerOtp(target, targetType, code) {
   });
 }
 
-function phoneRegistrationCredential() {
-  const config = chandlerConfig();
-  if (!config.applicationId || !config.clientSecret) {
+function phoneRegistrationCredential(edition = "gulong") {
+  try {
+    return registrationAttributionCredential(edition);
+  } catch {
     throw new ChandlerError("桌面手机号注册服务尚未完成安全配置，请联系管理员", {
       status: 503,
       code: "CHANDLER_PHONE_REGISTRATION_NOT_CONFIGURED",
     });
   }
-  return { clientId: config.applicationId, clientSecret: config.clientSecret };
 }
 
-export function isChandlerPhoneRegistrationConfigured() {
-  const config = chandlerConfig();
-  return Boolean(config.applicationId && config.clientSecret);
+export function isChandlerPhoneRegistrationConfigured(edition = "gulong") {
+  return isChandlerRegistrationAttributionConfigured(edition);
 }
 
-export function sendPhoneRegistrationOtpWithChandler(phone) {
-  const credential = phoneRegistrationCredential();
+export function sendPhoneRegistrationOtpWithChandler(phone, edition = "gulong") {
+  const credential = phoneRegistrationCredential(edition);
   return chandlerRequest("/v1/auth/phone/send-otp", {
     method: "POST",
     body: {
@@ -277,8 +299,8 @@ export function sendPhoneRegistrationOtpWithChandler(phone) {
   });
 }
 
-export function registerPhoneWithChandler({ phone, code, displayName, installId, deviceName, osVersion, appVersion }) {
-  const credential = phoneRegistrationCredential();
+export function registerPhoneWithChandler({ phone, code, displayName, installId, deviceName, osVersion, appVersion, edition = "gulong" }) {
+  const credential = phoneRegistrationCredential(edition);
   return chandlerRequest("/v1/auth/phone/register", {
     method: "POST",
     body: {

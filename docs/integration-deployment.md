@@ -4,7 +4,7 @@
 
 ## 1. 系统边界
 
-- Chandler v3.7：邮箱注册、6 位邮箱/短信验证码、已激活桌面手机号注册、邮箱验证、手机号绑定、微信预支付、用户订阅、离线权益凭据和合作伙伴管理能力。
+- Chandler v3.9：带合作伙伴应用来源归因的官网/桌面邮箱注册与桌面手机号注册、6 位邮箱/短信验证码、邮箱验证、手机号绑定、微信预支付、用户订阅、离线权益凭据和合作伙伴管理能力。
 - 古龙官网 MongoDB：加密会话引用、开发者 API Key、用户加密模型配置、合作伙伴、第二大脑文件索引、线下支付审核队列、发行渠道与发版任务。
 - 腾讯云 COS：第二大脑 ZIP 与 Windows 安装包的私有对象存储。
 - Windows 发行工作器：读取桌面端主题权限文件，领取官网发版任务，调用既有发布工作流并直传 COS。
@@ -19,7 +19,7 @@ Chandler 用户是全局账号：在古龙版桌面端或永生花版桌面端�
 
 | 官网能力 | Chandler 公共 OpenAPI |
 | --- | --- |
-| 邮箱注册 / 密码登录 / 刷新 / 退出 | `/v1/auth/register`、`/v1/auth/login`、`/v1/oauth/token`（`grant_type=refresh_token`）、`/v1/auth/logout` |
+| 官网邮箱注册 / 密码登录 / 刷新 / 退出 | 官网服务端携带 `client_id/client_secret` 调用 `/v1/auth/register`；登录、刷新、退出使用 `/v1/auth/login`、`/v1/oauth/token`、`/v1/auth/logout` |
 | 查询短信能力 | `/v1/auth/capabilities` |
 | 邮箱 / 短信验证码登录 | `/v1/auth/otp/send`、`/v1/auth/otp/login` |
 | 邮箱找回密码 | `/v1/auth/forgot-password`、`/v1/auth/reset-password` |
@@ -46,6 +46,7 @@ Chandler 用户是全局账号：在古龙版桌面端或永生花版桌面端�
 - 邮箱 / 短信验证码登录：`POST /api/auth/otp/send`、`POST /api/auth/otp/login`
 - 手机找回密码：`POST /api/auth/phone/forgot-password`、`POST /api/auth/phone/reset-password`
 - 已激活桌面手机号注册：`POST /api/v1/desktop/auth/phone/send-otp`、`POST /api/v1/desktop/auth/phone/register`
+- 已激活桌面邮箱注册及来源归因：`POST /api/v1/desktop/auth/email/register`；桌面端只提交公开 `client_id` 与激活回执，官网按应用注入服务端密钥。
 - 安全概览：`GET /api/account/security`
 - 邮箱验证：`POST /api/account/security/email/send-verification`、`POST /api/account/security/email/verify`
 - 手机号绑定：`POST /api/account/security/phone/bind`
@@ -98,6 +99,7 @@ Bucket CORS 至少允许：
 CHANDLER_API_BASE=https://api.chandler.work
 CHANDLER_APPLICATION_ID=cm_89be865af1af48f4a83406f0cf1a472e
 CHANDLER_CLIENT_SECRET=<Chandler 古龙 OAuth 客户端密钥，仅服务端保存>
+CHANDLER_AIROS_CLIENT_SECRET=<Chandler 永生花 OAuth 客户端密钥，仅服务端保存>
 TENCENT_SECRET_ID=<CAM 子账号 SecretId>
 TENCENT_SECRET_KEY=<CAM 子账号 SecretKey>
 COS_BUCKET=gulong-1259744534
