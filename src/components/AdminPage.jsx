@@ -1017,6 +1017,39 @@ function ActivationCodeManager() {
     }
   }
 
+  async function exportUnusedCodes() {
+    setBusy("export"); setMessage("");
+    try {
+      const response = await localizedFetch("/api/admin/activation-codes/export-unused", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(localizeErrorMessage(payload.message || "导出失败，请稍后重试"));
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get("content-disposition") || "";
+      const encodedFilename = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+      const fallback = `古龙-未使用激活码-${new Date().toISOString().slice(0, 10)}.txt`;
+      let filename = fallback;
+      if (encodedFilename) {
+        try { filename = decodeURIComponent(encodedFilename); } catch { filename = fallback; }
+      }
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url; link.download = filename;
+      document.body.appendChild(link); link.click(); link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+      const exportedCount = Number(response.headers.get("x-exported-count")) || counts.unused || 0;
+      setMessage(`已导出 ${exportedCount} 个未使用激活码，TXT 文件中每行一个完整激活码。`);
+    } catch (error) {
+      setMessage(localizeErrorMessage(error, "导出失败，请稍后重试"));
+    } finally { setBusy(""); }
+  }
+
   async function copyCode(item) {
     setBusy(item.id); setMessage("");
     try {
@@ -1058,7 +1091,7 @@ function ActivationCodeManager() {
   }
 
   return <section className="admin-module activation-manager">
-    <header className="admin-module-head"><div><span>DEVICE-BOUND OFFLINE LICENSES</span><h2>授权管理</h2><p>批量生成安装激活码。首次使用后绑定设备物理网卡指纹，同一台电脑可永久离线使用。</p></div><button className="button secondary" disabled={Boolean(busy)} onClick={() => load()}><ArrowClockwise size={17} />刷新</button></header>
+    <header className="admin-module-head"><div><span>DEVICE-BOUND OFFLINE LICENSES</span><h2>授权管理</h2><p>批量生成安装激活码。首次使用后绑定设备物理网卡指纹，同一台电脑可永久离线使用。</p></div><div className="admin-head-actions"><button className="button secondary" type="button" disabled={Boolean(busy) || !(counts.unused > 0)} onClick={exportUnusedCodes}><DownloadSimple size={17} />{busy === "export" ? "正在导出" : `导出未使用激活码${counts.unused ? `（${counts.unused}）` : ""}`}</button><button className="button secondary" type="button" disabled={Boolean(busy)} onClick={() => load()}><ArrowClockwise size={17} />刷新</button></div></header>
     {message && <AdminNotice tone={message.includes("已") ? "success" : "error"}>{message}</AdminNotice>}
     <div className="activation-summary"><button className={!status ? "active" : ""} onClick={() => { setStatus(""); load(""); }}><strong>{(counts.unused || 0) + (counts.used || 0) + (counts.revoked || 0)}</strong><span>全部</span></button><button className={status === "unused" ? "active" : ""} onClick={() => { setStatus("unused"); load("unused"); }}><strong>{counts.unused || 0}</strong><span>未使用</span></button><button className={status === "used" ? "active" : ""} onClick={() => { setStatus("used"); load("used"); }}><strong>{counts.used || 0}</strong><span>已使用</span></button><button className={status === "revoked" ? "active" : ""} onClick={() => { setStatus("revoked"); load("revoked"); }}><strong>{counts.revoked || 0}</strong><span>已停用</span></button></div>
     <form className="activation-generator" onSubmit={generate}><div><label><span>生成数量</span><input type="number" min="1" max="500" value={count} onChange={(event) => setCount(event.target.value)} /></label><label className="wide"><span>批次备注</span><input maxLength="200" value={note} onChange={(event) => setNote(event.target.value)} placeholder="例如：2026 年 8 月创作者内测" /></label></div><button className="button primary" disabled={Boolean(busy)}><Key size={18} weight="fill" />{busy === "generate" ? "正在生成" : "批量生成激活码"}</button></form>

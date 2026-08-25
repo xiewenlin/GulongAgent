@@ -719,6 +719,14 @@ test("activation management prioritizes unused codes and exposes encrypted copya
   assert.match(adminSource, /copyCode\(item\)/);
   assert.match(adminSource, /\/api\/admin\/activation-codes\/\$\{item\.id\}\/reissue/);
   assert.match(adminSource, /<Copy size=\{16\} \/>\{busy === item\.id \? "复制中" : "复制"\}/);
+  assert.match(serverSource, /path: "\/api\/admin\/activation-codes\/export-unused"/);
+  assert.match(serverSource, /collection\.find\(\{ status: "unused" \}\)\.sort\(\{ createdAt: -1, _id: -1 \}\)/);
+  assert.match(serverSource, /Content-Disposition", `attachment; filename="gulong-unused-activation-codes-/);
+  assert.match(serverSource, /`\\uFEFF\$\{codes\.join\("\\r\\n"\)\}\\r\\n`/);
+  assert.match(serverSource, /action: "admin_activation_codes_exported"/);
+  assert.match(adminSource, /exportUnusedCodes/);
+  assert.match(adminSource, /导出未使用激活码/);
+  assert.match(adminSource, /response\.blob\(\)/);
   assert.match(cssSource, /\.activation-table \.activation-code-value/);
 });
 

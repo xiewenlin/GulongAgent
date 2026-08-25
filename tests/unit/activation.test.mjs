@@ -71,3 +71,21 @@ test("administrator activation copy stays enabled and can reissue unreadable unu
   assert.match(serverSource, /status !== "unused"/);
   assert.match(serverSource, /codeEncrypted: sealUserSecret\(code, "activation-code"\)/);
 });
+
+test("unused activation code TXT export is documented and never succeeds without administrator authentication", async () => {
+  const document = app.getOpenAPIDocument({ openapi: "3.1.0", info: { title: "test", version: "1" } });
+  const route = document.paths["/api/admin/activation-codes/export-unused"]?.post;
+  assert.ok(route);
+  assert.ok(route.responses[200]?.content?.["text/plain"]);
+  assert.ok(route.responses[401]);
+  assert.ok(route.responses[403]);
+  assert.ok(route.responses[404]);
+
+  const response = await app.request("http://localhost/api/admin/activation-codes/export-unused", {
+    method: "POST",
+    headers: { origin: "http://localhost", "content-type": "application/json" },
+    body: "{}",
+  });
+  assert.ok([401, 503].includes(response.status));
+  assert.ok(["UNAUTHORIZED", "CONFIG_REQUIRED"].includes((await response.json()).code));
+});

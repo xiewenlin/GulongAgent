@@ -2305,6 +2305,20 @@ const adminAnalyticsDashboardRoute = createRoute({
   },
 });
 
+const adminExportUnusedActivationCodesRoute = createRoute({
+  method: "post",
+  path: "/api/admin/activation-codes/export-unused",
+  tags: ["Admin · Activation"],
+  summary: "批量导出未使用激活码",
+  description: "仅管理员可调用。服务端实时筛选未使用授权，并生成 UTF-8 TXT 文件；已使用和已停用授权不会出现在文件中。",
+  responses: {
+    200: { description: "每行一个完整激活码的 TXT 文件", content: { "text/plain": { schema: z.string() } } },
+    401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "非管理员或来源不受信任", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "当前没有未使用激活码", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 const healthRoute = createRoute({
   method: "get",
   path: "/api/health",
@@ -3558,6 +3572,76 @@ app.get("/api/admin/activation-codes", async (c) => {
     })),
     counts: Object.fromEntries(counts.map((item) => [item._id, item.count])),
   });
+});
+
+app.openapi(adminExportUnusedActivationCodesRoute, async (c) => {
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  c.header("Pragma", "no-cache");
+  const originError = requireTrustedMutation(c);
+  if (originError) return originError;
+  const auth = await requireAdmin(c);
+  if (auth.error) return auth.error;
+
+  const collection = await getCollection("activationCodes");
+  const unused = await collection.find({ status: "unused" }).sort({ createdAt: -1, _id: -1 }).toArray();
+  if (!unused.length) {
+    return c.json({ code: "NO_UNUSED_ACTIVATION_CODES", message: "当前没有可导出的未使用激活码" }, 404);
+  }
+
+  const codes = [];
+  let reissuedCount = 0;
+  for (const item of unused) {
+    let code = item.codeEncrypted ? readUserSecret(item.codeEncrypted, "activation-code") : null;
+    if (!code) {
+      const replacement = activationCode();
+      const now = new Date();
+      const encryptedMatch = item.codeEncrypted
+        ? { codeEncrypted: item.codeEncrypted }
+        : { codeEncrypted: { $exists: false } };
+      const updated = await collection.findOneAndUpdate(
+        { _id: item._id, status: "unused", ...encryptedMatch },
+        {
+          $set: {
+            codeHash: hashActivationCode(replacement),
+            codeEncrypted: sealUserSecret(replacement, "activation-code"),
+            codePreview: `${replacement.slice(0, 8)}...${replacement.slice(-5)}`,
+            reissuedAt: now,
+            reissuedBy: new ObjectId(auth.user.id),
+            updatedAt: now,
+          },
+          $unset: { code: "" },
+        },
+        { returnDocument: "after" },
+      );
+      if (updated) {
+        code = replacement;
+        reissuedCount += 1;
+      } else {
+        const current = await collection.findOne({ _id: item._id, status: "unused" });
+        code = current?.codeEncrypted ? readUserSecret(current.codeEncrypted, "activation-code") : null;
+      }
+    }
+    if (code) codes.push(code);
+  }
+
+  if (!codes.length) {
+    return c.json({ code: "NO_UNUSED_ACTIVATION_CODES", message: "未使用激活码状态刚刚发生变化，请刷新后重试" }, 404);
+  }
+
+  const exportedAt = new Date();
+  await (await getCollection("authAudit")).insertOne({
+    action: "admin_activation_codes_exported",
+    actorUserId: new ObjectId(auth.user.id),
+    count: codes.length,
+    reissuedCount,
+    createdAt: exportedAt,
+  }).catch(() => null);
+  const date = exportedAt.toISOString().slice(0, 10);
+  const chineseFilename = `古龙-未使用激活码-${date}.txt`;
+  c.header("Content-Type", "text/plain; charset=utf-8");
+  c.header("Content-Disposition", `attachment; filename="gulong-unused-activation-codes-${date}.txt"; filename*=UTF-8''${encodeURIComponent(chineseFilename)}`);
+  c.header("X-Exported-Count", String(codes.length));
+  return c.body(`\uFEFF${codes.join("\r\n")}\r\n`);
 });
 
 app.post("/api/admin/activation-codes", async (c) => {
