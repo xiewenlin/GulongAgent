@@ -4,6 +4,7 @@ import {
   CheckCircle,
   Coins,
   DownloadSimple,
+  Eye,
   File,
   ImageSquare,
   LockKey,
@@ -25,12 +26,16 @@ import remarkGfm from "remark-gfm";
 import { apiFetch, createClientRequestId, formatMoney } from "../api.js";
 import {
   H3_ASSET_ACCEPT,
+  H3_ASSET_LIMITS,
   calculateH3ClientPriceFen,
+  clampH3AssetSelection,
   h3AssetCounts,
   h3AssetDescriptor,
   h3AssetManifest,
   h3AssetReferences,
+  h3ReferenceQuery,
   removeH3AssetAndRemapReferences,
+  replaceH3ReferenceQuery,
   uploadH3AssetFiles,
   validateH3AssetSelection,
 } from "../h3-assets.js";
@@ -122,6 +127,94 @@ async function imageDataUrl(file) {
     reader.onerror = () => reject(new Error(`无法读取参考图 ${file.name}`));
     reader.readAsDataURL(file);
   });
+}
+
+function AttachmentThumbnail({ file, reference = "" }) {
+  const descriptor = h3AssetDescriptor(file);
+  const [previewUrl, setPreviewUrl] = useState("");
+  useEffect(() => {
+    if (descriptor?.kind !== "image" || typeof globalThis.URL?.createObjectURL !== "function") { setPreviewUrl(""); return undefined; }
+    const url = globalThis.URL.createObjectURL(file);
+    setPreviewUrl(url);
+    return () => globalThis.URL.revokeObjectURL(url);
+  }, [file, descriptor?.kind]);
+  return <span className={`agent-attachment-thumbnail ${descriptor?.kind || "file"}`} aria-hidden="true">
+    {previewUrl ? <img src={previewUrl} alt="" /> : descriptor?.kind === "video" ? <VideoCamera size={22} weight="duotone" /> : descriptor?.kind === "image" ? <ImageSquare size={22} weight="duotone" /> : <File size={21} weight="duotone" />}
+    {reference && <b>{reference.replace("@", "")}</b>}
+  </span>;
+}
+
+function matchingH3References(references, picker) {
+  if (!picker) return [];
+  const query = String(picker.query || "").trim().toLocaleLowerCase("zh-CN");
+  return references.filter((item) => !query
+    || item.reference.slice(1).toLocaleLowerCase("zh-CN").includes(query)
+    || item.file.name.toLocaleLowerCase("zh-CN").includes(query));
+}
+
+function H3ReferencePicker({ items, activeIndex = 0, onSelect }) {
+  if (!items.length) return null;
+  return <div className="agent-reference-picker" role="listbox" aria-label="选择要引用的素材">
+    <header><strong>选择参考素材</strong><span>方向键选择，Enter 插入</span></header>
+    <div>{items.map((item, index) => <button type="button" role="option" aria-selected={index === activeIndex} className={index === activeIndex ? "active" : ""} key={`${item.reference}-${item.file.name}`} onMouseDown={(event) => { event.preventDefault(); onSelect(item); }}>
+      <AttachmentThumbnail file={item.file} reference={item.reference} />
+      <span><strong>{item.reference}</strong><small>{item.file.name}</small></span>
+    </button>)}</div>
+  </div>;
+}
+
+function DraftPreviewEditor({ value, setValue, maxLength, references, onClose }) {
+  const textareaRef = useRef(null);
+  const [picker, setPicker] = useState(null);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const suggestions = useMemo(() => matchingH3References(references, picker), [references, picker]);
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = previousOverflow; };
+  }, []);
+
+  function syncPicker(nextValue, caret) {
+    const nextPicker = references.length ? h3ReferenceQuery(nextValue, caret) : null;
+    setPicker(nextPicker);
+    setActiveIndex(0);
+  }
+
+  function selectReference(item) {
+    if (!picker) return;
+    const next = replaceH3ReferenceQuery(value, picker, item.reference);
+    setValue(next.value); setPicker(null);
+    requestAnimationFrame(() => { textareaRef.current?.focus(); textareaRef.current?.setSelectionRange(next.caret, next.caret); });
+  }
+
+  function keyDown(event) {
+    if (picker && suggestions.length) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        setActiveIndex((current) => (current + direction + suggestions.length) % suggestions.length);
+        return;
+      }
+      if (event.key === "Enter" || event.key === "Tab") { event.preventDefault(); selectReference(suggestions[activeIndex] || suggestions[0]); return; }
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      if (picker) setPicker(null); else onClose();
+    }
+  }
+
+  return <div className="agent-draft-preview-backdrop">
+    <section className="agent-draft-preview" role="dialog" aria-modal="true" aria-labelledby="agent-draft-preview-title">
+      <header><div><span>FULL SCREEN EDITOR</span><h2 id="agent-draft-preview-title">提示词预览与编辑</h2><p>大屏检查长文本并直接修改；输入 @ 可选择当前参考素材。</p></div><div><strong>{value.length} / {maxLength}</strong><button className="modal-close" type="button" aria-label="关闭全屏预览" onClick={onClose}><X size={21} /></button></div></header>
+      {references.length > 0 && <div className="agent-draft-reference-strip">{references.map((item) => <span key={`${item.reference}-${item.file.name}`}><AttachmentThumbnail file={item.file} reference={item.reference} /><b>{item.reference}</b><small>{item.file.name}</small></span>)}</div>}
+      <div className="agent-draft-editor-area">
+        <textarea ref={textareaRef} autoFocus maxLength={maxLength} value={value} onChange={(event) => { setValue(event.target.value); syncPicker(event.target.value, event.target.selectionStart); }} onClick={(event) => syncPicker(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyDown={keyDown} placeholder="在这里查看并编辑完整任务说明……" />
+        {picker && <H3ReferencePicker items={suggestions} activeIndex={activeIndex} onSelect={selectReference} />}
+      </div>
+      <footer><span>编辑内容会实时同步回对话框。Esc 返回，输入 @ 可引用素材。</span><button className="button primary" type="button" onClick={onClose}><Check size={18} weight="bold" />完成编辑</button></footer>
+    </section>
+  </div>;
 }
 
 function MediaResult({ item }) {
@@ -234,6 +327,9 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
   const [sending, setSending] = useState(false);
   const [assetOpen, setAssetOpen] = useState(false);
   const [skillOpen, setSkillOpen] = useState(false);
+  const [draftPreviewOpen, setDraftPreviewOpen] = useState(false);
+  const [referencePicker, setReferencePicker] = useState(null);
+  const [referenceActiveIndex, setReferenceActiveIndex] = useState(0);
   const [quotaPrompt, setQuotaPrompt] = useState("");
   const [liveWorkflow, setLiveWorkflow] = useState(null);
   const inputRef = useRef(null);
@@ -313,6 +409,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
   const selectedModel = useMemo(() => availableModels.find((item) => item.id === model), [availableModels, model]);
   const isH3Video = creationType === "video" && model === H3_SHARED_MODEL.id;
   const h3References = useMemo(() => isH3Video ? h3AssetReferences(attachments) : [], [attachments, isH3Video]);
+  const referenceSuggestions = useMemo(() => matchingH3References(h3References, referencePicker), [h3References, referencePicker]);
   const h3Counts = useMemo(() => h3AssetCounts(attachments), [attachments]);
   const h3EstimatedPriceFen = useMemo(() => {
     if (!isH3Video) return 0;
@@ -327,7 +424,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
     setAttachments((current) => nextType === "text"
       ? current
       : nextType === "video"
-        ? current.filter((file) => h3AssetDescriptor(file))
+        ? clampH3AssetSelection(current.filter((file) => h3AssetDescriptor(file))).files
         : current.filter((file) => file.type.startsWith("image/")));
     setMessage("");
   }
@@ -337,6 +434,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
     if (creationType === "video") {
       if (nextModel === H3_SHARED_MODEL.id) {
         if (!H3_VIDEO_DURATIONS.includes(duration)) setDuration(5);
+        setAttachments((current) => clampH3AssetSelection(current).files);
       } else {
         if (!(bootstrap?.mediaOptions?.videoDurations || [5]).includes(duration)) setDuration(5);
         setAttachments((current) => current.filter((file) => file.type.startsWith("image/")));
@@ -369,10 +467,11 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
     event.target.value = "";
     if (isH3Video) {
       try {
-        const next = [...attachments, ...files];
-        validateH3AssetSelection(next);
-        setAttachments(next);
-        setMessage("");
+        const selection = clampH3AssetSelection([...attachments, ...files]);
+        validateH3AssetSelection(selection.files);
+        setAttachments(selection.files);
+        const skippedCount = Object.values(selection.skipped).reduce((sum, value) => sum + value, 0);
+        setMessage(skippedCount ? "参考素材已限制为图片最多 3 张、视频最多 3 个、音频最多 3 个，超出或不支持的文件未添加。" : "");
       } catch (error) { setMessage(error.message); }
       return;
     }
@@ -399,11 +498,24 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
     const insertion = `${prefix}${reference}${suffix}`;
     const next = `${before}${insertion}${after}`;
     const caret = before.length + insertion.length;
-    setDraft(next);
+    setDraft(next); setReferencePicker(null);
     requestAnimationFrame(() => {
       inputRef.current?.focus();
       inputRef.current?.setSelectionRange(caret, caret);
     });
+  }
+
+  function syncReferencePicker(value, caret) {
+    const nextPicker = isH3Video && h3References.length ? h3ReferenceQuery(value, caret) : null;
+    setReferencePicker(nextPicker);
+    setReferenceActiveIndex(0);
+  }
+
+  function selectTypedReference(item) {
+    if (!referencePicker) return;
+    const next = replaceH3ReferenceQuery(draft, referencePicker, item.reference);
+    setDraft(next.value); setReferencePicker(null);
+    requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.setSelectionRange(next.caret, next.caret); });
   }
 
   function removeAttachment(index) {
@@ -496,6 +608,18 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
   }
 
   function keyDown(event) {
+    if (referencePicker && referenceSuggestions.length) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        setReferenceActiveIndex((current) => (current + direction + referenceSuggestions.length) % referenceSuggestions.length);
+        return;
+      }
+      if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault(); selectTypedReference(referenceSuggestions[referenceActiveIndex] || referenceSuggestions[0]); return;
+      }
+      if (event.key === "Escape") { event.preventDefault(); setReferencePicker(null); return; }
+    }
     if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); }
   }
 
@@ -521,14 +645,15 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
         <div className="agent-composer-wrap">
           {message && <div className="agent-inline-alert"><LockKey size={18} /><span>{message}</span><button type="button" onClick={() => setMessage("")}><X size={16} /></button></div>}
           {!bootstrap?.subscription?.active && !loading && <div className="agent-membership-gate"><div><Coins size={24} weight="duotone" /><span><strong>会员订阅尚未生效</strong><small>免费文字对话需开通会员；付费图片与视频可使用已有余额按次创作。</small></span></div><button type="button" onClick={() => navigate("/pricing")}>查看会员 <ArrowRight size={16} /></button></div>}
-          <div className="agent-mode-row"><div className="agent-creation-hint">{creationType === "text" ? "免费文字对话" : isH3Video ? `${formatMoney(h3EstimatedPriceFen)} · MiniMaxH3共享节点预估价` : (selectedModel?.priceLabel || "按实际模型计费")}</div><span>{draft.length} / {isH3Video ? 20000 : 4096}</span></div>
-          {isH3Video && <div className="agent-h3-asset-summary"><strong>多参素材</strong><span>图片 {h3Counts.image} / 9</span><span>视频 {h3Counts.video} / 3</span><span>音频 {h3Counts.audio} / 3</span><small>上传后可用 @ 引用</small></div>}
+          <div className="agent-mode-row"><div className="agent-creation-hint">{creationType === "text" ? "免费文字对话" : isH3Video ? `${formatMoney(h3EstimatedPriceFen)} · MiniMaxH3共享节点预估价` : (selectedModel?.priceLabel || "按实际模型计费")}</div><div className="agent-draft-meta"><button type="button" onClick={() => { setReferencePicker(null); setDraftPreviewOpen(true); }} title="全屏查看并编辑长文本"><Eye size={19} weight="duotone" /><span>预览编辑</span></button><span>{draft.length} / {isH3Video ? 20000 : 4096}</span></div></div>
+          {isH3Video && <div className="agent-h3-asset-summary"><strong>多参素材</strong><span>图片 {h3Counts.image} / {H3_ASSET_LIMITS.image}</span><span>视频 {h3Counts.video} / {H3_ASSET_LIMITS.video}</span><span>音频 {h3Counts.audio} / {H3_ASSET_LIMITS.audio}</span><small>输入 @ 可选择并引用素材</small></div>}
           {isH3Video && h3References.length > 0 && <div className="agent-h3-reference-bar"><strong>@ 引用素材</strong>{h3References.map((item) => <button type="button" disabled={sending} key={`${item.file.name}-${item.index}`} onClick={() => insertH3Reference(item.reference)}>{item.reference}</button>)}</div>}
-          {attachments.length > 0 && <div className="agent-attachment-row">{attachments.map((file, index) => <span key={`${file.name}-${index}`}><File size={16} />{h3References[index]?.reference && <button className="agent-h3-reference-token" type="button" disabled={sending} title={`插入 ${h3References[index].reference}`} onClick={() => insertH3Reference(h3References[index].reference)}>{h3References[index].reference}</button>}<b>{file.name}</b><small>{byteText(file.size)}</small><button type="button" disabled={sending} aria-label={`移除 ${file.name}`} onClick={() => removeAttachment(index)}><X size={14} /></button></span>)}</div>}
+          {attachments.length > 0 && <div className="agent-attachment-row">{attachments.map((file, index) => <article key={`${file.name}-${index}`}><AttachmentThumbnail file={file} reference={h3References[index]?.reference} /><div>{h3References[index]?.reference && <button className="agent-h3-reference-token" type="button" disabled={sending} title={`插入 ${h3References[index].reference}`} onClick={() => insertH3Reference(h3References[index].reference)}>{h3References[index].reference}</button>}<b title={file.name}>{file.name}</b><small>{byteText(file.size)}</small></div><button className="agent-attachment-remove" type="button" disabled={sending} aria-label={`移除 ${file.name}`} onClick={() => removeAttachment(index)}><X size={15} /></button></article>)}</div>}
           {assetUploadProgress && <div className="agent-h3-upload-progress"><SpinnerGap size={18} className="agent-spin" /><span>正在安全上传 {assetUploadProgress.name}</span><strong>{assetUploadProgress.completed || 0} / {assetUploadProgress.total || attachments.length}</strong></div>}
-          <textarea ref={inputRef} maxLength={isH3Video ? 20000 : 4096} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={keyDown} placeholder={isH3Video ? "描述视频任务，可用 @图片1、@视频1、@音频1 精确引用素材。Enter 发送，Shift + Enter 换行" : "描述任务；上传附件后输入你的要求。Enter 发送，Shift + Enter 换行"} />
+          <textarea ref={inputRef} maxLength={isH3Video ? 20000 : 4096} value={draft} onChange={(event) => { setDraft(event.target.value); syncReferencePicker(event.target.value, event.target.selectionStart); }} onSelect={(event) => syncReferencePicker(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyDown={keyDown} placeholder={isH3Video ? "描述视频任务，输入 @ 可选择图片、视频或音频素材。Enter 发送，Shift + Enter 换行" : "描述任务；上传附件后输入你的要求。Enter 发送，Shift + Enter 换行"} />
+          {referencePicker && <H3ReferencePicker items={referenceSuggestions} activeIndex={referenceActiveIndex} onSelect={selectTypedReference} />}
           <footer>
-            <label className="agent-attach-button" title={creationType === "text" ? "最多 12 个附件" : isH3Video ? "图片最多 9 张、视频最多 3 个、音频最多 3 个" : "上传参考图，每张不超过 600 KB"}><Paperclip size={20} /><span>{creationType === "text" ? "附件" : isH3Video ? "多模态素材" : "参考图"}</span><input type="file" multiple disabled={sending} accept={creationType === "text" ? "image/*,video/*,.txt,.md,.csv,.json,.pdf,.docx,.xlsx,.pptx" : isH3Video ? H3_ASSET_ACCEPT : "image/jpeg,image/png,image/webp"} onChange={pickAttachments} /></label>
+            <label className="agent-attach-button" title={creationType === "text" ? "最多 12 个附件" : isH3Video ? "图片最多 3 张、视频最多 3 个、音频最多 3 个" : "上传参考图，每张不超过 600 KB"}><Paperclip size={20} /><span>{creationType === "text" ? "附件" : isH3Video ? "多模态素材" : "参考图"}</span><input type="file" multiple disabled={sending} accept={creationType === "text" ? "image/*,video/*,.txt,.md,.csv,.json,.pdf,.docx,.xlsx,.pptx" : isH3Video ? H3_ASSET_ACCEPT : "image/jpeg,image/png,image/webp"} onChange={pickAttachments} /></label>
             <div className="agent-type-select"><span>{creationType === "text" ? <TextT size={18} /> : creationType === "image" ? <ImageSquare size={18} /> : <VideoCamera size={18} />}</span><select value={creationType} onChange={(event) => changeCreationType(event.target.value)}><option value="text">文字</option><option value="image">图片</option><option value="video">视频</option></select></div>
             {creationType === "image" && <div className="agent-parameter-select"><select value={imageSize} onChange={(event) => setImageSize(event.target.value)}>{(bootstrap?.mediaOptions?.imageSizes || ["1:1"]).map((value) => <option key={value} value={value}>{value}</option>)}</select></div>}
             {creationType === "video" && <><div className="agent-parameter-select"><select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)}><option value="16:9">16:9 横屏</option><option value="9:16">9:16 竖屏</option></select></div><div className="agent-parameter-select"><select value={duration} onChange={(event) => setDuration(Number(event.target.value))}>{(isH3Video ? H3_VIDEO_DURATIONS : bootstrap?.mediaOptions?.videoDurations || [5]).map((value) => <option key={value} value={value}>{value} 秒</option>)}</select></div>{isH3Video && <button className={`agent-h3-prompt-toggle ${h3PromptOptimizationEnabled ? "active" : ""}`} type="button" disabled={sending} aria-pressed={h3PromptOptimizationEnabled} aria-label={`魔法提示词优化${h3PromptOptimizationEnabled ? "已开启" : "已关闭"}`} title={h3PromptOptimizationEnabled ? "已开启：桌面节点会先优化提示词" : "未开启：桌面节点直接使用原始提示词"} onClick={() => setH3PromptOptimizationEnabled((enabled) => !enabled)}><MagicWand size={20} weight={h3PromptOptimizationEnabled ? "fill" : "duotone"} /><span>魔法优化</span><em>{h3PromptOptimizationEnabled ? "开" : "关"}</em></button>}</>}
@@ -541,6 +666,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
 
     {assetOpen && <AssetPanel bootstrap={bootstrap} onClose={() => setAssetOpen(false)} navigate={navigate} />}
     {skillOpen && <SkillPanel onClose={() => setSkillOpen(false)} setDraft={(value) => { setDraft(value); setTimeout(() => inputRef.current?.focus(), 0); }} />}
+    {draftPreviewOpen && <DraftPreviewEditor value={draft} setValue={setDraft} maxLength={isH3Video ? 20000 : 4096} references={h3References} onClose={() => setDraftPreviewOpen(false)} />}
     {quotaPrompt && <QuotaPrompt kind={quotaPrompt} onClose={() => setQuotaPrompt("")} navigate={navigate} />}
   </main>;
 }

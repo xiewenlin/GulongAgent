@@ -1,4 +1,4 @@
-export const H3_ASSET_LIMITS = Object.freeze({ image: 9, video: 3, audio: 3 });
+export const H3_ASSET_LIMITS = Object.freeze({ image: 3, video: 3, audio: 3 });
 export const H3_MAX_ASSET_BYTES = 2 * 1024 * 1024 * 1024;
 export const H3_ASSET_ACCEPT = "image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime,audio/mpeg,audio/mp4,audio/wav,audio/x-wav,audio/ogg,audio/webm";
 
@@ -61,6 +61,25 @@ export function h3AssetReferences(files = []) {
   });
 }
 
+export function h3ReferenceQuery(value = "", caret = String(value || "").length) {
+  const text = String(value || "");
+  const safeCaret = Math.max(0, Math.min(Number.isInteger(caret) ? caret : text.length, text.length));
+  const match = text.slice(0, safeCaret).match(/@[\p{Script=Han}\d]*$/u);
+  if (!match) return null;
+  return { start: safeCaret - match[0].length, end: safeCaret, query: match[0].slice(1) };
+}
+
+export function replaceH3ReferenceQuery(value = "", range, reference) {
+  const text = String(value || "");
+  const start = Math.max(0, Math.min(Number(range?.start) || 0, text.length));
+  const end = Math.max(start, Math.min(Number(range?.end) || start, text.length));
+  const normalizedReference = String(reference || "").trim();
+  const after = text.slice(end);
+  const suffix = after && !/^\s/.test(after) ? " " : "";
+  const next = `${text.slice(0, start)}${normalizedReference}${suffix}${after}`;
+  return { value: next, caret: start + normalizedReference.length + suffix.length };
+}
+
 export function removeH3AssetAndRemapReferences(files = [], index, prompt = "") {
   const oldReferences = h3AssetReferences(files);
   const nextFiles = files.filter((_, itemIndex) => itemIndex !== index);
@@ -91,6 +110,26 @@ export function validateH3AssetSelection(files = []) {
   if (counts.video > H3_ASSET_LIMITS.video) throw new Error(`视频最多上传 ${H3_ASSET_LIMITS.video} 个`);
   if (counts.audio > H3_ASSET_LIMITS.audio) throw new Error(`音频最多上传 ${H3_ASSET_LIMITS.audio} 个`);
   return counts;
+}
+
+export function clampH3AssetSelection(files = []) {
+  const counts = { image: 0, video: 0, audio: 0 };
+  const accepted = [];
+  const skipped = { image: 0, video: 0, audio: 0, unsupported: 0 };
+  for (const file of files) {
+    const descriptor = h3AssetDescriptor(file);
+    if (!descriptor) {
+      skipped.unsupported += 1;
+      continue;
+    }
+    if (counts[descriptor.kind] >= H3_ASSET_LIMITS[descriptor.kind]) {
+      skipped[descriptor.kind] += 1;
+      continue;
+    }
+    counts[descriptor.kind] += 1;
+    accepted.push(file);
+  }
+  return { files: accepted, counts, skipped };
 }
 
 export function calculateH3ClientPriceFen(durationSeconds, files = []) {
