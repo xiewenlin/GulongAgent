@@ -30,6 +30,8 @@ export const WALLET_PROMOTION_BONUS_RATE = 0.1;
 export const WALLET_RECHARGE_BONUS_THRESHOLD_FEN = 50_000;
 
 export const PEAR_API_FREE_MODELS = Object.freeze([
+  { id: "ox-alpha", name: "OX-Alpha", vendor: "Open", description: "面向通用对话与创作的免费模型，适合日常问答、内容整理和多步骤任务。" },
+  { id: "minimax-m3", name: "MiniMax-M3", vendor: "MiniMax", description: "面向真实生产环境的高吞吐、低延迟模型，适合代码、推理与代理任务。" },
   { id: "glm-4-flash-250414", name: "GLM-4-Flash-250414", vendor: "GLM", description: "轻量通用模型，适合日常问答、多任务处理与长上下文。" },
   { id: "GPT-OSS-120B", name: "GPT-OSS-120B", vendor: "OpenAI", upstreamIds: ["GPT-OSS-120B", "gpt-oss-120b"], description: "大参数开放模型，适合综合分析、写作与复杂指令。" },
   { id: "hunyuan-mt-7b", name: "Hunyuan-MT-7B", vendor: "Tencent", description: "面向多语言互译的轻量模型，覆盖多种语言。" },
@@ -38,6 +40,8 @@ export const PEAR_API_FREE_MODELS = Object.freeze([
   { id: "spark-lite", name: "Spark-Lite", vendor: "Spark", description: "轻量文本生成与问答模型，适合响应敏感场景。" },
   { id: "step-3.5-flash", name: "Step-3.5-Flash", vendor: "Stepfun", description: "低延迟通用模型，适合快速推理与实时交互。" },
 ]);
+
+export const PEAR_API_DEFAULT_TEXT_MODEL_ID = "ox-alpha";
 
 const FREE_MODEL_IDS = new Set(PEAR_API_FREE_MODELS.map((model) => model.id));
 const FREE_MODEL_MAP = new Map(PEAR_API_FREE_MODELS.map((model) => [model.id, model]));
@@ -658,7 +662,7 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     responses: { 200: { description: "返回全部免费模型的实时可用状态" }, 503: { description: "免费渠道令牌无效或服务不可用", content: { "application/json": { schema: ErrorSchema } } } },
   });
 
-  app.openapi(modelsRoute, (c) => c.json({ models: PEAR_API_FREE_MODELS.map((model) => ({ ...model, free: true })), defaultModel: PEAR_API_FREE_MODELS[0].id }));
+  app.openapi(modelsRoute, (c) => c.json({ models: PEAR_API_FREE_MODELS.map((model) => ({ ...model, free: true })), defaultModel: PEAR_API_DEFAULT_TEXT_MODEL_ID }));
 
   app.openapi(bootstrapRoute, async (c) => {
     const auth = await authenticate(c); if (auth.error) return auth.error;
@@ -676,7 +680,7 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
       subscription: accountUsage.subscription,
       shortVideoPackage: accountUsage.shortVideoPackage,
       models: PEAR_API_FREE_MODELS.map((model) => ({ ...model, free: true })),
-      defaultModel: PEAR_API_FREE_MODELS[0].id,
+      defaultModel: PEAR_API_DEFAULT_TEXT_MODEL_ID,
       mediaModels: {
         image: PEAR_API_IMAGE_MODELS.map((model) => publicPearMediaModel(model, PEAR_API_MARKUP_RATE)),
         video: PEAR_API_VIDEO_MODELS.map((model) => publicPearMediaModel(model, PEAR_API_MARKUP_RATE)),

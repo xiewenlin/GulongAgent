@@ -5,6 +5,7 @@ import { OpenAPIHono } from "@hono/zod-openapi";
 import { ObjectId } from "mongodb";
 import {
   PEAR_API_BASE_URL,
+  PEAR_API_DEFAULT_TEXT_MODEL_ID,
   PEAR_API_FREE_MODELS,
   PEAR_API_MARKUP_RATE,
   PEAR_API_TOKEN_CHANNELS,
@@ -20,10 +21,13 @@ import {
 } from "../../server/pearapi.js";
 import { PEAR_API_IMAGE_MODELS, PEAR_API_VIDEO_MODELS, publicPearMediaModel, resolvePearAutoModel } from "../../server/pearapi-models.js";
 
-test("PearAPI web agent only exposes the seven approved free models", () => {
+test("PearAPI web agent exposes nine approved free models with OX-Alpha as default", () => {
   assert.equal(PEAR_API_BASE_URL, "https://api.pearapi.ai");
-  assert.equal(PEAR_API_FREE_MODELS.length, 7);
+  assert.equal(PEAR_API_DEFAULT_TEXT_MODEL_ID, "ox-alpha");
+  assert.equal(PEAR_API_FREE_MODELS.length, 9);
   assert.deepEqual(PEAR_API_FREE_MODELS.map((model) => model.id), [
+    "ox-alpha",
+    "minimax-m3",
     "glm-4-flash-250414",
     "GPT-OSS-120B",
     "hunyuan-mt-7b",
@@ -128,6 +132,22 @@ test("chat rejects models outside the free allowlist before any upstream request
   );
 });
 
+test("MiniMax-M3 and OX-Alpha use their published PearAPI model IDs", async () => {
+  const calls = [];
+  const fetchImpl = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    calls.push(body.model);
+    return Response.json({ id: `response-${body.model}`, model: body.model, choices: [{ message: { content: `来自 ${body.model} 的回复` } }] });
+  };
+  const minimax = await callPearApiChat({ token: "valid-test-token", model: "minimax-m3", messages: [{ role: "user", content: "你好" }], fetchImpl, timeoutMs: 1_000 });
+  const oxAlpha = await callPearApiChat({ token: "valid-test-token", model: "ox-alpha", messages: [{ role: "user", content: "你好" }], fetchImpl, timeoutMs: 1_000 });
+  assert.deepEqual(calls, ["minimax-m3", "ox-alpha"]);
+  assert.equal(minimax.resolvedModel, "minimax-m3");
+  assert.equal(oxAlpha.resolvedModel, "ox-alpha");
+  assert.equal(minimax.fallback, false);
+  assert.equal(oxAlpha.fallback, false);
+});
+
 test("GPT-OSS retries the public lowercase alias when the canonical model ID is rejected", async () => {
   const calls = [];
   const fetchImpl = async (_url, options) => {
@@ -158,7 +178,7 @@ test("a transient free-model outage falls back to the known healthy free model",
   assert.equal(result.fallbackReason, "PEAR_API_UPSTREAM_ERROR");
 });
 
-test("the administrator health check probes all seven free models independently", async () => {
+test("the administrator health check probes all nine free models independently", async () => {
   const calls = [];
   const fetchImpl = async (_url, options) => {
     const body = JSON.parse(options.body);
@@ -166,8 +186,8 @@ test("the administrator health check probes all seven free models independently"
     return Response.json({ id: body.model, model: body.model, choices: [{ message: { content: "正常" } }] });
   };
   const health = await checkPearApiFreeModels({ token: "valid-test-token", fetchImpl, timeoutMs: 1_000 });
-  assert.equal(health.total, 7);
-  assert.equal(health.healthy, 7);
+  assert.equal(health.total, 9);
+  assert.equal(health.healthy, 9);
   assert.equal(health.allAvailable, true);
   assert.deepEqual(new Set(calls), new Set(PEAR_API_FREE_MODELS.map((model) => model.id)));
 });
@@ -181,7 +201,9 @@ test("PearAPI routes publish the free-model and protected admin contracts in Ope
   });
   const response = await app.request("/api/agent/models");
   assert.equal(response.status, 200);
-  assert.equal((await response.json()).models.length, 7);
+  const catalog = await response.json();
+  assert.equal(catalog.models.length, 9);
+  assert.equal(catalog.defaultModel, "ox-alpha");
   const document = app.getOpenAPIDocument({ openapi: "3.1.0", info: { title: "test", version: "1" } });
   assert.ok(document.paths["/api/agent/chat"]?.post);
   assert.ok(document.paths["/api/agent/workflows/{operationId}"]?.get);
@@ -219,6 +241,9 @@ test("website exposes the simplified agent while user settings no longer expose 
   assert.match(appSource, /<small className="brand-web-entry">网页版入口<\/small>/);
   assert.match(agentSource, /返回官网/);
   assert.match(agentSource, /远程模型已连接/);
+  assert.match(agentSource, /useState\("ox-alpha"\)/);
+  assert.match(agentSource, /result\.defaultModel \|\| "ox-alpha"/);
+  assert.match(agentSource, /bootstrap\?\.models\?\.length \|\| 9/);
   assert.match(agentSource, /拓展技能/);
   assert.match(agentSource, /剩余用量/);
   assert.match(agentSource, /MEMBERSHIP REQUIRED/);
@@ -247,6 +272,7 @@ test("website exposes the simplified agent while user settings no longer expose 
   assert.doesNotMatch(agentSource, /rehypeRaw/);
   assert.match(adminSource, /\{ id: "tokens", label: "令牌配置", icon: LockKey \}/);
   assert.match(adminSource, /\["默认", "优质", "免费", "按次", "特价", "限时免费"\]/);
+  assert.match(adminSource, /config\?\.models\?\.length \|\| 9/);
   assert.doesNotMatch(accountSource, /id: "minimax"/);
   assert.doesNotMatch(accountSource, /MiniMax 配置/);
 });

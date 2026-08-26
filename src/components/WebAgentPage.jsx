@@ -303,7 +303,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
-  const [model, setModel] = useState("glm-4-flash-250414");
+  const [model, setModel] = useState("ox-alpha");
   const [creationType, setCreationType] = useState("text");
   const [imageSize, setImageSize] = useState("1:1");
   const [aspectRatio, setAspectRatio] = useState("16:9");
@@ -335,7 +335,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
     setMessages([]);
     setConversationId(sessionStorage.getItem(`gulong-agent-conversation:${user.id}`) || "");
     setLoading(true);
-    apiFetch("/api/agent/bootstrap").then((result) => { setBootstrap(result); setModel(result.defaultModel || "glm-4-flash-250414"); }).catch((error) => setMessage(error.message)).finally(() => setLoading(false));
+    apiFetch("/api/agent/bootstrap").then((result) => { setBootstrap(result); setModel(result.defaultModel || "ox-alpha"); }).catch((error) => setMessage(error.message)).finally(() => setLoading(false));
   }, [user?.id]);
 
   useEffect(() => {
@@ -407,7 +407,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
 
   function changeCreationType(nextType) {
     setCreationType(nextType);
-    setModel(nextType === "text" ? (bootstrap?.defaultModel || "glm-4-flash-250414") : nextType === "video" ? H3_SHARED_MODEL.id : (bootstrap?.mediaDefaults?.[nextType] || `auto-${nextType}`));
+    setModel(nextType === "text" ? (bootstrap?.defaultModel || "ox-alpha") : nextType === "video" ? H3_SHARED_MODEL.id : (bootstrap?.mediaDefaults?.[nextType] || `auto-${nextType}`));
     if (nextType === "video") setDuration(5);
     setAttachments((current) => nextType === "text"
       ? current
@@ -620,7 +620,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
     </div>
 
     <section className="agent-workspace section-shell">
-      <header className="agent-workspace-head"><div><span>PEARAPI FREE MODEL CLOUD</span><h1>今天想完成什么？</h1><p>7 个免费模型由古龙服务端统一调度；每次回复展示实时处理节点，不加载第二大脑、本地模型、插件或扩展工作流。</p></div><div className="agent-live-status"><i className={bootstrap?.configured ? "ready" : ""} /><span>{loading ? "正在连接" : bootstrap?.configured ? "远程模型已连接" : "等待管理员配置"}</span></div></header>
+      <header className="agent-workspace-head"><div><span>PEARAPI FREE MODEL CLOUD</span><h1>今天想完成什么？</h1><p>{bootstrap?.models?.length || 9} 个免费模型由古龙服务端统一调度；每次回复展示实时处理节点，不加载第二大脑、本地模型、插件或扩展工作流。</p></div><div className="agent-live-status"><i className={bootstrap?.configured ? "ready" : ""} /><span>{loading ? "正在连接" : bootstrap?.configured ? "远程模型已连接" : "等待管理员配置"}</span></div></header>
 
       <div className="agent-chat-shell">
         <div className="agent-chat-stream" aria-live="polite">
