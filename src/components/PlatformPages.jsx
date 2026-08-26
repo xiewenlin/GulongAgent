@@ -93,7 +93,7 @@ export function DownloadPage() {
       description: "面向个人用户、独立开发者与小型团队的标准版本。第一次接触古龙，直接选择这一版即可。",
       suitable: "适合希望快速拥有 AI 团队，并使用官方标准能力与持续更新的用户。",
       features: ["完整智能体引擎与任务工作流", "第二大脑、技能与插件能力", "本地优先的数据与模型配置"],
-      icon: "/assets/gulong-edition-icon.png",
+      icon: "/assets/gulong-agent-icon.png",
     },
     {
       key: "yongshenghua",
@@ -103,7 +103,7 @@ export function DownloadPage() {
       description: "为 AI 视频创作者与算力节点打造的高性能桌面版，整合 MiniMax H3 本地视频链路、PromptEngine、Z-Image 与 ComfyUI，一套安装包即可进入创作。",
       suitable: "适合配备 NVIDIA 显卡、重视本地隐私和视频生成效率，并希望参与 H3 共享节点接单收益的个人与团队。",
       features: ["MiniMax H3 本地视频创作链路", "针对 16GB 显存场景持续优化", "PromptEngine、Z-Image 与 ComfyUI 一体化", "可作为共享节点接单并查看真实收益"],
-      icon: "/assets/yongshenghua-edition-icon.png",
+      icon: "/assets/gulong-agent-icon.png",
     },
   ];
 

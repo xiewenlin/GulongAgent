@@ -1118,8 +1118,7 @@ test("download page explains both desktop editions", async () => {
   assert.match(source, /MiniMax H3 极速视频版/);
   assert.match(source, /PromptEngine、Z-Image 与 ComfyUI/);
   assert.doesNotMatch(source, /永生花定制版/);
-  assert.match(source, /gulong-edition-icon\.png/);
-  assert.match(source, /yongshenghua-edition-icon\.png/);
+  assert.equal((source.match(/gulong-agent-icon\.png/g) || []).length, 2);
   assert.match(adminSource, /return "MiniMax H3 极速视频版"/);
   assert.match(source, /\/api\/downloads\/\$\{editionKey\}\/download/);
   assert.match(source, /\/api\/platform\?_platform_path=downloads/);

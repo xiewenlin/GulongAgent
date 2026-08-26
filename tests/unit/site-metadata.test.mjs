@@ -14,6 +14,14 @@ test("browser bookmarks and social previews use the Gulong product title", async
   assert.match(html, new RegExp(`property="og:title" content="${expectedTitle}"`));
   assert.match(html, new RegExp(`name="twitter:title" content="${expectedTitle}"`));
   assert.doesNotMatch(html, /AI Tool Finder|Discover the Best AI Tools/i);
+  assert.match(html, /\/assets\/gulong-agent-icon\.png\?v=20260826-gulong-agent-1/);
   assert.equal(manifest.name, expectedTitle);
   assert.equal(manifest.short_name, "古龙 Gulong Agent Engine");
+  assert.equal(manifest.icons[0].src, "/assets/gulong-agent-icon.png");
+});
+
+test("all website themes use the same Gulong Agent brand icon", async () => {
+  const siteSource = await readFile(new URL("../../src/data/site.js", import.meta.url), "utf8");
+  assert.equal((siteSource.match(/icon: "\/assets\/gulong-agent-icon\.png"/g) || []).length, 4);
+  assert.doesNotMatch(siteSource, /gulong-theme-(?:yuci|sunrise|bamboo|iris)-3d-v2\.png/);
 });

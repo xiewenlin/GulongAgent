@@ -9,7 +9,7 @@
   "theme_color": "#fbfaf6",
   "icons": [
     {
-      "src": "/assets/themes/gulong-theme-yuci-3d-v2.png",
+      "src": "/assets/gulong-agent-icon.png",
       "sizes": "any",
       "type": "image/png",
       "purpose": "any maskable"
