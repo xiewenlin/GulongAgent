@@ -33,6 +33,11 @@
   --radius-lg: 24px;
 }
 
+/* Keep the shared Gulong brand artwork legible and consistent in every theme. */
+img[src*="/assets/gulong-agent-icon.png"] {
+  background: #fff;
+}
+
 /* Simplified PearAPI web agent */
 .web-agent-page { min-height: calc(100vh - 82px); padding-bottom: 86px; background: radial-gradient(circle at 12% 6%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 27%), radial-gradient(circle at 88% 14%, color-mix(in srgb, var(--primary) 8%, transparent), transparent 28%), var(--bg); }
 .agent-topbar { min-height: 92px; display: flex; align-items: center; justify-content: space-between; gap: 24px; border-bottom: 1px solid color-mix(in srgb, var(--line) 76%, transparent); }
@@ -67,10 +72,14 @@
 .agent-empty-chat > div:last-child button:hover { color: var(--primary); border-color: color-mix(in srgb, var(--primary) 35%, var(--line)); background: color-mix(in srgb, var(--primary) 4%, var(--surface)); }
 .agent-message { width: min(1200px, 92%); max-width: none; margin: 0 auto 28px; display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 14px; }
 .agent-message-avatar { width: 42px; height: 42px; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line); border-radius: 50%; color: #fff; background: var(--primary); font-size: 18px; font-weight: 850; }
-.agent-message-avatar img { width: 100%; height: 100%; object-fit: cover; }
-.agent-message > div:last-child { min-width: 0; padding: 16px 19px; border: 1px solid var(--line); border-radius: 6px 20px 20px; background: var(--surface); box-shadow: 0 12px 32px rgba(29, 52, 46, .055); }
-.agent-message.user > div:last-child { background: color-mix(in srgb, var(--primary) 7%, var(--surface)); }
-.agent-message header { display: flex; align-items: center; gap: 9px; }
+.agent-message-avatar img { width: 100%; height: 100%; object-fit: contain; background: #fff; }
+.agent-message.assistant .agent-message-avatar { background: #fff; }
+.agent-message > div:last-child { width: min(100%, 960px); min-width: 0; justify-self: start; padding: 16px 19px; border: 1px solid var(--line); border-radius: 6px 20px 20px; background: var(--surface); box-shadow: 0 12px 32px rgba(29, 52, 46, .055); }
+.agent-message.user { grid-template-columns: minmax(0, 1fr) 46px; }
+.agent-message.user .agent-message-avatar { grid-column: 2; grid-row: 1; justify-self: end; }
+.agent-message.user > div:last-child { grid-column: 1; grid-row: 1; justify-self: end; border-radius: 20px 6px 20px 20px; background: color-mix(in srgb, var(--primary) 7%, var(--surface)); }
+.agent-message.user header { justify-content: flex-end; }
+.agent-message header { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
 .agent-message header strong { font-size: 18px; }
 .agent-message header time { color: var(--muted); font-size: 18px; }
 .agent-message header em { margin-left: auto; padding: 3px 8px; border-radius: 999px; color: var(--success); background: color-mix(in srgb, var(--success) 9%, transparent); font-size: 18px; font-style: normal; font-weight: 800; }
@@ -367,8 +376,10 @@
   .agent-empty-chat > div:last-child { grid-template-columns: 1fr; }
   .agent-empty-chat > div:last-child button:nth-child(n + 3) { display: none; }
   .agent-message { width: 100%; grid-template-columns: 38px minmax(0, 1fr); gap: 9px; }
+  .agent-message.user { grid-template-columns: minmax(0, 1fr) 38px; }
   .agent-message-avatar { width: 36px; height: 36px; }
   .agent-message > div:last-child { padding: 13px 14px; }
+  .agent-message header em { flex-basis: 100%; margin: 3px 0 0; text-align: center; }
   .agent-workflow-trace > header { align-items: flex-start; flex-direction: column; gap: 5px; }
   .agent-workflow-node { min-width: 155px; }
   .agent-composer-wrap { margin: 0 9px 9px; padding: 11px; border-radius: 18px; }
