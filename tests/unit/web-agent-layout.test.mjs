@@ -22,3 +22,17 @@ test("web agent aligns Gulong replies left and user messages right", async () =>
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.agent-message\.user\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) 38px;/s);
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.agent-message header em\s*\{[^}]*flex-basis:\s*100%;/s);
 });
+
+test("web agent scrolls to the latest message only once and renders replies below their workflow", async () => {
+  const source = await readFile(new URL("../../src/components/WebAgentPage.jsx", import.meta.url), "utf8");
+  assert.match(source, /const streamRef = useRef\(null\);/);
+  assert.match(source, /const initialScrollDoneRef = useRef\(false\);/);
+  assert.match(source, /if \(!initialScrollDoneRef\.current\)[\s\S]*?initialScrollDoneRef\.current = true;[\s\S]*?stream\.scrollTop = stream\.scrollHeight;/);
+  assert.match(source, /className="agent-chat-stream" aria-live="polite" ref=\{streamRef\}/);
+  assert.doesNotMatch(source, /scrollIntoView\(\{ behavior: "smooth", block: "nearest" \}\)/);
+  assert.doesNotMatch(source, /\[messages, sending\]/);
+
+  const workflowIndex = source.indexOf("<WorkflowTrace workflow={item.workflow} />");
+  const replyIndex = source.indexOf("<MarkdownMessage>{item.content}</MarkdownMessage>");
+  assert.ok(workflowIndex >= 0 && replyIndex > workflowIndex, "assistant reply must render below its workflow trace");
+});

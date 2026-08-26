@@ -321,7 +321,8 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
   const [quotaPrompt, setQuotaPrompt] = useState("");
   const [liveWorkflow, setLiveWorkflow] = useState(null);
   const inputRef = useRef(null);
-  const endRef = useRef(null);
+  const streamRef = useRef(null);
+  const initialScrollDoneRef = useRef(false);
   const pollersRef = useRef(new Map());
 
   function rememberConversation(nextConversationId) {
@@ -331,6 +332,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
   }
 
   useEffect(() => {
+    initialScrollDoneRef.current = false;
     if (!user) { setLoading(false); setBootstrap(null); return; }
     setMessages([]);
     setConversationId(sessionStorage.getItem(`gulong-agent-conversation:${user.id}`) || "");
@@ -360,6 +362,13 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
           }
           return next;
         });
+        if (!initialScrollDoneRef.current) {
+          initialScrollDoneRef.current = true;
+          window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+            const stream = streamRef.current;
+            if (stream) stream.scrollTop = stream.scrollHeight;
+          }));
+        }
       } catch (error) {
         if (!cancelled && error.status !== 401) setMessage(error.message);
       }
@@ -370,8 +379,6 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
   }, [user?.id, conversationId]);
 
   useEffect(() => () => { for (const timer of pollersRef.current.values()) clearTimeout(timer); pollersRef.current.clear(); }, []);
-
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }); }, [messages, sending]);
 
   useEffect(() => {
     if (!sending || !liveWorkflow?.operationId) return;
@@ -623,11 +630,10 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
       <header className="agent-workspace-head"><div><span>PEARAPI FREE MODEL CLOUD</span><h1>今天想完成什么？</h1><p>{bootstrap?.models?.length || 9} 个免费模型由古龙服务端统一调度；每次回复展示实时处理节点，不加载第二大脑、本地模型、插件或扩展工作流。</p></div><div className="agent-live-status"><i className={bootstrap?.configured ? "ready" : ""} /><span>{loading ? "正在连接" : bootstrap?.configured ? "远程模型已连接" : "等待管理员配置"}</span></div></header>
 
       <div className="agent-chat-shell">
-        <div className="agent-chat-stream" aria-live="polite">
+        <div className="agent-chat-stream" aria-live="polite" ref={streamRef}>
           {!messages.length && <div className="agent-empty-chat"><div className="agent-empty-mark"><Sparkle size={35} weight="duotone" /></div><h2>把目标交给古龙</h2><p>选择文字、图片或视频，挑选模型并描述你想完成的结果。</p><div>{starterPrompts.map((prompt) => <button key={prompt} type="button" onClick={() => { setDraft(prompt); inputRef.current?.focus(); }}>{prompt}<ArrowRight size={16} /></button>)}</div></div>}
-          {messages.map((item, index) => <article className={`agent-message ${item.role}`} key={`${item.createdAt}-${index}`}><div className="agent-message-avatar">{item.role === "assistant" ? <img src={themeIcon} alt="古龙" /> : (user.displayName || user.username || "我").slice(0, 1)}</div><div><header><strong>{item.role === "assistant" ? "古龙" : "你"}</strong><time>{new Date(item.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time>{item.free && <em>免费</em>}{item.fallback && <em>已切换备用模型</em>}</header>{item.role === "assistant" ? <MarkdownMessage>{item.content}</MarkdownMessage> : <p>{item.content}</p>}<WorkflowTrace workflow={item.workflow} /><MediaResult item={item} />{item.attachments?.length > 0 && <div className="agent-message-files">{item.attachments.map((file, fileIndex) => <span key={`${file.name}-${fileIndex}`}><File size={15} />{file.reference && <b>{file.reference}</b>}{file.name}</span>)}</div>}</div></article>)}
+          {messages.map((item, index) => <article className={`agent-message ${item.role}`} key={`${item.createdAt}-${index}`}><div className="agent-message-avatar">{item.role === "assistant" ? <img src={themeIcon} alt="古龙" /> : (user.displayName || user.username || "我").slice(0, 1)}</div><div><header><strong>{item.role === "assistant" ? "古龙" : "你"}</strong><time>{new Date(item.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time>{item.free && <em>免费</em>}{item.fallback && <em>已切换备用模型</em>}</header>{item.role === "assistant" ? <><WorkflowTrace workflow={item.workflow} /><MarkdownMessage>{item.content}</MarkdownMessage></> : <p>{item.content}</p>}<MediaResult item={item} />{item.attachments?.length > 0 && <div className="agent-message-files">{item.attachments.map((file, fileIndex) => <span key={`${file.name}-${fileIndex}`}><File size={15} />{file.reference && <b>{file.reference}</b>}{file.name}</span>)}</div>}</div></article>)}
           {sending && <article className="agent-message assistant pending"><div className="agent-message-avatar"><img src={themeIcon} alt="" /></div><div><header><strong>古龙</strong><em>{creationType === "text" ? "文字" : creationType === "image" ? "图片" : "视频"}</em></header>{creationType === "text" && <WorkflowTrace workflow={liveWorkflow} live />}<p><SpinnerGap size={20} className="agent-spin" /> {assetUploadProgress ? `正在${assetUploadProgress.phase === "hashing" ? "校验" : assetUploadProgress.phase === "uploading" ? "上传" : assetUploadProgress.phase === "verifying" ? "确认" : "处理"}素材 ${assetUploadProgress.name}…` : `正在通过 ${selectedModel?.name || model} 处理任务…`}</p></div></article>}
-          <div ref={endRef} />
         </div>
 
         <div className="agent-composer-wrap">
