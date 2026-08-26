@@ -1,98 +1,51 @@
-# Design QA — Gulong Agent Engine
+# Design QA — 统一古龙品牌图标
 
-## Comparison basis
+- source visual truth path: `D:\openclaw\古龙智能体引擎\图标设计\古龙智能体.png`
+- implementation screenshot path: `C:\Users\YCAI\AppData\Local\Temp\gulong-sites-v52.png`
+- production URL: `https://gulong-agent-official-2026.wellonxie.chatgpt.site`
+- viewport: 1200 × 750 CSS px
+- source pixels: 1260 × 1260 px
+- implementation pixels: 1200 × 750 px
+- density normalization: source icon was inspected at original density; implementation was reviewed at the deployed screenshot's native density.
+- state: 玉瓷浅色主题、官网首页、未登录。
 
-- Reference: `docs/design/selected-homepage-option-1.png`
-- Implementation viewport: 1536 × 1024
-- Final comparison: `docs/design/comparison-round-2.png`
-- Core journeys checked in the in-app browser: homepage, theme picker, downloads, developer console, pricing, second-brain upload, feedback, authentication, and API docs.
+## Full-view comparison evidence
 
-## Resolved findings
+The deployed header brand mark, hero product preview logo, and assistant avatar visibly use the supplied rainbow 3D dragon neural-network artwork. The transparent source background remains clean on the light theme, and the square artwork keeps its proportions inside circular icon masks without stretching.
 
-- P1: The first implementation used excessive vertical whitespace and pushed the four-step workflow below the first viewport. Reduced the hero height and product-demo canvas, tightened the workflow heading, and placed both the workflow and capability strip in the 1536 × 1024 frame.
-- P1: Hero typography wrapped more aggressively than the reference. Rebalanced the hero columns and type scale so both headline lines keep the intended hierarchy.
-- P2: The workflow lacked the selected concept's contained panel treatment. Added the light bordered panel, compact horizontal steps, jade states, and pale-gold directional accents.
-- P2: Route state originally omitted URL hashes. Included hash state so homepage navigation and active states remain reliable.
-- P2: A mobile width expression was invalid CSS. Replaced it with a valid `calc()` expression.
+## Focused region comparison evidence
 
-## Final audit
+The header's 48 px brand slot and the product preview's larger avatar slot were checked in the same deployed capture. Both preserve the source artwork's central dragon, rainbow network halo, and transparent edge treatment. No placeholder, old theme-specific icon, or distorted crop remains in these visible brand locations.
 
-- Visual hierarchy and section order match the selected concept.
-- Real source logo and a code-native product UI are used; no fake placeholder assets are present.
-- Layout is responsive at desktop, tablet, and mobile breakpoints.
-- Primary navigation, CTAs, dialogs, forms, theme selection, and developer actions are interactive.
-- Focus styles, labels, semantic landmarks, contrast, and keyboard-accessible controls are present.
-- No unresolved P0, P1, or P2 design issues remain.
+## Required fidelity surfaces
 
-final result: passed
+- Fonts and typography: unchanged; the icon replacement does not alter the established 18 px body typography.
+- Spacing and layout rhythm: existing icon containers retain their dimensions and alignment; no header or preview reflow is visible.
+- Colors and visual tokens: the full rainbow artwork remains legible against the porcelain light background while theme color tokens remain unchanged.
+- Image quality and asset fidelity: the exact supplied PNG is copied byte-for-byte and rendered with preserved aspect ratio.
+- Copy and content: unchanged.
 
-## 2026-08-18 任务派单筛选栏布局修复
+## Findings
 
-### 对照依据
+No actionable P0, P1, or P2 visual differences were found for the requested brand-icon replacement.
 
-- 用户问题截图：`C:/Users/YCAI/AppData/Local/Temp/codex-clipboard-0c9170f3-a390-4cc2-9262-e5e62c5a366c.png`（1261 × 520）。
-- 修复后完整页面：`docs/design/h3-task-layout-full.png`（1265 × 939）。
-- 修复前后聚焦对照：`docs/design/h3-task-layout-comparison.png`（1261 × 1190）。
-- 验收状态：空任务列表；桌面视口 1280 × 720，响应式补测 1024 × 768。
+## Open Questions
 
-### 修复与验收
+None.
 
-- P1：原筛选栏强制单行排布，搜索按钮被压成逐字换行并超出可视区域；现改为六轨两行网格，关键词和接单人占双轨，日期位于第二行，搜索按钮完整显示在右侧。
-- P1：原“实际计费”说明被容器截断；现改为“任务数量 + 弹性计费说明”网格，说明可安全换行且完整显示“音频免费”。
-- P2：1100px 以下切换为两列自适应布局，680px 以下切换为单列；1024px 实测筛选栏 `clientWidth = scrollWidth = 893px`，摘要区 `clientWidth = scrollWidth = 891px`，无横向溢出。
-- 字体、边框、圆角、背景、按钮和图标沿用现有玉瓷主题设计令牌，未引入新的视觉体系。
-- 浏览器控制台未发现 error 或 warning；搜索按钮、六个筛选控件及完整计费文案均在 DOM 和截图中可见。
-- 修复后无遗留 P0、P1 或 P2 设计问题。
+## Implementation Checklist
 
-final result: passed
+- [x] Use one canonical brand asset for all four themes.
+- [x] Replace header, footer, login, home preview, assistant avatar, download card, favicon, and PWA icon sources.
+- [x] Preserve functional action icons for usability.
+- [x] Verify production asset responses and deployment capture.
 
-## 2026-07-30 合作伙伴全息神经网络与编辑流程
+## Comparison history
 
-### 视觉依据与实现证据
+Initial production comparison passed; no visual correction iteration was required.
 
-- 参考页面截图：`docs/design/partner-network-reference-yeschic.png`
-- 控件参考图：`C:/Users/YCAI/AppData/Local/Temp/codex-clipboard-f73e579a-b9f9-4ef3-8e01-6aa5fe65a5e8.png`
-- 删除区域参考图：`C:/Users/YCAI/AppData/Local/Temp/codex-clipboard-08a86539-dea2-4198-a9ce-f4c9a0677c1e.png`
-- 全息网络实现：`docs/design/partner-network-fullscreen.png`
-- 右上角控件实现：`docs/design/partner-network-controls.png`
-- 合作伙伴编辑弹窗：`docs/design/partner-admin-edit.png`
-- 对照视口：参考页与实现页均为 1280 × 720。
+## Follow-up Polish
 
-### 交互与视觉验收
-
-- P1：首轮节点在左上区域出现重叠；已按行业组重新分散纬度偏移并收敛前景节点最大尺寸，第二轮对照通过。
-- P1：鼠标移入节点或画布时动画保持运行，只能使用“暂停/继续”按钮控制。
-- P1：已删除“品牌网络正在实时旋转 / 已暂停，方便选择节点”底部提示卡片及相关样式。
-- P1：暂停、继续、复位视角、全息预览和退出全屏均可操作；拖拽旋转、滚轮缩放可用。
-- P1：合作伙伴编辑弹窗支持查看当前 Logo/宣传图、替换或删除图片，保存后同步品牌神经网络。
-- P2：控件固定在画布右上角，图标、字号、边框和深色半透明质感与参考图一致。
-- P2：全息画布使用真实合作伙伴 Logo 和真实行业分类数据，外层官网仍保持玉瓷浅色视觉。
-- 可访问性：按钮包含可读文本/`aria-label`，全屏支持 Escape 退出，键盘焦点样式沿用全站系统。
-
-final result: passed
-
-## 2026-07-29 全站 18px 与账号身份修复
-
-### 对照基础
-
-- 原始用户截图：`C:/Users/YCAI/AppData/Local/Temp/codex-clipboard-6b0737b1-77df-4d5c-8e79-88a395e89b41.png`
-- 同尺寸实现：`docs/design/account-minimax-18px.png`
-- 并排对照：`docs/design/account-minimax-comparison.png`
-- 对照视口：1512 × 669；另测 1024 × 768 与 390 × 844。
-- 账号页面使用仅限本地设计验收的模拟管理员数据；模拟接口未进入生产代码。
-
-### 已解决问题
-
-- P1 · 字体：清除中文正文、侧栏、表单、表格和帮助说明中低于 18px 的计算字号；`small` 元素不再继承浏览器默认的 15px。
-- P1 · 身份：侧栏和账户总览分别显示产品版本与账号角色；管理员身份不再被“会员”订阅状态覆盖，并恢复“进入管理员后台”入口。
-- P1 · 响应式：账户后台在 1100px 以下改为上下布局，避免 18px 字号挤压 MiniMax 双栏；手机端菜单改为单列，文件元数据允许换行。
-- P2 · 内容溢出：API 路径允许安全断行，首页产品演示扩大最小高度与侧栏宽度，并移除工作流步骤箭头造成的横向溢出。
-
-### 最终检查
-
-- 运行时扫描：桌面、平板、手机三个视口均未发现低于 18px 的可见文字。
-- 1512px 与 1024px 用户后台均无页面级横向滚动；390px 首页与账户页保持在视口内。
-- 管理员、会员状态、古龙版/永生花版三个维度视觉分离，长邮箱、API 路径和移动端菜单仍可读。
-- 键盘可达按钮、焦点样式、语义导航和现有主题色保持不变。
+None required for this scope.
 
 final result: passed
