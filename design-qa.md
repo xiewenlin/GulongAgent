@@ -1,34 +1,30 @@
-# Design QA — 古龙网页版 H3 多参考素材与对话区高度
+# Design QA — 古龙官网品牌图标统一
 
-- source visual truth: 用户要求移除独立的“@ 引用素材”行，恢复最多 9 张参考图，保证每张缩略图清晰可辨且界面不混乱，并把网页版对话框高度增加 3/5。
-- implementation desktop screenshot: `C:\Users\YCAI\Documents\Codex\2026-07-28\product-design-plugin-product-design-openai-3\work\GulongAgent\artifacts\qa\web-agent-h3-assets-desktop-final.png`
-- implementation mobile screenshot: `C:\Users\YCAI\Documents\Codex\2026-07-28\product-design-plugin-product-design-openai-3\work\GulongAgent\artifacts\qa\web-agent-h3-assets-mobile-final.png`
-- local preview URL: `http://127.0.0.1:4173/qa-h3-grid.html`
-- viewport: 1440 × 900 CSS px and 390 × 844 CSS px
-- state: 玉瓷浅色主题、MiniMaxH3共享节点、9 张图片全部上传。
+- source visual truth: `D:\openclaw\古龙智能体引擎\bak\图标设计\古龙图标.png`
+- canonical website asset: `public/assets/gulong-agent-icon.png`
+- desktop home screenshot: `artifacts/qa/brand-icon-home-desktop.png`
+- desktop download screenshot: `artifacts/qa/brand-icon-download-desktop.png`
+- mobile home screenshot: `artifacts/qa/brand-icon-home-mobile.png`
+- viewports: 1440 × 900 CSS px and 390 × 844 CSS px
+- tested themes: 玉瓷、日出
 
 ## Full-view comparison evidence
 
-桌面端对话框最小高度由 680 px 增加至 1088 px，精确增加 60%；消息区最小高度同步由 390 px 增加至 624 px。9 张图片在 1440 px 下形成 5+4 两行自适应卡片，不出现横向溢出。390 px 移动端维持单列并使用内部纵向滚动，不撑破页面宽度。
+源图标与官网规范资源的 SHA-256 完全一致。主页导航、产品演示、行动区、页脚、下载版本卡片和网页版入口均读取同一规范资源；桌面端与移动端未出现裁切、变形或横向溢出。
 
-## Focused region comparison evidence
+## Browser icon and cache evidence
 
-素材区不再渲染独立的“@ 引用素材”快捷行。每个素材卡片保留 58 × 58 px 的真实图片缩略图、就近的 `@图片N` 引用按钮、文件名、大小与删除操作；桌面卡片宽约 261 px，移动端卡片宽约 285 px。
+- HTML favicon、shortcut icon、Apple Touch Icon 与 PWA manifest 均指向同一规范图标。
+- 静态收藏图标使用 `20260826-gulong-icon-2` 缓存版本。
+- 主题切换后运行时图标 URL 同步切换 `theme` 参数并重建 favicon；验证从玉瓷切换为日出后 `data-theme=morning`。
+- 1254 × 1254 源图在导航 48 px、下载卡片 80 px、移动端 42 px 等槽位均保持 1:1 比例。
 
 ## Primary interactions and console checks
 
-- 验证 9 张图片全部显示缩略图。
-- 验证网格自适应列数、限定最大高度并内部滚动。
-- 验证桌面与移动端均无水平溢出。
-- 验证控制台无警告或错误。
-
-## Required fidelity surfaces
-
-- 字体：沿用全站正文最低 18 px 的既有规范。
-- 颜色：保持当前浅色主题 token，不引入新的暗色界面。
-- 图片：使用 `object-fit: cover`，缩略图不拉伸。
-- 交互：手动输入 `@` 的素材选择器仍保留，卡片上的引用按钮仍可直接插入。
-- 上传：图片/视频素材继续直传腾讯云 COS，参考图不再经过 600 KB 的内联 Base64 门槛。
+- 验证主页所有古龙品牌图像均成功加载，白色背景规则生效。
+- 验证下载页两个版本卡片均显示新图标。
+- 验证主题切换后页面图标与浏览器标签图标同步刷新。
+- 验证浏览器控制台无警告或错误。
 
 ## Findings
 
@@ -36,16 +32,10 @@
 
 ## Implementation Checklist
 
-- [x] H3 图片上限恢复为 9 张，视频和音频各 3 个。
-- [x] 移除独立的“@ 引用素材”行。
-- [x] 9 张缩略图使用响应式网格并保持可见。
-- [x] 素材多时使用内部滚动，避免挤乱编辑器。
-- [x] 对话框桌面高度增加 3/5。
-- [x] 移动端保留适度增高与安全滚动。
-- [x] 取消普通图片创作的 600 KB 前端门槛，改为受信任 COS 直传。
-
-## Follow-up Polish
-
-None required for this scope.
+- [x] 替换全站规范品牌 PNG。
+- [x] 导航、演示、对话头像、登录、下载卡片、页脚与主题入口复用同一资源。
+- [x] 浏览器 favicon、快捷图标、Apple Touch Icon 与 PWA 图标统一。
+- [x] 新增缓存版本，规避浏览器继续显示旧图标。
+- [x] 桌面端、移动端与主题切换完成视觉验收。
 
 final result: passed

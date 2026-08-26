@@ -50,7 +50,7 @@ const primaryNav = [
   { label: "下载", href: "/download" },
 ];
 
-const THEME_ICON_VERSION = "20260826-gulong-agent-1";
+const THEME_ICON_VERSION = "20260826-gulong-icon-2";
 
 function themeIconUrl(theme) {
   return `${theme.icon}?theme=${theme.id}&v=${THEME_ICON_VERSION}`;

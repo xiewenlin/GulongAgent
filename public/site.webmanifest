@@ -9,10 +9,10 @@
   "theme_color": "#fbfaf6",
   "icons": [
     {
-      "src": "/assets/gulong-agent-icon.png",
+      "src": "/assets/gulong-agent-icon.png?v=20260826-gulong-icon-2",
       "sizes": "any",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "any"
     }
   ]
 }
