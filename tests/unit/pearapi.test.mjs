@@ -190,6 +190,21 @@ test("PearAPI routes publish the free-model and protected admin contracts in Ope
   assert.ok(document.paths["/api/agent/media/{id}"]?.get);
   assert.ok(document.paths["/api/admin/pearapi/config"]?.put);
   assert.ok(document.paths["/api/admin/pearapi/test"]?.post);
+  assert.match(JSON.stringify(document.paths["/api/agent/media"].post), /referenceAssets/);
+});
+
+test("website reference images bypass the old inline size gate through trusted COS assets", async () => {
+  const [agentSource, pearSource] = await Promise.all([
+    readFile(new URL("../../src/components/WebAgentPage.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../server/pearapi.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(agentSource, /referenceAssets/);
+  assert.match(agentSource, /uploadH3AssetFiles\(attachments[^\n]+validateSelection: false/);
+  assert.doesNotMatch(agentSource, /MAX_MEDIA_REFERENCE_BYTES|单张参考图不能超过 600 KB|imageDataUrl/);
+  assert.match(pearSource, /ReferenceAssetSchema/);
+  assert.match(pearSource, /getCollection\("h3AssetUploads"\)/);
+  assert.match(pearSource, /createPresignedDownloadUrl/);
+  assert.match(pearSource, /record\.objectKey !== asset\.object_key/);
 });
 
 test("website exposes the simplified agent while user settings no longer expose MiniMax", async () => {

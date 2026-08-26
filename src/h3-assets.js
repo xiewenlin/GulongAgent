@@ -1,4 +1,4 @@
-export const H3_ASSET_LIMITS = Object.freeze({ image: 3, video: 3, audio: 3 });
+export const H3_ASSET_LIMITS = Object.freeze({ image: 9, video: 3, audio: 3 });
 export const H3_MAX_ASSET_BYTES = 2 * 1024 * 1024 * 1024;
 export const H3_ASSET_ACCEPT = "image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime,audio/mpeg,audio/mp4,audio/wav,audio/x-wav,audio/ogg,audio/webm";
 
@@ -173,7 +173,16 @@ export async function uploadH3AssetFile(file, { apiFetch, fetchImpl = globalThis
 }
 
 export async function uploadH3AssetFiles(files = [], options = {}) {
-  validateH3AssetSelection(files);
+  if (options.validateSelection === false) {
+    for (const file of files) {
+      const descriptor = h3AssetDescriptor(file);
+      if (!descriptor) throw new Error(`不支持素材 ${file?.name || "未命名文件"}`);
+      const bytes = Number(file?.size || 0);
+      if (!Number.isSafeInteger(bytes) || bytes < 1 || bytes > H3_MAX_ASSET_BYTES) throw new Error(`${file?.name || "素材"} 大小必须在 1 字节到 2 GB 之间`);
+    }
+  } else {
+    validateH3AssetSelection(files);
+  }
   if (!files.length) return [];
   const results = new Array(files.length);
   let cursor = 0;

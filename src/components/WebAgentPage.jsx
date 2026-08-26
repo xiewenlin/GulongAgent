@@ -44,7 +44,6 @@ const MAX_ATTACHMENTS = 16;
 const MAX_ATTACHMENT_BYTES = 192 * 1024 * 1024;
 const TEXT_ATTACHMENT_BYTES = 128 * 1024;
 const TEXT_EXTENSIONS = new Set(["txt", "md", "csv", "json"]);
-const MAX_MEDIA_REFERENCE_BYTES = 600 * 1024;
 const H3_SHARED_MODEL = { id: "minimax_h3_shared", name: "MiniMaxH3共享节点", priceLabel: "0.20 元/秒 + 0.05 元/图 + 0.20 元/视频；音频免费" };
 const H3_VIDEO_DURATIONS = [5, 10, 15, 30, 60];
 
@@ -116,17 +115,6 @@ async function attachmentContext(files) {
     }
   }
   return contexts.join("").slice(0, 7_000);
-}
-
-async function imageDataUrl(file) {
-  if (!file.type.match(/^image\/(jpeg|png|webp)$/i)) throw new Error("参考图仅支持 JPEG、PNG 或 WebP 格式");
-  if (file.size > MAX_MEDIA_REFERENCE_BYTES) throw new Error("单张参考图不能超过 600 KB，请压缩后重试");
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error(`无法读取参考图 ${file.name}`));
-    reader.readAsDataURL(file);
-  });
 }
 
 function AttachmentThumbnail({ file, reference = "" }) {
@@ -471,17 +459,16 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
         validateH3AssetSelection(selection.files);
         setAttachments(selection.files);
         const skippedCount = Object.values(selection.skipped).reduce((sum, value) => sum + value, 0);
-        setMessage(skippedCount ? "参考素材已限制为图片最多 3 张、视频最多 3 个、音频最多 3 个，超出或不支持的文件未添加。" : "");
+        setMessage(skippedCount ? "部分素材未添加：MiniMax H3 单次任务支持图片 9 张、视频 3 个、音频 3 个，并仅接收支持的图片、视频和音频格式。" : "");
       } catch (error) { setMessage(error.message); }
       return;
     }
     if (creationType !== "text") {
       if (files.some((file) => !file.type.match(/^image\/(jpeg|png|webp)$/i))) { setMessage("参考图仅支持 JPEG、PNG 或 WebP 格式"); return; }
-      if (files.some((file) => file.size > MAX_MEDIA_REFERENCE_BYTES)) { setMessage("单张参考图不能超过 600 KB，请压缩后重试"); return; }
     }
     const next = [...attachments, ...files].slice(0, MAX_ATTACHMENTS);
     const total = next.reduce((sum, file) => sum + file.size, 0);
-    if (total > MAX_ATTACHMENT_BYTES) { setMessage("附件总大小不能超过 192 MB"); return; }
+    if (creationType === "text" && total > MAX_ATTACHMENT_BYTES) { setMessage("附件总大小不能超过 192 MB"); return; }
     setAttachments(next);
     setMessage("");
   }
@@ -577,9 +564,10 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
         return;
       }
       if (creationType !== "text") {
-        const referenceImages = await Promise.all(attachments.filter((file) => file.type.startsWith("image/")).map(imageDataUrl));
+        const uploadedReferenceAssets = await uploadH3AssetFiles(attachments.filter((file) => file.type.startsWith("image/")), { apiFetch, onProgress: setAssetUploadProgress, validateSelection: false });
+        const referenceAssets = h3AssetManifest(uploadedReferenceAssets).images;
         const result = await apiFetch("/api/agent/media", { method: "POST", headers: { "Idempotency-Key": createClientRequestId() }, body: JSON.stringify({
-          modality: creationType, model, prompt: content, conversationId: conversationId || undefined, referenceImages, imageSize, aspectRatio, duration,
+          modality: creationType, model, prompt: content, conversationId: conversationId || undefined, referenceAssets, imageSize, aspectRatio, duration,
         }) });
         rememberConversation(result.job.conversationId);
         setMessages((current) => [...current, {
@@ -647,13 +635,12 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
           {!bootstrap?.subscription?.active && !loading && <div className="agent-membership-gate"><div><Coins size={24} weight="duotone" /><span><strong>会员订阅尚未生效</strong><small>免费文字对话需开通会员；付费图片与视频可使用已有余额按次创作。</small></span></div><button type="button" onClick={() => navigate("/pricing")}>查看会员 <ArrowRight size={16} /></button></div>}
           <div className="agent-mode-row"><div className="agent-creation-hint">{creationType === "text" ? "免费文字对话" : isH3Video ? `${formatMoney(h3EstimatedPriceFen)} · MiniMaxH3共享节点预估价` : (selectedModel?.priceLabel || "按实际模型计费")}</div><div className="agent-draft-meta"><button type="button" onClick={() => { setReferencePicker(null); setDraftPreviewOpen(true); }} title="全屏查看并编辑长文本"><Eye size={19} weight="duotone" /><span>预览编辑</span></button><span>{draft.length} / {isH3Video ? 20000 : 4096}</span></div></div>
           {isH3Video && <div className="agent-h3-asset-summary"><strong>多参素材</strong><span>图片 {h3Counts.image} / {H3_ASSET_LIMITS.image}</span><span>视频 {h3Counts.video} / {H3_ASSET_LIMITS.video}</span><span>音频 {h3Counts.audio} / {H3_ASSET_LIMITS.audio}</span><small>输入 @ 可选择并引用素材</small></div>}
-          {isH3Video && h3References.length > 0 && <div className="agent-h3-reference-bar"><strong>@ 引用素材</strong>{h3References.map((item) => <button type="button" disabled={sending} key={`${item.file.name}-${item.index}`} onClick={() => insertH3Reference(item.reference)}>{item.reference}</button>)}</div>}
-          {attachments.length > 0 && <div className="agent-attachment-row">{attachments.map((file, index) => <article key={`${file.name}-${index}`}><AttachmentThumbnail file={file} reference={h3References[index]?.reference} /><div>{h3References[index]?.reference && <button className="agent-h3-reference-token" type="button" disabled={sending} title={`插入 ${h3References[index].reference}`} onClick={() => insertH3Reference(h3References[index].reference)}>{h3References[index].reference}</button>}<b title={file.name}>{file.name}</b><small>{byteText(file.size)}</small></div><button className="agent-attachment-remove" type="button" disabled={sending} aria-label={`移除 ${file.name}`} onClick={() => removeAttachment(index)}><X size={15} /></button></article>)}</div>}
+          {attachments.length > 0 && <div className={`agent-attachment-row ${isH3Video ? "h3-grid" : ""}`}>{attachments.map((file, index) => <article key={`${file.name}-${index}`}><AttachmentThumbnail file={file} reference={h3References[index]?.reference} /><div>{h3References[index]?.reference && <button className="agent-h3-reference-token" type="button" disabled={sending} title={`插入 ${h3References[index].reference}`} onClick={() => insertH3Reference(h3References[index].reference)}>{h3References[index].reference}</button>}<b title={file.name}>{file.name}</b><small>{byteText(file.size)}</small></div><button className="agent-attachment-remove" type="button" disabled={sending} aria-label={`移除 ${file.name}`} onClick={() => removeAttachment(index)}><X size={15} /></button></article>)}</div>}
           {assetUploadProgress && <div className="agent-h3-upload-progress"><SpinnerGap size={18} className="agent-spin" /><span>正在安全上传 {assetUploadProgress.name}</span><strong>{assetUploadProgress.completed || 0} / {assetUploadProgress.total || attachments.length}</strong></div>}
           <textarea ref={inputRef} maxLength={isH3Video ? 20000 : 4096} value={draft} onChange={(event) => { setDraft(event.target.value); syncReferencePicker(event.target.value, event.target.selectionStart); }} onSelect={(event) => syncReferencePicker(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyDown={keyDown} placeholder={isH3Video ? "描述视频任务，输入 @ 可选择图片、视频或音频素材。Enter 发送，Shift + Enter 换行" : "描述任务；上传附件后输入你的要求。Enter 发送，Shift + Enter 换行"} />
           {referencePicker && <H3ReferencePicker items={referenceSuggestions} activeIndex={referenceActiveIndex} onSelect={selectTypedReference} />}
           <footer>
-            <label className="agent-attach-button" title={creationType === "text" ? "最多 12 个附件" : isH3Video ? "图片最多 3 张、视频最多 3 个、音频最多 3 个" : "上传参考图，每张不超过 600 KB"}><Paperclip size={20} /><span>{creationType === "text" ? "附件" : isH3Video ? "多模态素材" : "参考图"}</span><input type="file" multiple disabled={sending} accept={creationType === "text" ? "image/*,video/*,.txt,.md,.csv,.json,.pdf,.docx,.xlsx,.pptx" : isH3Video ? H3_ASSET_ACCEPT : "image/jpeg,image/png,image/webp"} onChange={pickAttachments} /></label>
+            <label className="agent-attach-button" title={creationType === "text" ? "最多 12 个附件" : isH3Video ? "支持图片 9 张、视频 3 个、音频 3 个" : "上传参考图，不限制原始文件大小"}><Paperclip size={20} /><span>{creationType === "text" ? "附件" : isH3Video ? "多模态素材" : "参考图"}</span><input type="file" multiple disabled={sending} accept={creationType === "text" ? "image/*,video/*,.txt,.md,.csv,.json,.pdf,.docx,.xlsx,.pptx" : isH3Video ? H3_ASSET_ACCEPT : "image/jpeg,image/png,image/webp"} onChange={pickAttachments} /></label>
             <div className="agent-type-select"><span>{creationType === "text" ? <TextT size={18} /> : creationType === "image" ? <ImageSquare size={18} /> : <VideoCamera size={18} />}</span><select value={creationType} onChange={(event) => changeCreationType(event.target.value)}><option value="text">文字</option><option value="image">图片</option><option value="video">视频</option></select></div>
             {creationType === "image" && <div className="agent-parameter-select"><select value={imageSize} onChange={(event) => setImageSize(event.target.value)}>{(bootstrap?.mediaOptions?.imageSizes || ["1:1"]).map((value) => <option key={value} value={value}>{value}</option>)}</select></div>}
             {creationType === "video" && <><div className="agent-parameter-select"><select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)}><option value="16:9">16:9 横屏</option><option value="9:16">9:16 竖屏</option></select></div><div className="agent-parameter-select"><select value={duration} onChange={(event) => setDuration(Number(event.target.value))}>{(isH3Video ? H3_VIDEO_DURATIONS : bootstrap?.mediaOptions?.videoDurations || [5]).map((value) => <option key={value} value={value}>{value} 秒</option>)}</select></div>{isH3Video && <button className={`agent-h3-prompt-toggle ${h3PromptOptimizationEnabled ? "active" : ""}`} type="button" disabled={sending} aria-pressed={h3PromptOptimizationEnabled} aria-label={`魔法提示词优化${h3PromptOptimizationEnabled ? "已开启" : "已关闭"}`} title={h3PromptOptimizationEnabled ? "已开启：桌面节点会先优化提示词" : "未开启：桌面节点直接使用原始提示词"} onClick={() => setH3PromptOptimizationEnabled((enabled) => !enabled)}><MagicWand size={20} weight={h3PromptOptimizationEnabled ? "fill" : "duotone"} /><span>魔法优化</span><em>{h3PromptOptimizationEnabled ? "开" : "关"}</em></button>}</>}

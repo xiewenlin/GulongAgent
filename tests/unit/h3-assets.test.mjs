@@ -18,34 +18,34 @@ function asset(name, type, size = 16, content = "gulong-h3") {
   return { name, type, size, arrayBuffer: async () => new TextEncoder().encode(content).buffer };
 }
 
-test("web H3 accepts and numbers 3 images, 3 videos and 3 audios for @ references", () => {
+test("web H3 accepts and numbers 9 images, 3 videos and 3 audios for @ references", () => {
   const files = [
-    ...Array.from({ length: 3 }, (_, index) => asset(`picture-${index + 1}.png`, "image/png")),
+    ...Array.from({ length: 9 }, (_, index) => asset(`picture-${index + 1}.png`, "image/png")),
     ...Array.from({ length: 3 }, (_, index) => asset(`video-${index + 1}.mp4`, "video/mp4")),
     ...Array.from({ length: 3 }, (_, index) => asset(`audio-${index + 1}.mp3`, "audio/mpeg")),
   ];
-  assert.deepEqual(validateH3AssetSelection(files), { image: 3, video: 3, audio: 3 });
+  assert.deepEqual(validateH3AssetSelection(files), { image: 9, video: 3, audio: 3 });
   assert.deepEqual(h3AssetReferences(files).map((item) => item.reference), [
-    "@图片1", "@图片2", "@图片3",
+    "@图片1", "@图片2", "@图片3", "@图片4", "@图片5", "@图片6", "@图片7", "@图片8", "@图片9",
     "@视频1", "@视频2", "@视频3", "@音频1", "@音频2", "@音频3",
   ]);
-  assert.equal(calculateH3ClientPriceFen(5, files), 175);
-  assert.throws(() => validateH3AssetSelection([...files, asset("picture-4.png", "image/png")]), /图片最多上传 3 张/);
+  assert.equal(calculateH3ClientPriceFen(5, files), 205);
+  assert.throws(() => validateH3AssetSelection([...files, asset("picture-10.png", "image/png")]), /图片最多上传 9 张/);
   assert.match(H3_ASSET_ACCEPT, /video\/mp4/);
   assert.match(H3_ASSET_ACCEPT, /audio\/mpeg/);
 });
 
-test("web H3 clamps oversized selections while preserving the first three files of each kind", () => {
+test("web H3 clamps oversized selections while preserving nine images and three files of other kinds", () => {
   const selected = [
-    ...Array.from({ length: 5 }, (_, index) => asset(`picture-${index + 1}.png`, "image/png")),
+    ...Array.from({ length: 11 }, (_, index) => asset(`picture-${index + 1}.png`, "image/png")),
     ...Array.from({ length: 4 }, (_, index) => asset(`video-${index + 1}.mp4`, "video/mp4")),
     ...Array.from({ length: 3 }, (_, index) => asset(`audio-${index + 1}.mp3`, "audio/mpeg")),
   ];
   const result = clampH3AssetSelection(selected);
-  assert.deepEqual(result.counts, { image: 3, video: 3, audio: 3 });
+  assert.deepEqual(result.counts, { image: 9, video: 3, audio: 3 });
   assert.deepEqual(result.skipped, { image: 2, video: 1, audio: 0, unsupported: 0 });
   assert.deepEqual(result.files.map((file) => file.name), [
-    "picture-1.png", "picture-2.png", "picture-3.png",
+    "picture-1.png", "picture-2.png", "picture-3.png", "picture-4.png", "picture-5.png", "picture-6.png", "picture-7.png", "picture-8.png", "picture-9.png",
     "video-1.mp4", "video-2.mp4", "video-3.mp4",
     "audio-1.mp3", "audio-2.mp3", "audio-3.mp3",
   ]);
@@ -115,12 +115,17 @@ test("web H3 asset upload uses SHA-256 COS metadata contract and completes the a
 
 test("web H3 composer exposes multi-asset upload and inserts @ references into the prompt", async () => {
   const source = await readFile(new URL("../../src/components/WebAgentPage.jsx", import.meta.url), "utf8");
-  assert.match(source, /图片最多 3 张、视频最多 3 个、音频最多 3 个/);
+  const styles = await readFile(new URL("../../src/styles.css", import.meta.url), "utf8");
+  assert.match(source, /支持图片 9 张、视频 3 个、音频 3 个/);
   assert.match(source, /输入 @ 可选择图片、视频或音频素材/);
   assert.match(source, /H3ReferencePicker/);
   assert.match(source, /预览编辑/);
   assert.match(source, /AttachmentThumbnail/);
-  assert.match(source, /insertH3Reference\(item\.reference\)/);
+  assert.match(source, /insertH3Reference\(h3References\[index\]\.reference\)/);
+  assert.doesNotMatch(source, /agent-h3-reference-bar|@ 引用素材/);
+  assert.match(source, /agent-attachment-row \$\{isH3Video \? "h3-grid"/);
+  assert.match(styles, /\.agent-attachment-row\.h3-grid\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fill, minmax\(230px, 1fr\)\);/s);
+  assert.match(styles, /\.agent-chat-shell\s*\{[^}]*min-height:\s*1088px;/s);
   assert.match(source, /uploadH3AssetFiles\(attachments/);
   assert.match(source, /assets: h3AssetManifest\(uploadedAssets\)/);
   assert.doesNotMatch(source, /当前网页入口先支持纯提示词|完整素材请从桌面 Agent 提交|桌面素材/);

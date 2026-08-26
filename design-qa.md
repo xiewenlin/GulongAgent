@@ -1,61 +1,48 @@
-# Design QA — 古龙网页版消息分栏与品牌白底
+# Design QA — 古龙网页版 H3 多参考素材与对话区高度
 
-- source visual truth: 用户在 2026-08-26 明确指定“古龙头像和聊天内容居左，用户头像和聊天内容居右”，并要求所有古龙品牌图标统一使用白色背景。
-- source brand asset path: `D:\openclaw\古龙智能体引擎\图标设计\古龙智能体.png`
-- implementation desktop screenshot: `C:\Users\YCAI\Documents\Codex\2026-07-28\product-design-plugin-product-design-openai-3\work\GulongAgent\artifacts\qa\web-agent-message-layout-desktop-final.png`
-- implementation mobile screenshot: `C:\Users\YCAI\Documents\Codex\2026-07-28\product-design-plugin-product-design-openai-3\work\GulongAgent\artifacts\qa\web-agent-message-layout-mobile-final.png`
-- local preview URL: `http://127.0.0.1:4175/qa-web-agent.html`
+- source visual truth: 用户要求移除独立的“@ 引用素材”行，恢复最多 9 张参考图，保证每张缩略图清晰可辨且界面不混乱，并把网页版对话框高度增加 3/5。
+- implementation desktop screenshot: `C:\Users\YCAI\Documents\Codex\2026-07-28\product-design-plugin-product-design-openai-3\work\GulongAgent\artifacts\qa\web-agent-h3-assets-desktop-final.png`
+- implementation mobile screenshot: `C:\Users\YCAI\Documents\Codex\2026-07-28\product-design-plugin-product-design-openai-3\work\GulongAgent\artifacts\qa\web-agent-h3-assets-mobile-final.png`
+- local preview URL: `http://127.0.0.1:4173/qa-h3-grid.html`
 - viewport: 1440 × 900 CSS px and 390 × 844 CSS px
-- source pixels: supplied brand asset 1260 × 1260 px; layout source is a role-alignment specification rather than a raster mockup.
-- implementation pixels: 1440 × 900 px desktop; 390 × 844 px mobile.
-- density normalization: browser screenshots were captured at their CSS viewport size with the same production stylesheet and canonical brand PNG.
-- state: 玉瓷浅色主题, representative assistant/user conversation, completed assistant response.
+- state: 玉瓷浅色主题、MiniMaxH3共享节点、9 张图片全部上传。
 
 ## Full-view comparison evidence
 
-The desktop capture visibly separates the conversation roles: both Gulong avatar/reply groups begin on the left, while the user avatar and message bubble terminate on the right. The mobile capture preserves the same reading direction without horizontal overflow. All visible Gulong artwork sits on a pure white image/avatar background.
+桌面端对话框最小高度由 680 px 增加至 1088 px，精确增加 60%；消息区最小高度同步由 390 px 增加至 624 px。9 张图片在 1440 px 下形成 5+4 两行自适应卡片，不出现横向溢出。390 px 移动端维持单列并使用内部纵向滚动，不撑破页面宽度。
 
 ## Focused region comparison evidence
 
-The two assistant avatar circles were inspected in both captures, including an icon URL carrying a theme query parameter. Both resolve to the same undistorted artwork with a white background. The user row uses the reverse grid order, while text inside each bubble remains naturally left-aligned for readability.
+素材区不再渲染独立的“@ 引用素材”快捷行。每个素材卡片保留 58 × 58 px 的真实图片缩略图、就近的 `@图片N` 引用按钮、文件名、大小与删除操作；桌面卡片宽约 261 px，移动端卡片宽约 285 px。
 
 ## Primary interactions and console checks
 
-- Loaded the production CSS in a browser-rendered QA harness using the same message DOM classes as `WebAgentPage`.
-- Checked desktop and the 760 px responsive breakpoint at 390 px width.
-- Verified the browser console contained no warnings or errors.
+- 验证 9 张图片全部显示缩略图。
+- 验证网格自适应列数、限定最大高度并内部滚动。
+- 验证桌面与移动端均无水平溢出。
+- 验证控制台无警告或错误。
 
 ## Required fidelity surfaces
 
-- Fonts and typography: existing 18 px body copy, weights, and line heights are preserved; no small-text regression.
-- Spacing and layout rhythm: 46 px desktop and 38 px mobile avatar tracks remain balanced; bubbles are capped at 960 px and align to their role edge.
-- Colors and visual tokens: theme surfaces remain unchanged; only the canonical Gulong image background is forced to `#fff`.
-- Image quality and asset fidelity: the supplied PNG is rendered with `object-fit: contain`, preserving the full circular artwork without crop or stretch.
-- Copy and content: application copy is unchanged.
+- 字体：沿用全站正文最低 18 px 的既有规范。
+- 颜色：保持当前浅色主题 token，不引入新的暗色界面。
+- 图片：使用 `object-fit: cover`，缩略图不拉伸。
+- 交互：手动输入 `@` 的素材选择器仍保留，卡片上的引用按钮仍可直接插入。
+- 上传：图片/视频素材继续直传腾讯云 COS，参考图不再经过 600 KB 的内联 Base64 门槛。
 
 ## Findings
 
-No actionable P0, P1, or P2 visual differences remain.
-
-## Open Questions
-
-None.
+无待处理的 P0、P1 或 P2 视觉问题。
 
 ## Implementation Checklist
 
-- [x] Apply white background to every canonical Gulong brand image, including theme-query variants.
-- [x] Keep functional icons unchanged.
-- [x] Align assistant identity and message left.
-- [x] Align user identity and message right.
-- [x] Preserve the same role separation on mobile.
-- [x] Add regression tests and browser screenshots.
-
-## Comparison history
-
-1. Initial desktop comparison passed for white image backgrounds and left/right role separation.
-2. Initial 390 px capture found a P2 issue: the assistant completion badge compressed the message header.
-3. The header was made wrap-aware and the mobile status badge received its own row.
-4. The revised 390 px capture shows a readable status badge, stable role alignment, and no overflow.
+- [x] H3 图片上限恢复为 9 张，视频和音频各 3 个。
+- [x] 移除独立的“@ 引用素材”行。
+- [x] 9 张缩略图使用响应式网格并保持可见。
+- [x] 素材多时使用内部滚动，避免挤乱编辑器。
+- [x] 对话框桌面高度增加 3/5。
+- [x] 移动端保留适度增高与安全滚动。
+- [x] 取消普通图片创作的 600 KB 前端门槛，改为受信任 COS 直传。
 
 ## Follow-up Polish
 

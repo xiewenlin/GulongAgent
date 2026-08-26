@@ -5,6 +5,7 @@ import { getCollection } from "./db.js";
 import { enforceRateLimit } from "./rate-limit.js";
 import { readUserSecret, sealUserSecret } from "./security.js";
 import { localizeErrorMessage } from "../shared/error-messages.js";
+import { createPresignedDownloadUrl } from "./cos.js";
 import {
   SHORT_VIDEO_PLAN_ID,
   expireShortVideoPackageAllowance,
@@ -293,6 +294,30 @@ async function pearMediaRequest(endpoint, payload, timeoutMs = 25_000) {
   return result;
 }
 
+async function referenceImagePart(reference, index) {
+  if (typeof reference === "string") {
+    const match = /^data:(image\/(?:jpeg|png|webp));base64,(.+)$/i.exec(reference);
+    if (!match) throw new PearApiError("参考图格式无效", { status: 400, code: "INVALID_REFERENCE_IMAGE" });
+    return {
+      body: Buffer.from(match[2], "base64"),
+      contentType: match[1].toLowerCase(),
+      filename: `reference-${index + 1}.${match[1].split("/")[1].replace("jpeg", "jpg")}`,
+    };
+  }
+  if (!reference?.url) throw new PearApiError("参考图上传记录无效", { status: 409, code: "ASSET_NOT_READY" });
+  let response;
+  try { response = await fetch(reference.url, { headers: { Accept: "image/jpeg,image/png,image/webp" } }); }
+  catch { throw new PearApiError("暂时无法读取已上传的参考图，请稍后重试", { status: 502, code: "REFERENCE_IMAGE_DOWNLOAD_FAILED" }); }
+  if (!response.ok) throw new PearApiError("暂时无法读取已上传的参考图，请重新上传后重试", { status: 409, code: "ASSET_NOT_READY" });
+  const contentType = String(response.headers.get("content-type") || reference.contentType || "").split(";")[0].toLowerCase();
+  if (!/^image\/(jpeg|png|webp)$/.test(contentType)) throw new PearApiError("参考图仅支持 JPEG、PNG 或 WebP 格式", { status: 400, code: "INVALID_REFERENCE_IMAGE" });
+  return {
+    body: Buffer.from(await response.arrayBuffer()),
+    contentType,
+    filename: String(reference.filename || `reference-${index + 1}.${contentType.split("/")[1].replace("jpeg", "jpg")}`).slice(0, 180),
+  };
+}
+
 async function pearImageMultipartRequest({ key, model, prompt, imageSize, referenceImages }) {
   const form = new FormData();
   form.append("key", key);
@@ -301,11 +326,9 @@ async function pearImageMultipartRequest({ key, model, prompt, imageSize, refere
   form.append("size", imageSize);
   form.append("task_type", "async");
   form.append("task_id", "");
-  for (const [index, dataUrl] of referenceImages.entries()) {
-    const match = /^data:(image\/(?:jpeg|png|webp));base64,(.+)$/i.exec(dataUrl);
-    if (!match) throw new PearApiError("参考图格式无效", { status: 400, code: "INVALID_REFERENCE_IMAGE" });
-    const body = Buffer.from(match[2], "base64");
-    form.append("images[]", new Blob([body], { type: match[1] }), `reference-${index + 1}.${match[1].split("/")[1].replace("jpeg", "jpg")}`);
+  for (const [index, reference] of referenceImages.entries()) {
+    const part = await referenceImagePart(reference, index);
+    form.append("images[]", new Blob([part.body], { type: part.contentType }), part.filename);
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 25_000);
@@ -331,7 +354,7 @@ async function submitPearMedia({ key, modality, model, prompt, referenceImages, 
       ? pearImageMultipartRequest({ key, model, prompt, imageSize, referenceImages })
       : pearMediaRequest(IMAGE_ENDPOINT, { key, model, prompt, images: [], size: imageSize, task_type: "async", task_id: "" });
   }
-  return pearMediaRequest(VIDEO_ENDPOINT, { key, model, prompt, aspect_ratio: aspectRatio, duration, images: referenceImages });
+  return pearMediaRequest(VIDEO_ENDPOINT, { key, model, prompt, aspect_ratio: aspectRatio, duration, images: referenceImages.map((reference) => typeof reference === "string" ? reference : reference.url) });
 }
 
 async function pollPearMedia({ key, modality, upstreamTaskId }) {
@@ -586,6 +609,7 @@ const ErrorSchema = z.object({ code: z.string(), message: z.string() });
 const ModelSchema = z.object({ id: z.string(), name: z.string(), vendor: z.string(), description: z.string(), free: z.literal(true) });
 const MessageSchema = z.object({ role: z.enum(["user", "assistant"]), content: z.string().trim().min(1).max(12_000) });
 const ReferenceImageSchema = z.string().max(900_000).refine((value) => /^data:image\/(jpeg|png|webp);base64,/i.test(value), "仅支持 JPEG、PNG 或 WebP 图片");
+const ReferenceAssetSchema = z.object({ asset_id: z.string().trim().min(1).max(80), object_key: z.string().trim().max(1_000).optional() });
 
 export function registerPearApiRoutes(app, { authenticate, requireAdmin, requireTrustedMutation }) {
   const modelsRoute = createRoute({
@@ -610,7 +634,7 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     method: "post", path: "/api/agent/media", tags: ["Web Agent"], summary: "提交 PearAPI 图片或视频生成任务",
     request: { body: { content: { "application/json": { schema: z.object({
       modality: z.enum(["image", "video"]), model: z.string(), prompt: z.string().trim().min(1).max(4_096), conversationId: z.string().optional(),
-      referenceImages: z.array(ReferenceImageSchema).max(16).default([]), imageSize: z.enum(PEAR_IMAGE_SIZES).default("1:1"),
+      referenceImages: z.array(ReferenceImageSchema).max(16).default([]), referenceAssets: z.array(ReferenceAssetSchema).max(16).default([]), imageSize: z.enum(PEAR_IMAGE_SIZES).default("1:1"),
       aspectRatio: z.enum(["16:9", "9:16"]).default("16:9"), duration: z.number().int().refine((value) => PEAR_VIDEO_DURATIONS.includes(value), "不支持的视频时长").default(5),
     }) } } } },
     responses: { 201: { description: "媒体任务已提交；普通用户与订阅用户返回原子预扣金额和剩余余额，管理员免扣费" }, 400: { description: "模型、参数或 Idempotency-Key 无效", content: { "application/json": { schema: ErrorSchema } } }, 402: { description: "非管理员余额不足", content: { "application/json": { schema: ErrorSchema } } } },
@@ -773,8 +797,24 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     if (!key) return c.json({ code: "PEAR_API_KEY_NOT_CONFIGURED", message: "管理员尚未配置 PearAPI Key" }, 503);
     const actual = requested.auto ? resolvePearAutoModel(input.modality, input.prompt) : requested;
     if (input.referenceImages.reduce((total, value) => total + value.length, 0) > 3_200_000) return c.json({ code: "REFERENCE_IMAGES_TOO_LARGE", message: "参考图编码后总大小不能超过 3.2 MB，请压缩后重试" }, 413);
-    const referenceImages = input.referenceImages.slice(0, actual.referenceImages);
-    if (input.referenceImages.length > actual.referenceImages) return c.json({ code: "TOO_MANY_REFERENCE_IMAGES", message: `${actual.name} 最多支持 ${actual.referenceImages} 张参考图` }, 400);
+    const requestedReferenceCount = input.referenceImages.length + input.referenceAssets.length;
+    if (requestedReferenceCount > actual.referenceImages) return c.json({ code: "TOO_MANY_REFERENCE_IMAGES", message: `${actual.name} 最多支持 ${actual.referenceImages} 张参考图` }, 400);
+    const referenceAssetIds = input.referenceAssets.map((asset) => asset.asset_id);
+    if (referenceAssetIds.some((id) => !ObjectId.isValid(id))) return c.json({ code: "ASSET_NOT_READY", message: "参考图上传记录无效，请重新上传后重试" }, 409);
+    const assetRecords = referenceAssetIds.length ? await (await getCollection("h3AssetUploads")).find({
+      _id: { $in: referenceAssetIds.map((id) => new ObjectId(id)) }, ownerId, status: "ready", kind: "image",
+    }).toArray() : [];
+    const assetRecordById = new Map(assetRecords.map((asset) => [asset._id.toString(), asset]));
+    const trustedReferenceAssets = [];
+    for (const asset of input.referenceAssets) {
+      const record = assetRecordById.get(asset.asset_id);
+      if (!record || (asset.object_key && record.objectKey !== asset.object_key)) return c.json({ code: "ASSET_NOT_READY", message: "参考图尚未完成受信任上传，或不属于当前账号" }, 409);
+      trustedReferenceAssets.push({
+        assetId: record._id.toString(), objectKey: record.objectKey, filename: record.filename, contentType: record.contentType,
+        url: createPresignedDownloadUrl(record.objectKey, { expires: 30 * 60 }),
+      });
+    }
+    const referenceImages = [...input.referenceImages, ...trustedReferenceAssets];
     const chargedFen = unlimited ? 0 : chargedFenForModel(actual, input.modality, input.duration);
     const conversationId = ObjectId.isValid(input.conversationId) ? new ObjectId(input.conversationId) : new ObjectId();
     const requestId = `pear_media_${Date.now().toString(36)}_${randomBytes(6).toString("hex")}`;
@@ -791,7 +831,7 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
       try {
         await jobs.insertOne({
           _id: jobId, ownerId, conversationId, requestId, idempotencyKey, modality: input.modality, requestedModel: requested.id, model: actual.id, modelName: actual.name,
-          prompt: input.prompt, referenceCount: referenceImages.length, imageSize: input.imageSize, aspectRatio: input.aspectRatio, duration: input.duration,
+          prompt: input.prompt, referenceCount: referenceImages.length, referenceAssetIds: trustedReferenceAssets.map((asset) => asset.assetId), referenceObjectKeys: trustedReferenceAssets.map((asset) => asset.objectKey), imageSize: input.imageSize, aspectRatio: input.aspectRatio, duration: input.duration,
           baseCostMilliFen: actual.baseCostMilliFen, chargedFen, markupRate: PEAR_API_MARKUP_RATE, chargeStatus: unlimited ? "exempt" : "pending", status: "reserving", createdAt: now, updatedAt: now,
         });
         job = await jobs.findOne({ _id: jobId });
