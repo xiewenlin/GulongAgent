@@ -63,6 +63,14 @@ test("web agent uses one page scrollbar and a collapsible centered composer", as
   assert.match(source, /video_mode: h3VideoMode/);
   assert.match(source, /sampling_steps: h3SamplingSteps/);
   assert.match(source, /seed: h3SeedValue/);
+  assert.match(source, /<UploadSimple size=\{22\} weight="bold" \/>/);
+  assert.match(source, /agent-h3-prompt-toggle agent-h3-prompt-toggle-inline/);
+  assert.equal(source.match(/agent-h3-prompt-toggle agent-h3-prompt-toggle-inline/g)?.length, 1);
+  assert.match(source, /agent-h3-parameter-rail \$\{h3VideoMode === "extended" \? "extended" : ""\}/);
+  assert.match(css, /\.agent-h3-assets-menu\s*\{[^}]*top:\s*16px;[^}]*left:\s*16px;/s);
+  assert.match(css, /\.agent-h3-assets-menu > summary\s*\{[^}]*min-height:\s*96px;[^}]*border:\s*1px dashed/s);
+  assert.match(css, /\.agent-h3-prompt-toggle-inline\s*\{[^}]*bottom:\s*14px;[^}]*left:\s*50%;[^}]*translateX\(-50%\)/s);
+  assert.match(css, /\.agent-h3-parameter-rail\s*\{[^}]*flex-wrap:\s*nowrap;/s);
   assert.match(css, /\.agent-composer-wrap textarea\s*\{[^}]*min-height:\s*216px;/s);
   assert.match(css, /\.agent-workspace-intro\s*\{[^}]*display:\s*flex;[^}]*align-items:\s*center;/s);
   assert.match(css, /\.agent-home-cluster\s*\{[^}]*display:\s*flex;[^}]*align-items:\s*center;/s);

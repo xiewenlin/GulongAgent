@@ -1,57 +1,62 @@
 # MiniMax H3 网页创作窗 Design QA
 
-- source visual truth path: `C:\Users\YCAI\AppData\Local\Temp\codex-clipboard-3aeef378-4f97-414d-af4c-9ce1f00b280d.png`
-- implementation screenshot path: `C:\Users\YCAI\Documents\Codex\2026-07-28\product-design-plugin-product-design-openai-3\work\GulongAgent\artifacts\design-qa-h3-final-1440x960.png`
-- combined comparison path: `C:\Users\YCAI\Documents\Codex\2026-07-28\product-design-plugin-product-design-openai-3\work\GulongAgent\artifacts\design-qa-h3-comparison.png`
-- focused states: `artifacts/design-qa-h3-assets-1440x960.png`, `artifacts/design-qa-h3-duration-1440x960.png`, `artifacts/design-qa-h3-extended-1440x960.png`, `artifacts/design-qa-h3-mobile-390x844.png`
-- viewport: 1440 × 960 desktop target; browser content viewport 1425 × 950; 390 × 844 mobile resilience check
-- source pixels: 982 × 525 at source density
-- implementation pixels: 1425 × 950 at device scale factor 1
-- normalization: comparison board scales the source proportionally to 1424 × 761 and keeps the implementation at 1424 × 950; browser chrome is excluded
-- state: authenticated administrator mock, 视频类型, MiniMaxH3共享节点, empty prompt, no attachments
+- source visual truth paths:
+  - `C:\Users\YCAI\AppData\Local\Temp\codex-clipboard-82dc43f2-5b00-4f2c-ad5f-8982b51a14cb.png`
+  - `C:\Users\YCAI\AppData\Local\Temp\codex-clipboard-93a049cb-4569-4c3b-ba6a-ed7f0bfdae51.png`
+- implementation screenshot paths:
+  - `C:\Users\YCAI\Documents\Codex\2026-07-28\product-design-plugin-product-design-openai-3\work\GulongAgent\artifacts\design-qa-h3-inline-controls-full-1920x1080.png`
+  - `C:\Users\YCAI\Documents\Codex\2026-07-28\product-design-plugin-product-design-openai-3\work\GulongAgent\artifacts\design-qa-h3-inline-controls-full-1440x960.png`
+- combined comparison path: `C:\Users\YCAI\Documents\Codex\2026-07-28\product-design-plugin-product-design-openai-3\work\GulongAgent\artifacts\design-qa-h3-inline-controls-comparison.png`
+- viewport: 1920 × 1080 primary desktop; 1440 × 960 responsive desktop
+- source pixels: 1319 × 641 for the broken layout; 925 × 273 for the target upload-card detail
+- implementation pixels: 1905 × 1072 and 1425 × 950 at device scale factor 1; browser scrollbar width is excluded from the captured content width
+- normalization: the comparison board crops the 1920 implementation to the 1280 × 533 dialog rectangle and scales each source panel into a fixed 1280 px review width; browser chrome is excluded
+- state: authenticated administrator mock, 视频类型, MiniMaxH3共享节点, empty prompt, no attachments, magic optimization disabled by default
 
 ## Full-view comparison evidence
 
-The source screenshot shows a narrow composer where “多模态素材” collapses into a vertical word stack and hides most generation parameters. The final implementation uses exactly two thirds of the configured 1440 px desktop CSS viewport (959.98 px), keeps the dialog centered, gives the prompt editor a 350 px minimum height, and presents all desktop-generation parameters in a stable two-row rail without clipping. The page scrollbar reduces `documentElement.clientWidth` to 1425 px but does not alter the requested viewport-relative width.
+The broken source state placed the reference-material control at the lower-left edge of the editor and wrapped the model selector onto a second footer row. The implementation now places a dashed, icon-led “参考素材” upload card in the upper-left of the prompt editor, keeps “魔法优化” centered inside the editor at the bottom, and keeps type, video mode, aspect ratio, resolution, sampling steps, duration, seed, model and send controls on one continuous parameter rail.
+
+At the 1920 px primary viewport every parameter remains fully separated and vertically aligned. At 1440 px the rail measures 958 px with `scrollWidth === clientWidth` and `flex-wrap: nowrap`; longer native select values use intentional ellipsis instead of overlapping, wrapping or hiding controls. This is consistent with the reference treatment of the long model name.
 
 ## Focused region comparison evidence
 
-- Reference assets: the compact “参考素材” control opens a 3-column image/video/audio picker; it can expand to a 2-column thumbnail grid and remains scrollable without changing the composer geometry.
-- Duration: the 1–15 second control opens a separate range/number/quick-value panel above the toolbar and does not cover the send or model controls.
-- Long-form mode: selecting “超长视频” reveals the desktop-matched “连续成片 / 批量短片” strategy, blank-line prompt segmentation, per-segment duration, total-duration summary and TXT import without widening or clipping the composer.
-- Mobile: at 390 × 844, the editor and controls become a full-width stacked layout; no horizontal clipping or vertically stacked label characters are visible.
-- Interactions: video mode, aspect ratio, resolution, sampling steps, seed, duration, asset panel and the existing magic switch were exercised. The console contained no warning or error entries.
+- Reference assets: the target detail uses a square dashed upload card with a raised upload icon and label. The implementation reproduces this visual hierarchy at 104 × 96 px and places it at 16 px from the editor’s top-left edge.
+- Magic switch: the existing functional toggle is repositioned at the horizontal center and 14 px above the editor bottom. Its pressed state, tooltip, hover treatment and accessible name remain intact.
+- Parameter rail: all nine primary controls stay in one row at 1920 and 1440. At 1440 the measured rail is 958/958 px client/scroll width, so no persistent control is clipped outside the dialog.
+- Reference-material interaction: opening the upload card displays the existing image/video/audio picker and closing it restores the clean editing surface without reflowing the footer.
+- Extended video mode: ten controls remain on one line at 1440 with 958/958 px client/scroll width.
+- Console: the browser console contained no warning or error entries after reload, video selection, material-panel open/close, magic-toggle activation and extended-mode selection.
 
 ## Required fidelity surfaces
 
-- Fonts and typography: retains the product’s existing font stack and 18 px minimum UI text; headings remain 20 px; no clipped or vertical Chinese labels.
-- Spacing and layout rhythm: centered 2/3-width frame, 76 px title band, 350 px editor, 72 px parameter rail, consistent 8–18 px gaps and existing 11–22 px radii.
-- Colors and visual tokens: all surfaces, borders, focus indicators and active states use the existing theme tokens; no new hard-coded dark theme.
-- Image quality and asset fidelity: existing Phosphor icons and real file thumbnails are reused; no placeholder imagery, handcrafted SVG, emoji or CSS illustration was introduced.
-- Copy and content: desktop parameter names and options are present; website-only “魔法优化” is retained; “优化提示词”和“预览提示词” buttons are not implemented.
+- Fonts and typography: the product’s existing font stack and 18 px minimum control text are retained; labels remain horizontal and readable. Long model/sampling values truncate only inside their native select control at narrower desktop widths.
+- Spacing and layout rhythm: the 2/3-width centered dialog is preserved; the 16 px upload-card inset, 14 px magic-switch bottom inset, 6 px desktop control gap and 68 px footer form one clear editor-to-parameter rhythm.
+- Colors and visual tokens: dashed borders, surfaces, text, active states, shadows and focus rings continue to use the current light-theme variables; no dark or hard-coded foreign palette was introduced.
+- Image quality and asset fidelity: the visible upload glyph uses the existing Phosphor `UploadSimple` icon rather than CSS art, emoji or a raster placeholder. Existing real attachment thumbnails remain unchanged.
+- Copy and content: “参考素材” and “魔法优化” are preserved; all H3 parameter names and values remain available and the original task placeholder still explains `@图片1`、`@视频1`、`@音频1` references.
+- Accessibility and interaction: controls remain semantic buttons/selects, the magic switch exposes `aria-pressed`, keyboard focus-visible styling is retained, and the mobile rail stays horizontally reachable rather than vertically stacking Chinese labels.
 
 ## Comparison history
 
-1. P1 layout failure: source state compressed the asset label vertically and exposed only a subset of H3 parameters.
-   - Fix: widened the desktop composer to 66.666vw, introduced the desktop-style title/editor/asset popover/parameter rail, and added full mode, ratio, resolution, sampling, duration and seed controls.
-   - Post-fix evidence: `artifacts/design-qa-h3-desktop-1440x960.png`; all controls are visible and the vertical label failure is gone.
-2. P2 polish issue: first focused-state capture showed the browser’s default black focus outline around `summary` controls.
-   - Fix: replaced mouse focus styling with the existing theme border and preserved a brand-color `:focus-visible` ring for keyboard accessibility.
-   - Post-fix evidence: `artifacts/design-qa-h3-final-1440x960.png`; no black outline remains in the idle state.
+1. P1 layout mismatch: the asset entry sat at the editor bottom and the footer wrapped the model/send controls onto a second row.
+   - Fix: moved the material summary into a target-style dashed top-left upload card, moved the magic toggle into the editor bottom center, and converted the footer to a no-wrap adaptive flex rail.
+   - Post-fix evidence: `artifacts/design-qa-h3-inline-controls-comparison.png`; all persistent controls are visible on one row and the upload card matches the supplied target hierarchy.
+2. P2 responsive risk: the first layout calculation could over-constrain long labels below 1600 px.
+   - Fix: introduced proportional flex bases, compact gaps/padding and icon suppression below 1600 px while preserving 18 px text; long native select values use ellipsis.
+   - Post-fix evidence: `artifacts/design-qa-h3-inline-controls-full-1440x960.png`; rail client and scroll widths are both 958 px and no controls wrap or overlap.
 
 ## Findings
 
-No actionable P0, P1 or P2 differences remain. The desktop design preserves the current website theme while matching the current MiniMax H3 desktop parameter model. Responsive deviations on tablet and mobile are intentional usability adaptations.
+No actionable P0, P1 or P2 differences remain. The implementation preserves the current website theme while adopting the target upload-card composition and the requested single-row parameter layout. Select-value ellipsis at narrower desktop widths is an expected responsive constraint and does not hide any parameter control.
 
 ## Primary interactions tested
 
-- Switch from text to video and select MiniMaxH3共享节点
-- Select smart multiframe, 16:9, 1080P and 8 sampling steps
-- Enter seed 20260827
-- Open/close reference asset and duration panels
-- Enable the existing magic optimization switch
-- Select long-form generation, enter three blank-line-separated prompt segments and verify a 15-second computed total
-- Verify the computed width is 959.98 px in a 1440 px configured viewport (66.665%); the 15 px page scrollbar is outside that CSS viewport calculation
+- Switch from text to video and load MiniMaxH3共享节点
+- Open and close the reference-material picker
+- Toggle magic optimization and verify `aria-pressed=true`
+- Select extended video mode and verify all ten controls remain in one row
+- Measure 1440 px rail geometry: 958 px client width, 958 px scroll width, `nowrap`
 - Check browser console warnings and errors: none
 
 final result: passed

@@ -279,18 +279,18 @@ img[src*="/assets/gulong-agent-icon.png"] {
 .agent-h3-composer-title > div:last-child > span { padding: 7px 11px; border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--line)); border-radius: 999px; color: var(--primary); background: color-mix(in srgb, var(--accent) 8%, var(--surface)); font-weight: 780; }
 .agent-h3-composer-title > div:last-child > small { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .agent-h3-prompt-wrap { margin: 14px 18px 0; position: relative; }
-.agent-composer-wrap.h3-desktop-composer .agent-h3-prompt-wrap > textarea { min-height: 350px; max-height: 56vh; padding: 22px 20px 84px 132px; resize: vertical; border: 1px solid color-mix(in srgb, var(--primary) 24%, var(--line)); border-radius: 15px; background: color-mix(in srgb, var(--bg-soft) 34%, var(--surface)); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .72); }
+.agent-composer-wrap.h3-desktop-composer .agent-h3-prompt-wrap > textarea { min-height: 350px; max-height: 56vh; padding: 24px 20px 84px 132px; resize: vertical; border: 1px solid color-mix(in srgb, var(--primary) 24%, var(--line)); border-radius: 15px; background: color-mix(in srgb, var(--bg-soft) 34%, var(--surface)); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .72); }
 .agent-composer-wrap.h3-desktop-composer .agent-h3-prompt-wrap > textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 9%, transparent), inset 0 1px 0 rgba(255, 255, 255, .72); }
-.agent-h3-assets-menu { position: absolute; z-index: 36; left: 14px; bottom: 14px; }
-.agent-h3-assets-menu > summary { width: 104px; min-height: 54px; padding: 8px 9px; display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 2px 7px; list-style: none; border: 1px solid color-mix(in srgb, var(--primary) 24%, var(--line)); border-radius: 12px; color: var(--primary); background: color-mix(in srgb, var(--surface-strong) 96%, transparent); font-size: 18px; font-weight: 780; cursor: pointer; box-shadow: 0 8px 22px rgba(20, 48, 41, .08); }
+.agent-h3-assets-menu { position: absolute; z-index: 36; top: 16px; left: 16px; }
+.agent-h3-assets-menu > summary { width: 104px; min-height: 96px; padding: 10px 8px; position: relative; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 7px; list-style: none; border: 1px dashed color-mix(in srgb, var(--primary) 34%, var(--line)); border-radius: 11px; color: var(--primary); background: color-mix(in srgb, var(--surface-strong) 72%, transparent); font-size: 18px; font-weight: 780; cursor: pointer; box-shadow: none; }
 .agent-h3-assets-menu > summary::-webkit-details-marker { display: none; }
-.agent-h3-assets-menu > summary > span { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 9px; color: #fff; background: linear-gradient(145deg, var(--primary), color-mix(in srgb, var(--primary) 66%, var(--accent))); }
+.agent-h3-assets-menu > summary > span { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 9px; color: var(--primary); background: var(--surface); box-shadow: 0 7px 18px rgba(20, 48, 41, .1); }
 .agent-h3-assets-menu > summary > small { color: inherit; font-size: 18px; white-space: nowrap; }
 .agent-h3-assets-menu > summary > b { position: absolute; top: -7px; right: -7px; min-width: 26px; height: 26px; padding: 0 6px; display: grid; place-items: center; border: 2px solid var(--surface); border-radius: 999px; color: #fff; background: var(--accent); font-size: 18px; }
-.agent-h3-assets-menu[open] > summary { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 9%, var(--surface)); box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 8%, transparent); }
+.agent-h3-assets-menu[open] > summary { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 7%, var(--surface)); box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 8%, transparent); }
 .agent-h3-assets-menu > summary:focus { outline: 0; }
 .agent-h3-assets-menu > summary:focus-visible, .agent-h3-duration-menu > summary:focus-visible { outline: 3px solid color-mix(in srgb, var(--primary) 24%, transparent); outline-offset: 2px; }
-.agent-h3-assets-popover { width: min(650px, calc(66.666vw - 70px)); max-height: min(520px, 62vh); padding: 16px; position: absolute; z-index: 45; bottom: 66px; left: 0; overflow-y: auto; border: 1px solid color-mix(in srgb, var(--primary) 34%, var(--line)); border-radius: 18px; background: color-mix(in srgb, var(--surface-strong) 98%, transparent); box-shadow: 0 28px 80px rgba(10, 40, 35, .24); backdrop-filter: blur(18px); }
+.agent-h3-assets-popover { width: min(650px, calc(66.666vw - 70px)); max-height: min(520px, 62vh); padding: 16px; position: absolute; z-index: 45; top: 108px; left: 0; overflow-y: auto; border: 1px solid color-mix(in srgb, var(--primary) 34%, var(--line)); border-radius: 18px; background: color-mix(in srgb, var(--surface-strong) 98%, transparent); box-shadow: 0 28px 80px rgba(10, 40, 35, .24); backdrop-filter: blur(18px); }
 .agent-h3-assets-popover > header { margin-bottom: 12px; }
 .agent-h3-assets-popover > header > div { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .agent-h3-assets-popover > header strong { font-size: 20px; }
@@ -321,14 +321,18 @@ img[src*="/assets/gulong-agent-icon.png"] {
 .agent-h3-longform-bar small { color: var(--muted); }
 .agent-h3-longform-bar > label { min-height: 42px; padding: 0 11px; display: inline-flex; align-items: center; gap: 7px; position: relative; overflow: hidden; flex: none; border: 1px solid var(--line); border-radius: 10px; color: var(--primary); background: var(--surface); font-size: 18px; font-weight: 740; cursor: pointer; }
 .agent-h3-longform-bar > label input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
-.agent-h3-parameter-rail { min-height: 72px; padding: 11px 14px; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; border-top: 1px solid color-mix(in srgb, var(--primary) 18%, var(--line)); border-radius: 0 0 22px 22px; background: color-mix(in srgb, var(--bg-soft) 64%, var(--surface)); }
+.agent-h3-parameter-rail { min-height: 68px; padding: 10px 12px; display: flex; align-items: center; flex-wrap: nowrap; gap: 6px; overflow: visible; border-top: 1px solid color-mix(in srgb, var(--primary) 18%, var(--line)); border-radius: 0 0 22px 22px; background: color-mix(in srgb, var(--bg-soft) 64%, var(--surface)); scrollbar-width: thin; }
+.agent-h3-parameter-rail > * { min-width: 0; }
 .agent-h3-compact-control, .agent-h3-duration-menu > summary { min-height: 44px; padding: 0 10px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 11px; color: var(--primary); background: var(--surface); font-size: 18px; font-weight: 720; }
 .agent-h3-compact-control select, .agent-h3-compact-control input { min-width: 0; border: 0; outline: 0; color: inherit; background: transparent; font: inherit; font-size: 18px; }
-.agent-h3-compact-control.wide { width: 155px; }
-.agent-h3-compact-control.sampling { width: 168px; }
-.agent-h3-compact-control.seed { width: 104px; }
-.agent-h3-compact-control.seed input { width: 60px; }
-.agent-h3-duration-menu { position: relative; }
+.agent-h3-compact-control { flex: .82 1 76px; padding-inline: 8px; gap: 5px; overflow: hidden; }
+.agent-h3-compact-control > svg { flex: none; }
+.agent-h3-compact-control select { width: 100%; text-overflow: ellipsis; }
+.agent-h3-compact-control.wide { width: auto; flex: 1.18 1 116px; }
+.agent-h3-compact-control.sampling { width: auto; flex: 1.34 1 132px; }
+.agent-h3-compact-control.seed { width: auto; flex: .72 1 74px; }
+.agent-h3-compact-control.seed input { width: 100%; }
+.agent-h3-duration-menu { position: relative; flex: .66 1 70px; }
 .agent-h3-duration-menu > summary { list-style: none; cursor: pointer; }
 .agent-h3-duration-menu > summary:focus:not(:focus-visible) { outline: 0; }
 .agent-h3-duration-menu > summary::-webkit-details-marker { display: none; }
@@ -350,9 +354,27 @@ img[src*="/assets/gulong-agent-icon.png"] {
 .agent-h3-segment-field input { width: 70px; border: 0; outline: 0; color: var(--primary); background: transparent; font: inherit; font-size: 18px; text-align: right; }
 .agent-h3-segment-field em { color: var(--muted); font-size: 18px; font-style: normal; }
 .agent-h3-duration-note { margin-top: 9px; display: block; color: var(--muted); font-size: 18px; line-height: 1.55; }
-.h3-desktop-composer .agent-type-select { flex: none; color: var(--primary); background: var(--surface); }
-.h3-desktop-composer .agent-model-select { max-width: 260px; min-width: 220px; flex: 1 1 220px; margin-left: auto; background: var(--surface); }
+.agent-h3-prompt-toggle-inline { position: absolute; z-index: 34; bottom: 14px; left: 50%; transform: translateX(-50%); background: color-mix(in srgb, var(--surface-strong) 96%, transparent); box-shadow: 0 8px 22px rgba(20, 48, 41, .08); }
+.agent-h3-prompt-toggle-inline:hover { transform: translate(-50%, -1px); }
+.h3-desktop-composer .agent-type-select { min-width: 76px; flex: .78 1 82px; overflow: hidden; color: var(--primary); background: var(--surface); }
+.h3-desktop-composer .agent-type-select select { width: 100%; text-overflow: ellipsis; }
+.h3-desktop-composer .agent-model-select { max-width: 220px; min-width: 140px; flex: 1.45 1 170px; margin-left: 0; overflow: hidden; background: var(--surface); }
 .h3-desktop-composer .agent-send-button { width: 46px; height: 46px; }
+.agent-h3-parameter-rail.extended { gap: 5px; padding-inline: 8px; }
+.agent-h3-parameter-rail.extended .agent-h3-compact-control.wide { flex-basis: 98px; }
+.agent-h3-parameter-rail.extended .agent-h3-compact-control.sampling { flex-basis: 112px; }
+.h3-desktop-composer .agent-h3-parameter-rail.extended .agent-model-select { min-width: 120px; }
+@media (max-width: 1600px) {
+  .agent-h3-parameter-rail { gap: 4px; padding-inline: 8px; }
+  .agent-h3-parameter-rail .agent-type-select > span,
+  .agent-h3-parameter-rail .agent-h3-compact-control > svg,
+  .agent-h3-parameter-rail .agent-h3-duration-menu > summary > svg,
+  .agent-h3-parameter-rail .agent-model-select > svg { display: none; }
+  .agent-h3-parameter-rail .agent-h3-compact-control,
+  .agent-h3-parameter-rail .agent-h3-duration-menu > summary,
+  .agent-h3-parameter-rail .agent-type-select,
+  .agent-h3-parameter-rail .agent-model-select { padding-inline: 7px; }
+}
 .agent-spin { animation: agentSpin 1s linear infinite; }
 @keyframes agentSpin { to { transform: rotate(360deg); } }
 .agent-drawer-backdrop { position: fixed; z-index: 1450; inset: 0; display: flex; justify-content: flex-end; background: rgba(9, 28, 25, .32); backdrop-filter: blur(7px); }
@@ -489,20 +511,25 @@ img[src*="/assets/gulong-agent-icon.png"] {
   .agent-h3-composer-title > div:last-child { width: 100%; justify-content: space-between; }
   .agent-h3-composer-title > div:last-child > em { display: none; }
   .agent-h3-prompt-wrap { margin: 10px 10px 0; }
-  .agent-composer-wrap.h3-desktop-composer .agent-h3-prompt-wrap > textarea { min-height: 310px; max-height: 50vh; padding: 18px 14px 80px 114px; }
-  .agent-h3-assets-menu { left: 10px; bottom: 12px; }
-  .agent-h3-assets-menu > summary { width: 94px; }
+  .agent-composer-wrap.h3-desktop-composer .agent-h3-prompt-wrap > textarea { min-height: 310px; max-height: 50vh; padding: 18px 14px 80px 112px; }
+  .agent-h3-assets-menu { top: 12px; left: 10px; }
+  .agent-h3-assets-menu > summary { width: 90px; min-height: 88px; }
   .agent-h3-assets-popover { width: calc(100vw - 54px); max-height: min(470px, 60vh); padding: 13px; }
   .agent-h3-assets-upload-options, .agent-h3-assets-grid { grid-template-columns: 1fr; }
   .h3-desktop-composer .agent-h3-upload-progress { margin: 8px 10px 0; }
   .agent-h3-longform-bar { margin: 8px 10px 0; align-items: stretch; flex-direction: column; }
   .agent-h3-longform-bar > label { width: 100%; justify-content: center; }
-  .agent-h3-parameter-rail { padding: 10px; align-items: stretch; }
-  .agent-h3-compact-control, .agent-h3-duration-menu > summary, .agent-h3-prompt-toggle, .h3-desktop-composer .agent-type-select { flex: 1 1 calc(50% - 8px); width: auto; }
-  .agent-h3-compact-control.wide, .agent-h3-compact-control.sampling, .agent-h3-compact-control.seed { width: auto; }
-  .agent-h3-duration-menu > div { width: calc(100vw - 54px); right: auto; left: 0; }
-  .h3-desktop-composer .agent-model-select { max-width: none; min-width: 0; flex: 1 1 calc(100% - 56px); order: 2; margin-left: 0; }
-  .h3-desktop-composer .agent-send-button { order: 2; }
+  .agent-h3-parameter-rail { padding: 8px; align-items: center; flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; }
+  .agent-h3-compact-control, .agent-h3-duration-menu, .h3-desktop-composer .agent-type-select { width: auto; flex: none; }
+  .agent-h3-compact-control { width: 82px; }
+  .agent-h3-compact-control.wide { width: 122px; }
+  .agent-h3-compact-control.sampling { width: 142px; }
+  .agent-h3-compact-control.seed { width: 86px; }
+  .agent-h3-duration-menu { width: 78px; }
+  .agent-h3-duration-menu > div { width: calc(100vw - 32px); position: fixed; right: 16px; bottom: 82px; left: 16px; }
+  .h3-desktop-composer .agent-model-select { max-width: none; min-width: 180px; flex: none; order: initial; margin-left: 0; }
+  .h3-desktop-composer .agent-send-button { order: initial; }
+  .agent-h3-prompt-toggle-inline { bottom: 12px; }
   .agent-composer-close { top: 8px; right: 8px; }
   .agent-composer-orb { right: 10px; width: 62px; height: 62px; }
   .agent-composer-orb img { width: 50px; height: 50px; }
@@ -538,7 +565,7 @@ img[src*="/assets/gulong-agent-icon.png"] {
 
 @media (min-width: 761px) and (max-width: 1120px) {
   .agent-floating-composer { width: calc(100vw - 40px); }
-  .agent-h3-parameter-rail { flex-wrap: wrap; }
+  .agent-h3-parameter-rail { flex-wrap: nowrap; }
   .h3-desktop-composer .agent-model-select { max-width: none; }
   .agent-attachment-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .pear-token-layout { grid-template-columns: 1fr; }
