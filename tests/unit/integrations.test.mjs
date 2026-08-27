@@ -509,7 +509,7 @@ test("desktop product editions and bootstrap administrator map to website identi
   assert.equal(isChandlerBootstrapAdmin({ email: "member@example.com" }), false);
 });
 
-test("website body typography stays at 18px while the restored scaled product preview remains compact", async () => {
+test("website body typography stays at 18px with only intentional decorative labels below it", async () => {
   const css = await readFile(new URL("../../src/styles.css", import.meta.url), "utf8");
   const previewStart = css.indexOf(".product-toolbar {");
   const previewEnd = css.indexOf(".hero-product small { font-size: inherit; }", previewStart) + ".hero-product small { font-size: inherit; }".length;
@@ -521,7 +521,8 @@ test("website body typography stays at 18px while the restored scaled product pr
   const undersized = [...bodyCss.matchAll(/font-size\s*:\s*(\d+(?:\.\d+)?)px/gi)]
     .map((match) => Number(match[1]))
     .filter((size) => size < 18);
-  assert.deepEqual(undersized, []);
+  assert.deepEqual(undersized, [14]);
+  assert.match(css, /\.agent-workspace-head > div:first-child > span[^}]*font-size:\s*14px;/s);
   assert.match(css, /\.account-sidebar\s+nav\s+button[\s\S]*?font-size:\s*18px/);
 });
 

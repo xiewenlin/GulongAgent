@@ -2,6 +2,7 @@ import {
   ArrowRight,
   Check,
   CheckCircle,
+  ChatCircleDots,
   Coins,
   DownloadSimple,
   Eye,
@@ -316,6 +317,7 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
   const [assetOpen, setAssetOpen] = useState(false);
   const [skillOpen, setSkillOpen] = useState(false);
   const [draftPreviewOpen, setDraftPreviewOpen] = useState(false);
+  const [composerOpen, setComposerOpen] = useState(true);
   const [referencePicker, setReferencePicker] = useState(null);
   const [referenceActiveIndex, setReferenceActiveIndex] = useState(0);
   const [quotaPrompt, setQuotaPrompt] = useState("");
@@ -623,20 +625,23 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
   return <main id="main-content" className="web-agent-page">
     <div className="agent-topbar section-shell">
       <div className="agent-home-cluster"><button className="agent-home" type="button" onClick={() => navigate("/")} aria-label="返回古龙官网首页"><img src={themeIcon} alt="" /><span><strong>古龙网页版</strong><small>轻量 · 安全 · 云端响应</small></span></button><a href="/" onClick={(event) => { event.preventDefault(); navigate("/"); }}>返回官网 <ArrowRight size={15} /></a></div>
-      <nav aria-label="网页版功能"><button type="button" onClick={() => setSkillOpen(true)}><Sparkle size={21} weight="duotone" />拓展技能</button><button type="button" onClick={() => setAssetOpen(true)}><Wallet size={21} weight="duotone" />剩余用量</button></nav>
+      <nav aria-label="网页版功能"><button type="button" aria-label="拓展技能" title="拓展技能" onClick={() => setSkillOpen(true)}><Sparkle size={21} weight="duotone" /><span>拓展技能</span></button><button type="button" aria-label="剩余用量" title="剩余用量" onClick={() => setAssetOpen(true)}><Wallet size={21} weight="duotone" /><span>剩余用量</span></button></nav>
     </div>
 
     <section className="agent-workspace section-shell">
-      <header className="agent-workspace-head"><div><span>PEARAPI FREE MODEL CLOUD</span><h1>今天想完成什么？</h1><p>{bootstrap?.models?.length || 9} 个免费模型由古龙服务端统一调度；每次回复展示实时处理节点，不加载第二大脑、本地模型、插件或扩展工作流。</p></div><div className="agent-live-status"><i className={bootstrap?.configured ? "ready" : ""} /><span>{loading ? "正在连接" : bootstrap?.configured ? "远程模型已连接" : "等待管理员配置"}</span></div></header>
+      <header className="agent-workspace-head"><div className="agent-workspace-intro"><span>PEARAPI FREE MODEL CLOUD</span><h1>今天想完成什么？</h1><p title={`${bootstrap?.models?.length || 9} 个免费模型由古龙服务端统一调度；每次回复展示实时处理节点，不加载第二大脑、本地模型、插件或扩展工作流。`}>{bootstrap?.models?.length || 9} 个免费模型由古龙服务端统一调度；每次回复展示实时处理节点，不加载第二大脑、本地模型、插件或扩展工作流。</p></div><div className="agent-live-status"><i className={bootstrap?.configured ? "ready" : ""} /><span>{loading ? "正在连接" : bootstrap?.configured ? "远程模型已连接" : "等待管理员配置"}</span></div></header>
 
       <div className="agent-chat-shell">
         <div className="agent-chat-stream" aria-live="polite" ref={streamRef}>
-          {!messages.length && <div className="agent-empty-chat"><div className="agent-empty-mark"><Sparkle size={35} weight="duotone" /></div><h2>把目标交给古龙</h2><p>选择文字、图片或视频，挑选模型并描述你想完成的结果。</p><div>{starterPrompts.map((prompt) => <button key={prompt} type="button" onClick={() => { setDraft(prompt); inputRef.current?.focus(); }}>{prompt}<ArrowRight size={16} /></button>)}</div></div>}
+          {!messages.length && <div className="agent-empty-chat"><div className="agent-empty-mark"><Sparkle size={35} weight="duotone" /></div><h2>把目标交给古龙</h2><p>选择文字、图片或视频，挑选模型并描述你想完成的结果。</p><div>{starterPrompts.map((prompt) => <button key={prompt} type="button" onClick={() => { setDraft(prompt); setComposerOpen(true); setTimeout(() => inputRef.current?.focus(), 0); }}>{prompt}<ArrowRight size={16} /></button>)}</div></div>}
           {messages.map((item, index) => <article className={`agent-message ${item.role}`} key={`${item.createdAt}-${index}`}><div className="agent-message-avatar">{item.role === "assistant" ? <img src={themeIcon} alt="古龙" /> : (user.displayName || user.username || "我").slice(0, 1)}</div><div><header><strong>{item.role === "assistant" ? "古龙" : "你"}</strong><time>{new Date(item.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time>{item.free && <em>免费</em>}{item.fallback && <em>已切换备用模型</em>}</header>{item.role === "assistant" ? <><WorkflowTrace workflow={item.workflow} /><MarkdownMessage>{item.content}</MarkdownMessage></> : <p>{item.content}</p>}<MediaResult item={item} />{item.attachments?.length > 0 && <div className="agent-message-files">{item.attachments.map((file, fileIndex) => <span key={`${file.name}-${fileIndex}`}><File size={15} />{file.reference && <b>{file.reference}</b>}{file.name}</span>)}</div>}</div></article>)}
           {sending && <article className="agent-message assistant pending"><div className="agent-message-avatar"><img src={themeIcon} alt="" /></div><div><header><strong>古龙</strong><em>{creationType === "text" ? "文字" : creationType === "image" ? "图片" : "视频"}</em></header>{creationType === "text" && <WorkflowTrace workflow={liveWorkflow} live />}<p><SpinnerGap size={20} className="agent-spin" /> {assetUploadProgress ? `正在${assetUploadProgress.phase === "hashing" ? "校验" : assetUploadProgress.phase === "uploading" ? "上传" : assetUploadProgress.phase === "verifying" ? "确认" : "处理"}素材 ${assetUploadProgress.name}…` : `正在通过 ${selectedModel?.name || model} 处理任务…`}</p></div></article>}
         </div>
 
-        <div className="agent-composer-wrap">
+      </div>
+
+      {composerOpen ? <section className="agent-composer-wrap agent-floating-composer" role="dialog" aria-modal="false" aria-label="古龙创作输入框">
+          <button className="agent-composer-close" type="button" aria-label="收起创作输入框" title="收起为悬浮球" onClick={() => { setReferencePicker(null); setComposerOpen(false); }}><X size={20} weight="bold" /></button>
           {message && <div className="agent-inline-alert"><LockKey size={18} /><span>{message}</span><button type="button" onClick={() => setMessage("")}><X size={16} /></button></div>}
           {!bootstrap?.subscription?.active && !loading && <div className="agent-membership-gate"><div><Coins size={24} weight="duotone" /><span><strong>会员订阅尚未生效</strong><small>免费文字对话需开通会员；付费图片与视频可使用已有余额按次创作。</small></span></div><button type="button" onClick={() => navigate("/pricing")}>查看会员 <ArrowRight size={16} /></button></div>}
           <div className="agent-mode-row"><div className="agent-creation-hint">{creationType === "text" ? "免费文字对话" : isH3Video ? `${formatMoney(h3EstimatedPriceFen)} · MiniMaxH3共享节点预估价` : (selectedModel?.priceLabel || "按实际模型计费")}</div><div className="agent-draft-meta"><button type="button" onClick={() => { setReferencePicker(null); setDraftPreviewOpen(true); }} title="全屏查看并编辑长文本"><Eye size={19} weight="duotone" /><span>预览编辑</span></button><span>{draft.length} / {isH3Video ? 20000 : 4096}</span></div></div>
@@ -653,12 +658,11 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
             <div className="agent-model-select"><select value={model} onChange={(event) => changeModel(event.target.value)}>{availableModels.map((item) => <option value={item.id} key={item.id}>{item.name}{creationType === "text" ? " · 免费" : ` · ${item.priceLabel}`}</option>)}</select><Check size={15} weight="bold" /></div>
             <button className="agent-send-button" type="button" aria-label="发送" disabled={!draft.trim() || sending || loading} onClick={send}>{sending ? <SpinnerGap size={22} className="agent-spin" /> : <PaperPlaneRight size={22} weight="fill" />}</button>
           </footer>
-        </div>
-      </div>
+        </section> : <button className={`agent-composer-orb ${sending ? "working" : ""}`} type="button" aria-label="展开古龙创作输入框" title="展开创作输入框" onClick={() => { setComposerOpen(true); setTimeout(() => inputRef.current?.focus(), 0); }}><img src={themeIcon} alt="" /><ChatCircleDots size={25} weight="fill" /></button>}
     </section>
 
     {assetOpen && <AssetPanel bootstrap={bootstrap} onClose={() => setAssetOpen(false)} navigate={navigate} />}
-    {skillOpen && <SkillPanel onClose={() => setSkillOpen(false)} setDraft={(value) => { setDraft(value); setTimeout(() => inputRef.current?.focus(), 0); }} />}
+    {skillOpen && <SkillPanel onClose={() => setSkillOpen(false)} setDraft={(value) => { setDraft(value); setComposerOpen(true); setTimeout(() => inputRef.current?.focus(), 0); }} />}
     {draftPreviewOpen && <DraftPreviewEditor value={draft} setValue={setDraft} maxLength={isH3Video ? 20000 : 4096} references={h3References} onClose={() => setDraftPreviewOpen(false)} />}
     {quotaPrompt && <QuotaPrompt kind={quotaPrompt} onClose={() => setQuotaPrompt("")} navigate={navigate} />}
   </main>;

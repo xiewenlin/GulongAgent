@@ -39,30 +39,31 @@ img[src*="/assets/gulong-agent-icon.png"] {
 }
 
 /* Simplified PearAPI web agent */
-.web-agent-page { min-height: calc(100vh - 82px); padding-bottom: 86px; background: radial-gradient(circle at 12% 6%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 27%), radial-gradient(circle at 88% 14%, color-mix(in srgb, var(--primary) 8%, transparent), transparent 28%), var(--bg); }
-.agent-topbar { min-height: 92px; display: flex; align-items: center; justify-content: space-between; gap: 24px; border-bottom: 1px solid color-mix(in srgb, var(--line) 76%, transparent); }
+.web-agent-page { min-height: calc(100vh - 82px); padding-bottom: 86px; overflow-x: clip; background: radial-gradient(circle at 12% 6%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 27%), radial-gradient(circle at 88% 14%, color-mix(in srgb, var(--primary) 8%, transparent), transparent 28%), var(--bg); }
+.agent-topbar { min-height: 64px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid color-mix(in srgb, var(--line) 76%, transparent); }
 .agent-home { padding: 0; display: flex; align-items: center; gap: 13px; border: 0; color: var(--text); background: transparent; text-align: left; cursor: pointer; }
-.agent-home-cluster { display: grid; gap: 2px; }
-.agent-home-cluster > a { width: max-content; margin-left: 61px; display: inline-flex; align-items: center; gap: 4px; color: var(--primary); font-size: 18px; font-weight: 760; text-decoration: none; text-underline-offset: 4px; transition: color .2s ease, gap .2s ease; }
+.agent-home-cluster { min-width: 0; display: flex; align-items: center; gap: 16px; }
+.agent-home-cluster > a { width: max-content; display: inline-flex; align-items: center; gap: 4px; color: var(--primary); font-size: 18px; font-weight: 760; text-decoration: none; text-underline-offset: 4px; transition: color .2s ease, gap .2s ease; }
 .agent-home-cluster > a:hover { gap: 7px; color: var(--accent); text-decoration: underline; }
-.agent-topbar img { width: 48px; height: 48px; border-radius: 50%; box-shadow: 0 10px 26px color-mix(in srgb, var(--primary) 18%, transparent); }
-.agent-home span { display: grid; gap: 2px; }
+.agent-topbar img { width: 40px; height: 40px; border-radius: 50%; box-shadow: 0 8px 22px color-mix(in srgb, var(--primary) 16%, transparent); }
+.agent-home span { display: flex; align-items: baseline; gap: 10px; white-space: nowrap; }
 .agent-topbar strong { font-size: 20px; }
 .agent-topbar small { color: var(--muted); font-size: 18px; }
 .agent-topbar nav { display: flex; gap: 10px; }
-.agent-topbar nav button { min-height: 48px; padding: 0 18px; display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: 14px; color: var(--text); background: color-mix(in srgb, var(--panel) 88%, transparent); font-size: 18px; font-weight: 760; cursor: pointer; box-shadow: 0 10px 28px rgba(28, 52, 46, .05); transition: transform .2s ease, border-color .2s ease, color .2s ease; }
+.agent-topbar nav button { min-height: 40px; padding: 0 15px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 12px; color: var(--text); background: color-mix(in srgb, var(--panel) 88%, transparent); font-size: 18px; font-weight: 760; cursor: pointer; box-shadow: 0 8px 22px rgba(28, 52, 46, .05); transition: transform .2s ease, border-color .2s ease, color .2s ease; }
 .agent-topbar nav button:hover { transform: translateY(-2px); color: var(--primary); border-color: color-mix(in srgb, var(--primary) 32%, var(--line)); }
 .agent-workspace.section-shell { width: calc(100% - 32px); max-width: none; }
-.agent-workspace { padding-top: 48px; }
-.agent-workspace-head { max-width: none; margin: 0 auto 27px; display: flex; align-items: flex-end; justify-content: space-between; gap: 28px; }
-.agent-workspace-head > div:first-child > span, .agent-asset-drawer > span, .agent-skill-drawer > span { color: var(--accent); font-size: 18px; font-weight: 900; letter-spacing: .15em; }
-.agent-workspace-head h1 { margin: 8px 0 9px; color: var(--ink-strong); font-size: clamp(38px, 4vw, 57px); line-height: 1.08; letter-spacing: -.035em; }
-.agent-workspace-head p { max-width: 780px; margin: 0; color: var(--muted); font-size: 18px; line-height: 1.75; }
-.agent-live-status { flex: none; padding: 11px 15px; display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: var(--panel); font-size: 18px; font-weight: 760; box-shadow: 0 10px 30px rgba(30, 52, 47, .05); }
+.agent-workspace { padding-top: 14px; }
+.agent-workspace-head { min-height: 62px; max-width: none; margin: 0 auto 14px; padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid color-mix(in srgb, var(--line) 78%, transparent); border-radius: 16px; background: color-mix(in srgb, var(--panel) 88%, transparent); box-shadow: 0 10px 26px rgba(28, 52, 46, .035); }
+.agent-workspace-intro { min-width: 0; flex: 1; display: flex; align-items: center; gap: 14px; }
+.agent-workspace-head > div:first-child > span, .agent-asset-drawer > span, .agent-skill-drawer > span { flex: none; color: var(--accent); font-size: 14px; font-weight: 900; letter-spacing: .13em; }
+.agent-workspace-head h1 { flex: none; margin: 0; color: var(--ink-strong); font-size: clamp(22px, 2vw, 28px); line-height: 1.2; letter-spacing: -.025em; }
+.agent-workspace-head p { min-width: 0; max-width: none; margin: 0; overflow: hidden; color: var(--muted); font-size: 18px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
+.agent-live-status { flex: none; min-height: 40px; padding: 8px 13px; display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: var(--panel); font-size: 18px; font-weight: 760; box-shadow: 0 8px 24px rgba(30, 52, 47, .05); }
 .agent-live-status i { width: 10px; height: 10px; border-radius: 50%; background: #aab3b2; box-shadow: 0 0 0 5px color-mix(in srgb, #aab3b2 12%, transparent); }
 .agent-live-status i.ready { background: #21a57e; box-shadow: 0 0 0 5px color-mix(in srgb, #21a57e 14%, transparent); }
-.agent-chat-shell { width: 100%; min-height: 1088px; margin: 0 auto; overflow: hidden; display: grid; grid-template-rows: minmax(624px, 1fr) auto; border: 1px solid color-mix(in srgb, var(--line-strong) 72%, var(--line)); border-radius: 28px; background: color-mix(in srgb, var(--panel) 96%, transparent); box-shadow: 0 32px 90px rgba(22, 48, 42, .11); }
-.agent-chat-stream { min-height: 624px; max-height: 96vh; padding: 34px clamp(22px, 4vw, 52px); overflow-y: auto; scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--primary) 25%, transparent) transparent; }
+.agent-chat-shell { width: 100%; min-height: calc(100vh - 172px); margin: 0 auto; overflow: hidden; border: 1px solid color-mix(in srgb, var(--line-strong) 72%, var(--line)); border-radius: 24px; background: color-mix(in srgb, var(--panel) 96%, transparent); box-shadow: 0 24px 70px rgba(22, 48, 42, .09); }
+.agent-chat-stream { min-height: calc(100vh - 172px); max-height: none; padding: 34px clamp(22px, 4vw, 52px) 160px; overflow: visible; }
 .agent-empty-chat { min-height: 330px; display: grid; place-items: center; align-content: center; text-align: center; }
 .agent-empty-mark { width: 74px; height: 74px; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); border-radius: 25px; color: var(--accent); background: radial-gradient(circle at 35% 25%, color-mix(in srgb, var(--accent) 22%, transparent), transparent 62%), var(--bg-soft); transform: rotate(-4deg); box-shadow: 0 18px 35px color-mix(in srgb, var(--accent) 12%, transparent); }
 .agent-empty-chat h2 { margin: 22px 0 8px; font-size: 34px; }
@@ -171,7 +172,17 @@ img[src*="/assets/gulong-agent-icon.png"] {
 .agent-h3-progress > small { color: var(--muted); font-size: 18px; }
 .agent-h3-progress.failed { border-color: color-mix(in srgb, var(--danger) 30%, var(--line)); background: color-mix(in srgb, var(--danger) 6%, var(--surface)); }
 .agent-h3-progress.failed > header strong { color: var(--danger); }
-.agent-composer-wrap { position: relative; margin: 0 20px 20px; padding: 14px; border: 1px solid color-mix(in srgb, var(--primary) 24%, var(--line)); border-radius: 22px; background: var(--surface-strong); box-shadow: 0 20px 55px rgba(22, 50, 43, .11); }
+.agent-composer-wrap { position: relative; padding: 18px; border: 1px solid color-mix(in srgb, var(--primary) 30%, var(--line)); border-radius: 24px; background: color-mix(in srgb, var(--surface-strong) 97%, transparent); box-shadow: 0 28px 80px rgba(12, 42, 36, .22), inset 0 1px 0 rgba(255, 255, 255, .8); }
+.agent-floating-composer { position: fixed; z-index: 1200; top: 50%; left: 50%; width: clamp(680px, 50vw, 960px); max-height: calc(100vh - 32px); overflow-y: auto; transform: translate(-50%, -50%); backdrop-filter: blur(18px); animation: agent-composer-enter .2s cubic-bezier(.2, .72, .2, 1) both; }
+.agent-composer-close { position: absolute; z-index: 4; top: 11px; right: 11px; width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%; color: var(--muted); background: var(--surface); cursor: pointer; box-shadow: 0 8px 20px rgba(20, 48, 41, .08); }
+.agent-composer-close:hover { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 38%, var(--line)); transform: translateY(-1px); }
+.agent-composer-orb { position: fixed; z-index: 1200; top: 50%; right: 20px; width: 70px; height: 70px; padding: 5px; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--primary) 36%, var(--line)); border-radius: 50%; color: #fff; background: #fff; cursor: pointer; box-shadow: 0 20px 48px color-mix(in srgb, var(--primary) 28%, rgba(13, 44, 38, .22)); transform: translateY(-50%); transition: transform .2s ease, box-shadow .2s ease; }
+.agent-composer-orb:hover { transform: translateY(-50%) scale(1.06); box-shadow: 0 24px 58px color-mix(in srgb, var(--primary) 36%, rgba(13, 44, 38, .26)); }
+.agent-composer-orb img { width: 58px; height: 58px; display: block; border-radius: 50%; object-fit: contain; background: #fff; }
+.agent-composer-orb svg { position: absolute; right: -3px; bottom: -2px; padding: 4px; overflow: visible; border: 2px solid #fff; border-radius: 50%; color: #fff; background: var(--primary); }
+.agent-composer-orb.working { animation: agent-composer-working 1.6s ease-in-out infinite; }
+@keyframes agent-composer-enter { from { opacity: 0; transform: translate(-50%, calc(-50% + 18px)) scale(.97); } to { opacity: 1; transform: translate(-50%, -50%) scale(1); } }
+@keyframes agent-composer-working { 50% { box-shadow: 0 20px 58px color-mix(in srgb, var(--accent) 58%, transparent); } }
 .agent-mode-row { min-height: 36px; display: flex; align-items: center; justify-content: space-between; gap: 18px; }
 .agent-mode-row > div { display: flex; gap: 7px; }
 .agent-mode-row button { min-height: 34px; padding: 0 11px; display: flex; align-items: center; gap: 6px; border: 0; border-radius: 9px; color: var(--muted); background: transparent; font-size: 18px; font-weight: 760; cursor: pointer; }
@@ -180,7 +191,7 @@ img[src*="/assets/gulong-agent-icon.png"] {
 .agent-draft-meta > button { min-height: 36px; padding: 0 11px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid color-mix(in srgb, var(--primary) 26%, var(--line)); border-radius: 10px; color: var(--primary); background: color-mix(in srgb, var(--primary) 5%, var(--surface)); font: inherit; font-size: 18px; font-weight: 760; cursor: pointer; }
 .agent-draft-meta > button:hover { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 9%, var(--surface)); transform: translateY(-1px); }
 .agent-creation-hint { min-height: 34px; align-items: center; color: var(--primary); font-size: 18px; font-weight: 760; }
-.agent-composer-wrap textarea { width: 100%; min-height: 108px; max-height: 240px; padding: 13px 4px; resize: vertical; border: 0; outline: 0; color: var(--text); background: transparent; font: inherit; font-size: 18px; line-height: 1.7; }
+.agent-composer-wrap textarea { width: 100%; min-height: 216px; max-height: 48vh; padding: 15px 4px; resize: vertical; border: 0; outline: 0; color: var(--text); background: transparent; font: inherit; font-size: 18px; line-height: 1.7; }
 .agent-composer-wrap textarea::placeholder { color: color-mix(in srgb, var(--muted) 76%, transparent); }
 .agent-composer-wrap > footer { min-height: 46px; display: flex; align-items: center; gap: 9px; }
 .agent-attach-button, .agent-type-select, .agent-model-select, .agent-parameter-select { min-height: 42px; padding: 0 11px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 11px; color: var(--muted); background: var(--bg-soft); font-size: 18px; font-weight: 700; }
@@ -363,16 +374,22 @@ img[src*="/assets/gulong-agent-icon.png"] {
 .web-agent-gate p { max-width: 680px; margin: 0 0 26px; color: var(--muted); font-size: 19px; line-height: 1.8; }
 
 @media (max-width: 760px) {
-  .agent-topbar { min-height: 82px; }
+  .agent-topbar { min-height: 62px; gap: 8px; }
   .agent-home small { display: none; }
-  .agent-topbar nav button { padding: 0 12px; font-size: 18px; }
+  .agent-home-cluster { gap: 8px; }
+  .agent-home-cluster > a { display: none; }
+  .agent-topbar img { width: 36px; height: 36px; }
+  .agent-topbar nav { gap: 6px; }
+  .agent-topbar nav button { width: 40px; min-height: 38px; padding: 0; justify-content: center; font-size: 18px; }
+  .agent-topbar nav button span { display: none; }
   .agent-workspace.section-shell { width: calc(100% - 16px); }
-  .agent-workspace { padding-top: 30px; }
-  .agent-workspace-head { align-items: flex-start; flex-direction: column; }
-  .agent-live-status { align-self: flex-start; }
-  .agent-chat-shell { min-height: 760px; grid-template-rows: minmax(450px, 1fr) auto; border-radius: 22px; }
-  .agent-chat-stream { min-height: 450px; max-height: 76vh; }
-  .agent-chat-stream { padding: 25px 15px; }
+  .agent-workspace { padding-top: 9px; }
+  .agent-workspace-head { min-height: 54px; padding: 7px 9px; gap: 8px; }
+  .agent-workspace-intro > span, .agent-workspace-intro > p { display: none; }
+  .agent-workspace-head h1 { font-size: 21px; }
+  .agent-live-status { min-height: 38px; padding: 7px 10px; }
+  .agent-chat-shell { min-height: calc(100vh - 142px); border-radius: 20px; }
+  .agent-chat-stream { min-height: calc(100vh - 142px); max-height: none; padding: 25px 15px 120px; overflow: visible; }
   .agent-empty-chat > div:last-child { grid-template-columns: 1fr; }
   .agent-empty-chat > div:last-child button:nth-child(n + 3) { display: none; }
   .agent-message { width: 100%; grid-template-columns: 38px minmax(0, 1fr); gap: 9px; }
@@ -382,15 +399,20 @@ img[src*="/assets/gulong-agent-icon.png"] {
   .agent-message header em { flex-basis: 100%; margin: 3px 0 0; text-align: center; }
   .agent-workflow-trace > header { align-items: flex-start; flex-direction: column; gap: 5px; }
   .agent-workflow-node { min-width: 155px; }
-  .agent-composer-wrap { margin: 0 9px 9px; padding: 11px; border-radius: 18px; }
+  .agent-floating-composer { width: calc(100vw - 20px); max-height: calc(100vh - 20px); padding: 13px; border-radius: 20px; }
+  .agent-composer-close { top: 8px; right: 8px; }
+  .agent-composer-orb { right: 10px; width: 62px; height: 62px; }
+  .agent-composer-orb img { width: 50px; height: 50px; }
+  .agent-composer-wrap textarea { min-height: 216px; max-height: 42vh; }
   .agent-mode-row { align-items: stretch; flex-direction: column; gap: 8px; }
   .agent-draft-meta { justify-content: space-between; }
   .agent-attachment-row { grid-template-columns: 1fr; }
   .agent-reference-picker > header { align-items: flex-start; flex-direction: column; gap: 2px; }
   .agent-reference-picker > div { grid-template-columns: 1fr; }
-  .agent-composer-wrap > footer { flex-wrap: wrap; }
-  .agent-model-select { max-width: none; flex: 1; order: 3; margin-left: 0; }
-  .agent-send-button { margin-left: auto; }
+  .agent-composer-wrap > footer { align-items: stretch; flex-wrap: wrap; }
+  .agent-attach-button, .agent-type-select, .agent-parameter-select, .agent-h3-prompt-toggle { order: 1; }
+  .agent-model-select { max-width: none; flex: 1 1 calc(100% - 56px); order: 2; margin-left: 0; }
+  .agent-send-button { order: 2; margin-left: 0; }
   .agent-membership-gate { align-items: flex-start; flex-direction: column; }
   .agent-asset-drawer, .agent-skill-drawer { padding: 42px 20px 28px; }
   .agent-estimate-grid { grid-template-columns: 1fr; }
@@ -412,6 +434,7 @@ img[src*="/assets/gulong-agent-icon.png"] {
 }
 
 @media (min-width: 761px) and (max-width: 1120px) {
+  .agent-floating-composer { width: calc(100vw - 40px); }
   .agent-attachment-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .pear-token-layout { grid-template-columns: 1fr; }
   .pear-free-models > div { grid-template-columns: repeat(2, minmax(0, 1fr)); }

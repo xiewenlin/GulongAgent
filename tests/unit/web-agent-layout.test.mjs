@@ -36,3 +36,25 @@ test("web agent scrolls to the latest message only once and renders replies belo
   const replyIndex = source.indexOf("<MarkdownMessage>{item.content}</MarkdownMessage>");
   assert.ok(workflowIndex >= 0 && replyIndex > workflowIndex, "assistant reply must render below its workflow trace");
 });
+
+test("web agent uses one page scrollbar and a collapsible centered composer", async () => {
+  const [css, source] = await Promise.all([
+    readFile(new URL("../../src/styles.css", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/WebAgentPage.jsx", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(source, /const \[composerOpen, setComposerOpen\] = useState\(true\);/);
+  assert.match(source, /composerOpen \? <section className="agent-composer-wrap agent-floating-composer"/);
+  assert.match(source, /className=\{`agent-composer-orb \$\{sending \? "working" : ""\}`\}/);
+  assert.match(source, /aria-label="收起创作输入框"/);
+  assert.match(source, /aria-label="展开古龙创作输入框"/);
+  assert.match(source, /aria-label="拓展技能" title="拓展技能"/);
+  assert.match(source, /aria-label="剩余用量" title="剩余用量"/);
+  assert.match(css, /\.agent-chat-stream\s*\{[^}]*max-height:\s*none;[^}]*overflow:\s*visible;/s);
+  assert.match(css, /\.agent-floating-composer\s*\{[^}]*position:\s*fixed;[^}]*top:\s*50%;[^}]*left:\s*50%;[^}]*width:\s*clamp\(680px, 50vw, 960px\);/s);
+  assert.match(css, /\.agent-composer-wrap textarea\s*\{[^}]*min-height:\s*216px;/s);
+  assert.match(css, /\.agent-workspace-intro\s*\{[^}]*display:\s*flex;[^}]*align-items:\s*center;/s);
+  assert.match(css, /\.agent-home-cluster\s*\{[^}]*display:\s*flex;[^}]*align-items:\s*center;/s);
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.agent-topbar nav button span\s*\{[^}]*display:\s*none;/s);
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.agent-model-select\s*\{[^}]*flex:\s*1 1 calc\(100% - 56px\);[^}]*order:\s*2;/s);
+});

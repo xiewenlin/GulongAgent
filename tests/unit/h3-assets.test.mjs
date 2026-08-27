@@ -125,7 +125,8 @@ test("web H3 composer exposes multi-asset upload and inserts @ references into t
   assert.doesNotMatch(source, /agent-h3-reference-bar|@ 引用素材/);
   assert.match(source, /agent-attachment-row \$\{isH3Video \? "h3-grid"/);
   assert.match(styles, /\.agent-attachment-row\.h3-grid\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fill, minmax\(230px, 1fr\)\);/s);
-  assert.match(styles, /\.agent-chat-shell\s*\{[^}]*min-height:\s*1088px;/s);
+  assert.match(styles, /\.agent-chat-shell\s*\{[^}]*min-height:\s*calc\(100vh - 172px\);/s);
+  assert.match(styles, /\.agent-chat-stream\s*\{[^}]*max-height:\s*none;[^}]*overflow:\s*visible;/s);
   assert.match(source, /uploadH3AssetFiles\(attachments/);
   assert.match(source, /assets: h3AssetManifest\(uploadedAssets\)/);
   assert.doesNotMatch(source, /当前网页入口先支持纯提示词|完整素材请从桌面 Agent 提交|桌面素材/);
