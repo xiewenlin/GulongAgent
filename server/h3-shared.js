@@ -18,6 +18,11 @@ export const H3_ACCOUNT_BINDING_HEADER = "X-Gulong-Account-Binding";
 export const H3_SHARED_MODEL = "minimax_h3_shared";
 export const H3_OUTPUT_RETENTION_MS = 24 * 60 * 60_000;
 const H3_MAX_DURATION_SECONDS = 600;
+const H3_VIDEO_MODES = new Set(["all_reference", "first_last", "smart_multiframe", "extended"]);
+const H3_LONGFORM_MODES = new Set(["continuous", "independent"]);
+const H3_VIDEO_ASPECTS = new Set(["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]);
+const H3_VIDEO_PROFILES = new Set(["official_max", "ultra1080", "fast2k", "fast", "balanced", "turbo544", "quality", "preview"]);
+const H3_SAMPLING_STEPS = new Set([4, 8, 20]);
 const H3_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 const DEFAULT_PLATFORM_ADMIN_EMAIL = "1186664388@qq.com";
 const H3_NODE_ONLINE_WINDOW_MS = 3 * 60_000;
@@ -88,9 +93,24 @@ export function normalizeH3TaskInput(body = {}) {
   const images = assetManifest(assets.images || body.image_assets, "image", 9);
   const videos = assetManifest(assets.videos || body.video_assets, "video", 3);
   const audio = assetManifest(assets.audio || body.audio_assets, "audio", 3);
-  const durationSeconds = integer(body.duration_seconds ?? body.durationSeconds, -1);
+  const videoMode = String(body.video_mode || body.videoMode || "all_reference").trim().toLowerCase();
+  const longformMode = String(body.longform_mode || body.longformMode || "continuous").trim().toLowerCase();
+  const segmentDurationSeconds = integer(body.segment_duration_seconds ?? body.segmentDurationSeconds, 5);
+  const promptSegments = originalPrompt.split(/\r?\n\s*\r?\n/u).map((item) => item.trim()).filter(Boolean);
+  const durationSeconds = videoMode === "extended" ? promptSegments.length * segmentDurationSeconds : integer(body.duration_seconds ?? body.durationSeconds, -1);
   const priceFen = calculateH3SharedPrice({ durationSeconds, imageCount: images.length, videoCount: videos.length });
   const promptOptimizationEnabled = body.prompt_optimization_enabled === false || body.promptOptimizationEnabled === false ? false : true;
+  const aspectRatio = String(body.aspect_ratio || body.aspectRatio || "16:9").trim();
+  const profile = String(body.profile || "official_max").trim().toLowerCase();
+  const samplingSteps = integer(body.sampling_steps ?? body.samplingSteps, 4);
+  const seed = integer(body.seed, -1);
+  if (!H3_VIDEO_MODES.has(videoMode)) throw Object.assign(new Error("视频生成方式无效"), { code: "VALIDATION_ERROR", status: 400 });
+  if (videoMode === "extended" && !H3_LONGFORM_MODES.has(longformMode)) throw Object.assign(new Error("超长视频生产方式无效"), { code: "VALIDATION_ERROR", status: 400 });
+  if (videoMode === "extended" && (segmentDurationSeconds < 5 || segmentDurationSeconds > 15)) throw Object.assign(new Error("超长视频单段时长必须为 5–15 秒"), { code: "VALIDATION_ERROR", status: 400 });
+  if (!H3_VIDEO_ASPECTS.has(aspectRatio)) throw Object.assign(new Error("视频画面比例无效"), { code: "VALIDATION_ERROR", status: 400 });
+  if (!H3_VIDEO_PROFILES.has(profile)) throw Object.assign(new Error("视频分辨率配置无效"), { code: "VALIDATION_ERROR", status: 400 });
+  if (!H3_SAMPLING_STEPS.has(samplingSteps)) throw Object.assign(new Error("主采样步数仅支持 4、8 或 20"), { code: "VALIDATION_ERROR", status: 400 });
+  if (seed < -1 || seed > 2_147_483_647) throw Object.assign(new Error("随机种子必须为 -1 至 2147483647 的整数"), { code: "VALIDATION_ERROR", status: 400 });
   return {
     sourceChannel,
     model,
@@ -103,9 +123,15 @@ export function normalizeH3TaskInput(body = {}) {
     promptCompilation: promptOptimizationEnabled
       ? { mode: "desktop_local_magic_v1", source: "execution_node", validated: false, status: "pending" }
       : { mode: "raw_prompt_v1", source: "requester", validated: false, status: "skipped" },
-    aspectRatio: String(body.aspect_ratio || body.aspectRatio || "16:9").trim().slice(0, 24),
+    videoMode,
+    longformMode: videoMode === "extended" ? longformMode : null,
+    segmentDurationSeconds: videoMode === "extended" ? segmentDurationSeconds : null,
+    promptSegmentCount: videoMode === "extended" ? promptSegments.length : 1,
+    aspectRatio,
     durationSeconds,
-    profile: String(body.profile || "balanced").trim().toLowerCase().slice(0, 60),
+    profile,
+    samplingSteps,
+    seed,
     imageCount: images.length,
     videoCount: videos.length,
     audioCount: audio.length,
@@ -250,9 +276,15 @@ function publicTask(task, { includePrompt = true } = {}) {
     promptCompilation: task.promptCompilation || null,
     promptOptimizationEnabled,
     promptMode: task.promptMode || (promptOptimizationEnabled ? "desktop_local_magic_v1" : "raw_prompt_v1"),
+    videoMode: task.videoMode || "all_reference",
+    longformMode: task.longformMode || null,
+    segmentDurationSeconds: task.segmentDurationSeconds || null,
+    promptSegmentCount: integer(task.promptSegmentCount, 1),
     aspectRatio: task.aspectRatio,
     durationSeconds: task.durationSeconds,
     profile: task.profile,
+    samplingSteps: integer(task.samplingSteps, 4),
+    seed: integer(task.seed, -1),
     imageCount: task.imageCount,
     videoCount: task.videoCount,
     audioCount: task.audioCount,
@@ -448,9 +480,15 @@ export function toH3WorkerTask(task, { assets = [], outputUpload = null } = {}) 
     prompt_mode: promptOptimizationEnabled ? "desktop_local_magic_v1" : "raw_prompt_v1",
     prompt_optimization_enabled: promptOptimizationEnabled,
     local_prompt_optimization_required: promptOptimizationEnabled,
+    video_mode: task.videoMode || "all_reference",
+    longform_mode: task.longformMode || null,
+    segment_duration_seconds: task.segmentDurationSeconds || null,
+    prompt_list: task.videoMode === "extended" ? sourcePrompt : null,
     aspectRatio: task.aspectRatio,
     durationSeconds: task.durationSeconds,
     profile: task.profile,
+    sampling_steps: integer(task.samplingSteps, 4),
+    seed: integer(task.seed, -1),
     imageCount: task.imageCount,
     videoCount: task.videoCount,
     audioCount: task.audioCount,
@@ -1198,7 +1236,8 @@ export function registerH3SharedRoutes(app, dependencies) {
         createTask: { method: "POST", url: "/api/h3/tasks", scope: "tasks:write" },
         assetUpload: { presign: "/api/h3/assets/presign", complete: "/api/h3/assets/{asset_id}/complete", scope: "tasks:write" },
         promptProcessing: { mode: "requester_choice", enableField: "prompt_optimization_enabled", defaultEnabledForLegacyClients: true, inputField: "prompt", preserveOriginal: true, optimizationWorkerCapability: "local_prompt_optimization_v1" },
-        limits: { durationSeconds: { min: 1, max: H3_MAX_DURATION_SECONDS }, imageCount: 9, videoCount: 3, audioCount: 3 },
+        generationParameters: { videoModes: [...H3_VIDEO_MODES], longformModes: [...H3_LONGFORM_MODES], segmentDurationSeconds: { min: 5, max: 15 }, aspectRatios: [...H3_VIDEO_ASPECTS], resolutions: [{ label: "720P", profile: "official_max" }, { label: "1080P", profile: "ultra1080" }, { label: "2K极速", profile: "fast2k" }], samplingSteps: [...H3_SAMPLING_STEPS], seed: { min: -1, max: 2_147_483_647, randomValue: -1 } },
+        limits: { durationSeconds: { min: 1, max: H3_MAX_DURATION_SECONDS }, websiteDurationSeconds: { min: 1, max: 15 }, imageCount: 9, videoCount: 3, audioCount: 3 },
         pricingFen: { perSecond: 20, perImage: 5, perVideo: 20, perAudio: 0 },
       },
       wallet: { balanceFen: integer(wallet?.balanceFen), unlimited: auth.user.role === "admin" },
@@ -1220,11 +1259,13 @@ export function registerH3SharedRoutes(app, dependencies) {
     const gpuName = String(capabilities.gpu_name || capabilities.gpu || "").trim().slice(0, 160) || null;
     const localPromptOptimizationV1 = capabilities.local_prompt_optimization_v1 === true;
     const batchCapable = capabilities.batch_claim === true || capabilities.batch_claim_v1 === true;
+    const longformV1 = capabilities.longform_v1 === true;
     const maxConcurrentTasks = integer(capabilities.max_concurrent_tasks, 1);
-    if (maxDurationSeconds < 1 || maxDurationSeconds > H3_MAX_DURATION_SECONDS || !profiles.length || maxImageCount < 0 || maxImageCount > 9 || maxVideoCount < 0 || maxVideoCount > 3 || maxAudioCount < 0 || maxAudioCount > 3 || maxConcurrentTasks < 1 || maxConcurrentTasks > 8) return c.json({ code: "INVALID_NODE_CAPABILITIES", message: "节点必须上报有效的最大时长、profiles、素材上限与并发上限" }, 400);
+    const samplingSteps = Array.isArray(capabilities.sampling_steps) ? [...new Set(capabilities.sampling_steps.map((value) => integer(value, -1)).filter((value) => H3_SAMPLING_STEPS.has(value)))] : [4];
+    if (maxDurationSeconds < 1 || maxDurationSeconds > H3_MAX_DURATION_SECONDS || !profiles.length || !samplingSteps.length || maxImageCount < 0 || maxImageCount > 9 || maxVideoCount < 0 || maxVideoCount > 3 || maxAudioCount < 0 || maxAudioCount > 3 || maxConcurrentTasks < 1 || maxConcurrentTasks > 8) return c.json({ code: "INVALID_NODE_CAPABILITIES", message: "节点必须上报有效的最大时长、profiles、采样步数、素材上限与并发上限" }, 400);
     const now = new Date();
     const nodeName = String(body.node_name || auth.binding.nodeName || "").slice(0, 120);
-    const reportedCapabilities = { gpuName, vramMb, maxDurationSeconds, profiles, maxImageCount, maxVideoCount, maxAudioCount, maxConcurrentTasks, batchCapable, localPromptOptimizationV1 };
+    const reportedCapabilities = { gpuName, vramMb, maxDurationSeconds, profiles, samplingSteps, maxImageCount, maxVideoCount, maxAudioCount, maxConcurrentTasks, batchCapable, longformV1, localPromptOptimizationV1 };
     const heartbeat = { nodeName, lastSeenAt: now, lastUsedAt: now, queueStatus: body.dry_run === true ? "reachable" : "polling", capabilities: reportedCapabilities, updatedAt: now };
     if (body.dry_run !== true && auth.binding.nextClaimAt && new Date(auth.binding.nextClaimAt) > now) {
       const retryAfterMs = Math.max(250, new Date(auth.binding.nextClaimAt).getTime() - now.getTime());
@@ -1268,11 +1309,14 @@ export function registerH3SharedRoutes(app, dependencies) {
       jitterSeed: auth.binding.nodeId,
     });
     const node = { nodeId: auth.binding.nodeId, nodeName, bindingId: auth.binding._id, userId: auth.user._id, at: now };
+    const durationCapabilityQuery = longformV1
+      ? { $or: [{ videoMode: "extended", segmentDurationSeconds: { $lte: maxDurationSeconds } }, { videoMode: { $ne: "extended" }, durationSeconds: { $lte: maxDurationSeconds } }] }
+      : { videoMode: { $ne: "extended" }, durationSeconds: { $lte: maxDurationSeconds } };
     const claimed = [];
     try {
       for (let index = 0; index < claimPlan.recommendedBatchSize; index += 1) {
         const task = await tasks.findOneAndUpdate(
-          { status: "queued", model: H3_SHARED_MODEL, durationSeconds: { $lte: maxDurationSeconds }, profile: { $in: profiles }, imageCount: { $lte: maxImageCount }, videoCount: { $lte: maxVideoCount }, audioCount: { $lte: maxAudioCount }, ...(localPromptOptimizationV1 ? {} : { promptOptimizationEnabled: false, localPromptOptimizationRequired: false }) },
+          { status: "queued", model: H3_SHARED_MODEL, profile: { $in: profiles }, $and: [{ $or: [{ samplingSteps: { $in: samplingSteps } }, { samplingSteps: { $exists: false } }] }, durationCapabilityQuery], imageCount: { $lte: maxImageCount }, videoCount: { $lte: maxVideoCount }, audioCount: { $lte: maxAudioCount }, ...(localPromptOptimizationV1 ? {} : { promptOptimizationEnabled: false, localPromptOptimizationRequired: false }) },
           { $set: { status: "claimed", claimedByNode: { ...node, capabilities: reportedCapabilities }, claimedAt: now, claimLeaseUntil: new Date(now.getTime() + H3_CLAIM_LEASE_MS), updatedAt: now } },
           { sort: { createdAt: 1, _id: 1 }, returnDocument: "after" },
         );
@@ -1559,13 +1603,13 @@ export function registerH3SharedRoutes(app, dependencies) {
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/prompts/optimize", tags: ["MiniMax H3 Shared Nodes"], summary: "已停用：服务端提示词优化", description: "官网服务端不执行提示词优化。网页版通过 prompt_optimization_enabled 让用户选择是否由 MiniMax H3 极速视频桌面端执行本地魔法优化。", deprecated: true, responses: { 410: { description: "PROMPT_OPTIMIZATION_MOVED_TO_DESKTOP" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/assets/presign", tags: ["MiniMax H3 Shared Nodes"], summary: "为输入素材签发账号专属 COS 直传票据", request: { body: { required: true, content: { "application/json": { schema: z.object({ kind: z.enum(["image", "video", "audio"]), filename: z.string(), content_type: z.string(), bytes: z.number().int().positive(), sha256: z.string().regex(/^[A-Fa-f0-9]{64}$/) }) } } } }, responses: { 201: { description: "返回 PUT URL、固定 headers、asset_id 与 object_key" }, 409: { description: "COS 回执不匹配" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/assets/{id}/complete", tags: ["MiniMax H3 Shared Nodes"], summary: "校验并完成 H3 输入素材上传", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "返回可用于任务 assets manifest 的素材记录" }, 409: { description: "对象大小、摘要或归属不匹配" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "使用原始中文提示词创建共享节点任务并原子预扣余额", description: "实际价格（分）= 时长秒数×20 + 图片数×5 + 视频数×20；音频免费。普通用户与会员用户原子预扣钱包余额；有效期内的短视频包月用户优先扣套餐额度并按实际扣款 50/50 分账，套餐额度归零后仍可无限创建 H3 任务且本次扣款、节点分佣和平台分佣均为 0。管理员始终免扣费且不参与分佣。服务端始终原样保存 prompt，不翻译；prompt_optimization_enabled=true 时由桌面节点执行本地魔法优化并回调 compiled_prompt，false 时必须直接使用原始提示词且禁止回传 compiled_prompt。旧客户端省略字段时按 true 兼容。必须提供 Idempotency-Key。", request: { body: { required: true, content: { "application/json": { schema: z.object({ source_channel: z.enum(["website", "desktop_agent"]), model: z.literal(H3_SHARED_MODEL), prompt: z.string().min(1).max(20_000), prompt_optimization_enabled: z.boolean().optional(), conversation_id: z.string().optional(), aspect_ratio: z.string(), duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profile: z.string(), assets: z.object({ images: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(9), videos: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3), audio: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3) }), idempotency_key: z.string().min(8).max(160).optional() }) } } } }, responses: { 201: { description: "原始提示词与用户优化选择已保存，并按账号类型完成扣费或零扣费排队" }, 402: { description: "非套餐用户余额不足" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "使用原始中文提示词创建共享节点任务并原子预扣余额", description: "实际价格（分）= 时长秒数×20 + 图片数×5 + 视频数×20；音频免费。普通用户与会员用户原子预扣钱包余额；有效期内的短视频包月用户优先扣套餐额度并按实际扣款 50/50 分账，套餐额度归零后仍可无限创建 H3 任务且本次扣款、节点分佣和平台分佣均为 0。管理员始终免扣费且不参与分佣。服务端始终原样保存 prompt，不翻译；prompt_optimization_enabled=true 时由桌面节点执行本地魔法优化并回调 compiled_prompt，false 时必须直接使用原始提示词且禁止回传 compiled_prompt。video_mode、longform_mode、segment_duration_seconds、profile、sampling_steps 与 seed 会进入受信任节点任务合同；超长模式的 duration_seconds 由服务端按空行分段数乘单段时长重新计算。旧客户端省略字段时按全能参考、720P、4 步和随机种子兼容。必须提供 Idempotency-Key。", request: { body: { required: true, content: { "application/json": { schema: z.object({ source_channel: z.enum(["website", "desktop_agent"]), model: z.literal(H3_SHARED_MODEL), prompt: z.string().min(1).max(20_000), prompt_optimization_enabled: z.boolean().optional(), conversation_id: z.string().optional(), video_mode: z.enum(["all_reference", "first_last", "smart_multiframe", "extended"]).optional(), longform_mode: z.enum(["continuous", "independent"]).optional(), segment_duration_seconds: z.number().int().min(5).max(15).optional(), aspect_ratio: z.enum(["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]), duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profile: z.enum(["official_max", "ultra1080", "fast2k", "fast", "balanced", "turbo544", "quality", "preview"]), sampling_steps: z.union([z.literal(4), z.literal(8), z.literal(20)]).optional(), seed: z.number().int().min(-1).max(2_147_483_647).optional(), assets: z.object({ images: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(9), videos: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3), audio: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3) }), idempotency_key: z.string().min(8).max(160).optional() }) } } } }, responses: { 201: { description: "原始提示词、完整视频参数与用户优化选择已保存，并按账号类型完成扣费或零扣费排队" }, 402: { description: "非套餐用户余额不足" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "查看当前账号的共享节点订单", responses: { 200: { description: "最多返回最近 50 个订单" }, 401: { description: "未认证" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/conversations/recent", tags: ["MiniMax H3 Shared Nodes"], summary: "读取当前用户会话中的 H3 视频结果", description: "仅返回当前登录用户的 H3 assistant 结果消息；历史已完成任务会先进行同用户安全幂等回填。消息不包含 COS 永久地址。", request: { query: z.object({ conversation_id: z.string().optional() }) }, responses: { 200: { description: "当前会话及其 H3 视频结果" }, 401: { description: "未认证" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}", tags: ["MiniMax H3 Shared Nodes"], summary: "查看共享节点订单详情", description: "输出只包含受控 previewPath/downloadPath 和 24 小时到期状态，不返回 COS objectKey 或永久 URL。", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "订单详情" }, 404: { description: "订单不存在或无权查看" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}/output", tags: ["MiniMax H3 Shared Nodes"], summary: "鉴权预览或下载 H3 输出视频", description: "仅任务请求用户或管理员可访问。服务端按次签发不超过 5 分钟且不越过 24 小时保留截止时间的 COS GET 地址；disposition=attachment 用于下载。过期返回 410 并触发幂等删除。", request: { params: z.object({ id: z.string() }), query: z.object({ disposition: z.enum(["inline", "attachment"]).optional() }) }, responses: { 302: { description: "跳转到短时 COS 签名地址" }, 404: { description: "视频不存在或无权访问" }, 410: { description: "视频已过期并删除" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/desktop/agent/tools/minimax-h3-shared", tags: ["Desktop Agent Tools"], summary: "读取桌面古龙智能体的 H3 共享节点工具合同", description: "使用现有古龙会话或具有 tasks:read 的 API Key。返回 createTask、素材上传 URL、本地提示词处理合同、9图3视频3音频限制、整数分价格与当前余额；不再返回网页 optimizePrompt。管理员响应 wallet.unlimited=true，桌面端不得按余额拦截。桌面创建任务时 source_channel 必须为 desktop_agent。", responses: { 200: { description: "工具合同、本地提示词处理要求、钱包余额与管理员不限额标记" }, 401: { description: "未认证" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/claim", tags: ["MiniMax H3 Shared Nodes"], summary: "桌面节点按能力与队列压力原子领取任务", description: "capabilities 必须上报 max_duration_seconds、profiles 与素材上限；local_prompt_optimization_v1=true 表示节点能够处理用户开启魔法优化的任务，未声明该能力的节点仍可领取 raw_prompt_v1 原始提示词任务。服务端按 createdAt、_id 从旧到新原子领取并返回最小化 workerTask DTO。DTO 通过 prompt_optimization_enabled、prompt_mode 和 local_prompt_optimization_required 明确用户选择；开启时节点先 optimizing，再以 started + compiled_prompt + estimated_total_seconds 上报，关闭时直接以 started + estimated_total_seconds 开始生成且禁止改写 prompt。历史缺失选择字段的任务按开启兼容。dry_run=true 绝不领取任务或执行优化。DTO 不含 requester、价格、钱包流水或内部绑定信息。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "application/json": { schema: z.object({ bound_account_email: z.string().optional(), bound_account_id: z.string().optional(), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: z.object({ max_duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profiles: z.array(z.string()).min(1), gpu_name: z.string().max(160).optional(), vram_mb: z.number().int().min(0).optional(), max_image_count: z.number().int().min(0).max(9), max_video_count: z.number().int().min(0).max(3), max_audio_count: z.number().int().min(0).max(3), local_prompt_optimization_v1: z.boolean().optional(), batch_claim: z.boolean().optional(), max_concurrent_tasks: z.number().int().min(1).max(8).optional() }) }) } } } }, responses: { 200: { description: "dry_run 返回可达状态；正式领取返回原始提示词、用户优化选择、素材下载票据、output_upload、进度回调合同和动态 claim_plan" }, 400: { description: "节点能力无效" }, 401: { description: "绑定无效" }, 429: { description: "未遵循轮询退避或请求频率过高" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/claim", tags: ["MiniMax H3 Shared Nodes"], summary: "桌面节点按能力与队列压力原子领取任务", description: "capabilities 必须上报 max_duration_seconds、profiles、sampling_steps 与素材上限；只有 longform_v1=true 的节点可领取 video_mode=extended。local_prompt_optimization_v1=true 表示节点能够处理用户开启魔法优化的任务，未声明该能力的节点仍可领取 raw_prompt_v1 原始提示词任务。服务端按 createdAt、_id 从旧到新原子领取并返回最小化 workerTask DTO。DTO 除提示词选择外还包含 video_mode、longform_mode、segment_duration_seconds、prompt_list、profile、sampling_steps 和 seed；开启优化时节点先 optimizing，再以 started + compiled_prompt + estimated_total_seconds 上报，关闭时直接以 started + estimated_total_seconds 开始生成且禁止改写 prompt。历史缺失选择字段的任务按开启兼容。dry_run=true 绝不领取任务或执行优化。DTO 不含 requester、价格、钱包流水或内部绑定信息。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "application/json": { schema: z.object({ bound_account_email: z.string().optional(), bound_account_id: z.string().optional(), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: z.object({ max_duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profiles: z.array(z.string()).min(1), sampling_steps: z.array(z.union([z.literal(4), z.literal(8), z.literal(20)])).min(1).optional(), longform_v1: z.boolean().optional(), gpu_name: z.string().max(160).optional(), vram_mb: z.number().int().min(0).optional(), max_image_count: z.number().int().min(0).max(9), max_video_count: z.number().int().min(0).max(3), max_audio_count: z.number().int().min(0).max(3), local_prompt_optimization_v1: z.boolean().optional(), batch_claim: z.boolean().optional(), max_concurrent_tasks: z.number().int().min(1).max(8).optional() }) }) } } } }, responses: { 200: { description: "dry_run 返回可达状态；正式领取返回原始提示词、完整视频参数、用户优化选择、素材下载票据、output_upload、进度回调合同和动态 claim_plan" }, 400: { description: "节点能力无效" }, 401: { description: "绑定无效" }, 429: { description: "未遵循轮询退避或请求频率过高" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/callback", tags: ["MiniMax H3 Shared Nodes"], summary: "执行节点回调可选本地优化、生成进度或结果", description: "multipart/form-data 仅发送 metadata 字段，不得上传 video 文件。prompt_optimization_enabled=true 的任务先发送 status=optimizing，成功后以 status=started、compiled_prompt、estimated_total_seconds 上报；false 的任务不得发送 optimizing 或 compiled_prompt，直接以原始 prompt 执行并在 started 中提交 estimated_total_seconds。后续 progress 回调发送 progress（0–99）与可选 remaining_seconds。成功状态还需 video.sha256/bytes/filename/object_key，服务端 HEAD 校验对象归属。失败任务按既有幂等规则退款。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "multipart/form-data": { schema: z.object({ metadata: z.string() }) } } } }, responses: { 200: { description: "可选本地优化阶段、生成进度或最终结果已幂等处理" }, 400: { description: "回执不完整、缺少必需 compiled_prompt 或在关闭优化时非法提交 compiled_prompt" }, 401: { description: "绑定无效" }, 409: { description: "用户优化选择、本地优化、COS 回执、上传票据或结算状态不匹配" }, 413: { description: "禁止把视频文件经 Vercel 中转" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/admin/h3/tasks", tags: ["Administration"], summary: "管理员筛选共享节点任务派单", responses: { 200: { description: "任务列表" }, 403: { description: "需要管理员角色" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/admin/h3/tasks/{id}", tags: ["Administration"], summary: "管理员查看共享节点任务、回调和审计详情", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "任务详情、回调和审计时间线" }, 404: { description: "任务不存在" } } });

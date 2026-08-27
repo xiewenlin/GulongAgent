@@ -1,58 +1,57 @@
-# 古龙网页版紧凑工作台 Design QA
+# MiniMax H3 网页创作窗 Design QA
 
-- Source visual truth: `C:/Users/YCAI/AppData/Local/Temp/codex-clipboard-04c3b771-ec5c-4bc7-ac5c-22b9150447fa.png`，结合用户本轮明确要求的单行压缩、单滚动层、中央悬浮编辑器与右侧悬浮球状态。
-- Implementation screenshots:
-  - `docs/design/web-agent-floating-composer-desktop.png`
-  - `docs/design/web-agent-floating-composer-collapsed.png`
-  - `docs/design/web-agent-floating-composer-mobile.png`
-- Desktop viewport: 1536 × 1024 CSS px，截图 1521 × 1014 px，设备像素密度由内置浏览器保持默认。
-- Mobile viewport: 390 × 844 CSS px；浏览器内容宽度 375 px，近景截图 375 × 250 px。
-- State: 已登录预览用户、远程模型已连接、空会话；分别验证编辑器展开、编辑器收起、草稿恢复与移动端展开状态。
+- source visual truth path: `C:\Users\YCAI\AppData\Local\Temp\codex-clipboard-3aeef378-4f97-414d-af4c-9ce1f00b280d.png`
+- implementation screenshot path: `C:\Users\YCAI\Documents\Codex\2026-07-28\product-design-plugin-product-design-openai-3\work\GulongAgent\artifacts\design-qa-h3-final-1440x960.png`
+- combined comparison path: `C:\Users\YCAI\Documents\Codex\2026-07-28\product-design-plugin-product-design-openai-3\work\GulongAgent\artifacts\design-qa-h3-comparison.png`
+- focused states: `artifacts/design-qa-h3-assets-1440x960.png`, `artifacts/design-qa-h3-duration-1440x960.png`, `artifacts/design-qa-h3-extended-1440x960.png`, `artifacts/design-qa-h3-mobile-390x844.png`
+- viewport: 1440 × 960 desktop target; browser content viewport 1425 × 950; 390 × 844 mobile resilience check
+- source pixels: 982 × 525 at source density
+- implementation pixels: 1425 × 950 at device scale factor 1
+- normalization: comparison board scales the source proportionally to 1424 × 761 and keeps the implementation at 1424 × 950; browser chrome is excluded
+- state: authenticated administrator mock, 视频类型, MiniMaxH3共享节点, empty prompt, no attachments
 
-**Full-view comparison evidence**
+## Full-view comparison evidence
 
-- 原图的玉瓷浅色背景、墨绿色标题、灰绿色正文、金色装饰英文和白色状态胶囊均被保留。
-- 原图中三层纵向标题区已按要求重排为一条 69 px 的紧凑工具带，标题、说明与连接状态处于同一行；额外的品牌导航同样压缩到 64 px 单行。
-- 聊天内容不再使用内部 `overflow-y: auto`，实测 `.agent-chat-stream` 为 `overflow: visible`，页面只保留浏览器主滚动条。
-- 桌面编辑器实测宽 768 px，等于 1536 px 视口的 50%；固定在屏幕中央。文本区实测高 216 px，为原 108 px 的两倍。
-- 收起状态只保留右侧中部圆形古龙品牌悬浮球；恢复后草稿“测试草稿会在收起后继续保留”仍完整存在。
+The source screenshot shows a narrow composer where “多模态素材” collapses into a vertical word stack and hides most generation parameters. The final implementation uses exactly two thirds of the configured 1440 px desktop CSS viewport (959.98 px), keeps the dialog centered, gives the prompt editor a 350 px minimum height, and presents all desktop-generation parameters in a stable two-row rail without clipping. The page scrollbar reduces `documentElement.clientWidth` to 1425 px but does not alter the requested viewport-relative width.
 
-**Focused region comparison evidence**
+## Focused region comparison evidence
 
-- 顶部区域：装饰英文仍使用金色大写字距；主标题保留强对比墨绿；说明文字单行省略并保留完整 `title`，连接状态仍使用绿色状态点。
-- 编辑器：关闭按钮、预览编辑、字数、附件、类型、模型与发送按钮均保持可见且可操作；宽屏没有重叠。
-- 移动端：顶部改为“品牌 + 两个具备 aria-label/title 的图标按钮”单行；模型选择和发送按钮位于控制区第二行，页面 `scrollWidth` 与 `clientWidth` 同为 375 px，无横向溢出。
+- Reference assets: the compact “参考素材” control opens a 3-column image/video/audio picker; it can expand to a 2-column thumbnail grid and remains scrollable without changing the composer geometry.
+- Duration: the 1–15 second control opens a separate range/number/quick-value panel above the toolbar and does not cover the send or model controls.
+- Long-form mode: selecting “超长视频” reveals the desktop-matched “连续成片 / 批量短片” strategy, blank-line prompt segmentation, per-segment duration, total-duration summary and TXT import without widening or clipping the composer.
+- Mobile: at 390 × 844, the editor and controls become a full-width stacked layout; no horizontal clipping or vertically stacked label characters are visible.
+- Interactions: video mode, aspect ratio, resolution, sampling steps, seed, duration, asset panel and the existing magic switch were exercised. The console contained no warning or error entries.
 
-**Findings**
+## Required fidelity surfaces
 
-- 首轮移动端发现顶部按钮文字被挤成两行，模型选择宽度不足，属于 P2 响应式密度问题。
-- 已修复：移动端保留带可访问名称的图标按钮；模型选择改为第二行弹性宽度。复测按钮为 40 × 38 px，模型选择宽 280 px，未再发生遮挡或截断。
-- 复测未发现剩余 P0、P1 或 P2 问题。
+- Fonts and typography: retains the product’s existing font stack and 18 px minimum UI text; headings remain 20 px; no clipped or vertical Chinese labels.
+- Spacing and layout rhythm: centered 2/3-width frame, 76 px title band, 350 px editor, 72 px parameter rail, consistent 8–18 px gaps and existing 11–22 px radii.
+- Colors and visual tokens: all surfaces, borders, focus indicators and active states use the existing theme tokens; no new hard-coded dark theme.
+- Image quality and asset fidelity: existing Phosphor icons and real file thumbnails are reused; no placeholder imagery, handcrafted SVG, emoji or CSS illustration was introduced.
+- Copy and content: desktop parameter names and options are present; website-only “魔法优化” is retained; “优化提示词”和“预览提示词” buttons are not implemented.
 
-**Required fidelity surfaces**
+## Comparison history
 
-- Fonts and typography: 保留现有中文字体栈和 18 px 正文基线；仅装饰英文使用 14 px；主标题压缩为 22–28 px 以满足单行高度目标。
-- Spacing and layout rhythm: 顶部 64 px、介绍工具带约 69 px；桌面悬浮编辑器居中，移动端保留 10 px 安全边距。
-- Colors and visual tokens: 完全复用现有 `--bg`、`--panel`、`--primary`、`--accent`、`--line` 主题令牌，没有引入暗色或脱离主题的新配色。
-- Image quality and asset fidelity: 悬浮球复用现有高清古龙主题图标并保持白底、等比 `contain`；没有使用占位图或代码绘制品牌图形。
-- Copy and content: 原有功能文案、模型名称、连接状态、会员提示与发送行为均保留；只新增“收起/展开创作输入框”的可访问说明。
+1. P1 layout failure: source state compressed the asset label vertically and exposed only a subset of H3 parameters.
+   - Fix: widened the desktop composer to 66.666vw, introduced the desktop-style title/editor/asset popover/parameter rail, and added full mode, ratio, resolution, sampling, duration and seed controls.
+   - Post-fix evidence: `artifacts/design-qa-h3-desktop-1440x960.png`; all controls are visible and the vertical label failure is gone.
+2. P2 polish issue: first focused-state capture showed the browser’s default black focus outline around `summary` controls.
+   - Fix: replaced mouse focus styling with the existing theme border and preserved a brand-color `:focus-visible` ring for keyboard accessibility.
+   - Post-fix evidence: `artifacts/design-qa-h3-final-1440x960.png`; no black outline remains in the idle state.
 
-**Primary interactions tested**
+## Findings
 
-- 收起中央编辑器。
-- 展开右侧悬浮球。
-- 收起前输入草稿，恢复后内容保持不变。
-- 1536 × 1024 与 390 × 844 响应式布局。
-- 页面控制台 error/warning：0。
+No actionable P0, P1 or P2 differences remain. The desktop design preserves the current website theme while matching the current MiniMax H3 desktop parameter model. Responsive deviations on tablet and mobile are intentional usability adaptations.
 
-**Comparison history**
+## Primary interactions tested
 
-1. 首次桌面比较：单行顶部、单滚动层、50vw 中央编辑器、216 px 文本区均符合目标。
-2. 首次移动比较：发现按钮换行和模型区域过窄。
-3. 修复后移动复测：顶部保持单行，模型与发送区域清晰，无横向溢出；P2 已关闭。
-
-**Follow-up Polish**
-
-- 无阻塞项。后续可根据真实长会话数据微调悬浮球阴影强度，但当前不影响清晰度或操作。
+- Switch from text to video and select MiniMaxH3共享节点
+- Select smart multiframe, 16:9, 1080P and 8 sampling steps
+- Enter seed 20260827
+- Open/close reference asset and duration panels
+- Enable the existing magic optimization switch
+- Select long-form generation, enter three blank-line-separated prompt segments and verify a 15-second computed total
+- Verify the computed width is 959.98 px in a 1440 px configured viewport (66.665%); the 15 px page scrollbar is outside that CSS viewport calculation
+- Check browser console warnings and errors: none
 
 final result: passed

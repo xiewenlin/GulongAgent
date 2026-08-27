@@ -119,12 +119,12 @@ test("web H3 composer exposes multi-asset upload and inserts @ references into t
   assert.match(source, /支持图片 9 张、视频 3 个、音频 3 个/);
   assert.match(source, /输入 @ 可选择图片、视频或音频素材/);
   assert.match(source, /H3ReferencePicker/);
-  assert.match(source, /预览编辑/);
+  assert.match(source, /agent-h3-assets-menu/);
   assert.match(source, /AttachmentThumbnail/);
-  assert.match(source, /insertH3Reference\(h3References\[index\]\.reference\)/);
+  assert.match(source, /insertH3Reference\(h3References\[index\]\?\.reference\)/);
   assert.doesNotMatch(source, /agent-h3-reference-bar|@ 引用素材/);
-  assert.match(source, /agent-attachment-row \$\{isH3Video \? "h3-grid"/);
-  assert.match(styles, /\.agent-attachment-row\.h3-grid\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fill, minmax\(230px, 1fr\)\);/s);
+  assert.match(source, /agent-h3-assets-popover/);
+  assert.match(styles, /\.agent-h3-assets-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\);/s);
   assert.match(styles, /\.agent-chat-shell\s*\{[^}]*min-height:\s*calc\(100vh - 172px\);/s);
   assert.match(styles, /\.agent-chat-stream\s*\{[^}]*max-height:\s*none;[^}]*overflow:\s*visible;/s);
   assert.match(source, /uploadH3AssetFiles\(attachments/);

@@ -44,14 +44,25 @@ test("web agent uses one page scrollbar and a collapsible centered composer", as
   ]);
 
   assert.match(source, /const \[composerOpen, setComposerOpen\] = useState\(true\);/);
-  assert.match(source, /composerOpen \? <section className="agent-composer-wrap agent-floating-composer"/);
+  assert.match(source, /composerOpen \? <section className=\{`agent-composer-wrap agent-floating-composer \$\{isH3Video \? "h3-desktop-composer" : ""\}`\}/);
   assert.match(source, /className=\{`agent-composer-orb \$\{sending \? "working" : ""\}`\}/);
   assert.match(source, /aria-label="收起创作输入框"/);
   assert.match(source, /aria-label="展开古龙创作输入框"/);
   assert.match(source, /aria-label="拓展技能" title="拓展技能"/);
   assert.match(source, /aria-label="剩余用量" title="剩余用量"/);
   assert.match(css, /\.agent-chat-stream\s*\{[^}]*max-height:\s*none;[^}]*overflow:\s*visible;/s);
-  assert.match(css, /\.agent-floating-composer\s*\{[^}]*position:\s*fixed;[^}]*top:\s*50%;[^}]*left:\s*50%;[^}]*width:\s*clamp\(680px, 50vw, 960px\);/s);
+  assert.match(css, /\.agent-floating-composer\s*\{[^}]*position:\s*fixed;[^}]*top:\s*50%;[^}]*left:\s*50%;[^}]*width:\s*min\(66\.666vw, 1440px\);/s);
+  assert.match(css, /\.agent-composer-wrap\.h3-desktop-composer \.agent-h3-prompt-wrap > textarea\s*\{[^}]*min-height:\s*350px;/s);
+  assert.match(source, /H3_VIDEO_MODES/);
+  assert.match(source, /H3_VIDEO_RESOLUTIONS/);
+  assert.match(source, /H3_SAMPLING_STEPS/);
+  assert.match(source, /超长视频生产方式/);
+  assert.match(source, /导入 TXT（空行分段）/);
+  assert.match(source, /segment_duration_seconds: h3VideoMode === "extended" \? h3SegmentDuration/);
+  assert.match(source, /isH3Video \? <div className="agent-h3-composer-title"/);
+  assert.match(source, /video_mode: h3VideoMode/);
+  assert.match(source, /sampling_steps: h3SamplingSteps/);
+  assert.match(source, /seed: h3SeedValue/);
   assert.match(css, /\.agent-composer-wrap textarea\s*\{[^}]*min-height:\s*216px;/s);
   assert.match(css, /\.agent-workspace-intro\s*\{[^}]*display:\s*flex;[^}]*align-items:\s*center;/s);
   assert.match(css, /\.agent-home-cluster\s*\{[^}]*display:\s*flex;[^}]*align-items:\s*center;/s);

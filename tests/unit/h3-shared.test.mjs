@@ -31,7 +31,11 @@ test("H3 shared pricing uses integer fen and keeps audio free", () => {
     model: "minimax_h3_shared",
     prompt: "render",
     duration_seconds: 10,
+    video_mode: "smart_multiframe",
+    aspect_ratio: "9:16",
     profile: "QUALITY",
+    sampling_steps: 8,
+    seed: 20260827,
     priceFen: 1,
     image_count: 99,
     assets: {
@@ -42,6 +46,10 @@ test("H3 shared pricing uses integer fen and keeps audio free", () => {
   });
   assert.equal(normalized.sourceChannel, "desktop_agent");
   assert.equal(normalized.profile, "quality");
+  assert.equal(normalized.videoMode, "smart_multiframe");
+  assert.equal(normalized.aspectRatio, "9:16");
+  assert.equal(normalized.samplingSteps, 8);
+  assert.equal(normalized.seed, 20260827);
   assert.equal(normalized.imageCount, 1);
   assert.equal(normalized.audioCount, 1);
   assert.equal(normalized.priceFen, 205);
@@ -56,6 +64,25 @@ test("H3 pricing rejects unsupported duration and material counts", () => {
   assert.throws(() => calculateH3SharedPrice({ durationSeconds: 0, imageCount: 0, videoCount: 0 }), /时长或素材数量/);
   assert.throws(() => calculateH3SharedPrice({ durationSeconds: 15, imageCount: 10, videoCount: 0 }), /时长或素材数量/);
   assert.throws(() => normalizeH3TaskInput({ prompt: "x", duration_seconds: 15, assets: { images: [], videos: Array(4).fill({ object_key: "x" }), audio: [] } }), /不能超过 3/);
+});
+
+test("H3 extended mode derives its billable duration from prompt segments", () => {
+  const normalized = normalizeH3TaskInput({
+    model: "minimax_h3_shared",
+    prompt: "第一段镜头\n\n第二段镜头\n\n第三段镜头",
+    video_mode: "extended",
+    longform_mode: "continuous",
+    segment_duration_seconds: 8,
+    duration_seconds: 1,
+    aspect_ratio: "9:16",
+    profile: "official_max",
+    sampling_steps: 4,
+    assets: { images: [], videos: [], audio: [] },
+  });
+  assert.equal(normalized.promptSegmentCount, 3);
+  assert.equal(normalized.segmentDurationSeconds, 8);
+  assert.equal(normalized.durationSeconds, 24);
+  assert.equal(normalized.priceFen, 480);
 });
 
 test("H3 callback idempotency is stable per task event status and local job", () => {
@@ -96,7 +123,12 @@ test("H3 worker task DTO excludes requester and billing identity", () => {
     promptMode: "desktop_local_magic_v1",
     aspectRatio: "16:9",
     durationSeconds: 15,
+    videoMode: "smart_multiframe",
+    longformMode: null,
+    segmentDurationSeconds: null,
     profile: "balanced",
+    samplingSteps: 8,
+    seed: 20260827,
     imageCount: 1,
     videoCount: 0,
     audioCount: 0,
@@ -109,7 +141,11 @@ test("H3 worker task DTO excludes requester and billing identity", () => {
     assets: [{ type: "image", download_url: "https://example.invalid/signed" }],
     outputUpload: { url: "https://example.invalid/upload", object_key: "h3/tasks/test/output.mp4" },
   });
-  assert.deepEqual(Object.keys(task), ["id", "orderNo", "model", "prompt", "source_prompt", "original_prompt", "prompt_mode", "prompt_optimization_enabled", "local_prompt_optimization_required", "aspectRatio", "durationSeconds", "profile", "imageCount", "videoCount", "audioCount", "assets", "output_upload", "progress_callback"]);
+  assert.deepEqual(Object.keys(task), ["id", "orderNo", "model", "prompt", "source_prompt", "original_prompt", "prompt_mode", "prompt_optimization_enabled", "local_prompt_optimization_required", "video_mode", "longform_mode", "segment_duration_seconds", "prompt_list", "aspectRatio", "durationSeconds", "profile", "sampling_steps", "seed", "imageCount", "videoCount", "audioCount", "assets", "output_upload", "progress_callback"]);
+  assert.equal(task.video_mode, "smart_multiframe");
+  assert.equal(task.sampling_steps, 8);
+  assert.equal(task.seed, 20260827);
+  assert.equal(task.prompt_list, null);
   assert.equal(task.prompt, "让古龙跃过云海，保持原始中文");
   assert.equal(task.prompt_mode, "desktop_local_magic_v1");
   assert.equal(task.prompt_optimization_enabled, true);
@@ -688,9 +724,9 @@ test("H3 implementation keeps identity, capability, COS ownership and ledger gat
     readFile(new URL("../../vercel.json", import.meta.url), "utf8"),
   ]);
   assert.match(source, /verifyActivationReceipt\(body\.activation_receipt\)[\s\S]+users[\s\S]+USER_NOT_FOUND/);
-  assert.match(source, /findOneAndUpdate\([\s\S]*?\{ status: "queued", model: H3_SHARED_MODEL, durationSeconds: \{ \$lte: maxDurationSeconds \}/);
+  assert.match(source, /findOneAndUpdate\([\s\S]*?\{ status: "queued", model: H3_SHARED_MODEL, profile: \{ \$in: profiles \}[\s\S]*?durationCapabilityQuery/);
   const dryRunBranch = source.indexOf('if (body.dry_run === true) return c.json({ ok: true, service: "gulong-h3-shared", queue: "reachable" });');
-  const queueMutation = source.indexOf('{ status: "queued", model: H3_SHARED_MODEL, durationSeconds:');
+  const queueMutation = source.indexOf('{ status: "queued", model: H3_SHARED_MODEL, profile:');
   assert.ok(dryRunBranch > -1 && queueMutation > dryRunBranch, "dry-run returns before the first queue mutation so the queue cannot decrease");
   assert.match(source, /sort: \{ createdAt: 1, _id: 1 \}/);
   assert.match(source, /calculateH3ClaimPlan[\s\S]+additional_tasks:[\s\S]+poll_after_ms/);
