@@ -207,6 +207,144 @@ function activationCode() {
   return `H3-${groups.join("-")}`;
 }
 
+const HARDWARE_FINGERPRINT_VERSION = "h3-hw-v2";
+const HARDWARE_COMPONENT_WEIGHTS = Object.freeze({
+  systemUuid: 30,
+  baseboardSerial: 22,
+  baseboardModel: 8,
+  biosSerial: 12,
+  chassisSerial: 8,
+  tpm: 5,
+  cpu: 5,
+  systemDisk: 4,
+  gpu: 2,
+  physicalMacs: 2,
+  systemModel: 1,
+  oemStrings: 1,
+});
+const HARDWARE_COMPONENT_NAMES = Object.freeze(Object.keys(HARDWARE_COMPONENT_WEIGHTS));
+const HARDWARE_BINDING_V2_FIELDS = Object.freeze([
+  "fingerprintVersion",
+  "hardwareHash",
+  "hardwareEvidenceHash",
+  "fingerprintConfidence",
+  "hardwareScore",
+  "bindingScore",
+  "identityComponents",
+  "hardwareComponentDigests",
+]);
+const HARDWARE_BINDING_V2_ALLOWED_REQUEST_FIELDS = new Set([
+  "code",
+  "deviceId",
+  "deviceName",
+  "macHint",
+  ...HARDWARE_BINDING_V2_FIELDS,
+]);
+const RAW_HARDWARE_FIELD_PATTERN = /(uuid|smbios|baseboard|motherboard|bios|chassis|serial|tpm|cpu|disk|gpu|mac|oem|hardwarecomponents?|hardwareevidence)/i;
+const HardwareDigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
+const HardwareIdentityComponentSchema = z.enum(HARDWARE_COMPONENT_NAMES);
+const HardwareBindingV2RequestShape = {
+  fingerprintVersion: z.literal(HARDWARE_FINGERPRINT_VERSION),
+  hardwareHash: HardwareDigestSchema,
+  hardwareEvidenceHash: HardwareDigestSchema,
+  fingerprintConfidence: z.enum(["high", "medium", "low"]),
+  hardwareScore: z.number().int().min(0).max(100),
+  bindingScore: z.number().int().min(0).max(100),
+  identityComponents: z.array(HardwareIdentityComponentSchema).min(1).max(HARDWARE_COMPONENT_NAMES.length),
+  hardwareComponentDigests: z.record(z.string(), HardwareDigestSchema),
+};
+const HardwareBindingV2RequestSchema = z.object(HardwareBindingV2RequestShape);
+
+function activationHardwareError(code, message, status = 400) {
+  return Object.assign(new Error(message), { code, status });
+}
+
+function parseActivationHardwareBindingV2(bodyValue) {
+  const body = bodyValue && typeof bodyValue === "object" && !Array.isArray(bodyValue) ? bodyValue : {};
+  const rawHardwareFields = Object.keys(body).filter(
+    (field) => !HARDWARE_BINDING_V2_ALLOWED_REQUEST_FIELDS.has(field) && RAW_HARDWARE_FIELD_PATTERN.test(field),
+  );
+  if (rawHardwareFields.length) {
+    throw activationHardwareError("RAW_HARDWARE_EVIDENCE_REJECTED", "硬件指纹请求只能提交分类摘要，不能提交原始硬件值");
+  }
+  const hasV2Field = HARDWARE_BINDING_V2_FIELDS.some((field) => Object.hasOwn(body, field));
+  if (!hasV2Field) return null;
+
+  const unexpectedFields = Object.keys(body).filter((field) => !HARDWARE_BINDING_V2_ALLOWED_REQUEST_FIELDS.has(field));
+  if (unexpectedFields.length) {
+    throw activationHardwareError("RAW_HARDWARE_EVIDENCE_REJECTED", "硬件指纹请求只能提交分类摘要，不能提交原始硬件值");
+  }
+
+  const candidate = Object.fromEntries(HARDWARE_BINDING_V2_FIELDS.map((field) => [field, body[field]]));
+  const parsed = HardwareBindingV2RequestSchema.safeParse(candidate);
+  if (!parsed.success) {
+    throw activationHardwareError("INVALID_HARDWARE_FINGERPRINT", "硬件指纹摘要格式不正确");
+  }
+
+  const identitySet = new Set(parsed.data.identityComponents);
+  if (identitySet.size !== parsed.data.identityComponents.length) {
+    throw activationHardwareError("INVALID_HARDWARE_FINGERPRINT", "硬件指纹分类不能重复");
+  }
+  const digestKeys = Object.keys(parsed.data.hardwareComponentDigests);
+  if (digestKeys.length !== identitySet.size || digestKeys.some((key) => !identitySet.has(key))) {
+    throw activationHardwareError("INVALID_HARDWARE_FINGERPRINT", "硬件分类与分类摘要必须一一对应");
+  }
+  const expectedHardwareScore = [...identitySet].reduce((total, name) => total + HARDWARE_COMPONENT_WEIGHTS[name], 0);
+  if (parsed.data.hardwareScore !== expectedHardwareScore) {
+    throw activationHardwareError("INVALID_HARDWARE_FINGERPRINT", "硬件指纹权重得分不正确");
+  }
+
+  const identityComponents = HARDWARE_COMPONENT_NAMES.filter((name) => identitySet.has(name));
+  return {
+    fingerprintVersion: HARDWARE_FINGERPRINT_VERSION,
+    hardwareHash: parsed.data.hardwareHash,
+    hardwareEvidenceHash: parsed.data.hardwareEvidenceHash,
+    fingerprintConfidence: parsed.data.fingerprintConfidence,
+    hardwareScore: parsed.data.hardwareScore,
+    bindingScore: parsed.data.bindingScore,
+    identityComponents,
+    hardwareComponentDigests: Object.fromEntries(identityComponents.map((name) => [name, parsed.data.hardwareComponentDigests[name]])),
+  };
+}
+
+function activationHardwareBindingAction(record, incomingBinding) {
+  if (!incomingBinding) return "unchanged";
+  const existingHash = String(record?.hardwareBindingV2?.hardwareHash || "");
+  if (!existingHash) return "bind";
+  return existingHash === incomingBinding.hardwareHash ? "unchanged" : "mismatch";
+}
+
+async function persistActivationHardwareBindingV2(codes, record, incomingBinding, now = new Date()) {
+  const action = activationHardwareBindingAction(record, incomingBinding);
+  if (action === "unchanged") return record;
+  if (action === "mismatch") {
+    throw activationHardwareError("HARDWARE_FINGERPRINT_MISMATCH", "激活码已绑定到另一组主板硬件指纹", 409);
+  }
+
+  const updated = await codes.findOneAndUpdate(
+    {
+      _id: record._id,
+      status: "used",
+      deviceId: record.deviceId,
+      "hardwareBindingV2.hardwareHash": { $exists: false },
+    },
+    {
+      $set: {
+        hardwareBindingV2: { ...incomingBinding, boundAt: now },
+        updatedAt: now,
+      },
+    },
+    { returnDocument: "after" },
+  );
+  if (updated) return updated;
+
+  const current = await codes.findOne({ _id: record._id });
+  if (activationHardwareBindingAction(current, incomingBinding) === "mismatch") {
+    throw activationHardwareError("HARDWARE_FINGERPRINT_MISMATCH", "激活码已绑定到另一组主板硬件指纹", 409);
+  }
+  return current || record;
+}
+
 function activationReceiptPayload(record) {
   return {
     version: 1,
@@ -353,6 +491,7 @@ const ActivationRedeemRequestSchema = z.object({
   deviceId: z.string().regex(/^[a-f0-9]{64}$/).openapi({ example: "0".repeat(64) }),
   deviceName: z.string().trim().max(120).optional().openapi({ example: "CREATOR-PC" }),
   macHint: z.string().trim().max(32).optional().openapi({ example: "A1B2C3" }),
+  ...Object.fromEntries(Object.entries(HardwareBindingV2RequestShape).map(([name, schema]) => [name, schema.optional()])),
 });
 
 const ActivationReceiptSchema = z.object({
@@ -3494,6 +3633,12 @@ app.post("/api/licenses/redeem", async (c) => {
   if (!/^[a-f0-9]{64}$/.test(deviceId)) {
     return c.json({ code: "INVALID_DEVICE", message: "设备指纹不正确" }, 400);
   }
+  let hardwareBindingV2;
+  try {
+    hardwareBindingV2 = parseActivationHardwareBindingV2(body);
+  } catch (error) {
+    return c.json({ code: error.code || "INVALID_HARDWARE_FINGERPRINT", message: error.message || "硬件指纹摘要格式不正确" }, error.status || 400);
+  }
 
   const codes = await getCollection("activationCodes");
   const codeHash = hashActivationCode(code);
@@ -3506,6 +3651,7 @@ app.post("/api/licenses/redeem", async (c) => {
 
   if (record.status === "unused") {
     try {
+      const activatedAt = new Date();
       record = await codes.findOneAndUpdate(
         { _id: record._id, status: "unused" },
         {
@@ -3514,8 +3660,9 @@ app.post("/api/licenses/redeem", async (c) => {
             deviceId,
             deviceName,
             macHint,
-            activatedAt: new Date(),
-            updatedAt: new Date(),
+            activatedAt,
+            updatedAt: activatedAt,
+            ...(hardwareBindingV2 ? { hardwareBindingV2: { ...hardwareBindingV2, boundAt: activatedAt } } : {}),
           },
         },
         { returnDocument: "after" },
@@ -3531,6 +3678,14 @@ app.post("/api/licenses/redeem", async (c) => {
 
   if (!record || record.status !== "used" || record.deviceId !== deviceId) {
     return c.json({ code: "ACTIVATION_ALREADY_USED", message: "激活码已绑定到其他电脑" }, 409);
+  }
+  if (hardwareBindingV2) {
+    try {
+      record = await persistActivationHardwareBindingV2(codes, record, hardwareBindingV2);
+    } catch (error) {
+      if (error?.code !== "HARDWARE_FINGERPRINT_MISMATCH") throw error;
+      return c.json({ code: error.code, message: error.message || "硬件指纹与现有授权不匹配" }, error.status || 409);
+    }
   }
   const payload = activationReceiptPayload(record);
   return c.json({ ok: true, receipt: { ...payload, ...signActivationReceipt(payload, privateKey) } });
@@ -7815,15 +7970,15 @@ app.openAPIRegistry.registerPath({
   path: "/api/licenses/redeem",
   tags: ["Licensing"],
   summary: "兑换设备永久离线授权",
-  description: "安装器首次联网时提交一次性激活码与设备指纹。激活码原子绑定首台设备；同一设备可幂等恢复回执，其他设备会被拒绝。成功回执使用 RSA-3072 / SHA-256（RS256）签名，客户端随后可永久离线验签。",
+  description: "安装器首次联网时提交一次性激活码与旧版 deviceId。激活码原子绑定首台设备；同一旧版 deviceId 可幂等恢复原 RS256 回执。新客户端可同时提交 h3-hw-v2 加权硬件分类摘要，服务端只保存 SHA-256 摘要和分类名，不接收原始主板、SMBIOS、TPM、MAC 或序列号值；旧授权在旧版 deviceId 精确匹配后可补录一次 v2 绑定，不改变 activatedAt。已有 v2 hardwareHash 不一致时拒绝激活。回执 canonical 字段与签名顺序保持兼容。",
   security: [],
   request: { body: { required: true, content: { "application/json": { schema: ActivationRedeemRequestSchema } } } },
   responses: {
     200: { description: "激活成功或同设备恢复成功", content: { "application/json": { schema: z.object({ ok: z.literal(true), receipt: ActivationReceiptSchema }) } } },
-    400: { description: "激活码或设备指纹格式不正确", content: { "application/json": { schema: ErrorSchema } } },
+    400: { description: "激活码、设备指纹或硬件分类摘要格式不正确；原始硬件值会被拒绝", content: { "application/json": { schema: ErrorSchema } } },
     403: { description: "激活码已停用", content: { "application/json": { schema: ErrorSchema } } },
     404: { description: "激活码不存在", content: { "application/json": { schema: ErrorSchema } } },
-    409: { description: "激活码已绑定其他设备或设备已有授权", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "激活码已绑定其他设备、设备已有授权或 hardwareHash 与既有 v2 绑定不一致", content: { "application/json": { schema: ErrorSchema } } },
     429: { description: "激活尝试过于频繁", content: { "application/json": { schema: ErrorSchema } } },
     503: { description: "生产签名密钥尚未正确配置", content: { "application/json": { schema: ErrorSchema } } },
   },
@@ -7842,8 +7997,8 @@ app.doc("/api/openapi.json", {
   openapi: "3.1.0",
   info: {
     title: "古龙 Gulong Agent Engine API",
-    version: "2.4.0",
-    description: "已按 Chandler v3.9 与 PearAPI 统一接入升级：OAuth 应用密钥配置完成后，官网邮箱注册和已激活桌面客户端的邮箱/手机号注册均由官网服务端注入对应应用凭据，写入 Chandler 应用来源归因；client_secret 永不进入浏览器或桌面客户端。桌面端缺少归因凭据时故障关闭；官网公开邮箱注册按 Chandler 兼容合同保持可用但不伪造归因。邮箱和短信验证码统一为 6 位数字；服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。普通会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费；实付额外赠送 10% 钱包余额，单次充值满 500 元同样赠送 10%。短视频包月固定月费 5999 元、年费 59999 元，只支持线下审核，审核后实付金额按 1:1 组成可到期套餐余额，不额外赠送；有效期内 MiniMaxH3 套餐余额归零后仍可无限生成，但不再扣费或分佣。所有入账、扣款、退款和分账均使用独立幂等流水。MiniMax H3 共享节点支持钱包预扣、幂等退款与 50% 节点分成、激活设备账号绑定、按能力原子领取、腾讯云 COS 输入下载和输出直传票据，并提供仅按绑定账户聚合的桌面收益接口；工作器领取 DTO 不含需求用户身份和内部计费信息。另提供永久离线授权兑换、第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
+    version: "2.5.0",
+    description: "已按 Chandler v3.9 与 PearAPI 统一接入升级：OAuth 应用密钥配置完成后，官网邮箱注册和已激活桌面客户端的邮箱/手机号注册均由官网服务端注入对应应用凭据，写入 Chandler 应用来源归因；client_secret 永不进入浏览器或桌面客户端。桌面端缺少归因凭据时故障关闭；官网公开邮箱注册按 Chandler 兼容合同保持可用但不伪造归因。邮箱和短信验证码统一为 6 位数字；服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。普通会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费；实付额外赠送 10% 钱包余额，单次充值满 500 元同样赠送 10%。短视频包月固定月费 5999 元、年费 59999 元，只支持线下审核，审核后实付金额按 1:1 组成可到期套餐余额，不额外赠送；有效期内 MiniMaxH3 套餐余额归零后仍可无限生成，但不再扣费或分佣。所有入账、扣款、退款和分账均使用独立幂等流水。MiniMax H3 共享节点支持钱包预扣、幂等退款与 50% 节点分成、激活设备账号绑定、按能力原子领取、腾讯云 COS 输入下载和输出直传票据，并提供仅按绑定账户聚合的桌面收益接口；工作器领取 DTO 不含需求用户身份和内部计费信息。永久离线授权继续签发旧版 canonical RS256 回执，同时可选绑定 h3-hw-v2 加权硬件分类摘要；服务端不保存任何原始硬件值。另提供第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
   },
   servers: [
     { url: "/", description: "当前环境" },
@@ -7862,5 +8017,14 @@ app.get(
   }),
 );
 
-export { activationReceiptPayload, activationSigningPrivateKey, signActivationReceipt, verifyActivationReceipt };
+export {
+  HARDWARE_COMPONENT_WEIGHTS,
+  activationHardwareBindingAction,
+  activationReceiptPayload,
+  activationSigningPrivateKey,
+  parseActivationHardwareBindingV2,
+  persistActivationHardwareBindingV2,
+  signActivationReceipt,
+  verifyActivationReceipt,
+};
 export default app;

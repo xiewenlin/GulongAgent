@@ -14,6 +14,41 @@ X-Gulong-Account-Binding: gab_...
 
 服务端只保存该令牌的 HMAC-SHA256 摘要。桌面端应使用 Electron `safeStorage` 加密保存明文令牌。
 
+## 0. 加权硬件指纹 v2 激活
+
+`POST /api/licenses/redeem` 保持旧版请求字段和 RS256 回执 canonical 顺序不变。新版客户端仍把旧 MAC 算法生成的 `legacyDeviceId` 放入 `deviceId`，并可追加：
+
+```json
+{
+  "fingerprintVersion": "h3-hw-v2",
+  "hardwareHash": "64位小写SHA-256",
+  "hardwareEvidenceHash": "64位小写SHA-256",
+  "fingerprintConfidence": "high",
+  "hardwareScore": 72,
+  "bindingScore": 72,
+  "identityComponents": ["systemUuid", "baseboardSerial", "baseboardModel", "biosSerial"],
+  "hardwareComponentDigests": {
+    "systemUuid": "64位小写SHA-256",
+    "baseboardSerial": "64位小写SHA-256",
+    "baseboardModel": "64位小写SHA-256",
+    "biosSerial": "64位小写SHA-256"
+  }
+}
+```
+
+分类权重固定为：`systemUuid 30`、`baseboardSerial 22`、`baseboardModel 8`、`biosSerial 12`、`chassisSerial 8`、`tpm 5`、`cpu 5`、`systemDisk 4`、`gpu 2`、`physicalMacs 2`、`systemModel 1`、`oemStrings 1`。`hardwareScore` 必须等于已提交分类权重之和。
+
+官网只保存分类名和 SHA-256 摘要，拒绝原始主板、SMBIOS、序列号、TPM、MAC 等值。旧授权首次提交 v2 时，必须先精确匹配旧 `deviceId`，随后原子补录 `hardwareBindingV2`，不改变 `activatedAt`，也不消耗新的激活次数。同一 `hardwareHash` 幂等返回原回执；不同 `hardwareHash` 返回 HTTP 409：
+
+```json
+{
+  "code": "HARDWARE_FINGERPRINT_MISMATCH",
+  "message": "激活码已绑定到另一组主板硬件指纹"
+}
+```
+
+成功回执仍只有原有 `version`、`licenseId`、`product`、`deviceId`、`macHint`、`activatedAt`、`perpetual`、`algorithm`、`signature` 字段；Claim、账号绑定、收益与隐私 DTO 不变。
+
 ## 1. 绑定桌面节点账号
 
 `POST /api/desktop/account-bindings/verify`
