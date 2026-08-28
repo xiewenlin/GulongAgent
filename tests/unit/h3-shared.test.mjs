@@ -60,6 +60,71 @@ test("H3 successful revenue uses integer-fen 50/50 split with platform taking th
   assert.deepEqual(calculateH3RevenueSplit(300), { grossFen: 300, nodeShareFen: 150, platformShareFen: 150 });
 });
 
+test("H3 asset presign reconciles browser COS CORS before issuing a direct-upload ticket", async () => {
+  const isolated = new OpenAPIHono();
+  const userId = new ObjectId();
+  const inserted = [];
+  let corsChecks = 0;
+  let signedUploads = 0;
+  registerH3SharedRoutes(isolated, {
+    getCollection: async (name) => name === "h3AssetUploads"
+      ? { async insertOne(document) { inserted.push(document); return { insertedId: document._id }; } }
+      : { find: () => testCursor([]), findOne: async () => null, insertOne: async () => ({}), updateOne: async () => ({}) },
+    enforceRateLimit: async () => ({ allowed: true }),
+    authenticate: async () => ({ user: { id: userId.toString(), role: "user", email: "asset@example.com" } }),
+    requireAdmin: async () => ({ error: new Response(null, { status: 403 }) }),
+    requireTrustedMutation: () => null,
+    verifyActivationReceipt: async () => null,
+    ensureBrowserUploadCors: async () => { corsChecks += 1; return { changed: false }; },
+    createPresignedPutUrl: (key, options) => {
+      signedUploads += 1;
+      assert.equal(corsChecks, 1);
+      assert.equal(options.headers["Content-Type"], "image/png");
+      return `https://cos.example/${encodeURIComponent(key)}`;
+    },
+  });
+  const response = await isolated.request("http://localhost/api/h3/assets/presign", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind: "image", filename: "男主.png", content_type: "image/png", bytes: 128, sha256: "A".repeat(64) }),
+  });
+  assert.equal(response.status, 201);
+  assert.equal(corsChecks, 1);
+  assert.equal(signedUploads, 1);
+  assert.equal(inserted.length, 1);
+  assert.equal((await response.json()).method, "PUT");
+});
+
+test("H3 asset presign fails closed with a Chinese error when COS CORS cannot be reconciled", async () => {
+  const isolated = new OpenAPIHono();
+  let inserted = false;
+  registerH3SharedRoutes(isolated, {
+    getCollection: async () => ({ async insertOne() { inserted = true; } }),
+    enforceRateLimit: async () => ({ allowed: true }),
+    authenticate: async () => ({ user: { id: new ObjectId().toString(), role: "user" } }),
+    requireAdmin: async () => ({ error: new Response(null, { status: 403 }) }),
+    requireTrustedMutation: () => null,
+    verifyActivationReceipt: async () => null,
+    ensureBrowserUploadCors: async () => { throw new Error("AccessDenied"); },
+    createPresignedPutUrl: () => { throw new Error("must not sign"); },
+  });
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  let response;
+  try {
+    response = await isolated.request("http://localhost/api/h3/assets/presign", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "image", filename: "男主.png", content_type: "image/png", bytes: 128, sha256: "B".repeat(64) }),
+    });
+  } finally {
+    console.error = originalConsoleError;
+  }
+  assert.equal(response.status, 503);
+  assert.equal(inserted, false);
+  assert.deepEqual(await response.json(), { code: "COS_CORS_CONFIGURATION_FAILED", message: "腾讯云 COS 暂未允许当前官网上传素材，请稍后重试或联系管理员" });
+});
+
 test("H3 pricing rejects unsupported duration and material counts", () => {
   assert.throws(() => calculateH3SharedPrice({ durationSeconds: 0, imageCount: 0, videoCount: 0 }), /时长或素材数量/);
   assert.throws(() => calculateH3SharedPrice({ durationSeconds: 15, imageCount: 10, videoCount: 0 }), /时长或素材数量/);

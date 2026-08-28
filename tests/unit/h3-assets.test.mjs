@@ -113,6 +113,26 @@ test("web H3 asset upload uses SHA-256 COS metadata contract and completes the a
   assert.deepEqual(h3AssetManifest([completed]), { images: [{ asset_id: "asset-1", object_key: completed.objectKey }], videos: [], audio: [] });
 });
 
+test("web H3 asset upload explains COS cross-origin failures in Chinese without exposing the signed URL", async () => {
+  const file = asset("男主.png", "image/png", 16, "gulong-h3-image");
+  const originalConsoleError = console.error;
+  const diagnostics = [];
+  console.error = (...args) => diagnostics.push(args);
+  try {
+    await assert.rejects(
+      () => uploadH3AssetFile(file, {
+        apiFetch: async () => ({ upload_url: "https://secret.cos.example/?signature=hidden", method: "PUT", headers: { "Content-Type": "image/png" } }),
+        fetchImpl: async () => { throw new TypeError("Failed to fetch"); },
+      }),
+      /无法连接腾讯云存储.*COS 跨域配置/,
+    );
+  } finally {
+    console.error = originalConsoleError;
+  }
+  assert.equal(diagnostics.length, 1);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /signature=hidden/);
+});
+
 test("web H3 composer exposes multi-asset upload and inserts @ references into the prompt", async () => {
   const source = await readFile(new URL("../../src/components/WebAgentPage.jsx", import.meta.url), "utf8");
   const styles = await readFile(new URL("../../src/styles.css", import.meta.url), "utf8");

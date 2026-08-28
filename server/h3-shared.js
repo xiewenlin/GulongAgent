@@ -4,7 +4,7 @@ import { z } from "@hono/zod-openapi";
 import { getCollection as databaseCollection } from "./db.js";
 import { enforceRateLimit as databaseRateLimit } from "./rate-limit.js";
 import { fingerprintIp, hashOpaqueToken, normalizeEmail } from "./security.js";
-import { createPresignedDownloadUrl, createPresignedPutUrl, deleteObject, headObject, sanitizeFilename } from "./cos.js";
+import { createPresignedDownloadUrl, createPresignedPutUrl, deleteObject, ensureBrowserUploadCors, headObject, sanitizeFilename } from "./cos.js";
 import { calculateH3ClaimPlan, createH3QueueCoordinator, H3_CLAIM_LEASE_MS } from "./h3-queue.js";
 import { localizeErrorMessage } from "../shared/error-messages.js";
 import { acceptH3OptimizedPrompt, buildH3AuthoringPrompt, compileH3Prompt, containsCjkText, h3PromptOptimizerMessages, hardenH3CompiledPrompt, parseH3AuthoringPrompt } from "./h3-prompt.js";
@@ -895,8 +895,10 @@ export function registerH3SharedRoutes(app, dependencies) {
   const getCollection = dependencies.getCollection || databaseCollection;
   const enforceRateLimit = dependencies.enforceRateLimit || databaseRateLimit;
   const issueDownloadUrl = dependencies.createPresignedDownloadUrl || createPresignedDownloadUrl;
+  const issueUploadUrl = dependencies.createPresignedPutUrl || createPresignedPutUrl;
   const inspectCosObject = dependencies.headObject || headObject;
   const removeCosObject = dependencies.deleteObject || deleteObject;
+  const ensureUploadCors = dependencies.ensureBrowserUploadCors || ensureBrowserUploadCors;
   const queueCoordinator = dependencies.queueCoordinator || createH3QueueCoordinator({ getCollection, model: H3_SHARED_MODEL });
   const { authenticate, requireAdmin, requireTrustedMutation, verifyActivationReceipt } = dependencies;
 
@@ -946,7 +948,7 @@ export function registerH3SharedRoutes(app, dependencies) {
       "x-cos-meta-h3-task-id": task._id.toString(),
       "x-cos-meta-h3-upload-grant": grantId,
     };
-    const url = createPresignedPutUrl(objectKey, { expires: 60 * 60, headers: requiredHeaders });
+    const url = issueUploadUrl(objectKey, { expires: 60 * 60, headers: requiredHeaders });
     await (await getCollection("h3OutputUploads")).insertOne({ grantId, taskId: task._id, orderNo: task.orderNo, objectKey, status: "issued", issuedToBindingId: auth.binding._id, issuedToNodeId: auth.binding.nodeId, createdAt: now, expiresAt, updatedAt: now });
     return {
       url,
@@ -1041,6 +1043,15 @@ export function registerH3SharedRoutes(app, dependencies) {
     const contentType = String(body.content_type || body.contentType || "application/octet-stream").trim().toLowerCase();
     const allowed = kind === "image" ? /^image\/(jpeg|png|webp|gif)$/ : kind === "video" ? /^video\/(mp4|webm|quicktime)$/ : kind === "audio" ? /^audio\/(mpeg|mp4|wav|x-wav|ogg|webm)$/ : null;
     if (!kind || !allowed.test(contentType) || bytes < 1 || bytes > 2 * 1024 * 1024 * 1024 || !/^[A-F0-9]{64}$/.test(sha256)) return c.json({ code: "VALIDATION_ERROR", message: "H3 素材类型、大小或 SHA-256 不正确" }, 400);
+    try {
+      await ensureUploadCors();
+    } catch (error) {
+      console.error("[h3-assets:presign] COS browser-upload CORS self-check failed", {
+        origin: process.env.APP_ORIGIN || null,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return c.json({ code: "COS_CORS_CONFIGURATION_FAILED", message: "腾讯云 COS 暂未允许当前官网上传素材，请稍后重试或联系管理员" }, 503);
+    }
     const ownerId = new ObjectId(auth.user.id);
     const uploadId = new ObjectId();
     const objectKey = `h3/requesters/${ownerId}/assets/${uploadId}-${filename}`;
@@ -1048,7 +1059,7 @@ export function registerH3SharedRoutes(app, dependencies) {
     const expiresAt = new Date(now.getTime() + 60 * 60_000);
     const requiredHeaders = { "Content-Type": contentType, "x-cos-meta-sha256": sha256, "x-cos-meta-bytes": String(bytes), "x-cos-meta-owner-id": ownerId.toString(), "x-cos-meta-h3-asset-id": uploadId.toString() };
     await (await getCollection("h3AssetUploads")).insertOne({ _id: uploadId, ownerId, kind, filename, contentType, bytes, sha256, objectKey, status: "uploading", createdAt: now, updatedAt: now, expiresAt });
-    return c.json({ asset_id: uploadId.toString(), upload_url: createPresignedPutUrl(objectKey, { expires: 60 * 60, headers: requiredHeaders }), method: "PUT", object_key: objectKey, headers: requiredHeaders, expires_at: expiresAt.toISOString() }, 201);
+    return c.json({ asset_id: uploadId.toString(), upload_url: issueUploadUrl(objectKey, { expires: 60 * 60, headers: requiredHeaders }), method: "PUT", object_key: objectKey, headers: requiredHeaders, expires_at: expiresAt.toISOString() }, 201);
   });
 
   app.post("/api/h3/assets/:id/complete", async (c) => {
@@ -1601,7 +1612,7 @@ export function registerH3SharedRoutes(app, dependencies) {
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/desktop/earnings/summary", tags: ["Desktop Earnings"], summary: "读取当前绑定账户的 MiniMax H3 节点收益", description: "仅接受 X-Gulong-Account-Binding。可选 node_id 必须属于令牌对应账户，否则返回 403。金额均为人民币整数分。收益只聚合服务端 h3_node_commission 结算流水；平均每天收益=已结算累计收益÷max(1, 从首个成功结算的中国自然日到当前中国自然日的天数)。", security: [{ accountBinding: [] }], request: { query: z.object({ node_id: z.string().optional() }) }, responses: { 200: { description: "账户与设备收益汇总", content: { "application/json": { schema: earningsSummarySchema } } }, 401: { description: "未绑定或绑定令牌失效", content: { "application/json": { schema: errorSchema } } }, 403: { description: "node_id 不属于当前账户", content: { "application/json": { schema: errorSchema } } } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/account/earnings/summary", tags: ["Account"], summary: "用户后台读取自己的共享节点收益", description: "使用官网登录会话或账户 API Key，仅返回当前账户；网页端 node_id 已脱敏。", responses: { 200: { description: "账户收益和脱敏设备列表", content: { "application/json": { schema: earningsSummarySchema } } }, 401: { description: "未登录" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/prompts/optimize", tags: ["MiniMax H3 Shared Nodes"], summary: "已停用：服务端提示词优化", description: "官网服务端不执行提示词优化。网页版通过 prompt_optimization_enabled 让用户选择是否由 MiniMax H3 极速视频桌面端执行本地魔法优化。", deprecated: true, responses: { 410: { description: "PROMPT_OPTIMIZATION_MOVED_TO_DESKTOP" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/assets/presign", tags: ["MiniMax H3 Shared Nodes"], summary: "为输入素材签发账号专属 COS 直传票据", request: { body: { required: true, content: { "application/json": { schema: z.object({ kind: z.enum(["image", "video", "audio"]), filename: z.string(), content_type: z.string(), bytes: z.number().int().positive(), sha256: z.string().regex(/^[A-Fa-f0-9]{64}$/) }) } } } }, responses: { 201: { description: "返回 PUT URL、固定 headers、asset_id 与 object_key" }, 409: { description: "COS 回执不匹配" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/assets/presign", tags: ["MiniMax H3 Shared Nodes"], summary: "为输入素材签发账号专属 COS 直传票据", description: "签发前会幂等校验并补齐官网当前 HTTPS 来源的腾讯云 COS 浏览器跨域规则；大文件直接上传 COS，不经过官网请求体。", request: { body: { required: true, content: { "application/json": { schema: z.object({ kind: z.enum(["image", "video", "audio"]), filename: z.string(), content_type: z.string(), bytes: z.number().int().positive(), sha256: z.string().regex(/^[A-Fa-f0-9]{64}$/) }) } } } }, responses: { 201: { description: "返回 PUT URL、固定 headers、asset_id 与 object_key" }, 409: { description: "COS 回执不匹配" }, 503: { description: "COS 浏览器跨域规则暂时无法校验或配置" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/assets/{id}/complete", tags: ["MiniMax H3 Shared Nodes"], summary: "校验并完成 H3 输入素材上传", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "返回可用于任务 assets manifest 的素材记录" }, 409: { description: "对象大小、摘要或归属不匹配" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "使用原始中文提示词创建共享节点任务并原子预扣余额", description: "实际价格（分）= 时长秒数×20 + 图片数×5 + 视频数×20；音频免费。普通用户与会员用户原子预扣钱包余额；有效期内的短视频包月用户优先扣套餐额度并按实际扣款 50/50 分账，套餐额度归零后仍可无限创建 H3 任务且本次扣款、节点分佣和平台分佣均为 0。管理员始终免扣费且不参与分佣。服务端始终原样保存 prompt，不翻译；prompt_optimization_enabled=true 时由桌面节点执行本地魔法优化并回调 compiled_prompt，false 时必须直接使用原始提示词且禁止回传 compiled_prompt。video_mode、longform_mode、segment_duration_seconds、profile、sampling_steps 与 seed 会进入受信任节点任务合同；超长模式的 duration_seconds 由服务端按空行分段数乘单段时长重新计算。旧客户端省略字段时按全能参考、720P、4 步和随机种子兼容。必须提供 Idempotency-Key。", request: { body: { required: true, content: { "application/json": { schema: z.object({ source_channel: z.enum(["website", "desktop_agent"]), model: z.literal(H3_SHARED_MODEL), prompt: z.string().min(1).max(20_000), prompt_optimization_enabled: z.boolean().optional(), conversation_id: z.string().optional(), video_mode: z.enum(["all_reference", "first_last", "smart_multiframe", "extended"]).optional(), longform_mode: z.enum(["continuous", "independent"]).optional(), segment_duration_seconds: z.number().int().min(5).max(15).optional(), aspect_ratio: z.enum(["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]), duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profile: z.enum(["official_max", "ultra1080", "fast2k", "fast", "balanced", "turbo544", "quality", "preview"]), sampling_steps: z.union([z.literal(4), z.literal(8), z.literal(20)]).optional(), seed: z.number().int().min(-1).max(2_147_483_647).optional(), assets: z.object({ images: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(9), videos: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3), audio: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3) }), idempotency_key: z.string().min(8).max(160).optional() }) } } } }, responses: { 201: { description: "原始提示词、完整视频参数与用户优化选择已保存，并按账号类型完成扣费或零扣费排队" }, 402: { description: "非套餐用户余额不足" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "查看当前账号的共享节点订单", responses: { 200: { description: "最多返回最近 50 个订单" }, 401: { description: "未认证" } } });

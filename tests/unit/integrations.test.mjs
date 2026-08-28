@@ -767,8 +767,8 @@ test("COS object filenames cannot escape their assigned prefix", () => {
   assert.equal(sanitizeFilename("  "), "file.bin");
 });
 
-test("COS browser uploads allow both official domains without removing existing rules", () => {
-  const origins = ["https://www.sologle.com", "https://sologle.com"];
+test("COS browser uploads allow the official domains and Tencent HTTPS origin without removing existing rules", () => {
+  const origins = ["https://www.sologle.com", "https://sologle.com", "https://111.229.70.235"];
   assert.equal(browserUploadCorsReady([], origins), false);
   const existing = [{ AllowedOrigins: ["https://example.com"], AllowedMethods: ["GET"], AllowedHeaders: ["*"] }];
   const merged = [...existing, browserUploadCorsRule(origins)];

@@ -158,7 +158,16 @@ export async function uploadH3AssetFile(file, { apiFetch, fetchImpl = globalThis
   onProgress?.({ phase: "uploading", name: file.name });
   let uploaded;
   try { uploaded = await fetchImpl(ticket.upload_url, { method: ticket.method || "PUT", headers: ticket.headers || {}, body: file }); }
-  catch { throw new Error(`素材 ${file.name} 上传到腾讯云失败，请检查网络后重试`); }
+  catch (error) {
+    console.error("[h3-asset-upload] 腾讯云 COS 直传失败", {
+      filename: file.name,
+      contentType: descriptor.contentType,
+      bytes: file.size,
+      origin: globalThis.location?.origin || null,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw new Error(`素材 ${file.name} 无法连接腾讯云存储，请刷新页面后重试；如持续失败请联系管理员检查 COS 跨域配置`);
+  }
   if (!uploaded?.ok) throw new Error(`素材 ${file.name} 上传失败（HTTP ${uploaded?.status || "未知"}）`);
   onProgress?.({ phase: "verifying", name: file.name });
   const completed = await apiFetch(`/api/h3/assets/${encodeURIComponent(ticket.asset_id)}/complete`, { method: "POST", body: JSON.stringify({}) });

@@ -67,11 +67,13 @@ releases/{theme-group-id}/{timestamp}-{random}-{installer}.exe
 
 浏览器上传流程：官网创建 MongoDB `uploading` 记录 → 返回限时签名 PUT URL → 浏览器直传 COS → 官网 `HEAD Object` 校验大小 → 标记为 `queued_for_analysis`。下载始终通过 15 分钟签名 GET URL，不公开永久对象地址。
 
+所有浏览器直传票据在签发前都会幂等核验 Bucket CORS，并保留既有规则、补齐官网双域名与当前部署的 HTTPS `APP_ORIGIN`。腾讯云直连生产因此还必须允许 `https://111.229.70.235`；自检失败时接口返回 `503 COS_CORS_CONFIGURATION_FAILED`，不会创建无效上传记录或把签名 URL 写入诊断日志。
+
 CAM 子账号仅需目标 Bucket 下相应前缀的 `PutObject`、`HeadObject`、`GetObject`、`DeleteObject` 权限。不要使用主账号永久密钥。
 
 Bucket CORS 至少允许：
 
-- Origin：`https://www.sologle.com`、`https://sologle.com`
+- Origin：`https://www.sologle.com`、`https://sologle.com`、当前 HTTPS `APP_ORIGIN`（腾讯云直连为 `https://111.229.70.235`）
 - Method：`PUT`、`GET`、`HEAD`
 - Allowed-Headers：`Content-Type`、`Authorization`、`x-cos-*`
 - Expose-Headers：`ETag`、`Content-Length`
