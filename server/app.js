@@ -207,6 +207,19 @@ function activationCode() {
   return `H3-${groups.join("-")}`;
 }
 
+function activationSearchConditions(keyword) {
+  const value = String(keyword || "").trim().slice(0, 120);
+  if (!value) return [];
+  const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const conditions = [
+    { deviceName: { $regex: escaped, $options: "i" } },
+    { "nodeBindings.nodeName": { $regex: escaped, $options: "i" } },
+  ];
+  const macTail = value.replace(/[^a-z0-9]/gi, "").slice(-6);
+  if (macTail) conditions.push({ macHint: { $regex: macTail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), $options: "i" } });
+  return conditions;
+}
+
 const HARDWARE_FINGERPRINT_VERSION = "h3-hw-v2";
 const HARDWARE_COMPONENT_WEIGHTS = Object.freeze({
   systemUuid: 30,
@@ -3698,14 +3711,28 @@ app.get("/api/admin/activation-codes", async (c) => {
   if (auth.error) return auth.error;
   const status = String(c.req.query("status") || "").trim();
   const product = String(c.req.query("product") || "").trim();
+  const keyword = String(c.req.query("q") || "").trim().slice(0, 120);
   const limit = Math.min(Math.max(Number(c.req.query("limit")) || 100, 1), 500);
   const filter = {};
   if (["unused", "used", "revoked"].includes(status)) filter.status = status;
   if (product) filter.product = product;
+  const searchConditions = activationSearchConditions(keyword);
   const collection = await getCollection("activationCodes");
   const [items, counts] = await Promise.all([
     collection.aggregate([
       { $match: filter },
+      { $lookup: {
+        from: "nodeAccountBindings",
+        let: { activationLicenseId: "$_id" },
+        pipeline: [
+          { $match: { $expr: { $eq: ["$activationLicenseId", "$$activationLicenseId"] } } },
+          { $match: { nodeName: { $type: "string" } } },
+          { $sort: { status: 1, updatedAt: -1 } },
+          { $project: { _id: 0, nodeId: 1, nodeName: 1, status: 1, updatedAt: 1 } },
+        ],
+        as: "nodeBindings",
+      } },
+      ...(searchConditions.length ? [{ $match: { $or: searchConditions } }] : []),
       { $addFields: { _statusOrder: { $switch: { branches: [{ case: { $eq: ["$status", "unused"] }, then: 0 }, { case: { $eq: ["$status", "revoked"] }, then: 1 }, { case: { $eq: ["$status", "used"] }, then: 2 }], default: 3 } } } },
       { $sort: { _statusOrder: 1, createdAt: -1 } },
       { $limit: limit },
@@ -3722,6 +3749,8 @@ app.get("/api/admin/activation-codes", async (c) => {
       note: item.note || "",
       deviceName: item.deviceName || null,
       macHint: item.macHint || null,
+      nodeName: item.nodeBindings?.[0]?.nodeName || null,
+      nodeNames: [...new Set((item.nodeBindings || []).map((binding) => String(binding.nodeName || "").trim()).filter(Boolean))],
       createdAt: item.createdAt,
       activatedAt: item.activatedAt || null,
     })),
@@ -7966,6 +7995,25 @@ app.openAPIRegistry.registerPath({
 });
 
 app.openAPIRegistry.registerPath({
+  method: "get",
+  path: "/api/admin/activation-codes",
+  tags: ["Administration"],
+  summary: "管理员查询设备永久授权",
+  description: "未使用授权优先；q 可按绑定设备名称、MAC 尾号后六位或用户自定义节点名称进行不区分大小写的模糊搜索。节点名称来自已验证的桌面节点账号绑定记录。",
+  request: { query: z.object({
+    status: z.enum(["unused", "used", "revoked"]).optional(),
+    product: z.string().max(80).optional(),
+    q: z.string().max(120).optional(),
+    limit: z.coerce.number().int().min(1).max(500).optional(),
+  }) },
+  responses: {
+    200: { description: "授权列表、节点名称与全局状态汇总" },
+    401: { description: "尚未登录" },
+    403: { description: "需要管理员角色" },
+  },
+});
+
+app.openAPIRegistry.registerPath({
   method: "post",
   path: "/api/licenses/redeem",
   tags: ["Licensing"],
@@ -7997,7 +8045,7 @@ app.doc("/api/openapi.json", {
   openapi: "3.1.0",
   info: {
     title: "古龙 Gulong Agent Engine API",
-    version: "2.5.0",
+    version: "2.5.1",
     description: "已按 Chandler v3.9 与 PearAPI 统一接入升级：OAuth 应用密钥配置完成后，官网邮箱注册和已激活桌面客户端的邮箱/手机号注册均由官网服务端注入对应应用凭据，写入 Chandler 应用来源归因；client_secret 永不进入浏览器或桌面客户端。桌面端缺少归因凭据时故障关闭；官网公开邮箱注册按 Chandler 兼容合同保持可用但不伪造归因。邮箱和短信验证码统一为 6 位数字；服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。普通会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费；实付额外赠送 10% 钱包余额，单次充值满 500 元同样赠送 10%。短视频包月固定月费 5999 元、年费 59999 元，只支持线下审核，审核后实付金额按 1:1 组成可到期套餐余额，不额外赠送；有效期内 MiniMaxH3 套餐余额归零后仍可无限生成，但不再扣费或分佣。所有入账、扣款、退款和分账均使用独立幂等流水。MiniMax H3 共享节点支持钱包预扣、幂等退款与 50% 节点分成、激活设备账号绑定、按能力原子领取、腾讯云 COS 输入下载和输出直传票据，并提供仅按绑定账户聚合的桌面收益接口；工作器领取 DTO 不含需求用户身份和内部计费信息。永久离线授权继续签发旧版 canonical RS256 回执，同时可选绑定 h3-hw-v2 加权硬件分类摘要；服务端不保存任何原始硬件值。另提供第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
   },
   servers: [
@@ -8021,6 +8069,7 @@ export {
   HARDWARE_COMPONENT_WEIGHTS,
   activationHardwareBindingAction,
   activationReceiptPayload,
+  activationSearchConditions,
   activationSigningPrivateKey,
   parseActivationHardwareBindingV2,
   persistActivationHardwareBindingV2,

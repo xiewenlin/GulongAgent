@@ -4981,6 +4981,14 @@ textarea:focus {
 .activation-summary button:hover, .activation-summary button.active { color: var(--jade); border-color: var(--line-strong); background: var(--jade-soft); }
 .activation-summary strong { color: var(--ink); font-size: 26px; }
 .activation-summary span { font-size: 18px; font-weight: 750; }
+.activation-search { padding: 14px 16px; display: grid; grid-template-columns: minmax(320px, 1fr) auto; align-items: end; gap: 16px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); }
+.activation-search > label { min-width: 0; display: grid; gap: 7px; color: var(--muted); font-size: 18px; font-weight: 750; }
+.activation-search > label > div { height: 46px; padding: 0 12px; display: flex; align-items: center; gap: 9px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--bg-soft); }
+.activation-search > label > div:focus-within { border-color: var(--jade); box-shadow: 0 0 0 3px color-mix(in srgb, var(--jade) 10%, transparent); }
+.activation-search input { min-width: 0; width: 100%; border: 0; outline: 0; color: var(--ink); background: transparent; font: inherit; }
+.activation-search small { color: var(--muted); font-size: 18px; font-weight: 520; }
+.activation-search > div { display: flex; align-items: center; justify-content: flex-end; gap: 9px; }
+.activation-search > div > span { margin-right: 3px; color: var(--muted); font-size: 18px; white-space: nowrap; }
 .activation-generator { padding: 16px; display: flex; align-items: end; gap: 14px; border: 1px solid var(--line); border-radius: 13px; background: var(--bg-soft); }
 .activation-generator > div { min-width: 0; flex: 1; display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 12px; }
 .activation-generator label { min-width: 0; display: grid; gap: 7px; color: var(--muted); font-size: 18px; font-weight: 750; }
@@ -4990,8 +4998,8 @@ textarea:focus {
 .activation-generated header strong, .activation-generated header span { display: block; }
 .activation-generated header span { margin-top: 3px; color: var(--muted); font-size: 18px; }
 .activation-generated textarea { width: 100%; padding: 12px; resize: vertical; color: var(--ink); border: 1px solid var(--line); border-radius: 9px; background: var(--surface); font: 600 16px/1.65 ui-monospace, SFMono-Regular, Consolas, monospace; }
-.activation-table { overflow: hidden; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); }
-.activation-table-head, .activation-table article { min-height: 66px; padding: 10px 14px; display: grid; grid-template-columns: minmax(290px, 1.35fr) 90px minmax(180px, 1fr) minmax(210px, 1.1fr) minmax(174px, .8fr); align-items: center; gap: 12px; }
+.activation-table { overflow-x: auto; overflow-y: hidden; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); }
+.activation-table-head, .activation-table article { min-width: 1180px; min-height: 66px; padding: 10px 14px; display: grid; grid-template-columns: minmax(260px, 1.25fr) 90px minmax(160px, .82fr) minmax(180px, .92fr) minmax(210px, 1.05fr) minmax(174px, .8fr); align-items: center; gap: 12px; }
 .activation-table-head { color: var(--muted); border-bottom: 1px solid var(--line); background: var(--bg-soft); font-size: 18px; font-weight: 850; }
 .activation-table article + article { border-top: 1px solid var(--line); }
 .activation-table article > div { min-width: 0; }
@@ -5004,15 +5012,17 @@ textarea:focus {
 .activation-table .status-pill.used { color: #2f7659; background: #edf8f1; }
 .activation-table .status-pill.revoked { color: #9b4d3e; background: #fff1ee; }
 
-@media (max-width: 1050px) {
+@media (max-width: 1180px) {
   .activation-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .activation-search { grid-template-columns: 1fr; align-items: stretch; }
+  .activation-search > div { justify-content: flex-start; flex-wrap: wrap; }
   .activation-generator { align-items: stretch; flex-direction: column; }
-  .activation-table { overflow-x: auto; }
-  .activation-table-head, .activation-table article { min-width: 900px; }
 }
 
 @media (max-width: 650px) {
   .activation-summary, .activation-generator > div { grid-template-columns: 1fr; }
+  .activation-search { padding: 12px; }
+  .activation-search > div .button { flex: 1; }
 }
 
 .feedback-admin-filter { margin-bottom: 18px; display: flex; align-items: stretch; gap: 10px; }

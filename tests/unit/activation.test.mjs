@@ -6,6 +6,7 @@ import app, {
   HARDWARE_COMPONENT_WEIGHTS,
   activationHardwareBindingAction,
   activationReceiptPayload,
+  activationSearchConditions,
   activationSigningPrivateKey,
   parseActivationHardwareBindingV2,
   persistActivationHardwareBindingV2,
@@ -195,6 +196,37 @@ test("administrator activation copy stays enabled and can reissue unreadable unu
   assert.match(serverSource, /\/api\/admin\/activation-codes\/:id\/reissue/);
   assert.match(serverSource, /status !== "unused"/);
   assert.match(serverSource, /codeEncrypted: sealUserSecret\(code, "activation-code"\)/);
+});
+
+test("administrator activation search safely matches device, MAC tail and node name", async () => {
+  assert.deepEqual(activationSearchConditions(""), []);
+  const nodeConditions = activationSearchConditions("剪辑节点.*");
+  assert.equal(nodeConditions.length, 2);
+  assert.equal(nodeConditions[0].deviceName.$regex, "剪辑节点\\.\\*");
+  assert.equal(nodeConditions[1]["nodeBindings.nodeName"].$regex, "剪辑节点\\.\\*");
+
+  const macConditions = activationSearchConditions("A1:B2:C3");
+  assert.equal(macConditions.length, 3);
+  assert.equal(macConditions[2].macHint.$regex, "A1B2C3");
+
+  const [adminSource, serverSource, cssSource] = await Promise.all([
+    readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/styles.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(adminSource, /params\.set\("q", normalizedKeyword\)/);
+  assert.match(adminSource, /设备名、MAC 尾号后 6 位或节点名称/);
+  assert.match(adminSource, /<span>节点名称<\/span>/);
+  assert.match(adminSource, /item\.nodeName \|\| "未设置节点名称"/);
+  assert.match(serverSource, /from: "nodeAccountBindings"/);
+  assert.match(serverSource, /nodeName: item\.nodeBindings\?\.\[0\]\?\.nodeName/);
+  assert.match(cssSource, /\.activation-search\s*\{/);
+
+  const document = app.getOpenAPIDocument({ openapi: "3.1.0", info: { title: "test", version: "1" } });
+  const route = document.paths["/api/admin/activation-codes"]?.get;
+  assert.ok(route);
+  assert.match(JSON.stringify(route), /MAC 尾号后六位/);
+  assert.match(JSON.stringify(route), /"q"/);
 });
 
 test("unused activation code TXT export is documented and never succeeds without administrator authentication", async () => {

@@ -959,18 +959,25 @@ function ActivationCodeManager() {
   const [items, setItems] = useState([]);
   const [counts, setCounts] = useState({});
   const [status, setStatus] = useState("");
+  const [keyword, setKeyword] = useState("");
+  const [appliedKeyword, setAppliedKeyword] = useState("");
   const [count, setCount] = useState(10);
   const [note, setNote] = useState("");
   const [generated, setGenerated] = useState([]);
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("");
 
-  async function load(nextStatus = status) {
+  async function load(nextStatus = status, nextKeyword = keyword) {
     setBusy("load"); setMessage("");
     try {
-      const query = nextStatus ? `?status=${encodeURIComponent(nextStatus)}` : "";
+      const normalizedKeyword = String(nextKeyword || "").trim();
+      const params = new URLSearchParams();
+      if (nextStatus) params.set("status", nextStatus);
+      if (normalizedKeyword) params.set("q", normalizedKeyword);
+      const query = params.size ? `?${params}` : "";
       const result = await apiFetch(`/api/admin/activation-codes${query}`);
       setItems(result.items || []); setCounts(result.counts || {});
+      setAppliedKeyword(normalizedKeyword);
     } catch (error) { setMessage(error.message); }
     finally { setBusy(""); }
   }
@@ -1093,11 +1100,12 @@ function ActivationCodeManager() {
   return <section className="admin-module activation-manager">
     <header className="admin-module-head"><div><span>DEVICE-BOUND OFFLINE LICENSES</span><h2>授权管理</h2><p>批量生成安装激活码。首次使用后绑定设备物理网卡指纹，同一台电脑可永久离线使用。</p></div><div className="admin-head-actions"><button className="button secondary" type="button" disabled={Boolean(busy) || !(counts.unused > 0)} onClick={exportUnusedCodes}><DownloadSimple size={17} />{busy === "export" ? "正在导出" : `导出未使用激活码${counts.unused ? `（${counts.unused}）` : ""}`}</button><button className="button secondary" type="button" disabled={Boolean(busy)} onClick={() => load()}><ArrowClockwise size={17} />刷新</button></div></header>
     {message && <AdminNotice tone={message.includes("已") ? "success" : "error"}>{message}</AdminNotice>}
-    <div className="activation-summary"><button className={!status ? "active" : ""} onClick={() => { setStatus(""); load(""); }}><strong>{(counts.unused || 0) + (counts.used || 0) + (counts.revoked || 0)}</strong><span>全部</span></button><button className={status === "unused" ? "active" : ""} onClick={() => { setStatus("unused"); load("unused"); }}><strong>{counts.unused || 0}</strong><span>未使用</span></button><button className={status === "used" ? "active" : ""} onClick={() => { setStatus("used"); load("used"); }}><strong>{counts.used || 0}</strong><span>已使用</span></button><button className={status === "revoked" ? "active" : ""} onClick={() => { setStatus("revoked"); load("revoked"); }}><strong>{counts.revoked || 0}</strong><span>已停用</span></button></div>
+    <div className="activation-summary"><button className={!status ? "active" : ""} onClick={() => { setStatus(""); load("", keyword); }}><strong>{(counts.unused || 0) + (counts.used || 0) + (counts.revoked || 0)}</strong><span>全部</span></button><button className={status === "unused" ? "active" : ""} onClick={() => { setStatus("unused"); load("unused", keyword); }}><strong>{counts.unused || 0}</strong><span>未使用</span></button><button className={status === "used" ? "active" : ""} onClick={() => { setStatus("used"); load("used", keyword); }}><strong>{counts.used || 0}</strong><span>已使用</span></button><button className={status === "revoked" ? "active" : ""} onClick={() => { setStatus("revoked"); load("revoked", keyword); }}><strong>{counts.revoked || 0}</strong><span>已停用</span></button></div>
+    <form className="activation-search" onSubmit={(event) => { event.preventDefault(); load(status, keyword); }}><label><span>搜索绑定设备与节点</span><div><MagnifyingGlass size={20} /><input maxLength="120" value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="输入设备名、MAC 尾号后 6 位或节点名称" /></div><small>支持不区分大小写的关键词模糊搜索；MAC 可直接输入连续的后六位。</small></label><div><span>当前显示 {items.length} 条</span>{(keyword || appliedKeyword) && <button className="button secondary" type="button" disabled={Boolean(busy)} onClick={() => { setKeyword(""); load(status, ""); }}>清除</button>}<button className="button primary" disabled={Boolean(busy)}><MagnifyingGlass size={18} />{busy === "load" ? "正在搜索" : "搜索"}</button></div></form>
     <form className="activation-generator" onSubmit={generate}><div><label><span>生成数量</span><input type="number" min="1" max="500" value={count} onChange={(event) => setCount(event.target.value)} /></label><label className="wide"><span>批次备注</span><input maxLength="200" value={note} onChange={(event) => setNote(event.target.value)} placeholder="例如：2026 年 8 月创作者内测" /></label></div><button className="button primary" disabled={Boolean(busy)}><Key size={18} weight="fill" />{busy === "generate" ? "正在生成" : "批量生成激活码"}</button></form>
     {generated.length > 0 && <section className="activation-generated"><header><div><strong>本批次激活码</strong><span>激活码已加密保存，管理员可随时从下方列表复制。</span></div><button type="button" className="button secondary small" onClick={copyCodes}><Copy size={16} />复制全部</button></header><textarea readOnly value={generated.join("\n")} rows={Math.min(generated.length + 1, 12)} /></section>}
-    <div className="activation-table"><div className="activation-table-head"><span>激活码</span><span>状态</span><span>绑定设备</span><span>生成 / 激活时间</span><span>操作</span></div>{items.map((item) => <article key={item.id}><div><strong className="activation-code-value" title={item.code || item.codePreview}>{item.code || item.codePreview}</strong><small>{item.note || item.product}{!item.code ? " · 旧记录仅保留安全摘要" : ""}</small></div><em className={`status-pill ${item.status}`}>{item.status === "unused" ? "未使用" : item.status === "used" ? "已使用" : "已停用"}</em><div><strong>{item.deviceName || "尚未绑定"}</strong><small>{item.macHint ? `MAC 尾号 ${item.macHint}` : "首次安装时绑定"}</small></div><div><time>{item.createdAt ? new Date(item.createdAt).toLocaleString("zh-CN") : "-"}</time><small>{item.activatedAt ? `激活 ${new Date(item.activatedAt).toLocaleString("zh-CN")}` : "等待使用"}</small></div><div className="activation-row-actions"><button type="button" className="button small secondary" disabled={Boolean(busy)} onClick={() => copyCode(item)} title={item.code ? "复制完整激活码" : item.status === "unused" ? "重新生成旧激活码并复制" : "查看旧授权复制说明"}><Copy size={16} />{busy === item.id ? "复制中" : "复制"}</button><button type="button" className="button small danger" disabled={Boolean(busy) || item.status === "revoked"} onClick={() => revoke(item)}>停用</button></div></article>)}</div>
-    {!items.length && <EmptyState icon={Key} title={busy === "load" ? "正在读取授权" : "暂无授权记录"} text="在上方输入数量，生成第一批设备激活码。" />}
+    <div className="activation-table"><div className="activation-table-head"><span>激活码</span><span>状态</span><span>绑定设备</span><span>节点名称</span><span>生成 / 激活时间</span><span>操作</span></div>{items.map((item) => { const macTail = String(item.macHint || "").replace(/[^a-z0-9]/gi, "").slice(-6).toUpperCase(); return <article key={item.id}><div><strong className="activation-code-value" title={item.code || item.codePreview}>{item.code || item.codePreview}</strong><small>{item.note || item.product}{!item.code ? " · 旧记录仅保留安全摘要" : ""}</small></div><em className={`status-pill ${item.status}`}>{item.status === "unused" ? "未使用" : item.status === "used" ? "已使用" : "已停用"}</em><div><strong>{item.deviceName || "尚未绑定"}</strong><small>{macTail ? `MAC 尾号 ${macTail}` : "首次安装时绑定"}</small></div><div><strong title={(item.nodeNames || []).join("、")}>{item.nodeName || "未设置节点名称"}</strong><small>{item.nodeNames?.length > 1 ? `该授权关联 ${item.nodeNames.length} 个节点名称` : item.nodeName ? "用户自定义节点名称" : "绑定桌面节点后同步"}</small></div><div><time>{item.createdAt ? new Date(item.createdAt).toLocaleString("zh-CN") : "-"}</time><small>{item.activatedAt ? `激活 ${new Date(item.activatedAt).toLocaleString("zh-CN")}` : "等待使用"}</small></div><div className="activation-row-actions"><button type="button" className="button small secondary" disabled={Boolean(busy)} onClick={() => copyCode(item)} title={item.code ? "复制完整激活码" : item.status === "unused" ? "重新生成旧激活码并复制" : "查看旧授权复制说明"}><Copy size={16} />{busy === item.id ? "复制中" : "复制"}</button><button type="button" className="button small danger" disabled={Boolean(busy) || item.status === "revoked"} onClick={() => revoke(item)}>停用</button></div></article>; })}</div>
+    {!items.length && <EmptyState icon={Key} title={busy === "load" ? "正在读取授权" : appliedKeyword ? "没有匹配的授权" : "暂无授权记录"} text={appliedKeyword ? `没有找到设备名、MAC 尾号或节点名称包含“${appliedKeyword}”的记录。` : "在上方输入数量，生成第一批设备激活码。"} />}
   </section>;
 }
 
