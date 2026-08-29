@@ -714,11 +714,12 @@ test("activation management prioritizes unused codes and exposes encrypted copya
   ]);
   assert.match(serverSource, /\$eq: \["\$status", "unused"\][^\n]+then: 0/);
   assert.match(serverSource, /\$eq: \["\$status", "used"\][^\n]+then: 2/);
-  assert.match(serverSource, /codeEncrypted: sealUserSecret\(code, "activation-code"\)/);
-  assert.match(serverSource, /readUserSecret\(item\.codeEncrypted, "activation-code"\)/);
+  assert.match(serverSource, /codeEncrypted: sealActivationCodeSecret\(code\)/);
+  assert.match(serverSource, /storedActivationCode\(item\)/);
   assert.match(adminSource, /navigator\.clipboard\?\.writeText/);
   assert.match(adminSource, /copyCode\(item\)/);
-  assert.match(adminSource, /\/api\/admin\/activation-codes\/\$\{item\.id\}\/reissue/);
+  assert.match(adminSource, /\/api\/admin\/activation-codes\/\$\{item\.id\}\/copy/);
+  assert.match(adminSource, /\/api\/admin\/activation-codes\/\$\{item\.id\}\/rotate-bound-code/);
   assert.match(adminSource, /<Copy size=\{16\} \/>\{busy === item\.id \? "复制中" : "复制"\}/);
   assert.match(serverSource, /path: "\/api\/admin\/activation-codes\/export-unused"/);
   assert.match(serverSource, /collection\.find\(\{ status: "unused" \}\)\.sort\(\{ createdAt: -1, _id: -1 \}\)/);
@@ -729,6 +730,7 @@ test("activation management prioritizes unused codes and exposes encrypted copya
   assert.match(adminSource, /导出未使用激活码/);
   assert.match(adminSource, /response\.blob\(\)/);
   assert.match(cssSource, /\.activation-table \.activation-code-value/);
+  assert.match(cssSource, /\.activation-row-actions \.button \{[^}]+white-space: nowrap/);
 });
 
 test("deep customization opens the supplied WeChat QR dialog without requiring login", async () => {

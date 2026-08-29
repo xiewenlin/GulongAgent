@@ -26,8 +26,10 @@ import {
   normalizeUsername,
   revokeSession,
   verifyPassword,
+  readActivationCodeSecret,
   readExternalAuth,
   readUserSecret,
+  sealActivationCodeSecret,
   sealUserSecret,
 } from "./security.js";
 import { enforceRateLimit } from "./rate-limit.js";
@@ -170,7 +172,14 @@ const SUBSCRIPTION_PRICE_MIN_FEN = 100;
 const SUBSCRIPTION_PRICE_MAX_FEN = 10_000_000;
 const CUSTOM_ORDER_MAX_FEN = 10_000_000;
 const ACTIVATION_CODE_MAX_BATCH = 500;
-const ACTIVATION_PRODUCT_DEFAULT = "minimax-h3-universal";
+const ACTIVATION_PRODUCT_LEGACY_H3 = "minimax-h3-universal";
+const ACTIVATION_PRODUCT_DEFAULT = "minimax-h3-ultra-video";
+const ACTIVATION_PRODUCT_SUPER_VIDEO = "minimax-h3-super-video";
+const ACTIVATION_PRODUCT_LABELS = Object.freeze({
+  [ACTIVATION_PRODUCT_LEGACY_H3]: "MiniMax H3 超清视频（旧版授权）",
+  [ACTIVATION_PRODUCT_DEFAULT]: "MiniMax H3 超清视频",
+  [ACTIVATION_PRODUCT_SUPER_VIDEO]: "越狱视频-MiniMax H3 超能视频",
+});
 const RENEWAL_REMINDER_DAYS = 7;
 let authCapabilitiesCache = { expiresAt: 0, value: null };
 const ONLINE_PAYMENT_AVAILABILITY = Object.freeze({
@@ -205,6 +214,30 @@ function activationCode() {
     groups.push(part);
   }
   return `H3-${groups.join("-")}`;
+}
+
+function normalizeActivationProduct(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function activationProductLabel(value) {
+  return ACTIVATION_PRODUCT_LABELS[normalizeActivationProduct(value)] || String(value || "未知产品");
+}
+
+function activationProductsCompatible(storedProduct, requestedProduct) {
+  const stored = normalizeActivationProduct(storedProduct);
+  const requested = normalizeActivationProduct(requestedProduct);
+  if (!stored || !requested) return false;
+  if (stored === requested) return true;
+  return stored === ACTIVATION_PRODUCT_LEGACY_H3 && requested === ACTIVATION_PRODUCT_DEFAULT;
+}
+
+function storedActivationCode(record) {
+  const encrypted = record?.codeEncrypted ? readActivationCodeSecret(record.codeEncrypted) : null;
+  const legacy = record?.code ? normalizeActivationCode(record.code) : null;
+  const candidate = encrypted ? normalizeActivationCode(encrypted) : legacy;
+  if (!candidate || !/^H3(?:-[A-HJ-NP-Z2-9]{5}){4}$/.test(candidate)) return null;
+  return hashActivationCode(candidate) === record.codeHash ? candidate : null;
 }
 
 function activationSearchConditions(keyword) {
@@ -248,6 +281,7 @@ const HARDWARE_BINDING_V2_FIELDS = Object.freeze([
 ]);
 const HARDWARE_BINDING_V2_ALLOWED_REQUEST_FIELDS = new Set([
   "code",
+  "product",
   "deviceId",
   "deviceName",
   "macHint",
@@ -501,6 +535,7 @@ const ChangePasswordSchema = z.object({
 
 const ActivationRedeemRequestSchema = z.object({
   code: z.string().trim().regex(/^H3(?:-[A-HJ-NP-Z2-9]{5}){4}$/).openapi({ example: "H3-ABCDE-FGHJK-MNPQR-STUVW" }),
+  product: z.enum([ACTIVATION_PRODUCT_DEFAULT, ACTIVATION_PRODUCT_SUPER_VIDEO]).openapi({ example: ACTIVATION_PRODUCT_DEFAULT }),
   deviceId: z.string().regex(/^[a-f0-9]{64}$/).openapi({ example: "0".repeat(64) }),
   deviceName: z.string().trim().max(120).optional().openapi({ example: "CREATOR-PC" }),
   macHint: z.string().trim().max(32).optional().openapi({ example: "A1B2C3" }),
@@ -3637,6 +3672,7 @@ app.post("/api/licenses/redeem", async (c) => {
 
   const body = await c.req.json().catch(() => ({}));
   const code = normalizeActivationCode(body.code);
+  const requestedProduct = normalizeActivationProduct(body.product);
   const deviceId = String(body.deviceId || "").trim().toLowerCase();
   const deviceName = String(body.deviceName || "").trim().slice(0, 120);
   const macHint = String(body.macHint || "").trim().toUpperCase().slice(-8);
@@ -3646,18 +3682,37 @@ app.post("/api/licenses/redeem", async (c) => {
   if (!/^[a-f0-9]{64}$/.test(deviceId)) {
     return c.json({ code: "INVALID_DEVICE", message: "设备指纹不正确" }, 400);
   }
-  let hardwareBindingV2;
-  try {
-    hardwareBindingV2 = parseActivationHardwareBindingV2(body);
-  } catch (error) {
-    return c.json({ code: error.code || "INVALID_HARDWARE_FINGERPRINT", message: error.message || "硬件指纹摘要格式不正确" }, error.status || 400);
+  if (![ACTIVATION_PRODUCT_DEFAULT, ACTIVATION_PRODUCT_SUPER_VIDEO].includes(requestedProduct)) {
+    return c.json({
+      code: "ACTIVATION_PRODUCT_REQUIRED",
+      message: "请选择当前安装的产品并使用该产品专属激活码；MiniMax H3 超清视频与越狱视频-MiniMax H3 超能视频需要分别购买激活码",
+    }, 400);
   }
 
   const codes = await getCollection("activationCodes");
   const codeHash = hashActivationCode(code);
   let record = await codes.findOne({ codeHash });
   if (!record) return c.json({ code: "INVALID_ACTIVATION_CODE", message: "激活码不存在或已失效" }, 404);
+  if (!activationProductsCompatible(record.product, requestedProduct)) {
+    const codeProduct = activationProductLabel(record.product);
+    const currentProduct = activationProductLabel(requestedProduct);
+    return c.json({
+      code: "ACTIVATION_PRODUCT_MISMATCH",
+      message: `这个激活码是“${codeProduct}”专用，不能激活“${currentProduct}”。两款产品的授权彼此独立，激活码不能混用；请购买“${currentProduct}”的新激活码后重试。`,
+      expectedProduct: requestedProduct,
+      actualProduct: normalizeActivationProduct(record.product),
+    }, 409);
+  }
   if (record.status === "revoked") return c.json({ code: "ACTIVATION_REVOKED", message: "激活码已被停用" }, 403);
+  let hardwareBindingV2;
+  try {
+    hardwareBindingV2 = parseActivationHardwareBindingV2(body);
+  } catch (error) {
+    const message = error?.code === "INVALID_HARDWARE_FINGERPRINT"
+      ? "当前设备的硬件身份信息不完整或已损坏，请在当前产品中重新获取设备信息后再试"
+      : error.message || "设备硬件身份信息不正确，请重新获取后再试";
+    return c.json({ code: error.code || "INVALID_HARDWARE_FINGERPRINT", message }, error.status || 400);
+  }
   // Validate the production signing key before binding an unused code. A
   // deployment configuration error must never consume a customer's license.
   const privateKey = activationSigningPrivateKey();
@@ -3742,9 +3797,10 @@ app.get("/api/admin/activation-codes", async (c) => {
   return c.json({
     items: items.map((item) => ({
       id: item._id.toString(),
-      code: item.codeEncrypted ? readUserSecret(item.codeEncrypted, "activation-code") : null,
+      code: storedActivationCode(item),
       codePreview: item.codePreview,
       product: item.product,
+      productName: activationProductLabel(item.product),
       status: item.status,
       note: item.note || "",
       deviceName: item.deviceName || null,
@@ -3775,7 +3831,7 @@ app.openapi(adminExportUnusedActivationCodesRoute, async (c) => {
   const codes = [];
   let reissuedCount = 0;
   for (const item of unused) {
-    let code = item.codeEncrypted ? readUserSecret(item.codeEncrypted, "activation-code") : null;
+    let code = storedActivationCode(item);
     if (!code) {
       const replacement = activationCode();
       const now = new Date();
@@ -3787,7 +3843,7 @@ app.openapi(adminExportUnusedActivationCodesRoute, async (c) => {
         {
           $set: {
             codeHash: hashActivationCode(replacement),
-            codeEncrypted: sealUserSecret(replacement, "activation-code"),
+            codeEncrypted: sealActivationCodeSecret(replacement),
             codePreview: `${replacement.slice(0, 8)}...${replacement.slice(-5)}`,
             reissuedAt: now,
             reissuedBy: new ObjectId(auth.user.id),
@@ -3802,7 +3858,7 @@ app.openapi(adminExportUnusedActivationCodesRoute, async (c) => {
         reissuedCount += 1;
       } else {
         const current = await collection.findOne({ _id: item._id, status: "unused" });
-        code = current?.codeEncrypted ? readUserSecret(current.codeEncrypted, "activation-code") : null;
+        code = storedActivationCode(current);
       }
     }
     if (code) codes.push(code);
@@ -3837,13 +3893,13 @@ app.post("/api/admin/activation-codes", async (c) => {
   if (auth.error) return auth.error;
   const body = await c.req.json().catch(() => ({}));
   const count = Math.trunc(Number(body.count));
-  const product = String(body.product || ACTIVATION_PRODUCT_DEFAULT).trim().slice(0, 80);
+  const product = normalizeActivationProduct(body.product || ACTIVATION_PRODUCT_DEFAULT);
   const note = String(body.note || "").trim().slice(0, 200);
   if (!Number.isInteger(count) || count < 1 || count > ACTIVATION_CODE_MAX_BATCH) {
     return c.json({ code: "INVALID_COUNT", message: `一次可生成 1-${ACTIVATION_CODE_MAX_BATCH} 个激活码` }, 400);
   }
-  if (!/^[a-z0-9][a-z0-9._-]{2,79}$/i.test(product)) {
-    return c.json({ code: "INVALID_PRODUCT", message: "产品标识格式不正确" }, 400);
+  if (![ACTIVATION_PRODUCT_DEFAULT, ACTIVATION_PRODUCT_SUPER_VIDEO].includes(product)) {
+    return c.json({ code: "INVALID_PRODUCT", message: "请选择 MiniMax H3 超清视频或越狱视频-MiniMax H3 超能视频" }, 400);
   }
 
   const now = new Date();
@@ -3851,7 +3907,7 @@ app.post("/api/admin/activation-codes", async (c) => {
   const records = plaintext.map((code) => ({
     _id: new ObjectId(),
     codeHash: hashActivationCode(code),
-    codeEncrypted: sealUserSecret(code, "activation-code"),
+    codeEncrypted: sealActivationCodeSecret(code),
     codePreview: `${code.slice(0, 8)}...${code.slice(-5)}`,
     product,
     note,
@@ -3877,17 +3933,96 @@ app.post("/api/admin/activation-codes/:id/reissue", async (c) => {
   const existing = await collection.findOne({ _id: new ObjectId(id) });
   if (!existing) return c.json({ code: "NOT_FOUND", message: "授权记录不存在" }, 404);
   if (existing.status !== "unused") return c.json({ code: "ACTIVATION_NOT_REISSUABLE", message: "只有未使用的旧激活码可以重新生成" }, 409);
-  const readable = existing.codeEncrypted ? readUserSecret(existing.codeEncrypted, "activation-code") : null;
+  const readable = storedActivationCode(existing);
   if (readable) return c.json({ ok: true, code: readable, reissued: false });
   const code = activationCode();
   const now = new Date();
   const updated = await collection.findOneAndUpdate(
     { _id: existing._id, status: "unused" },
-    { $set: { codeHash: hashActivationCode(code), codeEncrypted: sealUserSecret(code, "activation-code"), codePreview: `${code.slice(0, 8)}...${code.slice(-5)}`, reissuedAt: now, reissuedBy: new ObjectId(auth.user.id), updatedAt: now }, $unset: { code: "" } },
+    { $set: { codeHash: hashActivationCode(code), codeEncrypted: sealActivationCodeSecret(code), codePreview: `${code.slice(0, 8)}...${code.slice(-5)}`, reissuedAt: now, reissuedBy: new ObjectId(auth.user.id), updatedAt: now }, $unset: { code: "" } },
     { returnDocument: "after" },
   );
   if (!updated) return c.json({ code: "ACTIVATION_CHANGED", message: "授权状态刚刚发生变化，请刷新后重试" }, 409);
   return c.json({ ok: true, code, reissued: true, codePreview: updated.codePreview });
+});
+
+app.post("/api/admin/activation-codes/:id/copy", async (c) => {
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  c.header("Pragma", "no-cache");
+  const originError = requireTrustedMutation(c);
+  if (originError) return originError;
+  const auth = await requireAdmin(c);
+  if (auth.error) return auth.error;
+  const id = c.req.param("id");
+  if (!ObjectId.isValid(id)) return c.json({ code: "NOT_FOUND", message: "授权记录不存在" }, 404);
+  const collection = await getCollection("activationCodes");
+  const existing = await collection.findOne({ _id: new ObjectId(id) });
+  if (!existing) return c.json({ code: "NOT_FOUND", message: "授权记录不存在" }, 404);
+  const readable = storedActivationCode(existing);
+  if (readable) {
+    await collection.updateOne(
+      { _id: existing._id, codeHash: existing.codeHash },
+      {
+        $set: { codeEncrypted: sealActivationCodeSecret(readable), codePreview: `${readable.slice(0, 8)}...${readable.slice(-5)}`, encryptionMigratedAt: new Date(), updatedAt: new Date() },
+        $unset: { code: "" },
+      },
+    );
+    await (await getCollection("authAudit")).insertOne({ action: "admin_activation_code_copied", activationLicenseId: existing._id, status: existing.status, product: existing.product, actorId: new ObjectId(auth.user.id), createdAt: new Date() });
+    return c.json({ ok: true, code: readable, status: existing.status, product: existing.product, reissued: false, rotated: false });
+  }
+  if (existing.status === "used") {
+    return c.json({
+      code: "ACTIVATION_BOUND_CODE_ROTATION_REQUIRED",
+      message: "这条已使用授权由旧密钥加密，原激活码无法恢复；可换发一个仍只绑定当前设备的新激活码",
+      rotationRequired: true,
+    }, 409);
+  }
+  if (existing.status !== "unused") {
+    return c.json({ code: "ACTIVATION_CODE_UNRECOVERABLE", message: "已停用授权不能换发或复制激活码" }, 409);
+  }
+  const replacement = activationCode();
+  const now = new Date();
+  const updated = await collection.findOneAndUpdate(
+    { _id: existing._id, status: "unused", codeHash: existing.codeHash },
+    {
+      $set: { codeHash: hashActivationCode(replacement), codeEncrypted: sealActivationCodeSecret(replacement), codePreview: `${replacement.slice(0, 8)}...${replacement.slice(-5)}`, reissuedAt: now, reissuedBy: new ObjectId(auth.user.id), updatedAt: now },
+      $unset: { code: "" },
+    },
+    { returnDocument: "after" },
+  );
+  if (!updated) return c.json({ code: "ACTIVATION_CHANGED", message: "授权状态刚刚发生变化，请刷新后重试" }, 409);
+  await (await getCollection("authAudit")).insertOne({ action: "admin_activation_code_reissued_for_copy", activationLicenseId: existing._id, status: "unused", product: existing.product, actorId: new ObjectId(auth.user.id), createdAt: now });
+  return c.json({ ok: true, code: replacement, status: "unused", product: existing.product, reissued: true, rotated: false, codePreview: updated.codePreview });
+});
+
+app.post("/api/admin/activation-codes/:id/rotate-bound-code", async (c) => {
+  c.header("Cache-Control", "private, no-store, max-age=0");
+  c.header("Pragma", "no-cache");
+  const originError = requireTrustedMutation(c);
+  if (originError) return originError;
+  const auth = await requireAdmin(c);
+  if (auth.error) return auth.error;
+  const id = c.req.param("id");
+  if (!ObjectId.isValid(id)) return c.json({ code: "NOT_FOUND", message: "授权记录不存在" }, 404);
+  const collection = await getCollection("activationCodes");
+  const existing = await collection.findOne({ _id: new ObjectId(id) });
+  if (!existing) return c.json({ code: "NOT_FOUND", message: "授权记录不存在" }, 404);
+  if (existing.status !== "used" || !existing.deviceId || !existing.activatedAt) {
+    return c.json({ code: "ACTIVATION_NOT_BOUND", message: "只有已经绑定设备的有效授权可以换发激活码" }, 409);
+  }
+  const replacement = activationCode();
+  const now = new Date();
+  const updated = await collection.findOneAndUpdate(
+    { _id: existing._id, status: "used", deviceId: existing.deviceId, codeHash: existing.codeHash },
+    {
+      $set: { codeHash: hashActivationCode(replacement), codeEncrypted: sealActivationCodeSecret(replacement), codePreview: `${replacement.slice(0, 8)}...${replacement.slice(-5)}`, boundCodeRotatedAt: now, boundCodeRotatedBy: new ObjectId(auth.user.id), updatedAt: now },
+      $unset: { code: "" },
+    },
+    { returnDocument: "after" },
+  );
+  if (!updated) return c.json({ code: "ACTIVATION_CHANGED", message: "授权状态刚刚发生变化，请刷新后重试" }, 409);
+  await (await getCollection("authAudit")).insertOne({ action: "admin_bound_activation_code_rotated", activationLicenseId: existing._id, deviceIdHash: hashOpaqueToken(existing.deviceId, "activation-device-audit"), product: existing.product, actorId: new ObjectId(auth.user.id), createdAt: now });
+  return c.json({ ok: true, code: replacement, status: "used", product: existing.product, reissued: false, rotated: true, codePreview: updated.codePreview });
 });
 
 app.post("/api/admin/activation-codes/:id/revoke", async (c) => {
@@ -7916,6 +8051,48 @@ app.openAPIRegistry.registerPath({
 });
 
 app.openAPIRegistry.registerPath({
+  method: "post",
+  path: "/api/admin/activation-codes",
+  tags: ["Administration"],
+  summary: "管理员按产品批量生成激活码",
+  description: "MiniMax H3 超清视频与越狱视频-MiniMax H3 超能视频使用不同的产品标识和独立激活码，不能跨产品兑换。",
+  request: { body: { required: true, content: { "application/json": { schema: z.object({ count: z.number().int().min(1).max(ACTIVATION_CODE_MAX_BATCH), product: z.enum([ACTIVATION_PRODUCT_DEFAULT, ACTIVATION_PRODUCT_SUPER_VIDEO]), note: z.string().max(200).optional() }) } } } },
+  responses: {
+    201: { description: "仅在本次响应中返回完整激活码" },
+    400: { description: "数量或产品无效", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "需要管理员角色", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openAPIRegistry.registerPath({
+  method: "post",
+  path: "/api/admin/activation-codes/{id}/copy",
+  tags: ["Administration"],
+  summary: "管理员读取并复制完整激活码",
+  description: "已使用授权也允许读取仍可解密的完整激活码。旧密文无法恢复时，未使用授权可安全换发；已绑定授权必须由管理员显式确认后调用换发接口，绝不静默变更。",
+  request: { params: z.object({ id: z.string() }) },
+  responses: {
+    200: { description: "返回完整激活码，禁止缓存" },
+    403: { description: "需要管理员角色", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "已绑定旧授权需要管理员确认换发", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openAPIRegistry.registerPath({
+  method: "post",
+  path: "/api/admin/activation-codes/{id}/rotate-bound-code",
+  tags: ["Administration"],
+  summary: "显式换发已绑定授权的激活码",
+  description: "只更新已绑定记录的激活码密文和摘要，保留产品、设备、激活时间、硬件绑定与既有离线回执；原激活码立即失效。",
+  request: { params: z.object({ id: z.string() }) },
+  responses: {
+    200: { description: "返回换发后的完整激活码，禁止缓存" },
+    403: { description: "需要管理员角色", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "记录并非有效的已绑定授权", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openAPIRegistry.registerPath({
   method: "get",
   path: "/api/billing/plans",
   tags: ["Billing"],
@@ -8018,7 +8195,7 @@ app.openAPIRegistry.registerPath({
   path: "/api/licenses/redeem",
   tags: ["Licensing"],
   summary: "兑换设备永久离线授权",
-  description: "安装器首次联网时提交一次性激活码与旧版 deviceId。激活码原子绑定首台设备；同一旧版 deviceId 可幂等恢复原 RS256 回执。新客户端可同时提交 h3-hw-v2 加权硬件分类摘要，服务端只保存 SHA-256 摘要和分类名，不接收原始主板、SMBIOS、TPM、MAC 或序列号值；旧授权在旧版 deviceId 精确匹配后可补录一次 v2 绑定，不改变 activatedAt。已有 v2 hardwareHash 不一致时拒绝激活。回执 canonical 字段与签名顺序保持兼容。",
+  description: "安装器首次联网时必须提交当前产品标识、一次性激活码与旧版 deviceId。MiniMax H3 超清视频和越狱视频-MiniMax H3 超能视频使用独立激活码，跨产品兑换会在硬件摘要校验前返回易懂的产品不匹配提示。同一台电脑可分别持有两款产品授权。同一旧版 deviceId 可幂等恢复原 RS256 回执。新客户端可同时提交 h3-hw-v2 加权硬件分类摘要，服务端只保存 SHA-256 摘要和分类名，不接收原始主板、SMBIOS、TPM、MAC 或序列号值；旧授权在旧版 deviceId 精确匹配后可补录一次 v2 绑定，不改变 activatedAt。已有 v2 hardwareHash 不一致时拒绝激活。回执 canonical 字段与签名顺序保持兼容。",
   security: [],
   request: { body: { required: true, content: { "application/json": { schema: ActivationRedeemRequestSchema } } } },
   responses: {
@@ -8026,7 +8203,7 @@ app.openAPIRegistry.registerPath({
     400: { description: "激活码、设备指纹或硬件分类摘要格式不正确；原始硬件值会被拒绝", content: { "application/json": { schema: ErrorSchema } } },
     403: { description: "激活码已停用", content: { "application/json": { schema: ErrorSchema } } },
     404: { description: "激活码不存在", content: { "application/json": { schema: ErrorSchema } } },
-    409: { description: "激活码已绑定其他设备、设备已有授权或 hardwareHash 与既有 v2 绑定不一致", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "激活码属于另一产品、已绑定其他设备、设备已有同产品授权或 hardwareHash 与既有 v2 绑定不一致", content: { "application/json": { schema: ErrorSchema } } },
     429: { description: "激活尝试过于频繁", content: { "application/json": { schema: ErrorSchema } } },
     503: { description: "生产签名密钥尚未正确配置", content: { "application/json": { schema: ErrorSchema } } },
   },
@@ -8045,7 +8222,7 @@ app.doc("/api/openapi.json", {
   openapi: "3.1.0",
   info: {
     title: "古龙 Gulong Agent Engine API",
-    version: "2.5.2",
+    version: "2.6.0",
     description: "已按 Chandler v3.9 与 PearAPI 统一接入升级：OAuth 应用密钥配置完成后，官网邮箱注册和已激活桌面客户端的邮箱/手机号注册均由官网服务端注入对应应用凭据，写入 Chandler 应用来源归因；client_secret 永不进入浏览器或桌面客户端。桌面端缺少归因凭据时故障关闭；官网公开邮箱注册按 Chandler 兼容合同保持可用但不伪造归因。邮箱和短信验证码统一为 6 位数字；服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。普通会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费；实付额外赠送 10% 钱包余额，单次充值满 500 元同样赠送 10%。短视频包月固定月费 5999 元、年费 59999 元，只支持线下审核，审核后实付金额按 1:1 组成可到期套餐余额，不额外赠送；有效期内 MiniMaxH3 套餐余额归零后仍可无限生成，但不再扣费或分佣。所有入账、扣款、退款和分账均使用独立幂等流水。MiniMax H3 共享节点支持钱包预扣、幂等退款与 50% 节点分成、激活设备账号绑定、按能力原子领取、腾讯云 COS 输入下载和输出直传票据，并提供仅按绑定账户聚合的桌面收益接口；工作器领取 DTO 不含需求用户身份和内部计费信息。永久离线授权继续签发旧版 canonical RS256 回执，同时可选绑定 h3-hw-v2 加权硬件分类摘要；服务端不保存任何原始硬件值。另提供第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
   },
   servers: [
@@ -8066,8 +8243,11 @@ app.get(
 );
 
 export {
+  ACTIVATION_PRODUCT_DEFAULT,
+  ACTIVATION_PRODUCT_SUPER_VIDEO,
   HARDWARE_COMPONENT_WEIGHTS,
   activationHardwareBindingAction,
+  activationProductsCompatible,
   activationReceiptPayload,
   activationSearchConditions,
   activationSigningPrivateKey,

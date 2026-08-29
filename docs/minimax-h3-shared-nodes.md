@@ -16,10 +16,13 @@ X-Gulong-Account-Binding: gab_...
 
 ## 0. 加权硬件指纹 v2 激活
 
-`POST /api/licenses/redeem` 保持旧版请求字段和 RS256 回执 canonical 顺序不变。新版客户端仍把旧 MAC 算法生成的 `legacyDeviceId` 放入 `deviceId`，并可追加：
+`POST /api/licenses/redeem` 保持 RS256 回执 canonical 顺序不变。新版客户端必须提交当前产品标识，仍把旧 MAC 算法生成的 `legacyDeviceId` 放入 `deviceId`，并可追加硬件摘要：
 
 ```json
 {
+  "code": "H3-ABCDE-FGHJK-MNPQR-STUVW",
+  "product": "minimax-h3-ultra-video",
+  "deviceId": "64位旧版设备指纹摘要",
   "fingerprintVersion": "h3-hw-v2",
   "hardwareHash": "64位小写SHA-256",
   "hardwareEvidenceHash": "64位小写SHA-256",
@@ -35,6 +38,13 @@ X-Gulong-Account-Binding: gab_...
   }
 }
 ```
+
+产品标识固定为：
+
+- MiniMax H3 超清视频：`minimax-h3-ultra-video`
+- 越狱视频-MiniMax H3 超能视频：`minimax-h3-super-video`
+
+两款产品必须分别购买激活码。同一电脑可分别激活，但激活码不能混用。跨产品提交时服务端先返回 `409 ACTIVATION_PRODUCT_MISMATCH` 与购买当前产品新激活码的中文提示，不会再把产品错误误报成硬件分类摘要错误。
 
 分类权重固定为：`systemUuid 30`、`baseboardSerial 22`、`baseboardModel 8`、`biosSerial 12`、`chassisSerial 8`、`tpm 5`、`cpu 5`、`systemDisk 4`、`gpu 2`、`physicalMacs 2`、`systemModel 1`、`oemStrings 1`。`hardwareScore` 必须等于已提交分类权重之和。
 
@@ -62,7 +72,7 @@ X-Gulong-Account-Binding: gab_...
   "activation_receipt": {
     "version": 1,
     "licenseId": "MongoDB ObjectId",
-    "product": "minimax-h3-universal",
+    "product": "minimax-h3-ultra-video",
     "deviceId": "64位设备指纹摘要",
     "macHint": null,
     "activatedAt": "2026-08-18T03:04:05.000Z",

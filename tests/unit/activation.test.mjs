@@ -3,8 +3,11 @@ import { createPublicKey, generateKeyPairSync, verify } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import app, {
+  ACTIVATION_PRODUCT_DEFAULT,
+  ACTIVATION_PRODUCT_SUPER_VIDEO,
   HARDWARE_COMPONENT_WEIGHTS,
   activationHardwareBindingAction,
+  activationProductsCompatible,
   activationReceiptPayload,
   activationSearchConditions,
   activationSigningPrivateKey,
@@ -12,6 +15,7 @@ import app, {
   persistActivationHardwareBindingV2,
   signActivationReceipt,
 } from "../../server/app.js";
+import { readActivationCodeSecret, sealActivationCodeSecret, sealUserSecret } from "../../server/security.js";
 
 function hardwareV2(overrides = {}) {
   return {
@@ -146,19 +150,20 @@ test("legacy activation adds v2 once without changing activatedAt and rejects an
   assert.equal(updateCount, 1);
 });
 
-test("redeem rejects raw v2 hardware evidence before database access", async () => {
-  const response = await app.request("http://localhost/api/licenses/redeem", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
+test("hardware parser rejects raw evidence while redeem prioritizes product mismatch", async () => {
+  assert.throws(
+    () => parseActivationHardwareBindingV2({
       code: "H3-ABCDE-FGHJK-MNPQR-STUVW",
+      product: ACTIVATION_PRODUCT_DEFAULT,
       deviceId: "a".repeat(64),
       ...hardwareV2(),
       systemUuid: "RAW-SMBIOS-VALUE",
     }),
-  });
-  assert.equal(response.status, 400);
-  assert.equal((await response.json()).code, "RAW_HARDWARE_EVIDENCE_REJECTED");
+    (error) => error.code === "RAW_HARDWARE_EVIDENCE_REJECTED" && error.status === 400,
+  );
+  const source = await readFile(new URL("../../server/app.js", import.meta.url), "utf8");
+  const routeSource = source.slice(source.indexOf('app.post("/api/licenses/redeem"'), source.indexOf('app.get("/api/admin/activation-codes"'));
+  assert.ok(routeSource.indexOf("ACTIVATION_PRODUCT_MISMATCH") < routeSource.indexOf("parseActivationHardwareBindingV2(body)"));
 });
 
 test("public redeem validation is uncached and documented without bearer authentication", async () => {
@@ -183,19 +188,74 @@ test("public redeem validation is uncached and documented without bearer authent
   assert.match(contract, /hardwareComponentDigests/);
   assert.match(contract, /h3-hw-v2/);
   assert.match(contract, /hardwareHash/);
+  assert.match(contract, /minimax-h3-ultra-video/);
+  assert.match(contract, /minimax-h3-super-video/);
 });
 
-test("administrator activation copy stays enabled and can reissue unreadable unused legacy codes", async () => {
+test("independent video products reject cross-product activation before hardware validation", async () => {
+  assert.equal(activationProductsCompatible(ACTIVATION_PRODUCT_DEFAULT, ACTIVATION_PRODUCT_DEFAULT), true);
+  assert.equal(activationProductsCompatible(ACTIVATION_PRODUCT_SUPER_VIDEO, ACTIVATION_PRODUCT_SUPER_VIDEO), true);
+  assert.equal(activationProductsCompatible("minimax-h3-universal", ACTIVATION_PRODUCT_DEFAULT), true);
+  assert.equal(activationProductsCompatible(ACTIVATION_PRODUCT_DEFAULT, ACTIVATION_PRODUCT_SUPER_VIDEO), false);
+  assert.equal(activationProductsCompatible(ACTIVATION_PRODUCT_SUPER_VIDEO, ACTIVATION_PRODUCT_DEFAULT), false);
+
+  const source = await readFile(new URL("../../server/app.js", import.meta.url), "utf8");
+  const routeSource = source.slice(source.indexOf('app.post("/api/licenses/redeem"'), source.indexOf('app.get("/api/admin/activation-codes"'));
+  assert.ok(routeSource.indexOf("ACTIVATION_PRODUCT_MISMATCH") < routeSource.indexOf("parseActivationHardwareBindingV2(body)"));
+  assert.match(routeSource, /两款产品的授权彼此独立，激活码不能混用；请购买/);
+  assert.match(routeSource, /的新激活码后重试/);
+});
+
+test("activation-code encryption has a dedicated cross-deployment key and legacy fallback", () => {
+  const previousDedicated = process.env.ACTIVATION_CODE_ENCRYPTION_KEY;
+  const previousSession = process.env.SESSION_SECRET;
+  try {
+    process.env.ACTIVATION_CODE_ENCRYPTION_KEY = "activation-key-shared-by-both-production-targets";
+    process.env.SESSION_SECRET = "legacy-session-key-for-test";
+    const sealed = sealActivationCodeSecret("H3-ABCDE-FGHJK-MNPQR-STUVW");
+    assert.equal(readActivationCodeSecret(sealed), "H3-ABCDE-FGHJK-MNPQR-STUVW");
+
+    const legacySealed = sealUserSecret("H3-BCDEF-GHJKM-NPQRS-TUVWX", "activation-code");
+    delete process.env.ACTIVATION_CODE_ENCRYPTION_KEY;
+    assert.equal(readActivationCodeSecret(legacySealed), "H3-BCDEF-GHJKM-NPQRS-TUVWX");
+  } finally {
+    if (previousDedicated === undefined) delete process.env.ACTIVATION_CODE_ENCRYPTION_KEY;
+    else process.env.ACTIVATION_CODE_ENCRYPTION_KEY = previousDedicated;
+    if (previousSession === undefined) delete process.env.SESSION_SECRET;
+    else process.env.SESSION_SECRET = previousSession;
+  }
+});
+
+test("administrator activation copy stays enabled for used codes and rotates unreadable bound codes only after confirmation", async () => {
   const [adminSource, serverSource] = await Promise.all([
     readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
   ]);
   assert.match(adminSource, /disabled=\{Boolean\(busy\)\} onClick=\{\(\) => copyCode\(item\)\}/);
-  assert.match(adminSource, /\/api\/admin\/activation-codes\/\$\{item\.id\}\/reissue/);
+  assert.match(adminSource, /\/api\/admin\/activation-codes\/\$\{item\.id\}\/copy/);
+  assert.match(adminSource, /ACTIVATION_BOUND_CODE_ROTATION_REQUIRED/);
+  assert.match(adminSource, /\/api\/admin\/activation-codes\/\$\{item\.id\}\/rotate-bound-code/);
+  assert.match(adminSource, /确认换发并复制/);
   assert.match(adminSource, /document\.execCommand\("copy"\)/);
-  assert.match(serverSource, /\/api\/admin\/activation-codes\/:id\/reissue/);
-  assert.match(serverSource, /status !== "unused"/);
-  assert.match(serverSource, /codeEncrypted: sealUserSecret\(code, "activation-code"\)/);
+  assert.match(serverSource, /\/api\/admin\/activation-codes\/:id\/copy/);
+  assert.match(serverSource, /action: "admin_activation_code_copied"/);
+  assert.match(serverSource, /ACTIVATION_BOUND_CODE_ROTATION_REQUIRED/);
+  assert.match(serverSource, /\/api\/admin\/activation-codes\/:id\/rotate-bound-code/);
+  assert.match(serverSource, /\{ _id: existing\._id, status: "used", deviceId: existing\.deviceId, codeHash: existing\.codeHash \}/);
+  assert.match(serverSource, /codeEncrypted: sealActivationCodeSecret\(replacement\)/);
+});
+
+test("activation management keeps full codes and copy actions on one line", async () => {
+  const [adminSource, cssSource] = await Promise.all([
+    readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/styles.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(adminSource, /ACTIVATION_PRODUCT_OPTIONS/);
+  assert.match(adminSource, /MiniMax H3 超清视频/);
+  assert.match(adminSource, /越狱视频-MiniMax H3 超能视频/);
+  assert.match(cssSource, /grid-template-columns: minmax\(350px, 1\.5fr\)/);
+  assert.match(cssSource, /\.activation-row-actions \{[^}]+flex-wrap: nowrap/);
+  assert.match(cssSource, /\.activation-row-actions \.button \{[^}]+white-space: nowrap/);
 });
 
 test("administrator activation search safely matches device, MAC tail and node name", async () => {

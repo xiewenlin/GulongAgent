@@ -174,15 +174,15 @@ function publicUser(user) {
   };
 }
 
-function encryptedValueKey(purpose = "external-auth") {
+function encryptedValueKey(purpose = "external-auth", rootSecret = secret("SESSION_SECRET")) {
   return createHash("sha256")
-    .update(`gulong-${purpose}:${secret("SESSION_SECRET")}`)
+    .update(`gulong-${purpose}:${rootSecret}`)
     .digest();
 }
 
-function sealEncryptedValue(value, purpose) {
+function sealEncryptedValue(value, purpose, rootSecret = secret("SESSION_SECRET")) {
   const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", encryptedValueKey(purpose), iv);
+  const cipher = createCipheriv("aes-256-gcm", encryptedValueKey(purpose, rootSecret), iv);
   const ciphertext = Buffer.concat([
     cipher.update(JSON.stringify(value), "utf8"),
     cipher.final(),
@@ -195,11 +195,11 @@ function sealEncryptedValue(value, purpose) {
   ].join(".");
 }
 
-function readEncryptedValue(sealed, purpose) {
+function readEncryptedValue(sealed, purpose, rootSecret = secret("SESSION_SECRET")) {
   try {
     const [version, ivValue, tagValue, ciphertextValue] = String(sealed || "").split(".");
     if (version !== "v1") return null;
-    const decipher = createDecipheriv("aes-256-gcm", encryptedValueKey(purpose), Buffer.from(ivValue, "base64url"));
+    const decipher = createDecipheriv("aes-256-gcm", encryptedValueKey(purpose, rootSecret), Buffer.from(ivValue, "base64url"));
     decipher.setAuthTag(Buffer.from(tagValue, "base64url"));
     return JSON.parse(Buffer.concat([
       decipher.update(Buffer.from(ciphertextValue, "base64url")),
@@ -224,6 +224,21 @@ export function sealUserSecret(value, purpose) {
 
 export function readUserSecret(sealed, purpose) {
   return readEncryptedValue(sealed, `user-secret:${purpose}`);
+}
+
+export function sealActivationCodeSecret(value) {
+  return sealEncryptedValue(value, "user-secret:activation-code", secret("ACTIVATION_CODE_ENCRYPTION_KEY"));
+}
+
+export function readActivationCodeSecret(sealed) {
+  const dedicated = process.env.ACTIVATION_CODE_ENCRYPTION_KEY?.trim();
+  if (dedicated) {
+    const readable = readEncryptedValue(sealed, "user-secret:activation-code", dedicated);
+    if (readable) return readable;
+  }
+  const legacy = process.env.SESSION_SECRET?.trim()
+    || (process.env.NODE_ENV === "production" ? "" : "gulong-local-development-SESSION_SECRET");
+  return legacy ? readEncryptedValue(sealed, "user-secret:activation-code", legacy) : null;
 }
 
 async function authenticateApiKey(raw, requiredScopes) {

@@ -4990,23 +4990,23 @@ textarea:focus {
 .activation-search > div { display: flex; align-items: center; justify-content: flex-end; gap: 9px; }
 .activation-search > div > span { margin-right: 3px; color: var(--muted); font-size: 18px; white-space: nowrap; }
 .activation-generator { padding: 16px; display: flex; align-items: end; gap: 14px; border: 1px solid var(--line); border-radius: 13px; background: var(--bg-soft); }
-.activation-generator > div { min-width: 0; flex: 1; display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 12px; }
+.activation-generator > div { min-width: 0; flex: 1; display: grid; grid-template-columns: minmax(240px, .8fr) 150px minmax(0, 1fr); gap: 12px; }
 .activation-generator label { min-width: 0; display: grid; gap: 7px; color: var(--muted); font-size: 18px; font-weight: 750; }
-.activation-generator input { width: 100%; height: 44px; padding: 0 12px; color: var(--ink); border: 1px solid var(--line-strong); border-radius: 9px; background: var(--surface); font: inherit; outline: 0; }
+.activation-generator input, .activation-generator select { width: 100%; height: 44px; padding: 0 12px; color: var(--ink); border: 1px solid var(--line-strong); border-radius: 9px; background: var(--surface); font: inherit; outline: 0; }
 .activation-generated { padding: 16px; border: 1px solid color-mix(in srgb, var(--jade) 30%, var(--line)); border-radius: 13px; background: var(--jade-soft); }
 .activation-generated header { margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .activation-generated header strong, .activation-generated header span { display: block; }
 .activation-generated header span { margin-top: 3px; color: var(--muted); font-size: 18px; }
 .activation-generated textarea { width: 100%; padding: 12px; resize: vertical; color: var(--ink); border: 1px solid var(--line); border-radius: 9px; background: var(--surface); font: 600 16px/1.65 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .activation-table { overflow-x: auto; overflow-y: hidden; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); }
-.activation-table-head, .activation-table article { min-width: 1180px; min-height: 66px; padding: 10px 14px; display: grid; grid-template-columns: minmax(260px, 1.25fr) 90px minmax(160px, .82fr) minmax(180px, .92fr) minmax(210px, 1.05fr) minmax(174px, .8fr); align-items: center; gap: 12px; }
+.activation-table-head, .activation-table article { min-width: 1380px; min-height: 72px; padding: 10px 14px; display: grid; grid-template-columns: minmax(350px, 1.5fr) 92px minmax(170px, .78fr) minmax(190px, .88fr) minmax(220px, 1fr) minmax(218px, .9fr); align-items: center; gap: 12px; }
 .activation-table-head { color: var(--muted); border-bottom: 1px solid var(--line); background: var(--bg-soft); font-size: 18px; font-weight: 850; }
 .activation-table article + article { border-top: 1px solid var(--line); }
 .activation-table article > div { min-width: 0; }
 .activation-table strong, .activation-table small, .activation-table time { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.activation-table .activation-code-value { overflow: visible; text-overflow: clip; white-space: nowrap; font: 750 17px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .025em; user-select: all; }
-.activation-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
-.activation-row-actions .button { min-width: 78px; }
+.activation-table .activation-code-value { overflow: visible; text-overflow: clip; white-space: nowrap; font: 750 18px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .018em; user-select: all; }
+.activation-row-actions { min-width: 210px; display: flex; flex-wrap: nowrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.activation-row-actions .button { min-width: 94px; flex: 0 0 auto; white-space: nowrap; word-break: keep-all; writing-mode: horizontal-tb; }
 .activation-table small, .activation-table time { margin-top: 3px; color: var(--muted); font-size: 18px; }
 .activation-table .status-pill.unused { color: #756019; background: #fff8d9; }
 .activation-table .status-pill.used { color: #2f7659; background: #edf8f1; }

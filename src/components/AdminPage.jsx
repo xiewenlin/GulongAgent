@@ -954,6 +954,16 @@ function PearTokenManager() {
   </section>;
 }
 
+const ACTIVATION_PRODUCT_OPTIONS = [
+  { id: "minimax-h3-ultra-video", name: "MiniMax H3 超清视频" },
+  { id: "minimax-h3-super-video", name: "越狱视频-MiniMax H3 超能视频" },
+];
+
+function activationProductName(product) {
+  return ACTIVATION_PRODUCT_OPTIONS.find((item) => item.id === product)?.name
+    || (product === "minimax-h3-universal" ? "MiniMax H3 超清视频（旧版授权）" : product || "未标注产品");
+}
+
 function ActivationCodeManager() {
   const confirmAction = useConfirmDialog();
   const [items, setItems] = useState([]);
@@ -962,6 +972,7 @@ function ActivationCodeManager() {
   const [keyword, setKeyword] = useState("");
   const [appliedKeyword, setAppliedKeyword] = useState("");
   const [count, setCount] = useState(10);
+  const [product, setProduct] = useState(ACTIVATION_PRODUCT_OPTIONS[0].id);
   const [note, setNote] = useState("");
   const [generated, setGenerated] = useState([]);
   const [busy, setBusy] = useState("");
@@ -989,10 +1000,10 @@ function ActivationCodeManager() {
     try {
       const result = await apiFetch("/api/admin/activation-codes", {
         method: "POST",
-        body: JSON.stringify({ count: Number(count), product: "minimax-h3-universal", note }),
+        body: JSON.stringify({ count: Number(count), product, note }),
       });
       setGenerated(result.codes || []);
-      setMessage(`已生成 ${result.count} 个 MiniMax H3 永久激活码；明文只在本窗口显示一次。`);
+      setMessage(`已生成 ${result.count} 个${activationProductName(product)}永久激活码；该激活码只能用于所选产品。`);
       await load(status);
     } catch (error) { setMessage(error.message); }
     finally { setBusy(""); }
@@ -1060,20 +1071,31 @@ function ActivationCodeManager() {
   async function copyCode(item) {
     setBusy(item.id); setMessage("");
     try {
-      let code = item.code;
-      let reissued = false;
-      if (!code && item.status === "unused") {
-        const result = await apiFetch(`/api/admin/activation-codes/${item.id}/reissue`, { method: "POST", body: "{}" });
-        code = result.code;
-        reissued = Boolean(result.reissued);
-        setItems((current) => current.map((record) => record.id === item.id ? { ...record, code, codePreview: result.codePreview || record.codePreview } : record));
+      let result;
+      try {
+        result = await apiFetch(`/api/admin/activation-codes/${item.id}/copy`, { method: "POST", body: "{}" });
+      } catch (error) {
+        if (error.code !== "ACTIVATION_BOUND_CODE_ROTATION_REQUIRED") throw error;
+        const confirmed = await confirmAction({
+          tone: "warning",
+          eyebrow: "ROTATE BOUND ACTIVATION CODE",
+          title: "换发这条已绑定激活码？",
+          message: "当前部署无法恢复这条旧记录的完整激活码。换发后仍只绑定原产品与原设备，原激活码将立即失效；设备现有的永久离线授权不受影响。",
+          detail: `${activationProductName(item.product)}${item.deviceName ? ` · ${item.deviceName}` : ""}`,
+          detailLabel: "授权范围",
+          confirmLabel: "确认换发并复制",
+        });
+        if (!confirmed) return;
+        result = await apiFetch(`/api/admin/activation-codes/${item.id}/rotate-bound-code`, { method: "POST", body: "{}" });
       }
-      if (!code) {
-        setMessage("这条已使用或已停用的旧授权只保留安全摘要，不能再次发送给用户。");
-        return;
-      }
+      const code = result.code;
       await writeClipboard(code);
-      setMessage(reissued ? `旧密文无法恢复，已重新生成并复制激活码 ${code}。` : `激活码 ${code} 已复制。`);
+      setItems((current) => current.map((record) => record.id === item.id ? { ...record, code, codePreview: result.codePreview || record.codePreview } : record));
+      setMessage(result.rotated
+        ? `已为原产品与原设备换发并复制激活码 ${code}；旧激活码已失效。`
+        : result.reissued
+          ? `旧密文无法恢复，已重新生成并复制激活码 ${code}。`
+          : `激活码 ${code} 已复制。`);
     } catch (error) {
       setMessage(error?.code || error?.status ? error.message : "浏览器未允许写入剪贴板，请选中激活码后手动复制。");
     } finally { setBusy(""); }
@@ -1098,13 +1120,13 @@ function ActivationCodeManager() {
   }
 
   return <section className="admin-module activation-manager">
-    <header className="admin-module-head"><div><span>DEVICE-BOUND OFFLINE LICENSES</span><h2>授权管理</h2><p>批量生成安装激活码。首次使用后绑定设备物理网卡指纹，同一台电脑可永久离线使用。</p></div><div className="admin-head-actions"><button className="button secondary" type="button" disabled={Boolean(busy) || !(counts.unused > 0)} onClick={exportUnusedCodes}><DownloadSimple size={17} />{busy === "export" ? "正在导出" : `导出未使用激活码${counts.unused ? `（${counts.unused}）` : ""}`}</button><button className="button secondary" type="button" disabled={Boolean(busy)} onClick={() => load()}><ArrowClockwise size={17} />刷新</button></div></header>
+    <header className="admin-module-head"><div><span>DEVICE-BOUND OFFLINE LICENSES</span><h2>授权管理</h2><p>批量生成独立产品激活码。MiniMax H3 超清视频与越狱视频-MiniMax H3 超能视频需分别购买、分别激活，激活码不能混用。</p></div><div className="admin-head-actions"><button className="button secondary" type="button" disabled={Boolean(busy) || !(counts.unused > 0)} onClick={exportUnusedCodes}><DownloadSimple size={17} />{busy === "export" ? "正在导出" : `导出未使用激活码${counts.unused ? `（${counts.unused}）` : ""}`}</button><button className="button secondary" type="button" disabled={Boolean(busy)} onClick={() => load()}><ArrowClockwise size={17} />刷新</button></div></header>
     {message && <AdminNotice tone={message.includes("已") ? "success" : "error"}>{message}</AdminNotice>}
     <div className="activation-summary"><button className={!status ? "active" : ""} onClick={() => { setStatus(""); load("", keyword); }}><strong>{(counts.unused || 0) + (counts.used || 0) + (counts.revoked || 0)}</strong><span>全部</span></button><button className={status === "unused" ? "active" : ""} onClick={() => { setStatus("unused"); load("unused", keyword); }}><strong>{counts.unused || 0}</strong><span>未使用</span></button><button className={status === "used" ? "active" : ""} onClick={() => { setStatus("used"); load("used", keyword); }}><strong>{counts.used || 0}</strong><span>已使用</span></button><button className={status === "revoked" ? "active" : ""} onClick={() => { setStatus("revoked"); load("revoked", keyword); }}><strong>{counts.revoked || 0}</strong><span>已停用</span></button></div>
     <form className="activation-search" onSubmit={(event) => { event.preventDefault(); load(status, keyword); }}><label><span>搜索绑定设备与节点</span><div><MagnifyingGlass size={20} /><input maxLength="120" value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="输入设备名、MAC 尾号后 6 位或节点名称" /></div><small>支持不区分大小写的关键词模糊搜索；MAC 可直接输入连续的后六位。</small></label><div><span>当前显示 {items.length} 条</span>{(keyword || appliedKeyword) && <button className="button secondary" type="button" disabled={Boolean(busy)} onClick={() => { setKeyword(""); load(status, ""); }}>清除</button>}<button className="button primary" disabled={Boolean(busy)}><MagnifyingGlass size={18} />{busy === "load" ? "正在搜索" : "搜索"}</button></div></form>
-    <form className="activation-generator" onSubmit={generate}><div><label><span>生成数量</span><input type="number" min="1" max="500" value={count} onChange={(event) => setCount(event.target.value)} /></label><label className="wide"><span>批次备注</span><input maxLength="200" value={note} onChange={(event) => setNote(event.target.value)} placeholder="例如：2026 年 8 月创作者内测" /></label></div><button className="button primary" disabled={Boolean(busy)}><Key size={18} weight="fill" />{busy === "generate" ? "正在生成" : "批量生成激活码"}</button></form>
+    <form className="activation-generator" onSubmit={generate}><div><label><span>授权产品</span><select value={product} onChange={(event) => setProduct(event.target.value)}>{ACTIVATION_PRODUCT_OPTIONS.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label><span>生成数量</span><input type="number" min="1" max="500" value={count} onChange={(event) => setCount(event.target.value)} /></label><label className="wide"><span>批次备注</span><input maxLength="200" value={note} onChange={(event) => setNote(event.target.value)} placeholder="例如：2026 年 8 月创作者内测" /></label></div><button className="button primary" disabled={Boolean(busy)}><Key size={18} weight="fill" />{busy === "generate" ? "正在生成" : "批量生成激活码"}</button></form>
     {generated.length > 0 && <section className="activation-generated"><header><div><strong>本批次激活码</strong><span>激活码已加密保存，管理员可随时从下方列表复制。</span></div><button type="button" className="button secondary small" onClick={copyCodes}><Copy size={16} />复制全部</button></header><textarea readOnly value={generated.join("\n")} rows={Math.min(generated.length + 1, 12)} /></section>}
-    <div className="activation-table"><div className="activation-table-head"><span>激活码</span><span>状态</span><span>绑定设备</span><span>节点名称</span><span>生成 / 激活时间</span><span>操作</span></div>{items.map((item) => { const macTail = String(item.macHint || "").replace(/[^a-z0-9]/gi, "").slice(-6).toUpperCase(); return <article key={item.id}><div><strong className="activation-code-value" title={item.code || item.codePreview}>{item.code || item.codePreview}</strong><small>{item.note || item.product}{!item.code ? " · 旧记录仅保留安全摘要" : ""}</small></div><em className={`status-pill ${item.status}`}>{item.status === "unused" ? "未使用" : item.status === "used" ? "已使用" : "已停用"}</em><div><strong>{item.deviceName || "尚未绑定"}</strong><small>{macTail ? `MAC 尾号 ${macTail}` : "首次安装时绑定"}</small></div><div><strong title={(item.nodeNames || []).join("、")}>{item.nodeName || "未设置节点名称"}</strong><small>{item.nodeNames?.length > 1 ? `该授权关联 ${item.nodeNames.length} 个节点名称` : item.nodeName ? "用户自定义节点名称" : "绑定桌面节点后同步"}</small></div><div><time>{item.createdAt ? new Date(item.createdAt).toLocaleString("zh-CN") : "-"}</time><small>{item.activatedAt ? `激活 ${new Date(item.activatedAt).toLocaleString("zh-CN")}` : "等待使用"}</small></div><div className="activation-row-actions"><button type="button" className="button small secondary" disabled={Boolean(busy)} onClick={() => copyCode(item)} title={item.code ? "复制完整激活码" : item.status === "unused" ? "重新生成旧激活码并复制" : "查看旧授权复制说明"}><Copy size={16} />{busy === item.id ? "复制中" : "复制"}</button><button type="button" className="button small danger" disabled={Boolean(busy) || item.status === "revoked"} onClick={() => revoke(item)}>停用</button></div></article>; })}</div>
+    <div className="activation-table"><div className="activation-table-head"><span>激活码</span><span>状态</span><span>绑定设备</span><span>节点名称</span><span>生成 / 激活时间</span><span>操作</span></div>{items.map((item) => { const macTail = String(item.macHint || "").replace(/[^a-z0-9]/gi, "").slice(-6).toUpperCase(); return <article key={item.id}><div><strong className="activation-code-value" title={item.code || item.codePreview}>{item.code || item.codePreview}</strong><small>{item.productName || activationProductName(item.product)}{item.note ? ` · ${item.note}` : ""}{!item.code ? " · 旧记录仅保留安全摘要" : ""}</small></div><em className={`status-pill ${item.status}`}>{item.status === "unused" ? "未使用" : item.status === "used" ? "已使用" : "已停用"}</em><div><strong>{item.deviceName || "尚未绑定"}</strong><small>{macTail ? `MAC 尾号 ${macTail}` : "首次安装时绑定"}</small></div><div><strong title={(item.nodeNames || []).join("、")}>{item.nodeName || "未设置节点名称"}</strong><small>{item.nodeNames?.length > 1 ? `该授权关联 ${item.nodeNames.length} 个节点名称` : item.nodeName ? "用户自定义节点名称" : "绑定桌面节点后同步"}</small></div><div><time>{item.createdAt ? new Date(item.createdAt).toLocaleString("zh-CN") : "-"}</time><small>{item.activatedAt ? `激活 ${new Date(item.activatedAt).toLocaleString("zh-CN")}` : "等待使用"}</small></div><div className="activation-row-actions"><button type="button" className="button small secondary" disabled={Boolean(busy)} onClick={() => copyCode(item)} title="复制完整激活码；旧密文不可恢复时会先征求确认"><Copy size={16} />{busy === item.id ? "复制中" : "复制"}</button><button type="button" className="button small danger" disabled={Boolean(busy) || item.status === "revoked"} onClick={() => revoke(item)}>停用</button></div></article>; })}</div>
     {!items.length && <EmptyState icon={Key} title={busy === "load" ? "正在读取授权" : appliedKeyword ? "没有匹配的授权" : "暂无授权记录"} text={appliedKeyword ? `没有找到设备名、MAC 尾号或节点名称包含“${appliedKeyword}”的记录。` : "在上方输入数量，生成第一批设备激活码。"} />}
   </section>;
 }

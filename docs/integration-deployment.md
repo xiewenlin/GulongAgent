@@ -102,6 +102,7 @@ CHANDLER_API_BASE=https://api.chandler.work
 CHANDLER_APPLICATION_ID=cm_89be865af1af48f4a83406f0cf1a472e
 CHANDLER_CLIENT_SECRET=<Chandler 古龙 OAuth 客户端密钥，仅服务端保存>
 CHANDLER_AIROS_CLIENT_SECRET=<Chandler 永生花 OAuth 客户端密钥，仅服务端保存>
+ACTIVATION_CODE_ENCRYPTION_KEY=<至少 32 字节的随机密钥，Vercel 与腾讯云必须完全一致>
 TENCENT_SECRET_ID=<CAM 子账号 SecretId>
 TENCENT_SECRET_KEY=<CAM 子账号 SecretKey>
 COS_BUCKET=gulong-1259744534
@@ -113,6 +114,8 @@ SESSION_COOKIE_SECURE=
 ```
 
 所有敏感变量只进入 Vercel Environment Variables 或受保护的本机用户环境，不能写入 Git、前端 `VITE_*` 变量、日志或截图。
+
+永久授权使用独立产品域：MiniMax H3 超清视频为 `minimax-h3-ultra-video`，越狱视频-MiniMax H3 超能视频为 `minimax-h3-super-video`。管理员必须按产品生成激活码；兑换接口先核对产品，再校验硬件分类摘要，因此拿错产品激活码时会直接返回中文产品不匹配提示。同一台电脑可以分别持有两款授权，但同一个激活码不能跨产品使用。`ACTIVATION_CODE_ENCRYPTION_KEY` 专门用于保存可复制的完整激活码，双目标部署必须使用同一值。历史已绑定密文若无法恢复，只能由管理员在瓷白确认弹窗中显式换发，系统不会静默改变已使用授权。
 
 腾讯云服务器如果暂时只能通过 `http://服务器IP` 访问，会话 Cookie 必须跟随外部 HTTP 协议且不能携带 `Secure`，否则登录接口虽然成功，后续管理员请求不会带回会话，页面就会提示“请先登录或提供有效管理员凭据”。本项目默认自动读取反向代理的 `X-Forwarded-Proto` 解决该问题。
 

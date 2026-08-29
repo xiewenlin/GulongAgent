@@ -69,6 +69,7 @@ npm run dev
 
 - `MONGODB_URI` / `MONGODB_DB`：MongoDB Atlas
 - `SESSION_SECRET` / `API_KEY_PEPPER`：会话与 API Key 摘要密钥
+- `ACTIVATION_CODE_ENCRYPTION_KEY`：激活码专用加密密钥；Vercel 与腾讯云必须保持相同，避免已使用激活码只能在单一部署复制
 - `SESSION_COOKIE_SECURE`：通常留空，由反向代理协议自动决定；仅在临时 HTTP 直连环境显式设为 `false`，正式域名必须使用 HTTPS
 - `GulongAgent` / `CHANDLER_*`：Chandler v3.9 API Key、古龙与永生花 OAuth 客户端密钥、API 地址、两套应用 ID 与当前价格版本
 - `TENCENT_SECRET_ID` / `TENCENT_SECRET_KEY`：仅授予目标 Bucket 所需操作的 CAM 子账号密钥
@@ -84,6 +85,7 @@ npm run dev
 
 - `/api/docs`：交互式 Scalar 文档
 - `/api/openapi.json`：OpenAPI 3.1 规范
+- 永久授权：两款视频产品分别使用 `minimax-h3-ultra-video` 与 `minimax-h3-super-video`；同一台电脑可分别激活，激活码不可跨产品混用
 - [MiniMax H3 共享节点接入合同](docs/minimax-h3-shared-nodes.md)：桌面账号绑定、能力领取、COS 直传、回调与余额账本
 - 开放接口认证：`Authorization: Bearer gla_live_...`
 - 按日期下载附件：`GET /api/v1/brain/attachments/latest?date=YYYY-MM-DD`
