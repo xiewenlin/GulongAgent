@@ -269,6 +269,18 @@ const HARDWARE_COMPONENT_WEIGHTS = Object.freeze({
   oemStrings: 1,
 });
 const HARDWARE_COMPONENT_NAMES = Object.freeze(Object.keys(HARDWARE_COMPONENT_WEIGHTS));
+const LEGACY_RECOVERY_MODE = "os_reinstall";
+const LEGACY_RECOVERY_PRIMARY_COMPONENTS = Object.freeze([
+  "systemUuid",
+  "baseboardSerial",
+  "baseboardModel",
+  "biosSerial",
+  "chassisSerial",
+]);
+const LEGACY_RECOVERY_MIN_PRIMARY_SCORE = 52;
+const LEGACY_RECOVERY_MIN_BINDING_SCORE = 75;
+const LEGACY_RECOVERY_NO_MAC_MIN_PRIMARY_SCORE = 64;
+const LEGACY_RECOVERY_NO_MAC_MIN_BINDING_SCORE = 85;
 const HARDWARE_BINDING_V2_FIELDS = Object.freeze([
   "fingerprintVersion",
   "hardwareHash",
@@ -285,6 +297,7 @@ const HARDWARE_BINDING_V2_ALLOWED_REQUEST_FIELDS = new Set([
   "deviceId",
   "deviceName",
   "macHint",
+  "legacyRecovery",
   ...HARDWARE_BINDING_V2_FIELDS,
 ]);
 const RAW_HARDWARE_FIELD_PATTERN = /(uuid|smbios|baseboard|motherboard|bios|chassis|serial|tpm|cpu|disk|gpu|mac|oem|hardwarecomponents?|hardwareevidence)/i;
@@ -301,9 +314,29 @@ const HardwareBindingV2RequestShape = {
   hardwareComponentDigests: z.record(z.string(), HardwareDigestSchema),
 };
 const HardwareBindingV2RequestSchema = z.object(HardwareBindingV2RequestShape);
+const LegacyActivationRecoverySchema = z.object({
+  mode: z.literal(LEGACY_RECOVERY_MODE),
+});
 
 function activationHardwareError(code, message, status = 400) {
   return Object.assign(new Error(message), { code, status });
+}
+
+function parseLegacyActivationRecovery(bodyValue) {
+  const body = bodyValue && typeof bodyValue === "object" && !Array.isArray(bodyValue) ? bodyValue : {};
+  if (!Object.hasOwn(body, "legacyRecovery")) return null;
+  const parsed = LegacyActivationRecoverySchema.safeParse(body.legacyRecovery);
+  if (!parsed.success) {
+    throw activationHardwareError(
+      "INVALID_LEGACY_RECOVERY_REQUEST",
+      "旧授权恢复请求格式不正确，请将 legacyRecovery.mode 设置为 os_reinstall",
+    );
+  }
+  return parsed.data;
+}
+
+function normalizedActivationMacTail(value) {
+  return String(value || "").toUpperCase().replace(/[^A-F0-9]/g, "").slice(-6);
 }
 
 function parseActivationHardwareBindingV2(bodyValue) {
@@ -359,6 +392,119 @@ function activationHardwareBindingAction(record, incomingBinding) {
   const existingHash = String(record?.hardwareBindingV2?.hardwareHash || "");
   if (!existingHash) return "bind";
   return existingHash === incomingBinding.hardwareHash ? "unchanged" : "mismatch";
+}
+
+function assertLegacyActivationRecoveryEligible(record, incomingBinding, incomingMacHint) {
+  if (!incomingBinding) {
+    throw activationHardwareError(
+      "LEGACY_RECOVERY_HARDWARE_REQUIRED",
+      "重装恢复必须提交完整的 h3-hw-v2 硬件摘要，不能只提交旧版设备指纹",
+    );
+  }
+  if (record?.hardwareBindingV2?.hardwareHash) {
+    throw activationHardwareError(
+      "LEGACY_RECOVERY_NOT_APPLICABLE",
+      "该授权已经绑定新版硬件指纹，不能再使用旧授权迁移；如确认仍是原电脑，请联系管理员核验",
+      409,
+    );
+  }
+
+  const componentSet = new Set(incomingBinding.identityComponents || []);
+  const primaryScore = LEGACY_RECOVERY_PRIMARY_COMPONENTS.reduce(
+    (score, name) => score + (componentSet.has(name) ? HARDWARE_COMPONENT_WEIGHTS[name] : 0),
+    0,
+  );
+  const hasSystemUuid = componentSet.has("systemUuid");
+  const hasBoardAnchor = ["baseboardSerial", "biosSerial", "chassisSerial"].some((name) => componentSet.has(name));
+  const historicalMacTail = normalizedActivationMacTail(record?.macHint);
+  const incomingMacTail = normalizedActivationMacTail(incomingMacHint);
+  const requiredPrimaryScore = historicalMacTail
+    ? LEGACY_RECOVERY_MIN_PRIMARY_SCORE
+    : LEGACY_RECOVERY_NO_MAC_MIN_PRIMARY_SCORE;
+  const requiredBindingScore = historicalMacTail
+    ? LEGACY_RECOVERY_MIN_BINDING_SCORE
+    : LEGACY_RECOVERY_NO_MAC_MIN_BINDING_SCORE;
+
+  if (
+    incomingBinding.fingerprintConfidence !== "high"
+    || !hasSystemUuid
+    || !hasBoardAnchor
+    || primaryScore < requiredPrimaryScore
+    || incomingBinding.bindingScore < requiredBindingScore
+  ) {
+    throw activationHardwareError(
+      "LEGACY_RECOVERY_EVIDENCE_INSUFFICIENT",
+      "旧授权恢复需要高置信度的系统 UUID 与主板、BIOS 或机箱摘要；当前硬件证据不足，未修改原授权",
+      409,
+    );
+  }
+  if (historicalMacTail && historicalMacTail !== incomingMacTail) {
+    throw activationHardwareError(
+      "LEGACY_RECOVERY_MAC_MISMATCH",
+      "当前电脑的网卡尾号与原授权记录不一致，无法自动确认是同一台电脑；请联系管理员核验",
+      409,
+    );
+  }
+  return { primaryScore, historicalMacTail, incomingMacTail };
+}
+
+async function recoverLegacyActivationHardwareV2(codes, record, {
+  deviceId,
+  deviceName,
+  macHint,
+  incomingBinding,
+  now = new Date(),
+}) {
+  assertLegacyActivationRecoveryEligible(record, incomingBinding, macHint);
+  const originalDeviceId = String(record.deviceId || "");
+  const updated = await codes.findOneAndUpdate(
+    {
+      _id: record._id,
+      codeHash: record.codeHash,
+      product: record.product,
+      status: "used",
+      deviceId: originalDeviceId,
+      "hardwareBindingV2.hardwareHash": { $exists: false },
+    },
+    {
+      $set: {
+        deviceId,
+        deviceName,
+        macHint: record.macHint || macHint,
+        hardwareBindingV2: { ...incomingBinding, boundAt: now },
+        legacyRecovery: {
+          version: 1,
+          mode: LEGACY_RECOVERY_MODE,
+          recoveredAt: now,
+          previousDeviceIdHash: hashOpaqueToken(originalDeviceId, "activation-device-recovery-audit"),
+        },
+        updatedAt: now,
+      },
+    },
+    { returnDocument: "after" },
+  );
+  if (updated) return { record: updated, recovered: true };
+
+  const current = await codes.findOne({ _id: record._id });
+  if (
+    current?.status === "used"
+    && current.deviceId === deviceId
+    && current.hardwareBindingV2?.hardwareHash === incomingBinding.hardwareHash
+  ) {
+    return { record: current, recovered: false };
+  }
+  if (current?.hardwareBindingV2?.hardwareHash && current.hardwareBindingV2.hardwareHash !== incomingBinding.hardwareHash) {
+    throw activationHardwareError(
+      "HARDWARE_FINGERPRINT_MISMATCH",
+      "该激活码已绑定到另一台电脑的主板硬件，不能用于当前电脑",
+      409,
+    );
+  }
+  throw activationHardwareError(
+    "LEGACY_RECOVERY_CONFLICT",
+    "旧授权恢复状态已发生变化，请重新获取授权状态后再试",
+    409,
+  );
 }
 
 async function persistActivationHardwareBindingV2(codes, record, incomingBinding, now = new Date()) {
@@ -539,6 +685,10 @@ const ActivationRedeemRequestSchema = z.object({
   deviceId: z.string().regex(/^[a-f0-9]{64}$/).openapi({ example: "0".repeat(64) }),
   deviceName: z.string().trim().max(120).optional().openapi({ example: "CREATOR-PC" }),
   macHint: z.string().trim().max(32).optional().openapi({ example: "A1B2C3" }),
+  legacyRecovery: LegacyActivationRecoverySchema.optional().openapi({
+    example: { mode: LEGACY_RECOVERY_MODE },
+    description: "仅用于 v2 上线前已使用授权在原电脑重装系统后的单次安全迁移；普通激活不要提交",
+  }),
   ...Object.fromEntries(Object.entries(HardwareBindingV2RequestShape).map(([name, schema]) => [name, schema.optional()])),
 });
 
@@ -3704,6 +3854,12 @@ app.post("/api/licenses/redeem", async (c) => {
     }, 409);
   }
   if (record.status === "revoked") return c.json({ code: "ACTIVATION_REVOKED", message: "激活码已被停用" }, 403);
+  let legacyRecoveryRequest;
+  try {
+    legacyRecoveryRequest = parseLegacyActivationRecovery(body);
+  } catch (error) {
+    return c.json({ code: error.code || "INVALID_LEGACY_RECOVERY_REQUEST", message: error.message }, error.status || 400);
+  }
   let hardwareBindingV2;
   try {
     hardwareBindingV2 = parseActivationHardwareBindingV2(body);
@@ -3716,6 +3872,7 @@ app.post("/api/licenses/redeem", async (c) => {
   // Validate the production signing key before binding an unused code. A
   // deployment configuration error must never consume a customer's license.
   const privateKey = activationSigningPrivateKey();
+  let legacyRecoveryApplied = false;
 
   if (record.status === "unused") {
     try {
@@ -3744,6 +3901,25 @@ app.post("/api/licenses/redeem", async (c) => {
     if (!record) record = await codes.findOne({ codeHash });
   }
 
+  if (record?.status === "used" && record.deviceId !== deviceId && legacyRecoveryRequest) {
+    try {
+      const recovery = await recoverLegacyActivationHardwareV2(codes, record, {
+        deviceId,
+        deviceName,
+        macHint,
+        incomingBinding: hardwareBindingV2,
+      });
+      record = recovery.record;
+      legacyRecoveryApplied = recovery.recovered;
+    } catch (error) {
+      if (error?.code === 11000) {
+        return c.json({ code: "DEVICE_ALREADY_LICENSED", message: "这台电脑已经绑定过同一产品授权" }, 409);
+      }
+      if (!error?.code) throw error;
+      return c.json({ code: error.code, message: error.message }, error.status || 409);
+    }
+  }
+
   if (!record || record.status !== "used" || record.deviceId !== deviceId) {
     return c.json({ code: "ACTIVATION_ALREADY_USED", message: "激活码已绑定到其他电脑" }, 409);
   }
@@ -3756,7 +3932,15 @@ app.post("/api/licenses/redeem", async (c) => {
     }
   }
   const payload = activationReceiptPayload(record);
-  return c.json({ ok: true, receipt: { ...payload, ...signActivationReceipt(payload, privateKey) } });
+  return c.json({
+    ok: true,
+    ...(legacyRecoveryApplied ? {
+      recovered: true,
+      code: "LEGACY_LICENSE_RECOVERED",
+      message: "已确认是原电脑并恢复旧授权；激活时间和授权次数保持不变",
+    } : {}),
+    receipt: { ...payload, ...signActivationReceipt(payload, privateKey) },
+  });
 });
 
 app.get("/api/admin/activation-codes", async (c) => {
@@ -8195,15 +8379,15 @@ app.openAPIRegistry.registerPath({
   path: "/api/licenses/redeem",
   tags: ["Licensing"],
   summary: "兑换设备永久离线授权",
-  description: "安装器首次联网时必须提交当前产品标识、一次性激活码与旧版 deviceId。MiniMax H3 超清视频和越狱视频-MiniMax H3 超能视频使用独立激活码，跨产品兑换会在硬件摘要校验前返回易懂的产品不匹配提示。同一台电脑可分别持有两款产品授权。同一旧版 deviceId 可幂等恢复原 RS256 回执。新客户端可同时提交 h3-hw-v2 加权硬件分类摘要，服务端只保存 SHA-256 摘要和分类名，不接收原始主板、SMBIOS、TPM、MAC 或序列号值；旧授权在旧版 deviceId 精确匹配后可补录一次 v2 绑定，不改变 activatedAt。已有 v2 hardwareHash 不一致时拒绝激活。回执 canonical 字段与签名顺序保持兼容。",
+  description: "安装器首次联网时必须提交当前产品标识、一次性激活码与旧版 deviceId。MiniMax H3 超清视频和越狱视频-MiniMax H3 超能视频使用独立激活码，跨产品兑换会在硬件摘要校验前返回易懂的产品不匹配提示。同一台电脑可分别持有两款产品授权。同一旧版 deviceId 可幂等恢复原 RS256 回执。新客户端可同时提交 h3-hw-v2 加权硬件分类摘要，服务端只保存 SHA-256 摘要和分类名，不接收原始主板、SMBIOS、TPM、MAC 或序列号值。v2 上线前已经使用、但重装后 legacy deviceId 因网卡变化而改变的授权，可显式提交 legacyRecovery.mode=os_reinstall；仅在授权尚无 v2 绑定、硬件置信度为 high、系统 UUID 与强主板锚点达到安全阈值，且历史 macHint 存在时尾号一致的情况下，原子更新 deviceId 并补录 v2。此恢复只允许一次，不改变 activatedAt，也不增加激活次数。已有 v2 绑定或不同主板一律拒绝。回执 canonical 字段与签名顺序保持兼容。所有错误响应固定为 JSON {code,message}，客户端应按 code 分支处理，不能把全部 HTTP 400 映射为格式错误。",
   security: [],
   request: { body: { required: true, content: { "application/json": { schema: ActivationRedeemRequestSchema } } } },
   responses: {
-    200: { description: "激活成功或同设备恢复成功", content: { "application/json": { schema: z.object({ ok: z.literal(true), receipt: ActivationReceiptSchema }) } } },
-    400: { description: "激活码、设备指纹或硬件分类摘要格式不正确；原始硬件值会被拒绝", content: { "application/json": { schema: ErrorSchema } } },
+    200: { description: "激活成功、同设备恢复成功或旧授权安全迁移成功", content: { "application/json": { schema: z.object({ ok: z.literal(true), recovered: z.literal(true).optional(), code: z.literal("LEGACY_LICENSE_RECOVERED").optional(), message: z.string().optional(), receipt: ActivationReceiptSchema }) } } },
+    400: { description: "激活码、设备指纹、legacyRecovery 或硬件分类摘要格式不正确；原始硬件值会被拒绝。响应为 {code,message}", content: { "application/json": { schema: ErrorSchema } } },
     403: { description: "激活码已停用", content: { "application/json": { schema: ErrorSchema } } },
     404: { description: "激活码不存在", content: { "application/json": { schema: ErrorSchema } } },
-    409: { description: "激活码属于另一产品、已绑定其他设备、设备已有同产品授权或 hardwareHash 与既有 v2 绑定不一致", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "激活码属于另一产品、已绑定其他设备、设备已有同产品授权、旧授权恢复证据不足、历史 MAC 尾号不一致，或 hardwareHash 与既有 v2 绑定不一致", content: { "application/json": { schema: ErrorSchema } } },
     429: { description: "激活尝试过于频繁", content: { "application/json": { schema: ErrorSchema } } },
     503: { description: "生产签名密钥尚未正确配置", content: { "application/json": { schema: ErrorSchema } } },
   },
@@ -8222,8 +8406,8 @@ app.doc("/api/openapi.json", {
   openapi: "3.1.0",
   info: {
     title: "古龙 Gulong Agent Engine API",
-    version: "2.7.0",
-    description: "已按 Chandler v3.9 与 PearAPI 统一接入升级：OAuth 应用密钥配置完成后，官网邮箱注册和已激活桌面客户端的邮箱/手机号注册均由官网服务端注入对应应用凭据，写入 Chandler 应用来源归因；client_secret 永不进入浏览器或桌面客户端。桌面端缺少归因凭据时故障关闭；官网公开邮箱注册按 Chandler 兼容合同保持可用但不伪造归因。邮箱和短信验证码统一为 6 位数字；服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。普通会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费；实付额外赠送 10% 钱包余额，单次充值满 500 元同样赠送 10%。短视频包月固定月费 5999 元、年费 59999 元，只支持线下审核，审核后实付金额按 1:1 组成可到期套餐余额，不额外赠送；有效期内 MiniMaxH3 套餐余额归零后仍可无限生成，但不再扣费或分佣。所有入账、扣款、退款和分账均使用独立幂等流水。MiniMax H3 共享节点支持钱包预扣、幂等退款与 50% 节点分成、激活设备账号绑定、按能力原子领取、腾讯云 COS 输入下载和输出直传票据，并提供仅按绑定账户聚合的桌面收益接口；工作器领取 DTO 不含需求用户身份和内部计费信息。永久离线授权继续签发旧版 canonical RS256 回执，同时可选绑定 h3-hw-v2 加权硬件分类摘要；服务端不保存任何原始硬件值。另提供第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
+    version: "2.8.0",
+    description: "已按 Chandler v3.9 与 PearAPI 统一接入升级：OAuth 应用密钥配置完成后，官网邮箱注册和已激活桌面客户端的邮箱/手机号注册均由官网服务端注入对应应用凭据，写入 Chandler 应用来源归因；client_secret 永不进入浏览器或桌面客户端。桌面端缺少归因凭据时故障关闭；官网公开邮箱注册按 Chandler 兼容合同保持可用但不伪造归因。邮箱和短信验证码统一为 6 位数字；服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。普通会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费；实付额外赠送 10% 钱包余额，单次充值满 500 元同样赠送 10%。短视频包月固定月费 5999 元、年费 59999 元，只支持线下审核，审核后实付金额按 1:1 组成可到期套餐余额，不额外赠送；有效期内 MiniMaxH3 套餐余额归零后仍可无限生成，但不再扣费或分佣。所有入账、扣款、退款和分账均使用独立幂等流水。MiniMax H3 共享节点支持钱包预扣、幂等退款与 50% 节点分成、激活设备账号绑定、按能力原子领取、腾讯云 COS 输入下载和输出直传票据，并提供仅按绑定账户聚合的桌面收益接口；工作器领取 DTO 不含需求用户身份和内部计费信息。永久离线授权继续签发旧版 canonical RS256 回执，同时可选绑定 h3-hw-v2 加权硬件分类摘要；v2 上线前的已用授权支持高置信度、一次性、保留激活时间的同机重装迁移，服务端不保存任何原始硬件值。另提供第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
   },
   servers: [
     { url: "/", description: "当前环境" },
@@ -8246,13 +8430,16 @@ export {
   ACTIVATION_PRODUCT_DEFAULT,
   ACTIVATION_PRODUCT_SUPER_VIDEO,
   HARDWARE_COMPONENT_WEIGHTS,
+  assertLegacyActivationRecoveryEligible,
   activationHardwareBindingAction,
   activationProductsCompatible,
   activationReceiptPayload,
   activationSearchConditions,
   activationSigningPrivateKey,
   parseActivationHardwareBindingV2,
+  parseLegacyActivationRecovery,
   persistActivationHardwareBindingV2,
+  recoverLegacyActivationHardwareV2,
   signActivationReceipt,
   verifyActivationReceipt,
 };

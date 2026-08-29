@@ -6,13 +6,16 @@ import app, {
   ACTIVATION_PRODUCT_DEFAULT,
   ACTIVATION_PRODUCT_SUPER_VIDEO,
   HARDWARE_COMPONENT_WEIGHTS,
+  assertLegacyActivationRecoveryEligible,
   activationHardwareBindingAction,
   activationProductsCompatible,
   activationReceiptPayload,
   activationSearchConditions,
   activationSigningPrivateKey,
   parseActivationHardwareBindingV2,
+  parseLegacyActivationRecovery,
   persistActivationHardwareBindingV2,
+  recoverLegacyActivationHardwareV2,
   signActivationReceipt,
 } from "../../server/app.js";
 import { readActivationCodeSecret, sealActivationCodeSecret, sealUserSecret } from "../../server/security.js";
@@ -150,6 +153,103 @@ test("legacy activation adds v2 once without changing activatedAt and rejects an
   assert.equal(updateCount, 1);
 });
 
+test("legacy OS reinstall recovery requires explicit mode, strong anchors, and matching historical MAC", () => {
+  assert.equal(parseLegacyActivationRecovery({}), null);
+  assert.deepEqual(parseLegacyActivationRecovery({ legacyRecovery: { mode: "os_reinstall" } }), { mode: "os_reinstall" });
+  assert.throws(
+    () => parseLegacyActivationRecovery({ legacyRecovery: { mode: "replace_hardware" } }),
+    (error) => error.code === "INVALID_LEGACY_RECOVERY_REQUEST" && error.status === 400,
+  );
+
+  const record = {
+    status: "used",
+    deviceId: "a".repeat(64),
+    macHint: "A1:B2:C3",
+  };
+  const strongBinding = parseActivationHardwareBindingV2(hardwareV2());
+  assert.deepEqual(
+    assertLegacyActivationRecoveryEligible(record, strongBinding, "AA-A1-B2-C3"),
+    { primaryScore: 52, historicalMacTail: "A1B2C3", incomingMacTail: "A1B2C3" },
+  );
+  assert.throws(
+    () => assertLegacyActivationRecoveryEligible(record, strongBinding, "D4E5F6"),
+    (error) => error.code === "LEGACY_RECOVERY_MAC_MISMATCH" && error.status === 409,
+  );
+  assert.throws(
+    () => assertLegacyActivationRecoveryEligible(record, { ...strongBinding, fingerprintConfidence: "medium" }, "A1B2C3"),
+    (error) => error.code === "LEGACY_RECOVERY_EVIDENCE_INSUFFICIENT" && error.status === 409,
+  );
+  assert.throws(
+    () => assertLegacyActivationRecoveryEligible({ ...record, hardwareBindingV2: strongBinding }, strongBinding, "A1B2C3"),
+    (error) => error.code === "LEGACY_RECOVERY_NOT_APPLICABLE" && error.status === 409,
+  );
+});
+
+test("legacy OS reinstall recovery raises thresholds without historical MAC", () => {
+  const insufficient = parseActivationHardwareBindingV2(hardwareV2());
+  assert.throws(
+    () => assertLegacyActivationRecoveryEligible({ status: "used", deviceId: "a".repeat(64) }, insufficient, "A1B2C3"),
+    (error) => error.code === "LEGACY_RECOVERY_EVIDENCE_INSUFFICIENT" && error.status === 409,
+  );
+  const stronger = parseActivationHardwareBindingV2(hardwareV2({
+    hardwareScore: 64,
+    bindingScore: 85,
+    identityComponents: ["systemUuid", "baseboardSerial", "biosSerial"],
+    hardwareComponentDigests: {
+      systemUuid: "4".repeat(64),
+      baseboardSerial: "5".repeat(64),
+      biosSerial: "6".repeat(64),
+    },
+  }));
+  assert.deepEqual(
+    assertLegacyActivationRecoveryEligible({ status: "used", deviceId: "a".repeat(64) }, stronger, "A1B2C3"),
+    { primaryScore: 64, historicalMacTail: "", incomingMacTail: "A1B2C3" },
+  );
+});
+
+test("legacy OS reinstall recovery atomically binds v2 once without changing activation time", async () => {
+  const activatedAt = new Date("2026-08-18T03:04:05.000Z");
+  let stored = {
+    _id: "license-recovery",
+    codeHash: "code-hash",
+    status: "used",
+    product: ACTIVATION_PRODUCT_DEFAULT,
+    deviceId: "a".repeat(64),
+    deviceName: "OLD-PC",
+    macHint: "A1B2C3",
+    activatedAt,
+  };
+  let writes = 0;
+  const collection = {
+    async findOneAndUpdate(filter, update) {
+      assert.equal(filter.deviceId, "a".repeat(64));
+      assert.equal(filter.codeHash, "code-hash");
+      assert.deepEqual(filter["hardwareBindingV2.hardwareHash"], { $exists: false });
+      assert.equal(Object.hasOwn(update.$set, "activatedAt"), false);
+      assert.equal(Object.hasOwn(update, "$inc"), false);
+      writes += 1;
+      stored = { ...stored, ...update.$set };
+      return stored;
+    },
+    async findOne() { return stored; },
+  };
+  const incoming = parseActivationHardwareBindingV2(hardwareV2());
+  const first = await recoverLegacyActivationHardwareV2(collection, stored, {
+    deviceId: "b".repeat(64),
+    deviceName: "REINSTALLED-PC",
+    macHint: "A1B2C3",
+    incomingBinding: incoming,
+    now: new Date("2026-08-30T00:00:00.000Z"),
+  });
+  assert.equal(first.recovered, true);
+  assert.equal(writes, 1);
+  assert.equal(first.record.activatedAt, activatedAt);
+  assert.equal(first.record.deviceId, "b".repeat(64));
+  assert.equal(first.record.hardwareBindingV2.hardwareHash, incoming.hardwareHash);
+  assert.equal(first.record.legacyRecovery.mode, "os_reinstall");
+  assert.notEqual(first.record.legacyRecovery.previousDeviceIdHash, "a".repeat(64));
+});
+
 test("hardware parser rejects raw evidence while redeem prioritizes product mismatch", async () => {
   assert.throws(
     () => parseActivationHardwareBindingV2({
@@ -174,7 +274,7 @@ test("public redeem validation is uncached and documented without bearer authent
   });
   assert.equal(response.status, 400);
   assert.match(response.headers.get("cache-control") || "", /no-store/);
-  assert.equal((await response.json()).code, "INVALID_ACTIVATION_CODE");
+  assert.deepEqual(await response.json(), { code: "INVALID_ACTIVATION_CODE", message: "激活码格式不正确" });
 
   const document = app.getOpenAPIDocument({ openapi: "3.1.0", info: { title: "test", version: "1" } });
   const route = document.paths["/api/licenses/redeem"]?.post;
@@ -190,6 +290,9 @@ test("public redeem validation is uncached and documented without bearer authent
   assert.match(contract, /hardwareHash/);
   assert.match(contract, /minimax-h3-ultra-video/);
   assert.match(contract, /minimax-h3-super-video/);
+  assert.match(contract, /legacyRecovery/);
+  assert.match(contract, /os_reinstall/);
+  assert.match(contract, /LEGACY_LICENSE_RECOVERED/);
 });
 
 test("independent video products reject cross-product activation before hardware validation", async () => {

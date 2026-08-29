@@ -48,7 +48,7 @@ X-Gulong-Account-Binding: gab_...
 
 分类权重固定为：`systemUuid 30`、`baseboardSerial 22`、`baseboardModel 8`、`biosSerial 12`、`chassisSerial 8`、`tpm 5`、`cpu 5`、`systemDisk 4`、`gpu 2`、`physicalMacs 2`、`systemModel 1`、`oemStrings 1`。`hardwareScore` 必须等于已提交分类权重之和。
 
-官网只保存分类名和 SHA-256 摘要，拒绝原始主板、SMBIOS、序列号、TPM、MAC 等值。旧授权首次提交 v2 时，必须先精确匹配旧 `deviceId`，随后原子补录 `hardwareBindingV2`，不改变 `activatedAt`，也不消耗新的激活次数。同一 `hardwareHash` 幂等返回原回执；不同 `hardwareHash` 返回 HTTP 409：
+官网只保存分类名和 SHA-256 摘要，拒绝原始主板、SMBIOS、序列号、TPM、MAC 等值。旧授权首次提交 v2 时，若旧 `deviceId` 仍相同，会直接原子补录 `hardwareBindingV2`，不改变 `activatedAt`，也不消耗新的激活次数。同一 `hardwareHash` 幂等返回原回执；不同 `hardwareHash` 返回 HTTP 409：
 
 ```json
 {
@@ -58,6 +58,64 @@ X-Gulong-Account-Binding: gab_...
 ```
 
 成功回执仍只有原有 `version`、`licenseId`、`product`、`deviceId`、`macHint`、`activatedAt`、`perpetual`、`algorithm`、`signature` 字段；Claim、账号绑定、收益与隐私 DTO 不变。
+
+### 0.1 同机重装后的旧授权安全恢复
+
+仅当激活码在 v2 上线前已经使用、授权记录尚无 `hardwareBindingV2`，并且重装系统导致旧版 `deviceId` 变化时，客户端才追加：
+
+```json
+{
+  "code": "H3-ABCDE-FGHJK-MNPQR-STUVW",
+  "product": "minimax-h3-ultra-video",
+  "deviceId": "重装后重新计算的64位旧版设备指纹摘要",
+  "deviceName": "CREATOR-PC",
+  "macHint": "A1B2C3",
+  "legacyRecovery": { "mode": "os_reinstall" },
+  "fingerprintVersion": "h3-hw-v2",
+  "hardwareHash": "64位小写SHA-256",
+  "hardwareEvidenceHash": "64位小写SHA-256",
+  "fingerprintConfidence": "high",
+  "hardwareScore": 64,
+  "bindingScore": 85,
+  "identityComponents": ["systemUuid", "baseboardSerial", "biosSerial"],
+  "hardwareComponentDigests": {
+    "systemUuid": "64位小写SHA-256",
+    "baseboardSerial": "64位小写SHA-256",
+    "biosSerial": "64位小写SHA-256"
+  }
+}
+```
+
+服务端安全门禁：
+
+- 必须持有原激活码，产品必须精确匹配，授权状态必须为 `used` 且尚未绑定 v2。
+- `fingerprintConfidence` 必须为 `high`，必须包含 `systemUuid` 和至少一项 `baseboardSerial`、`biosSerial`、`chassisSerial`。
+- 主要身份锚点权重至少为 52，`bindingScore` 至少为 75；历史记录没有 `macHint` 时，门槛提高为主要锚点至少 64、`bindingScore` 至少 85。
+- 历史记录有 `macHint` 时，当前 MAC 尾号后六位必须一致。
+- 通过后一次性原子更新 `deviceId` 并补录 v2，保留原 `activatedAt`，不增加激活次数；并发迁移只有一个请求能成功。
+- 已经绑定 v2 的授权不走本合同；不同主板或证据不足均返回 409，绝不降级为仅凭激活码恢复。
+
+迁移成功除原有签名回执外增加：
+
+```json
+{
+  "ok": true,
+  "recovered": true,
+  "code": "LEGACY_LICENSE_RECOVERED",
+  "message": "已确认是原电脑并恢复旧授权；激活时间和授权次数保持不变",
+  "receipt": { "version": 1, "algorithm": "RS256", "signature": "base64" }
+}
+```
+
+错误响应固定为 JSON `{"code":"...","message":"中文提示"}`。客户端必须按 `code` 分支处理，不要把全部 HTTP 400 映射为“硬件格式错误”。恢复相关错误码：
+
+- `400 INVALID_LEGACY_RECOVERY_REQUEST`：`legacyRecovery` 格式不正确。
+- `400 LEGACY_RECOVERY_HARDWARE_REQUIRED`：未提交完整 v2 摘要。
+- `409 LEGACY_RECOVERY_EVIDENCE_INSUFFICIENT`：强主板证据或可信度不足。
+- `409 LEGACY_RECOVERY_MAC_MISMATCH`：历史 MAC 尾号不一致。
+- `409 LEGACY_RECOVERY_NOT_APPLICABLE`：授权已经绑定 v2，不能走旧授权迁移。
+- `409 HARDWARE_FINGERPRINT_MISMATCH`：已绑定到另一台电脑的主板硬件。
+- `409 LEGACY_RECOVERY_CONFLICT`：并发恢复导致授权状态已经改变。
 
 ## 1. 绑定桌面节点账号
 
