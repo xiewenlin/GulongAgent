@@ -206,7 +206,7 @@ priceFen = duration_seconds * 20 + image_count * 5 + video_count * 20
 }
 ```
 
-## 4. 按节点能力原子领取
+## 4. 局域网集群负载感知领取
 
 `POST /api/h3/tasks/claim`
 
@@ -224,12 +224,39 @@ priceFen = duration_seconds * 20 + image_count * 5 + video_count * 20
     "max_image_count": 9,
     "max_video_count": 3,
     "max_audio_count": 3,
-    "local_prompt_optimization_v1": true
+    "local_prompt_optimization_v1": true,
+    "max_concurrent_tasks": 4
+  },
+  "lan_cluster": {
+    "cluster_id": "稳定匿名局域网集群ID，不得使用原始IP或MAC",
+    "observed_at": "2026-08-29T08:00:00.000Z",
+    "nodes": [
+      {
+        "node_id": "stable-node-0001",
+        "node_name": "H3-4090-01",
+        "running_task_count": 2,
+        "estimated_total_seconds": 1260,
+        "available": true,
+        "capabilities": "与上层 capabilities 同结构"
+      },
+      {
+        "node_id": "stable-node-0002",
+        "node_name": "H3-5090-02",
+        "running_task_count": 0,
+        "estimated_total_seconds": 0,
+        "available": true,
+        "capabilities": "与上层 capabilities 同结构"
+      }
+    ]
   }
 }
 ```
 
-领取使用单次 `findOneAndUpdate`，筛选 `queued`、模型、最大时长、profile、三类素材上限和本地提示词优化能力。开启优化的任务只会分配给声明 `local_prompt_optimization_v1=true` 的节点；未声明该能力的节点仍可领取用户明确关闭优化的 `raw_prompt_v1` 任务。没有适配任务时返回 `{ "task": null }`。
+`lan_cluster.nodes` 必须包含轮询节点以及同一局域网中所有可用执行节点。每个节点都必须已经用自己的 `X-Gulong-Account-Binding` 绑定到与轮询节点相同的官网账号；服务端不信任客户端自报邮箱或用户 ID，也拒绝跨账号节点。报告时间与服务器时间偏差不得超过 2 分钟，单次最多 64 个节点。老客户端暂时允许省略 `lan_cluster`，此时仅把轮询节点作为一节点集群。
+
+服务端先按 `createdAt、_id` 从旧到新读取候选任务，再对能力匹配的节点按 `estimated_total_seconds`、`running_task_count`、`node_id` 排序，选择预计完成时间最短的节点。任务仍通过原子 `findOneAndUpdate` 抢占，避免并发重复领取。开启优化的任务只会分配给声明 `local_prompt_optimization_v1=true` 的节点；未声明该能力的节点仍可领取用户明确关闭优化的 `raw_prompt_v1` 任务。没有适配任务时返回 `{ "task": null }`。
+
+相同账号与 `cluster_id` 共享一个短租约和 `nextClaimAt`：同一轮询窗口只有一个请求进入真实队列查询，其余节点直接得到 `cluster_throttled=true`、`poll_after_ms` 与 `Retry-After`。集群 ID 只以 SHA-256 保存。服务端同时读取各节点已经领取但尚未完成的任务，用服务端活动数和剩余耗时校正上报值，避免少报负载或旧客户端重复领取超过并发上限。
 
 “测试连接”必须发送 `dry_run: true`。服务端完成绑定身份、能力和限流校验后直接返回：
 
@@ -239,7 +266,7 @@ priceFen = duration_seconds * 20 + image_count * 5 + video_count * 20
 
 此分支不会读取或减少队列，不会改变任何任务状态，也不会签发输入下载或输出上传票据。正式轮询发送 `dry_run: false`。
 
-正式领取返回的是专用的最小权限 `workerTask`，仅包含 `id`、`orderNo`、`model`、原始中文 `prompt` / `source_prompt` / `original_prompt`、`prompt_optimization_enabled`、`prompt_mode`、`local_prompt_optimization_required`、视频参数、三类素材数量、短时素材下载票据和 `output_upload`。开启时三个选择字段分别为 `true`、`desktop_local_magic_v1`、`true`；关闭时分别为 `false`、`raw_prompt_v1`、`false`。它不会包含 `requester`、需求用户邮箱或 ID、`priceFen`、`walletLedgerId`、内部账号绑定、领取节点身份等字段，局域网渲染节点因此看不到需求用户的账号信息。管理员和订单本人通过各自受权查询接口查看完整订单。
+正式领取返回的是专用的最小权限 `workerTask`，仅包含 `id`、`orderNo`、`model`、原始中文 `prompt` / `source_prompt` / `original_prompt`、`prompt_optimization_enabled`、`prompt_mode`、`local_prompt_optimization_required`、视频参数、三类素材数量、短时素材下载票据、`assigned_node`、`dispatch_estimated_total_seconds`、`auto_cancel_at` 和 `output_upload`。局域网调度器必须把任务交给 `assigned_node.node_id` 指定的节点；只有该节点自己的绑定令牌可以提交回调。开启时三个选择字段分别为 `true`、`desktop_local_magic_v1`、`true`；关闭时分别为 `false`、`raw_prompt_v1`、`false`。DTO 不包含 `requester`、需求用户邮箱或 ID、`priceFen`、`walletLedgerId` 或内部绑定 ID，渲染节点因此看不到需求用户的账号信息。
 
 开启魔法优化时，节点领取后必须先回调 `status=optimizing`，在本机调用 PromptEngine 完成优化；成功后再回调 `status=started`，并提交本地产生的 `compiled_prompt`、`estimated_total_seconds` 和可选的 `prompt_optimization.engine/version/elapsed_seconds`。服务端收到并保存编译结果前，不接受生成进度或成功回调；本地优化失败时节点直接回调 `failed`，不得启动 H3 推理。关闭魔法优化时，节点不得发送 `optimizing` 或 `compiled_prompt`，应直接用原始 `prompt` 生成，并以 `status=started` + `estimated_total_seconds` 开始上报进度；服务端会拒绝违背用户选择的回调。
 
@@ -288,7 +315,7 @@ priceFen = duration_seconds * 20 + image_count * 5 + video_count * 20
 - `x-cos-meta-bytes`：十进制字节数；
 - `x-cos-meta-filename-b64`：UTF-8 文件名的 Base64，便于审计。
 
-调度节点写入 `claimedByNode`。局域网中的执行节点可以使用自己的绑定令牌回调；最终接单人不取 claim 的账号。
+轮询节点只记录在 `claimRequestedByNode`；服务端选中的 `assigned_node` 写入 `claimedByNode`。回调令牌必须与 `claimedByNode` 一致，最终接单人与分佣账户仍取成功回调令牌对应用户。
 
 ## 5. 回调
 
@@ -328,6 +355,8 @@ priceFen = duration_seconds * 20 + image_count * 5 + video_count * 20
 成功回调后，`executedByNode` 与 `assigneeUserId` 只取当前绑定令牌解析结果。回调幂等键为 `task_id + event + status + local_job_id`。重复回调不会重复扣款、退款或变更接单人。回调响应同样只返回任务 ID、订单号、状态、进度及完成/失败时间，不回传需求用户或计费字段。
 
 失败或取消回调会把预扣款按订单幂等退回。管理员重试时重新检查余额并创建新一轮预扣记录。
+
+任务创建时服务端会根据时长、profile、采样步数和素材数计算保守的 `dispatch_estimated_total_seconds`，并写入 `auto_cancel_at = createdAt + 10 × estimate`。执行节点首次 `started` 回调提供的 `estimated_total_seconds` 如果更长，会按两者较大值更新截止时间。任务超过截止时间仍未完成时，服务端原子改为 `cancelled`、幂等退款、作废未使用的输出上传票据，并发送站内提醒：建议用户改用其他视频模型。腾讯云节点每分钟执行一次维护；用户任务轮询、桌面领取和管理员列表也会触发同一幂等检查。
 
 ## 6. 管理员接口与页面
 

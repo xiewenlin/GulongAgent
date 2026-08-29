@@ -39,4 +39,7 @@ test("Tencent deployment validates its target and rolls back an unhealthy activa
   assert.match(source, /rollback/);
   assert.match(source, /mv -Tf "\$rollback_link" "\$current_link"/);
   assert.match(source, /Previous release restored successfully/);
+  assert.match(source, /gulong-h3-maintenance\.timer/);
+  assert.match(source, /OnUnitActiveSec=60s/);
+  assert.match(source, /api\/cron\/h3-output-cleanup/);
 });

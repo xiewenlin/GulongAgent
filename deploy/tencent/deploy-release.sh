@@ -110,6 +110,46 @@ else
   mv "$stage" "$target"
 fi
 
+cat >/usr/local/sbin/gulong-h3-maintenance <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+set -a
+source /etc/gulong/gulong.env
+set +a
+test -n "${CRON_SECRET:-}"
+exec /usr/bin/curl --fail --silent --show-error --max-time 55 \
+  --header "Authorization: Bearer ${CRON_SECRET}" \
+  http://127.0.0.1:8787/api/cron/h3-output-cleanup
+EOF
+chmod 0750 /usr/local/sbin/gulong-h3-maintenance
+
+cat >/etc/systemd/system/gulong-h3-maintenance.service <<'EOF'
+[Unit]
+Description=Gulong MiniMax H3 timeout and retention maintenance
+After=network-online.target gulong.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/sbin/gulong-h3-maintenance
+EOF
+
+cat >/etc/systemd/system/gulong-h3-maintenance.timer <<'EOF'
+[Unit]
+Description=Run Gulong MiniMax H3 maintenance every minute
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=60s
+AccuracySec=10s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload
+systemctl enable --now gulong-h3-maintenance.timer
+
 next_link="/opt/gulong/.current-next-${commit_sha}"
 ln -s "$target" "$next_link"
 mv -Tf "$next_link" "$current_link"

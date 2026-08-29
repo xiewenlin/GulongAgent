@@ -7,12 +7,17 @@ import app from "../../server/app.js";
 import {
   H3_ACCOUNT_BINDING_HEADER,
   H3_OUTPUT_RETENTION_MS,
+  H3_TASK_TIMEOUT_MULTIPLIER,
   backfillCompletedH3ConversationMessages,
   buildH3EarningsSummary,
   calculateH3RevenueSplit,
   calculateH3SharedPrice,
+  cancelTimedOutH3Tasks,
+  estimateH3TaskTotalSeconds,
   h3CallbackEventKey,
   h3OutputExpiresAt,
+  h3NodeCanRunTask,
+  h3TaskAutoCancelAt,
   cleanupExpiredH3Output,
   ensureH3ConversationMessages,
   normalizeH3TaskInput,
@@ -23,6 +28,7 @@ import {
   settleH3Revenue,
   toH3WorkerTask,
 } from "../../server/h3-shared.js";
+import { rankH3LanNodes } from "../../server/h3-queue.js";
 
 test("H3 shared pricing uses integer fen and keeps audio free", () => {
   assert.equal(calculateH3SharedPrice({ durationSeconds: 15, imageCount: 2, videoCount: 1 }), 330);
@@ -150,6 +156,52 @@ test("H3 extended mode derives its billable duration from prompt segments", () =
   assert.equal(normalized.priceFen, 480);
 });
 
+test("H3 LAN scheduler ranks the shortest projected node and preserves capability gates", () => {
+  const capabilities = { profiles: ["balanced"], samplingSteps: [4], maxDurationSeconds: 15, maxImageCount: 9, maxVideoCount: 3, maxAudioCount: 3, maxConcurrentTasks: 4, longformV1: false, localPromptOptimizationV1: true };
+  const ranked = rankH3LanNodes([
+    { nodeId: "stable-node-busy-0001", runningTaskCount: 1, estimatedTotalSeconds: 900, capabilities },
+    { nodeId: "stable-node-fast-0002", runningTaskCount: 2, estimatedTotalSeconds: 120, capabilities },
+    { nodeId: "stable-node-idle-0003", runningTaskCount: 0, estimatedTotalSeconds: 120, capabilities },
+  ]);
+  assert.equal(ranked[0].nodeId, "stable-node-idle-0003");
+  assert.equal(h3NodeCanRunTask(ranked[0], { profile: "balanced", samplingSteps: 4, durationSeconds: 15, imageCount: 9, videoCount: 3, audioCount: 3, promptOptimizationEnabled: true }), true);
+  assert.equal(h3NodeCanRunTask(ranked[0], { profile: "ultra1080", samplingSteps: 4, durationSeconds: 15, imageCount: 0, videoCount: 0, audioCount: 0 }), false);
+});
+
+test("H3 timeout deadline is exactly ten times the server estimate", () => {
+  const createdAt = new Date("2026-08-29T00:00:00.000Z");
+  const estimate = estimateH3TaskTotalSeconds({ durationSeconds: 5, profile: "balanced", samplingSteps: 4, imageCount: 1, videoCount: 0, audioCount: 0 });
+  assert.ok(estimate >= 120);
+  assert.equal(h3TaskAutoCancelAt(createdAt, estimate).getTime() - createdAt.getTime(), estimate * H3_TASK_TIMEOUT_MULTIPLIER * 1_000);
+});
+
+test("H3 estimated timeout cancellation and user reminder are idempotent", async () => {
+  const now = new Date("2026-08-29T12:00:00.000Z");
+  const task = { _id: new ObjectId(), orderNo: "H3-TIMEOUT-1", requesterUserId: new ObjectId(), status: "queued", chargeStatus: "exempt", revenueStatus: "exempt", autoCancelAt: new Date(now.getTime() - 1_000), estimatedTotalSeconds: 120, createdAt: new Date(now.getTime() - 1_201_000) };
+  let notices = 0;
+  const tasks = {
+    find() { return testCursor(task.status === "queued" ? [task] : []); },
+    async findOneAndUpdate(filter, update) {
+      if (task.status !== "queued" || filter._id.toString() !== task._id.toString()) return null;
+      setDocumentFields(task, update.$set);
+      return task;
+    },
+  };
+  const collections = {
+    h3SharedTasks: tasks,
+    h3OutputUploads: { updateMany: async () => ({ modifiedCount: 0 }) },
+    h3TaskAudits: { insertOne: async () => ({ insertedId: new ObjectId() }) },
+  };
+  const options = { getCollection: async (name) => collections[name], notifyUserOnce: async () => { notices += 1; }, now };
+  const first = await cancelTimedOutH3Tasks(options);
+  const second = await cancelTimedOutH3Tasks(options);
+  assert.equal(first.cancelled, 1);
+  assert.equal(second.cancelled, 0);
+  assert.equal(task.status, "cancelled");
+  assert.equal(task.error.code, "H3_ESTIMATED_TIMEOUT");
+  assert.equal(notices, 1);
+});
+
 test("H3 callback idempotency is stable per task event status and local job", () => {
   const metadata = { event: "render-completed", status: "completed", local_job_id: "local-1" };
   assert.equal(h3CallbackEventKey("task-1", metadata), h3CallbackEventKey("task-1", { ...metadata }));
@@ -201,12 +253,15 @@ test("H3 worker task DTO excludes requester and billing identity", () => {
     requesterEmailSnapshot: "private@example.com",
     priceFen: 305,
     walletLedgerId: "h3:charge:secret",
-    claimedByNode: { bindingId: new ObjectId("66c000000000000000000012") },
+    claimedByNode: { bindingId: new ObjectId("66c000000000000000000012"), nodeId: "stable-node-worker-0001", nodeName: "渲染节点" },
+    dispatchEstimatedTotalSeconds: 900,
+    autoCancelAt: new Date("2026-08-27T12:00:00.000Z"),
   }, {
     assets: [{ type: "image", download_url: "https://example.invalid/signed" }],
     outputUpload: { url: "https://example.invalid/upload", object_key: "h3/tasks/test/output.mp4" },
   });
-  assert.deepEqual(Object.keys(task), ["id", "orderNo", "model", "prompt", "source_prompt", "original_prompt", "prompt_mode", "prompt_optimization_enabled", "local_prompt_optimization_required", "video_mode", "longform_mode", "segment_duration_seconds", "prompt_list", "aspectRatio", "durationSeconds", "profile", "sampling_steps", "seed", "imageCount", "videoCount", "audioCount", "assets", "output_upload", "progress_callback"]);
+  assert.deepEqual(Object.keys(task), ["id", "orderNo", "model", "prompt", "source_prompt", "original_prompt", "prompt_mode", "prompt_optimization_enabled", "local_prompt_optimization_required", "video_mode", "longform_mode", "segment_duration_seconds", "prompt_list", "aspectRatio", "durationSeconds", "profile", "sampling_steps", "seed", "imageCount", "videoCount", "audioCount", "assets", "assigned_node", "dispatch_estimated_total_seconds", "auto_cancel_at", "output_upload", "progress_callback"]);
+  assert.deepEqual(task.assigned_node, { node_id: "stable-node-worker-0001", node_name: "渲染节点" });
   assert.equal(task.video_mode, "smart_multiframe");
   assert.equal(task.sampling_steps, 8);
   assert.equal(task.seed, 20260827);
@@ -604,11 +659,70 @@ test("H3 claim enforces the server poll window before queue and rate-limit datab
   const payload = await response.json();
   assert.equal(payload.task, null);
   assert.equal(payload.claim_plan.throttled, true);
-  assert.equal(payload.claim_plan.scheduling, "oldest_first");
+  assert.equal(payload.claim_plan.scheduling, "fifo_least_estimated_lan_load");
   assert.ok(payload.claim_plan.poll_after_ms > 0);
   assert.ok(response.headers.get("retry-after"));
   assert.equal(rateLimitWrites, 0);
   assert.equal(queueSnapshots, 0);
+});
+
+test("H3 claim assigns the oldest task to the least-loaded bound LAN node", async () => {
+  const isolated = new OpenAPIHono();
+  const userId = new ObjectId();
+  const caller = { _id: new ObjectId(), userId, nodeId: "stable-node-caller-0001", nodeName: "调度节点", status: "active", revokedAt: null };
+  const target = { _id: new ObjectId(), userId, nodeId: "stable-node-target-0002", nodeName: "空闲节点", status: "active", revokedAt: null };
+  const task = { _id: new ObjectId(), orderNo: "H3-LAN-CLAIM-1", requesterUserId: new ObjectId(), model: "minimax_h3_shared", status: "queued", prompt: "测试", originalPrompt: "测试", promptOptimizationEnabled: false, localPromptOptimizationRequired: false, videoMode: "all_reference", aspectRatio: "16:9", durationSeconds: 5, profile: "balanced", samplingSteps: 4, seed: -1, imageCount: 0, videoCount: 0, audioCount: 0, assets: { images: [], videos: [], audio: [] }, dispatchEstimatedTotalSeconds: 600, estimatedTotalSeconds: 600, autoCancelAt: new Date(Date.now() + 60_000), createdAt: new Date(Date.now() - 60_000) };
+  let uploadGrant = null;
+  const clusterState = { nextClaimAt: new Date(0) };
+  const collections = {
+    nodeAccountBindings: {
+      findOne: async () => caller,
+      find: () => testCursor([caller, target]),
+      updateOne: async () => ({ modifiedCount: 1 }),
+    },
+    users: { findOne: async () => ({ _id: userId, email: "dispatcher@example.com", status: "active" }) },
+    h3SharedTasks: {
+      find(filter) { return testCursor(filter.autoCancelAt ? [] : task.status === "queued" ? [task] : []); },
+      async findOneAndUpdate(filter, update) {
+        if (filter._id?.toString() !== task._id.toString() || task.status !== "queued") return null;
+        setDocumentFields(task, update.$set);
+        return task;
+      },
+    },
+    h3OutputUploads: { insertOne: async (record) => { uploadGrant = record; return { insertedId: new ObjectId() }; }, updateMany: async () => ({ modifiedCount: 0 }) },
+    h3TaskAudits: { insertOne: async () => ({ insertedId: new ObjectId() }) },
+    h3LanClusterStates: {
+      updateOne: async (_filter, update) => { if (update.$set) setDocumentFields(clusterState, update.$set); return { modifiedCount: 1 }; },
+      findOne: async () => clusterState,
+      findOneAndUpdate: async (_filter, update) => { setDocumentFields(clusterState, update.$set); return clusterState; },
+    },
+  };
+  registerH3SharedRoutes(isolated, {
+    getCollection: async (name) => collections[name] || { find: () => testCursor([]), findOne: async () => null, insertOne: async () => ({}), updateOne: async () => ({}), updateMany: async () => ({}) },
+    enforceRateLimit: async () => ({ allowed: true }),
+    queueCoordinator: { snapshot: async () => ({ cached: true, queuedCount: 1, activeNodeCount: 2, oldestQueuedAt: task.createdAt, cacheAgeMs: 0 }), invalidate: async () => {} },
+    authenticate: async () => ({ user: { id: userId.toString() } }),
+    requireAdmin: async () => ({ user: { id: userId.toString(), role: "admin" } }),
+    requireTrustedMutation: () => null,
+    verifyActivationReceipt: async () => { throw new Error("not used"); },
+    createPresignedPutUrl: (key) => `https://upload.example/${key}`,
+  });
+  const capabilities = { max_duration_seconds: 15, profiles: ["balanced"], sampling_steps: [4], max_image_count: 9, max_video_count: 3, max_audio_count: 3, max_concurrent_tasks: 4, local_prompt_optimization_v1: true };
+  const response = await isolated.request("http://localhost/api/h3/tasks/claim", {
+    method: "POST",
+    headers: { "content-type": "application/json", [H3_ACCOUNT_BINDING_HEADER]: `gab_${"l".repeat(48)}` },
+    body: JSON.stringify({ node_id: caller.nodeId, node_name: caller.nodeName, capabilities, lan_cluster: { cluster_id: "stable-lan-cluster-0001", observed_at: new Date().toISOString(), nodes: [
+      { node_id: caller.nodeId, node_name: caller.nodeName, running_task_count: 3, estimated_total_seconds: 1800, capabilities },
+      { node_id: target.nodeId, node_name: target.nodeName, running_task_count: 0, estimated_total_seconds: 0, capabilities },
+    ] } }),
+  });
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.deepEqual(payload.task.assigned_node, { node_id: target.nodeId, node_name: target.nodeName });
+  assert.equal(payload.claim_plan.scheduling, "fifo_least_estimated_lan_load");
+  assert.equal(task.claimedByNode.bindingId.toString(), target._id.toString());
+  assert.equal(task.claimRequestedByNode.bindingId.toString(), caller._id.toString());
+  assert.equal(uploadGrant.issuedToBindingId.toString(), target._id.toString());
 });
 
 function testCursor(items) {
@@ -761,13 +875,14 @@ test("H3 OpenAPI publishes binding, assets, desktop tool, claim and callback con
   assert.equal(document.components.securitySchemes.accountBinding.name, H3_ACCOUNT_BINDING_HEADER);
   assert.deepEqual(document.paths["/api/desktop/earnings/summary"].get.security, [{ accountBinding: [] }]);
   assert.match(document.paths["/api/h3/tasks/claim"].post.description, /max_duration_seconds/);
-  assert.match(document.paths["/api/h3/tasks/claim"].post.description, /oldest|从旧到新/);
+  assert.match(document.paths["/api/h3/tasks/claim"].post.description, /最早|从旧到新/);
   assert.match(document.paths["/api/h3/tasks/claim"].post.description, /local_prompt_optimization_v1/);
   assert.equal(document.paths["/api/h3/tasks/claim"].post.requestBody.content["application/json"].schema.properties.capabilities.properties.batch_claim.type, "boolean");
   assert.equal(document.paths["/api/h3/tasks/claim"].post.requestBody.content["application/json"].schema.properties.capabilities.properties.local_prompt_optimization_v1.type, "boolean");
   assert.equal(document.paths["/api/h3/tasks"].post.requestBody.content["application/json"].schema.properties.prompt_optimization_enabled.type, "boolean");
   assert.match(document.paths["/api/h3/tasks"].post.description, /prompt_optimization_enabled=true/);
-  assert.match(document.paths["/api/h3/tasks/claim"].post.description, /raw_prompt_v1/);
+  assert.match(document.paths["/api/h3/tasks/claim"].post.description, /assigned_node/);
+  assert.ok(document.paths["/api/h3/tasks/claim"].post.requestBody.content["application/json"].schema.properties.lan_cluster);
   assert.match(document.paths["/api/h3/tasks/callback"].post.description, /HEAD/);
   assert.match(document.paths["/api/h3/tasks/callback"].post.description, /estimated_total_seconds/);
   assert.match(document.paths["/api/h3/tasks/callback"].post.description, /compiled_prompt/);
@@ -789,16 +904,16 @@ test("H3 implementation keeps identity, capability, COS ownership and ledger gat
     readFile(new URL("../../vercel.json", import.meta.url), "utf8"),
   ]);
   assert.match(source, /verifyActivationReceipt\(body\.activation_receipt\)[\s\S]+users[\s\S]+USER_NOT_FOUND/);
-  assert.match(source, /findOneAndUpdate\([\s\S]*?\{ status: "queued", model: H3_SHARED_MODEL, profile: \{ \$in: profiles \}[\s\S]*?durationCapabilityQuery/);
+  assert.match(source, /h3NodeCanRunTask\(node, task\)[\s\S]+capabilities\.profiles/);
   const dryRunBranch = source.indexOf('if (body.dry_run === true) return c.json({ ok: true, service: "gulong-h3-shared", queue: "reachable" });');
-  const queueMutation = source.indexOf('{ status: "queued", model: H3_SHARED_MODEL, profile:');
+  const queueMutation = source.indexOf('{ _id: candidate._id, status: "queued", model: H3_SHARED_MODEL }');
   assert.ok(dryRunBranch > -1 && queueMutation > dryRunBranch, "dry-run returns before the first queue mutation so the queue cannot decrease");
   assert.match(source, /sort: \{ createdAt: 1, _id: 1 \}/);
   assert.match(source, /calculateH3ClaimPlan[\s\S]+additional_tasks:[\s\S]+poll_after_ms/);
-  assert.match(source, /localPromptOptimizationV1[\s\S]+promptOptimizationEnabled: false, localPromptOptimizationRequired: false/);
+  assert.match(source, /optimizationRequired[\s\S]+capabilities\.localPromptOptimizationV1/);
   assert.match(source, /!promptOptimizationEnabled && suppliedCompiledPrompt[\s\S]+PROMPT_OPTIMIZATION_DISABLED/);
   assert.match(source, /LOCAL_PROMPT_OPTIMIZATION_REQUIRED[\s\S]+compiled_prompt/);
-  assert.match(source, /imageCount: \{ \$lte: maxImageCount \}[\s\S]+videoCount: \{ \$lte: maxVideoCount \}[\s\S]+audioCount: \{ \$lte: maxAudioCount \}/);
+  assert.match(source, /integer\(task\.imageCount\) > capabilities\.maxImageCount[\s\S]+integer\(task\.videoCount\) > capabilities\.maxVideoCount[\s\S]+integer\(task\.audioCount\) > capabilities\.maxAudioCount/);
   assert.match(source, /OUTPUT_OBJECT_FORBIDDEN[\s\S]+inspectCosObject\(objectKey\)[\s\S]+x-cos-meta-sha256/);
   assert.match(source, /ledgerKeys: \{ \$ne: ledgerKey \}[\s\S]+balanceFen: -amountFen/);
   assert.match(source, /assigneeUserId: auth\.user\._id/);

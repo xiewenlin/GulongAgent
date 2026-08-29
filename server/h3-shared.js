@@ -5,7 +5,7 @@ import { getCollection as databaseCollection } from "./db.js";
 import { enforceRateLimit as databaseRateLimit } from "./rate-limit.js";
 import { fingerprintIp, hashOpaqueToken, normalizeEmail } from "./security.js";
 import { createPresignedDownloadUrl, createPresignedPutUrl, deleteObject, ensureBrowserUploadCors, headObject, sanitizeFilename } from "./cos.js";
-import { calculateH3ClaimPlan, createH3QueueCoordinator, H3_CLAIM_LEASE_MS } from "./h3-queue.js";
+import { calculateH3ClaimPlan, createH3QueueCoordinator, H3_CLAIM_LEASE_MS, H3_LAN_REPORT_MAX_NODES, rankH3LanNodes } from "./h3-queue.js";
 import { localizeErrorMessage } from "../shared/error-messages.js";
 import { acceptH3OptimizedPrompt, buildH3AuthoringPrompt, compileH3Prompt, containsCjkText, h3PromptOptimizerMessages, hardenH3CompiledPrompt, parseH3AuthoringPrompt } from "./h3-prompt.js";
 import {
@@ -17,6 +17,7 @@ import {
 export const H3_ACCOUNT_BINDING_HEADER = "X-Gulong-Account-Binding";
 export const H3_SHARED_MODEL = "minimax_h3_shared";
 export const H3_OUTPUT_RETENTION_MS = 24 * 60 * 60_000;
+export const H3_TASK_TIMEOUT_MULTIPLIER = 10;
 const H3_MAX_DURATION_SECONDS = 600;
 const H3_VIDEO_MODES = new Set(["all_reference", "first_last", "smart_multiframe", "extended"]);
 const H3_LONGFORM_MODES = new Set(["continuous", "independent"]);
@@ -29,6 +30,10 @@ const H3_NODE_ONLINE_WINDOW_MS = 3 * 60_000;
 const CHINA_UTC_OFFSET_MS = 8 * 60 * 60_000;
 const NATURAL_DAY_MS = 24 * 60 * 60_000;
 const h3CleanupThrottle = new Map();
+const H3_TIMEOUT_ERROR = Object.freeze({
+  code: "H3_ESTIMATED_TIMEOUT",
+  message: "MiniMax H3 共享节点在预计总耗时的 10 倍内仍未完成，任务已自动取消并退款。请更换其他视频模型后重试。",
+});
 
 function integer(value, fallback = 0) {
   const parsed = Number(value);
@@ -50,6 +55,34 @@ export function calculateH3RevenueSplit(priceFen) {
   if (grossFen < 0) throw Object.assign(new Error("MiniMax H3 分账金额无效"), { code: "VALIDATION_ERROR", status: 400 });
   const nodeShareFen = Math.floor(grossFen / 2);
   return { grossFen, nodeShareFen, platformShareFen: grossFen - nodeShareFen };
+}
+
+export function estimateH3TaskTotalSeconds(task = {}) {
+  const durationSeconds = Math.max(1, integer(task.durationSeconds ?? task.duration_seconds, 5));
+  const profile = String(task.profile || "official_max").trim().toLowerCase();
+  const profileSecondsPerOutputSecond = {
+    official_max: 180,
+    ultra1080: 210,
+    fast2k: 135,
+    fast: 100,
+    balanced: 120,
+    turbo544: 65,
+    quality: 180,
+    preview: 45,
+  }[profile] || 180;
+  const samplingSteps = integer(task.samplingSteps ?? task.sampling_steps, 4);
+  const samplingFactor = samplingSteps >= 20 ? 3.5 : samplingSteps >= 8 ? 1.6 : 1;
+  const assetOverhead = Math.max(0, integer(task.imageCount ?? task.image_count)) * 8
+    + Math.max(0, integer(task.videoCount ?? task.video_count)) * 25
+    + Math.max(0, integer(task.audioCount ?? task.audio_count)) * 10;
+  return Math.min(6 * 60 * 60, Math.max(120, Math.ceil(durationSeconds * profileSecondsPerOutputSecond * samplingFactor + assetOverhead)));
+}
+
+export function h3TaskAutoCancelAt(createdAt, estimatedTotalSeconds) {
+  const created = new Date(createdAt);
+  if (Number.isNaN(created.getTime())) throw Object.assign(new Error("H3 任务创建时间无效"), { code: "VALIDATION_ERROR", status: 400 });
+  const estimate = Math.max(1, integer(estimatedTotalSeconds, 1));
+  return new Date(created.getTime() + estimate * H3_TASK_TIMEOUT_MULTIPLIER * 1_000);
 }
 
 export function h3CallbackEventKey(taskId, metadata = {}) {
@@ -301,12 +334,15 @@ function publicTask(task, { includePrompt = true } = {}) {
     requester: { userId: task.requesterUserId.toString(), email: task.requesterEmailSnapshot || null },
     assignee: task.assigneeUserId ? { userId: task.assigneeUserId.toString(), email: task.assigneeEmailSnapshot || null, displayName: task.assigneeDisplayNameSnapshot || null } : null,
     claimedByNode: publicNode(task.claimedByNode),
+    claimRequestedByNode: publicNode(task.claimRequestedByNode),
     executedByNode: publicNode(task.executedByNode),
     conversationId: task.conversationId?.toString?.() || task.conversationId || null,
     requestMessageId: task.requestMessageId?.toString?.() || task.requestMessageId || null,
     resultMessageId: task.resultMessageId?.toString?.() || task.resultMessageId || null,
     output: publicH3Output(task),
     error: task.error ? { ...task.error, message: localizeErrorMessage(task.error.message, "共享节点任务处理失败") } : null,
+    dispatchEstimatedTotalSeconds: Math.max(0, integer(task.dispatchEstimatedTotalSeconds)),
+    autoCancelAt: task.autoCancelAt || null,
     createdAt: task.createdAt,
     claimedAt: task.claimedAt || null,
     completedAt: task.completedAt || null,
@@ -348,9 +384,12 @@ function publicH3ConversationTask(task) {
     orderNo: task.orderNo,
     status: task.status,
     progress: Math.min(100, Math.max(0, integer(task.progress, task.status === "completed" ? 100 : 0))),
-    estimatedTotalSeconds: Math.max(0, integer(task.estimatedTotalSeconds)),
+    estimatedTotalSeconds: Math.max(0, integer(task.estimatedTotalSeconds || task.dispatchEstimatedTotalSeconds)),
+    dispatchEstimatedTotalSeconds: Math.max(0, integer(task.dispatchEstimatedTotalSeconds)),
     remainingSeconds: Math.max(0, integer(task.remainingSeconds)),
     expectedCompletedAt: task.expectedCompletedAt || null,
+    autoCancelAt: task.autoCancelAt || null,
+    error: task.error ? { ...task.error, message: localizeErrorMessage(task.error.message, "共享节点任务处理失败") } : null,
     progressUpdatedAt: task.progressUpdatedAt || task.updatedAt || null,
     progressStage: task.progressStage || null,
     createdAt: task.createdAt,
@@ -493,6 +532,9 @@ export function toH3WorkerTask(task, { assets = [], outputUpload = null } = {}) 
     videoCount: task.videoCount,
     audioCount: task.audioCount,
     assets,
+    assigned_node: task.claimedByNode ? { node_id: task.claimedByNode.nodeId, node_name: task.claimedByNode.nodeName || null } : null,
+    dispatch_estimated_total_seconds: Math.max(0, integer(task.dispatchEstimatedTotalSeconds)),
+    auto_cancel_at: task.autoCancelAt || null,
     output_upload: outputUpload,
     progress_callback: {
       method: "POST",
@@ -887,6 +929,102 @@ async function refundTask({ getCollection, task, reason, actor = "system" }) {
     || tasks.findOne({ _id: current._id });
 }
 
+export async function cancelTimedOutH3Tasks({ getCollection, notifyUserOnce = null, now = new Date(), limit = 100 } = {}) {
+  const tasks = await getCollection("h3SharedTasks");
+  const candidates = await tasks.find({
+    status: { $in: ["queued", "claimed", "processing"] },
+    autoCancelAt: { $lte: now },
+  }).sort({ autoCancelAt: 1, createdAt: 1 }).limit(Math.max(1, Math.min(500, integer(limit, 100)))).toArray();
+  const summary = { scanned: candidates.length, cancelled: 0, refunded: 0, notified: 0 };
+  for (const candidate of candidates) {
+    const cancelled = await tasks.findOneAndUpdate(
+      { _id: candidate._id, status: { $in: ["queued", "claimed", "processing"] }, autoCancelAt: { $lte: now } },
+      {
+        $set: {
+          status: "cancelled",
+          progressStage: "cancelled",
+          revenueStatus: "not_earned",
+          error: H3_TIMEOUT_ERROR,
+          cancelReason: "estimated_timeout",
+          cancelledAt: now,
+          timedOutAt: now,
+          updatedAt: now,
+        },
+        $unset: { claimLeaseUntil: "" },
+      },
+      { returnDocument: "after" },
+    );
+    if (!cancelled) continue;
+    summary.cancelled += 1;
+    const refunded = await refundTask({ getCollection, task: cancelled, reason: H3_TIMEOUT_ERROR.message, actor: "h3_estimated_timeout" });
+    if (refunded?.refundStatus === "refunded") summary.refunded += 1;
+    await Promise.allSettled([
+      (await getCollection("h3OutputUploads")).updateMany(
+        { taskId: candidate._id, status: "issued" },
+        { $set: { status: "expired", expiredAt: now, updatedAt: now }, $unset: { expiresAt: "" } },
+      ),
+      audit(await getCollection("h3TaskAudits"), "estimated_timeout_cancelled", {
+        taskId: candidate._id,
+        orderNo: candidate.orderNo,
+        requesterUserId: candidate.requesterUserId,
+        estimatedTotalSeconds: integer(candidate.estimatedTotalSeconds || candidate.dispatchEstimatedTotalSeconds),
+        autoCancelAt: candidate.autoCancelAt,
+      }),
+    ]);
+    if (notifyUserOnce) {
+      await notifyUserOnce(
+        candidate.requesterUserId,
+        "h3_task_estimated_timeout",
+        "共享节点视频任务已自动取消",
+        "任务在预计总耗时的 10 倍内仍未完成，系统已自动取消；如有预扣费用已原路退回。请更换其他视频模型后重试。",
+        { taskId: candidate._id, orderNo: candidate.orderNo, reason: "estimated_timeout" },
+      ).then(() => { summary.notified += 1; }).catch(() => {});
+    }
+  }
+  return summary;
+}
+
+function normalizeH3NodeCapabilities(capabilities = {}) {
+  const maxDurationSeconds = integer(capabilities.max_duration_seconds ?? capabilities.maxDurationSeconds, -1);
+  const profiles = Array.isArray(capabilities.profiles) ? [...new Set(capabilities.profiles.map((value) => String(value).trim().toLowerCase()).filter(Boolean))].slice(0, 30) : [];
+  const maxImageCount = integer(capabilities.max_image_count ?? capabilities.max_images ?? capabilities.maxImageCount, -1);
+  const maxVideoCount = integer(capabilities.max_video_count ?? capabilities.max_videos ?? capabilities.maxVideoCount, -1);
+  const maxAudioCount = integer(capabilities.max_audio_count ?? capabilities.max_audio ?? capabilities.maxAudioCount, -1);
+  const maxConcurrentTasks = integer(capabilities.max_concurrent_tasks ?? capabilities.maxConcurrentTasks, 1);
+  const samplingSteps = Array.isArray(capabilities.sampling_steps ?? capabilities.samplingSteps)
+    ? [...new Set((capabilities.sampling_steps ?? capabilities.samplingSteps).map((value) => integer(value, -1)).filter((value) => H3_SAMPLING_STEPS.has(value)))]
+    : [4];
+  if (maxDurationSeconds < 1 || maxDurationSeconds > H3_MAX_DURATION_SECONDS || !profiles.length || !samplingSteps.length || maxImageCount < 0 || maxImageCount > 9 || maxVideoCount < 0 || maxVideoCount > 3 || maxAudioCount < 0 || maxAudioCount > 3 || maxConcurrentTasks < 1 || maxConcurrentTasks > 8) {
+    throw Object.assign(new Error("节点必须上报有效的最大时长、profiles、采样步数、素材上限与并发上限"), { code: "INVALID_NODE_CAPABILITIES", status: 400 });
+  }
+  return {
+    gpuName: String(capabilities.gpu_name || capabilities.gpuName || capabilities.gpu || "").trim().slice(0, 160) || null,
+    vramMb: Math.max(0, integer(capabilities.vram_mb ?? capabilities.vramMb)),
+    maxDurationSeconds,
+    profiles,
+    samplingSteps,
+    maxImageCount,
+    maxVideoCount,
+    maxAudioCount,
+    maxConcurrentTasks,
+    batchCapable: capabilities.batch_claim === true || capabilities.batch_claim_v1 === true || capabilities.batchCapable === true,
+    longformV1: capabilities.longform_v1 === true || capabilities.longformV1 === true,
+    localPromptOptimizationV1: capabilities.local_prompt_optimization_v1 === true || capabilities.localPromptOptimizationV1 === true,
+  };
+}
+
+export function h3NodeCanRunTask(node, task) {
+  const capabilities = node?.capabilities || {};
+  if (!node || node.availableSlots < 1 || !capabilities.profiles?.includes?.(String(task.profile || "").toLowerCase())) return false;
+  if (!capabilities.samplingSteps?.includes?.(integer(task.samplingSteps, 4))) return false;
+  if (integer(task.imageCount) > capabilities.maxImageCount || integer(task.videoCount) > capabilities.maxVideoCount || integer(task.audioCount) > capabilities.maxAudioCount) return false;
+  if (task.videoMode === "extended") {
+    if (!capabilities.longformV1 || integer(task.segmentDurationSeconds) > capabilities.maxDurationSeconds) return false;
+  } else if (integer(task.durationSeconds) > capabilities.maxDurationSeconds) return false;
+  const optimizationRequired = task.promptOptimizationEnabled !== false && task.localPromptOptimizationRequired !== false;
+  return !optimizationRequired || capabilities.localPromptOptimizationV1;
+}
+
 function routeError(c, error) {
   return c.json({ code: error.code || "H3_SHARED_ERROR", message: localizeErrorMessage(error, "共享节点服务暂时不可用") }, error.status || 500);
 }
@@ -900,6 +1038,7 @@ export function registerH3SharedRoutes(app, dependencies) {
   const removeCosObject = dependencies.deleteObject || deleteObject;
   const ensureUploadCors = dependencies.ensureBrowserUploadCors || ensureBrowserUploadCors;
   const queueCoordinator = dependencies.queueCoordinator || createH3QueueCoordinator({ getCollection, model: H3_SHARED_MODEL });
+  const notifyOnce = dependencies.notifyUserOnce || null;
   const { authenticate, requireAdmin, requireTrustedMutation, verifyActivationReceipt } = dependencies;
 
   async function authenticateBinding(c, { requireNodeId, touch = true } = {}) {
@@ -1118,11 +1257,14 @@ export function registerH3SharedRoutes(app, dependencies) {
       } : {};
       const chargeKey = `h3:charge:${orderNo}:0`;
       const exempt = auth.user.role === "admin";
+      const dispatchEstimatedTotalSeconds = estimateH3TaskTotalSeconds(input);
+      const autoCancelAt = h3TaskAutoCancelAt(now, dispatchEstimatedTotalSeconds);
       const task = {
         _id: taskId, orderNo, idempotencyKey, requesterUserId: ownerId, requesterEmailSnapshot: auth.user.email || null, requesterRoleSnapshot: auth.user.role || "user", ...input, ...conversation,
         ...(exempt ? {} : { walletLedgerId: chargeKey, activeChargeKey: chargeKey }),
         chargedFen: exempt ? 0 : input.priceFen,
         billingMode: exempt ? "administrator_exempt" : "wallet",
+        dispatchEstimatedTotalSeconds, autoCancelAt,
         status: exempt ? "queued" : "reserving", chargeStatus: exempt ? "exempt" : "reserving", revenueStatus: exempt ? "exempt" : "pending",
         ...(exempt ? { queuedAt: now } : {}), retryCount: 0, createdAt: now, updatedAt: now,
       };
@@ -1170,6 +1312,7 @@ export function registerH3SharedRoutes(app, dependencies) {
 
   app.get("/api/h3/tasks", async (c) => {
     const auth = await authenticate(c, { scopes: ["tasks:read"] }); if (auth.error) return auth.error;
+    await cancelTimedOutH3Tasks({ getCollection, notifyUserOnce: notifyOnce, limit: 100 }).catch(() => {});
     const tasks = await (await getCollection("h3SharedTasks")).find({ requesterUserId: new ObjectId(auth.user.id) }).sort({ createdAt: -1 }).limit(50).toArray();
     return c.json({ tasks: tasks.map((task) => publicTask(task)) });
   });
@@ -1178,6 +1321,7 @@ export function registerH3SharedRoutes(app, dependencies) {
     const auth = await authenticate(c, { scopes: ["tasks:read"] }); if (auth.error) return auth.error;
     c.header("Cache-Control", "private, no-store, max-age=0");
     const ownerId = new ObjectId(auth.user.id);
+    await cancelTimedOutH3Tasks({ getCollection, notifyUserOnce: notifyOnce, limit: 100 }).catch(() => {});
     await backfillCompletedH3ConversationMessages({ getCollection, ownerId, limit: 50 });
     const cleanupKey = ownerId.toString();
     if (!h3CleanupThrottle.has(cleanupKey) || Date.now() - h3CleanupThrottle.get(cleanupKey) >= 60_000) {
@@ -1260,23 +1404,11 @@ export function registerH3SharedRoutes(app, dependencies) {
     const body = await c.req.json().catch(() => ({}));
     const nodeId = String(body.node_id || "").trim();
     const auth = await authenticateBinding(c, { requireNodeId: nodeId, touch: false }); if (auth.error) return auth.error;
-    const capabilities = body.capabilities && typeof body.capabilities === "object" ? body.capabilities : {};
-    const maxDurationSeconds = integer(capabilities.max_duration_seconds, -1);
-    const profiles = Array.isArray(capabilities.profiles) ? [...new Set(capabilities.profiles.map((value) => String(value).trim().toLowerCase()).filter(Boolean))].slice(0, 30) : [];
-    const maxImageCount = integer(capabilities.max_image_count ?? capabilities.max_images, -1);
-    const maxVideoCount = integer(capabilities.max_video_count ?? capabilities.max_videos, -1);
-    const maxAudioCount = integer(capabilities.max_audio_count ?? capabilities.max_audio, -1);
-    const vramMb = Math.max(0, integer(capabilities.vram_mb));
-    const gpuName = String(capabilities.gpu_name || capabilities.gpu || "").trim().slice(0, 160) || null;
-    const localPromptOptimizationV1 = capabilities.local_prompt_optimization_v1 === true;
-    const batchCapable = capabilities.batch_claim === true || capabilities.batch_claim_v1 === true;
-    const longformV1 = capabilities.longform_v1 === true;
-    const maxConcurrentTasks = integer(capabilities.max_concurrent_tasks, 1);
-    const samplingSteps = Array.isArray(capabilities.sampling_steps) ? [...new Set(capabilities.sampling_steps.map((value) => integer(value, -1)).filter((value) => H3_SAMPLING_STEPS.has(value)))] : [4];
-    if (maxDurationSeconds < 1 || maxDurationSeconds > H3_MAX_DURATION_SECONDS || !profiles.length || !samplingSteps.length || maxImageCount < 0 || maxImageCount > 9 || maxVideoCount < 0 || maxVideoCount > 3 || maxAudioCount < 0 || maxAudioCount > 3 || maxConcurrentTasks < 1 || maxConcurrentTasks > 8) return c.json({ code: "INVALID_NODE_CAPABILITIES", message: "节点必须上报有效的最大时长、profiles、采样步数、素材上限与并发上限" }, 400);
+    let reportedCapabilities;
+    try { reportedCapabilities = normalizeH3NodeCapabilities(body.capabilities && typeof body.capabilities === "object" ? body.capabilities : {}); }
+    catch (error) { return routeError(c, error); }
     const now = new Date();
     const nodeName = String(body.node_name || auth.binding.nodeName || "").slice(0, 120);
-    const reportedCapabilities = { gpuName, vramMb, maxDurationSeconds, profiles, samplingSteps, maxImageCount, maxVideoCount, maxAudioCount, maxConcurrentTasks, batchCapable, longformV1, localPromptOptimizationV1 };
     const heartbeat = { nodeName, lastSeenAt: now, lastUsedAt: now, queueStatus: body.dry_run === true ? "reachable" : "polling", capabilities: reportedCapabilities, updatedAt: now };
     if (body.dry_run !== true && auth.binding.nextClaimAt && new Date(auth.binding.nextClaimAt) > now) {
       const retryAfterMs = Math.max(250, new Date(auth.binding.nextClaimAt).getTime() - now.getTime());
@@ -1289,7 +1421,7 @@ export function registerH3SharedRoutes(app, dependencies) {
         additional_tasks: [],
         claim_plan: {
           ...(auth.binding.lastClaimPlan || {}),
-          scheduling: "oldest_first",
+          scheduling: auth.binding.lastClaimPlan?.scheduling || "fifo_least_estimated_lan_load",
           throttled: true,
           assigned_count: 0,
           poll_after_ms: retryAfterMs,
@@ -1303,6 +1435,7 @@ export function registerH3SharedRoutes(app, dependencies) {
       { $set: heartbeat },
     );
     if (body.dry_run === true) return c.json({ ok: true, service: "gulong-h3-shared", queue: "reachable" });
+    await cancelTimedOutH3Tasks({ getCollection, notifyUserOnce: notifyOnce, now, limit: 100 }).catch(() => {});
     const tasks = await getCollection("h3SharedTasks");
     let queueSnapshot;
     try {
@@ -1310,42 +1443,172 @@ export function registerH3SharedRoutes(app, dependencies) {
     } catch {
       queueSnapshot = { cached: false, queuedCount: 1, activeNodeCount: 1, oldestQueuedAt: null, cacheAgeMs: null, stale: true };
     }
-    const activeTaskCount = await tasks.countDocuments({ status: { $in: ["claimed", "processing"] }, "claimedByNode.bindingId": auth.binding._id, claimLeaseUntil: { $gt: now } });
+    const clusterPayload = body.lan_cluster && typeof body.lan_cluster === "object" ? body.lan_cluster : null;
+    const rawClusterNodes = Array.isArray(clusterPayload?.nodes) ? clusterPayload.nodes : Array.isArray(body.lan_nodes) ? body.lan_nodes : null;
+    const clusterId = String(clusterPayload?.cluster_id || body.lan_cluster_id || "").trim();
+    const explicitLanReport = Boolean(rawClusterNodes);
+    let clusterNodes;
+    if (explicitLanReport) {
+      if (!/^[A-Za-z0-9._:-]{12,160}$/.test(clusterId) || rawClusterNodes.length < 1 || rawClusterNodes.length > H3_LAN_REPORT_MAX_NODES) {
+        return c.json({ code: "INVALID_LAN_CLUSTER_REPORT", message: `局域网负载报告必须提供稳定匿名 cluster_id，并包含 1–${H3_LAN_REPORT_MAX_NODES} 个节点` }, 400);
+      }
+      const observedAt = new Date(clusterPayload?.observed_at || body.lan_observed_at || now);
+      if (Number.isNaN(observedAt.getTime()) || Math.abs(now.getTime() - observedAt.getTime()) > 2 * 60_000) {
+        return c.json({ code: "STALE_LAN_CLUSTER_REPORT", message: "局域网负载报告已过期，请刷新全部节点状态后重试" }, 400);
+      }
+      const normalizedReports = [];
+      const seenNodeIds = new Set();
+      try {
+        for (const report of rawClusterNodes) {
+          const reportedNodeId = String(report?.node_id || "").trim();
+          if (!/^[A-Za-z0-9._:-]{12,160}$/.test(reportedNodeId) || seenNodeIds.has(reportedNodeId)) throw Object.assign(new Error("局域网节点 ID 无效或重复"), { code: "INVALID_LAN_CLUSTER_REPORT", status: 400 });
+          seenNodeIds.add(reportedNodeId);
+          const nodeCapabilities = normalizeH3NodeCapabilities(report.capabilities || (reportedNodeId === auth.binding.nodeId ? body.capabilities : {}));
+          normalizedReports.push({
+            nodeId: reportedNodeId,
+            nodeName: String(report.node_name || "").trim().slice(0, 120),
+            runningTaskCount: Math.max(0, integer(report.running_task_count)),
+            estimatedTotalSeconds: Math.max(0, integer(report.estimated_total_seconds ?? report.estimated_remaining_seconds)),
+            capabilities: nodeCapabilities,
+            available: report.available !== false,
+          });
+        }
+      } catch (error) { return routeError(c, error); }
+      if (!seenNodeIds.has(auth.binding.nodeId)) return c.json({ code: "CALLER_MISSING_FROM_LAN_REPORT", message: "局域网负载报告必须包含当前轮询节点" }, 400);
+      const bindingRecords = await (await getCollection("nodeAccountBindings")).find({ userId: auth.user._id, nodeId: { $in: [...seenNodeIds] }, status: "active", revokedAt: null }).toArray();
+      const bindingByNodeId = new Map(bindingRecords.map((binding) => [binding.nodeId, binding]));
+      if (bindingByNodeId.size !== seenNodeIds.size) return c.json({ code: "LAN_NODE_NOT_BOUND", message: "局域网负载报告包含未绑定到当前账号的节点" }, 403);
+      clusterNodes = normalizedReports.map((report) => ({
+        ...report,
+        binding: bindingByNodeId.get(report.nodeId),
+        runningTaskCount: report.available ? report.runningTaskCount : report.capabilities.maxConcurrentTasks,
+      }));
+    } else {
+      clusterNodes = [{
+        nodeId: auth.binding.nodeId,
+        nodeName,
+        binding: auth.binding,
+        runningTaskCount: 0,
+        estimatedTotalSeconds: 0,
+        capabilities: reportedCapabilities,
+        available: true,
+      }];
+    }
+    let clusterLease = null;
+    if (explicitLanReport) {
+      const states = await getCollection("h3LanClusterStates");
+      const stateId = createHash("sha256").update(`${auth.user._id}:${clusterId}`).digest("hex");
+      await states.updateOne(
+        { _id: stateId },
+        { $setOnInsert: { _id: stateId, userId: auth.user._id, clusterIdHash: createHash("sha256").update(clusterId).digest("hex"), nextClaimAt: new Date(0), createdAt: now } },
+        { upsert: true },
+      );
+      const leaseOwner = randomBytes(12).toString("hex");
+      const acquired = await states.findOneAndUpdate(
+        {
+          _id: stateId,
+          nextClaimAt: { $lte: now },
+          $or: [{ claimLeaseUntil: { $exists: false } }, { claimLeaseUntil: null }, { claimLeaseUntil: { $lte: now } }],
+        },
+        { $set: { claimLeaseOwner: leaseOwner, claimLeaseUntil: new Date(now.getTime() + 5_000), lastPollingBindingId: auth.binding._id, observedAt: now, updatedAt: now } },
+        { returnDocument: "after" },
+      );
+      if (!acquired || acquired.claimLeaseOwner !== leaseOwner) {
+        const current = await states.findOne({ _id: stateId });
+        const retryAfterMs = Math.max(500, Math.min(30_000, new Date(current?.nextClaimAt || now.getTime() + 1_000).getTime() - now.getTime() || 1_000));
+        c.header("Retry-After", String(Math.max(1, Math.ceil(retryAfterMs / 1_000))));
+        return c.json({
+          task: null,
+          additional_tasks: [],
+          claim_plan: {
+            ...(current?.lastClaimPlan || {}),
+            scheduling: "fifo_least_estimated_lan_load",
+            lan_protocol: "lan-load-v1",
+            cluster_throttled: true,
+            assigned_count: 0,
+            poll_after_ms: retryAfterMs,
+          },
+        });
+      }
+      clusterLease = { states, stateId, leaseOwner };
+    }
+    const bindingIds = clusterNodes.map((node) => node.binding._id);
+    const activeAssignments = await tasks.find({
+      status: { $in: ["claimed", "processing"] },
+      "claimedByNode.bindingId": { $in: bindingIds },
+      claimLeaseUntil: { $gt: now },
+    }).limit(512).toArray();
+    const authoritativeLoad = new Map();
+    for (const activeTask of activeAssignments) {
+      const bindingId = idText(activeTask.claimedByNode?.bindingId);
+      if (!bindingId) continue;
+      const current = authoritativeLoad.get(bindingId) || { runningTaskCount: 0, estimatedTotalSeconds: 0 };
+      current.runningTaskCount += 1;
+      current.estimatedTotalSeconds += Math.max(0, integer(activeTask.remainingSeconds || activeTask.estimatedTotalSeconds || activeTask.dispatchEstimatedTotalSeconds));
+      authoritativeLoad.set(bindingId, current);
+    }
+    clusterNodes = clusterNodes.map((node) => {
+      const serverLoad = authoritativeLoad.get(idText(node.binding._id));
+      if (!serverLoad) return node;
+      return {
+        ...node,
+        runningTaskCount: Math.max(node.runningTaskCount, serverLoad.runningTaskCount),
+        estimatedTotalSeconds: Math.max(node.estimatedTotalSeconds, serverLoad.estimatedTotalSeconds),
+      };
+    });
+    clusterNodes = rankH3LanNodes(clusterNodes);
+    const clusterRunningTaskCount = clusterNodes.reduce((sum, node) => sum + node.runningTaskCount, 0);
+    const clusterCapacity = clusterNodes.reduce((sum, node) => sum + node.capabilities.maxConcurrentTasks, 0);
     const claimPlan = calculateH3ClaimPlan({
       queuedCount: queueSnapshot.queuedCount,
-      activeNodeCount: queueSnapshot.activeNodeCount,
-      activeTaskCount,
-      maxConcurrentTasks,
-      batchCapable,
-      jitterSeed: auth.binding.nodeId,
+      activeNodeCount: Math.max(queueSnapshot.activeNodeCount, clusterNodes.length),
+      activeTaskCount: clusterRunningTaskCount,
+      maxConcurrentTasks: clusterCapacity,
+      batchCapable: explicitLanReport || reportedCapabilities.batchCapable,
+      jitterSeed: clusterId || auth.binding.nodeId,
     });
-    const node = { nodeId: auth.binding.nodeId, nodeName, bindingId: auth.binding._id, userId: auth.user._id, at: now };
-    const durationCapabilityQuery = longformV1
-      ? { $or: [{ videoMode: "extended", segmentDurationSeconds: { $lte: maxDurationSeconds } }, { videoMode: { $ne: "extended" }, durationSeconds: { $lte: maxDurationSeconds } }] }
-      : { videoMode: { $ne: "extended" }, durationSeconds: { $lte: maxDurationSeconds } };
+    const dispatcherNode = { nodeId: auth.binding.nodeId, nodeName, bindingId: auth.binding._id, userId: auth.user._id, at: now };
     const claimed = [];
     try {
       for (let index = 0; index < claimPlan.recommendedBatchSize; index += 1) {
-        const task = await tasks.findOneAndUpdate(
-          { status: "queued", model: H3_SHARED_MODEL, profile: { $in: profiles }, $and: [{ $or: [{ samplingSteps: { $in: samplingSteps } }, { samplingSteps: { $exists: false } }] }, durationCapabilityQuery], imageCount: { $lte: maxImageCount }, videoCount: { $lte: maxVideoCount }, audioCount: { $lte: maxAudioCount }, ...(localPromptOptimizationV1 ? {} : { promptOptimizationEnabled: false, localPromptOptimizationRequired: false }) },
-          { $set: { status: "claimed", claimedByNode: { ...node, capabilities: reportedCapabilities }, claimedAt: now, claimLeaseUntil: new Date(now.getTime() + H3_CLAIM_LEASE_MS), updatedAt: now } },
-          { sort: { createdAt: 1, _id: 1 }, returnDocument: "after" },
-        );
-        if (!task) break;
-        const entry = { task, outputUpload: null };
+        const oldestCandidates = await tasks.find({ status: "queued", model: H3_SHARED_MODEL }).sort({ createdAt: 1, _id: 1 }).limit(100).toArray();
+        let selectedTask = null;
+        let selectedNode = null;
+        for (const candidate of oldestCandidates) {
+          const eligibleNodes = rankH3LanNodes(clusterNodes).filter((node) => h3NodeCanRunTask(node, candidate));
+          if (!eligibleNodes.length) continue;
+          for (const candidateNode of eligibleNodes) {
+            const assignedNode = { nodeId: candidateNode.nodeId, nodeName: candidateNode.nodeName || candidateNode.binding.nodeName || null, bindingId: candidateNode.binding._id, userId: candidateNode.binding.userId, at: now, capabilities: candidateNode.capabilities };
+            const claimedTask = await tasks.findOneAndUpdate(
+              { _id: candidate._id, status: "queued", model: H3_SHARED_MODEL },
+              { $set: { status: "claimed", claimedByNode: assignedNode, claimRequestedByNode: dispatcherNode, claimedAt: now, claimLeaseUntil: new Date(now.getTime() + H3_CLAIM_LEASE_MS), updatedAt: now } },
+              { returnDocument: "after" },
+            );
+            if (!claimedTask) continue;
+            selectedTask = claimedTask;
+            selectedNode = clusterNodes.find((node) => node.nodeId === candidateNode.nodeId) || candidateNode;
+            break;
+          }
+          if (selectedTask) break;
+        }
+        if (!selectedTask || !selectedNode) break;
+        selectedNode.runningTaskCount += 1;
+        selectedNode.estimatedTotalSeconds += Math.max(1, integer(selectedTask.dispatchEstimatedTotalSeconds || selectedTask.estimatedTotalSeconds, estimateH3TaskTotalSeconds(selectedTask)));
+        const targetAuth = { binding: selectedNode.binding, user: auth.user };
+        const entry = { task: selectedTask, outputUpload: null, selectedNode };
         claimed.push(entry);
-        entry.outputUpload = await issueOutputUpload(task, auth, now);
+        entry.outputUpload = await issueOutputUpload(selectedTask, targetAuth, now);
       }
     } catch (error) {
       const taskIds = claimed.map((entry) => entry.task._id);
       if (taskIds.length) {
         await Promise.allSettled([
           tasks.updateMany(
-            { _id: { $in: taskIds }, status: "claimed", "claimedByNode.bindingId": auth.binding._id, claimedAt: now },
-            { $set: { status: "queued", queuedAt: now, updatedAt: new Date(), error: { code: "OUTPUT_UPLOAD_TICKET_FAILED", message: "输出直传票据签发失败" } }, $unset: { claimedByNode: "", claimedAt: "", claimLeaseUntil: "" } },
+            { _id: { $in: taskIds }, status: "claimed", "claimRequestedByNode.bindingId": auth.binding._id, claimedAt: now },
+            { $set: { status: "queued", queuedAt: now, updatedAt: new Date(), error: { code: "OUTPUT_UPLOAD_TICKET_FAILED", message: "输出直传票据签发失败" } }, $unset: { claimedByNode: "", claimRequestedByNode: "", claimedAt: "", claimLeaseUntil: "" } },
           ),
           (await getCollection("h3OutputUploads")).updateMany(
-            { taskId: { $in: taskIds }, status: "issued", issuedToBindingId: auth.binding._id, createdAt: now },
+            { taskId: { $in: taskIds }, status: "issued", createdAt: now },
             { $set: { status: "expired", expiredAt: new Date(), updatedAt: new Date() }, $unset: { expiresAt: "" } },
           ),
           queueCoordinator.invalidate(),
@@ -1357,26 +1620,41 @@ export function registerH3SharedRoutes(app, dependencies) {
     const pollAfterMs = assignedCount === 0 && claimPlan.recommendedBatchSize > 0 ? Math.max(5_000, claimPlan.pollAfterMs) : claimPlan.pollAfterMs;
     const nextClaimAt = new Date(now.getTime() + pollAfterMs);
     const publicPlan = {
-      scheduling: "oldest_first",
+      scheduling: "fifo_least_estimated_lan_load",
+      lan_protocol: explicitLanReport ? "lan-load-v1" : "legacy-single-node",
+      lan_cluster_id_hash: explicitLanReport ? createHash("sha256").update(clusterId).digest("hex") : null,
+      reported_node_count: clusterNodes.length,
       queue_snapshot_cached: queueSnapshot.cached !== false,
       queue_snapshot_stale: Boolean(queueSnapshot.stale),
       queued_count: Math.max(0, queueSnapshot.queuedCount - assignedCount),
       active_node_count: queueSnapshot.activeNodeCount,
-      active_task_count: activeTaskCount + assignedCount,
+      active_task_count: clusterRunningTaskCount + assignedCount,
       available_slots: Math.max(0, claimPlan.availableSlots - assignedCount),
       recommended_batch_size: claimPlan.recommendedBatchSize,
       assigned_count: assignedCount,
-      max_concurrent_tasks: maxConcurrentTasks,
+      max_concurrent_tasks: clusterCapacity,
       poll_after_ms: pollAfterMs,
       oldest_queued_at: queueSnapshot.oldestQueuedAt?.toISOString?.() || null,
       cache_age_ms: queueSnapshot.cacheAgeMs,
     };
     await (await getCollection("nodeAccountBindings")).updateOne(
       { _id: auth.binding._id },
-      { $set: { queueStatus: assignedCount ? "processing" : "idle", nextClaimAt, lastClaimPlan: publicPlan, ...(assignedCount ? { lastClaimedAt: now } : {}), updatedAt: new Date() } },
+      { $set: { queueStatus: claimed.some((entry) => idText(entry.selectedNode.binding._id) === idText(auth.binding._id)) ? "processing" : assignedCount ? "dispatching" : "idle", nextClaimAt, lastClaimPlan: publicPlan, ...(assignedCount ? { lastClaimedAt: now } : {}), updatedAt: new Date() } },
     );
+    await Promise.all(claimed
+      .filter((entry) => idText(entry.selectedNode.binding._id) !== idText(auth.binding._id))
+      .map((entry) => (getCollection("nodeAccountBindings")).then((bindings) => bindings.updateOne(
+        { _id: entry.selectedNode.binding._id, userId: auth.user._id, status: "active" },
+        { $set: { queueStatus: "processing", lastClaimedAt: now, lastSeenAt: now, updatedAt: new Date() } },
+      ))));
+    if (clusterLease) {
+      await clusterLease.states.updateOne(
+        { _id: clusterLease.stateId, claimLeaseOwner: clusterLease.leaseOwner },
+        { $set: { nextClaimAt, lastClaimPlan: publicPlan, updatedAt: new Date() }, $unset: { claimLeaseOwner: "", claimLeaseUntil: "" } },
+      );
+    }
     c.header("Retry-After", String(Math.max(1, Math.ceil(pollAfterMs / 1_000))));
-    await audit(await getCollection("h3TaskAudits"), assignedCount ? "claimed" : "claim_empty", { taskId: claimed[0]?.task?._id || null, taskIds: claimed.map((entry) => entry.task._id), actorUserId: auth.user._id, bindingId: auth.binding._id, nodeId: auth.binding.nodeId, capabilities: reportedCapabilities, claimPlan: publicPlan, reportedEmail: String(body.bound_account_email || "").slice(0, 254), reportedUserId: String(body.bound_account_id || "").slice(0, 80) });
+    await audit(await getCollection("h3TaskAudits"), assignedCount ? "claimed" : "claim_empty", { taskId: claimed[0]?.task?._id || null, taskIds: claimed.map((entry) => entry.task._id), assignedNodeIds: claimed.map((entry) => entry.selectedNode.nodeId), lanLoad: clusterNodes.map((entry) => ({ nodeId: entry.nodeId, runningTaskCount: entry.runningTaskCount, estimatedTotalSeconds: entry.estimatedTotalSeconds })), actorUserId: auth.user._id, bindingId: auth.binding._id, nodeId: auth.binding.nodeId, capabilities: reportedCapabilities, claimPlan: publicPlan, reportedEmail: String(body.bound_account_email || "").slice(0, 254), reportedUserId: String(body.bound_account_id || "").slice(0, 80) });
     const workerTasks = claimed.map(({ task, outputUpload }) => toH3WorkerTask(task, { assets: claimAssets(task.assets), outputUpload }));
     return c.json({ task: workerTasks[0] || null, additional_tasks: workerTasks.slice(1), claim_plan: publicPlan });
   });
@@ -1398,6 +1676,16 @@ export function registerH3SharedRoutes(app, dependencies) {
     const tasks = await getCollection("h3SharedTasks");
     let task = await tasks.findOne(filter);
     if (!task) return c.json({ code: "TASK_NOT_FOUND", message: "共享节点任务不存在" }, 404);
+    if (["queued", "claimed", "processing"].includes(task.status) && task.autoCancelAt && new Date(task.autoCancelAt) <= new Date()) {
+      await cancelTimedOutH3Tasks({ getCollection, notifyUserOnce: notifyOnce, limit: 100 }).catch(() => {});
+      task = await tasks.findOne(filter);
+      if (task?.status === "cancelled" && task?.error?.code === H3_TIMEOUT_ERROR.code) {
+        return c.json({ code: H3_TIMEOUT_ERROR.code, message: H3_TIMEOUT_ERROR.message }, 409);
+      }
+    }
+    if (task.claimedByNode?.bindingId && idText(task.claimedByNode.bindingId) !== idText(auth.binding._id)) {
+      return c.json({ code: "TASK_ASSIGNED_TO_ANOTHER_NODE", message: "该任务已由调度器分配给其他局域网节点，请由响应 assigned_node 指定的节点执行和回调" }, 409);
+    }
     const status = String(metadata.status || "").trim().toLowerCase();
     if (!["optimizing", "started", "processing", "progress", "completed", "succeeded", "failed", "cancelled"].includes(status)) return c.json({ code: "VALIDATION_ERROR", message: "回调状态不正确" }, 400);
     const eventKey = h3CallbackEventKey(task._id, metadata);
@@ -1441,6 +1729,8 @@ export function registerH3SharedRoutes(app, dependencies) {
       const normalizedProgress = normalizeH3ProgressCallback(task, metadata);
       if (normalizedProgress.error) return c.json(normalizedProgress.error, 400);
       const { progress, estimatedTotalSeconds, remainingSeconds } = normalizedProgress;
+      const timeoutEstimate = Math.max(integer(task.dispatchEstimatedTotalSeconds), estimatedTotalSeconds);
+      const autoCancelAt = h3TaskAutoCancelAt(task.createdAt, timeoutEstimate);
       const promptOptimization = metadata.prompt_optimization && typeof metadata.prompt_optimization === "object" ? metadata.prompt_optimization : {};
       const promptCompilation = suppliedCompiledPrompt ? {
         mode: "desktop_local_magic_v1",
@@ -1454,7 +1744,7 @@ export function registerH3SharedRoutes(app, dependencies) {
       } : task.promptCompilation;
       task = await tasks.findOneAndUpdate(
         { _id: task._id, status: { $in: ["claimed", "processing"] } },
-        { $set: { status: "processing", executedByNode: executionNode, progress, progressStage: "video_generation", ...(suppliedCompiledPrompt ? { compiledPrompt: suppliedCompiledPrompt, promptCompilation } : {}), ...(estimatedTotalSeconds > 0 ? { estimatedTotalSeconds } : {}), ...(remainingSeconds > 0 ? { remainingSeconds, expectedCompletedAt: new Date(now.getTime() + remainingSeconds * 1_000) } : {}), progressUpdatedAt: now, claimLeaseUntil: new Date(now.getTime() + H3_CLAIM_LEASE_MS), updatedAt: now } },
+        { $set: { status: "processing", executedByNode: executionNode, progress, progressStage: "video_generation", ...(suppliedCompiledPrompt ? { compiledPrompt: suppliedCompiledPrompt, promptCompilation } : {}), ...(estimatedTotalSeconds > 0 ? { estimatedTotalSeconds, autoCancelAt } : {}), ...(remainingSeconds > 0 ? { remainingSeconds, expectedCompletedAt: new Date(now.getTime() + remainingSeconds * 1_000) } : {}), progressUpdatedAt: now, claimLeaseUntil: new Date(now.getTime() + H3_CLAIM_LEASE_MS), updatedAt: now } },
         { returnDocument: "after" },
       ) || task;
       return c.json({ ok: true, idempotent: H3_TERMINAL_STATUSES.has(task.status), task: workerCallbackTask(task) });
@@ -1470,7 +1760,7 @@ export function registerH3SharedRoutes(app, dependencies) {
       const taskPrefix = `h3/tasks/${task._id}/outputs/`;
       if (!objectKey.startsWith(taskPrefix) || objectKey.includes("..")) return c.json({ code: "OUTPUT_OBJECT_FORBIDDEN", message: "输出对象不属于当前任务" }, 403);
       const uploads = await getCollection("h3OutputUploads");
-      const grant = await uploads.findOne({ taskId: task._id, objectKey, status: { $in: ["issued", "completed"] } });
+      const grant = await uploads.findOne({ taskId: task._id, objectKey, issuedToBindingId: auth.binding._id, status: { $in: ["issued", "completed"] } });
       if (!grant) return c.json({ code: "OUTPUT_UPLOAD_GRANT_NOT_FOUND", message: "输出直传票据不存在或不属于当前任务" }, 409);
       if (grant.status !== "completed" && grant.expiresAt <= now) return c.json({ code: "OUTPUT_UPLOAD_GRANT_EXPIRED", message: "输出直传票据已过期，请重新领取任务" }, 409);
       let head;
@@ -1513,6 +1803,7 @@ export function registerH3SharedRoutes(app, dependencies) {
 
   app.get("/api/admin/h3/tasks", async (c) => {
     const auth = await requireAdmin(c); if (auth.error) return auth.error;
+    await cancelTimedOutH3Tasks({ getCollection, notifyUserOnce: notifyOnce, limit: 200 }).catch(() => {});
     const filter = {};
     const status = String(c.req.query("status") || "").trim();
     const source = String(c.req.query("source") || "").trim();
@@ -1583,7 +1874,7 @@ export function registerH3SharedRoutes(app, dependencies) {
     }
     const queued = await tasks.findOneAndUpdate(
       { _id: task._id, status: task.status, ...(exempt || packageNoCharge ? {} : { refundStatus: "refunded" }) },
-      { $set: { status: "queued", ...retryBilling, refundStatus: null, ...(exempt ? { administratorExemptedAt: new Date() } : { activeChargeKey: chargeKey, walletLedgerId: chargeKey }), retryCount, queuedAt: new Date(), updatedAt: new Date() }, $unset: { claimedByNode: "", executedByNode: "", assigneeUserId: "", assigneeEmailSnapshot: "", assigneeDisplayNameSnapshot: "", output: "", error: "", settlement: "", claimedAt: "", claimLeaseUntil: "", completedAt: "", failedAt: "", cancelledAt: "", refundedAt: "", refundReason: "" } },
+      { $set: { status: "queued", ...retryBilling, refundStatus: null, ...(exempt ? { administratorExemptedAt: new Date() } : { activeChargeKey: chargeKey, walletLedgerId: chargeKey }), retryCount, autoCancelAt: h3TaskAutoCancelAt(new Date(), integer(task.dispatchEstimatedTotalSeconds || task.estimatedTotalSeconds, estimateH3TaskTotalSeconds(task))), queuedAt: new Date(), updatedAt: new Date() }, $unset: { claimedByNode: "", claimRequestedByNode: "", executedByNode: "", assigneeUserId: "", assigneeEmailSnapshot: "", assigneeDisplayNameSnapshot: "", output: "", error: "", settlement: "", claimedAt: "", claimLeaseUntil: "", completedAt: "", failedAt: "", cancelledAt: "", timedOutAt: "", refundedAt: "", refundReason: "" } },
       { returnDocument: "after" },
     );
     await queueCoordinator.invalidate().catch(() => {});
@@ -1596,9 +1887,10 @@ export function registerH3SharedRoutes(app, dependencies) {
     if (!cronSecret) return c.json({ code: "CRON_NOT_CONFIGURED", message: "H3 视频清理任务尚未配置" }, 503);
     if (c.req.header("authorization") !== `Bearer ${cronSecret}`) return c.json({ code: "UNAUTHORIZED", message: "无权执行 H3 视频清理任务" }, 401);
     c.header("Cache-Control", "private, no-store, max-age=0");
+    const timeouts = await cancelTimedOutH3Tasks({ getCollection, notifyUserOnce: notifyOnce, limit: 500 });
     const backfill = await backfillCompletedH3ConversationMessages({ getCollection, limit: 200 });
     const cleanup = await cleanupExpiredH3Outputs({ getCollection, removeObject: removeCosObject, limit: 200 });
-    return c.json({ ok: true, backfill, cleanup, completedAt: new Date().toISOString() });
+    return c.json({ ok: true, backfill, timeouts, cleanup, completedAt: new Date().toISOString() });
   });
 
   app.openAPIRegistry.registerComponent("securitySchemes", "accountBinding", { type: "apiKey", in: "header", name: H3_ACCOUNT_BINDING_HEADER, description: "桌面端账号绑定时签发的可撤销高熵令牌；服务端仅保存哈希。" });
@@ -1607,6 +1899,8 @@ export function registerH3SharedRoutes(app, dependencies) {
   const unknownUserSchema = errorSchema.extend({ register_url: z.url() });
   const earningsDeviceSchema = z.object({ node_id: z.string(), node_name: z.string(), gpu_name: z.string().nullable(), vram_mb: z.number().int(), online: z.boolean(), status: z.enum(["online", "offline"]), queue_status: z.string(), total_earnings_fen: z.number().int(), settled_earnings_fen: z.number().int(), pending_earnings_fen: z.number().int(), average_daily_earnings_fen: z.number().int(), active_days: z.number().int(), completed_task_count: z.number().int(), last_claimed_at: z.string().nullable(), last_callback_at: z.string().nullable(), last_completed_at: z.string().nullable(), app_version: z.string().nullable() });
   const earningsSummarySchema = z.object({ ok: z.literal(true), currency: z.literal("CNY"), account: z.object({ total_earnings_fen: z.number().int(), settled_earnings_fen: z.number().int(), pending_earnings_fen: z.number().int(), average_daily_earnings_fen: z.number().int(), active_days: z.number().int(), device_count: z.number().int() }), current_device: z.object({ node_id: z.string(), node_name: z.string(), total_earnings_fen: z.number().int(), average_daily_earnings_fen: z.number().int(), completed_task_count: z.number().int(), last_completed_at: z.string().nullable() }).nullable(), devices: z.array(earningsDeviceSchema) });
+  const h3NodeCapabilitiesSchema = z.object({ max_duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profiles: z.array(z.string()).min(1), sampling_steps: z.array(z.union([z.literal(4), z.literal(8), z.literal(20)])).min(1).optional(), longform_v1: z.boolean().optional(), gpu_name: z.string().max(160).optional(), vram_mb: z.number().int().min(0).optional(), max_image_count: z.number().int().min(0).max(9), max_video_count: z.number().int().min(0).max(3), max_audio_count: z.number().int().min(0).max(3), local_prompt_optimization_v1: z.boolean().optional(), batch_claim: z.boolean().optional(), max_concurrent_tasks: z.number().int().min(1).max(8).optional() });
+  const h3LanNodeSchema = z.object({ node_id: z.string().min(12).max(160), node_name: z.string().max(120), running_task_count: z.number().int().min(0).max(64), estimated_total_seconds: z.number().int().min(0).max(7 * 24 * 60 * 60), available: z.boolean().optional(), capabilities: h3NodeCapabilitiesSchema });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/desktop/account-bindings/verify", tags: ["Desktop Account Binding"], summary: "在已激活桌面端绑定古龙官网账号", description: "先验证 RS256 激活回执，再查询邮箱。未激活或伪造客户端无法利用本接口枚举账号。服务端不会接收或保存原始 MAC。", security: [], request: { body: { required: true, content: { "application/json": { schema: z.object({ email: z.email(), node_id: z.string().min(12).max(160), node_name: z.string().min(1).max(120), app_version: z.string().min(1).max(40), activation_receipt: z.union([z.string(), z.record(z.string(), z.unknown())]) }) } } } }, responses: { 200: { description: "绑定成功；binding_token 只在本次响应返回", content: { "application/json": { schema: bindingSuccessSchema } } }, 403: { description: "激活证明无效", content: { "application/json": { schema: errorSchema } } }, 404: { description: "激活验证通过但邮箱未注册", content: { "application/json": { schema: unknownUserSchema } } }, 429: { description: "请求过于频繁", content: { "application/json": { schema: errorSchema } } } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/desktop/account-bindings/unbind", tags: ["Desktop Account Binding"], summary: "撤销当前节点账号绑定", security: [{ accountBinding: [] }], responses: { 200: { description: "已撤销" }, 401: { description: "绑定令牌无效" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/desktop/earnings/summary", tags: ["Desktop Earnings"], summary: "读取当前绑定账户的 MiniMax H3 节点收益", description: "仅接受 X-Gulong-Account-Binding。可选 node_id 必须属于令牌对应账户，否则返回 403。金额均为人民币整数分。收益只聚合服务端 h3_node_commission 结算流水；平均每天收益=已结算累计收益÷max(1, 从首个成功结算的中国自然日到当前中国自然日的天数)。", security: [{ accountBinding: [] }], request: { query: z.object({ node_id: z.string().optional() }) }, responses: { 200: { description: "账户与设备收益汇总", content: { "application/json": { schema: earningsSummarySchema } } }, 401: { description: "未绑定或绑定令牌失效", content: { "application/json": { schema: errorSchema } } }, 403: { description: "node_id 不属于当前账户", content: { "application/json": { schema: errorSchema } } } } });
@@ -1620,11 +1914,11 @@ export function registerH3SharedRoutes(app, dependencies) {
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}", tags: ["MiniMax H3 Shared Nodes"], summary: "查看共享节点订单详情", description: "输出只包含受控 previewPath/downloadPath 和 24 小时到期状态，不返回 COS objectKey 或永久 URL。", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "订单详情" }, 404: { description: "订单不存在或无权查看" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}/output", tags: ["MiniMax H3 Shared Nodes"], summary: "鉴权预览或下载 H3 输出视频", description: "仅任务请求用户或管理员可访问。服务端按次签发不超过 5 分钟且不越过 24 小时保留截止时间的 COS GET 地址；disposition=attachment 用于下载。过期返回 410 并触发幂等删除。", request: { params: z.object({ id: z.string() }), query: z.object({ disposition: z.enum(["inline", "attachment"]).optional() }) }, responses: { 302: { description: "跳转到短时 COS 签名地址" }, 404: { description: "视频不存在或无权访问" }, 410: { description: "视频已过期并删除" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/desktop/agent/tools/minimax-h3-shared", tags: ["Desktop Agent Tools"], summary: "读取桌面古龙智能体的 H3 共享节点工具合同", description: "使用现有古龙会话或具有 tasks:read 的 API Key。返回 createTask、素材上传 URL、本地提示词处理合同、9图3视频3音频限制、整数分价格与当前余额；不再返回网页 optimizePrompt。管理员响应 wallet.unlimited=true，桌面端不得按余额拦截。桌面创建任务时 source_channel 必须为 desktop_agent。", responses: { 200: { description: "工具合同、本地提示词处理要求、钱包余额与管理员不限额标记" }, 401: { description: "未认证" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/claim", tags: ["MiniMax H3 Shared Nodes"], summary: "桌面节点按能力与队列压力原子领取任务", description: "capabilities 必须上报 max_duration_seconds、profiles、sampling_steps 与素材上限；只有 longform_v1=true 的节点可领取 video_mode=extended。local_prompt_optimization_v1=true 表示节点能够处理用户开启魔法优化的任务，未声明该能力的节点仍可领取 raw_prompt_v1 原始提示词任务。服务端按 createdAt、_id 从旧到新原子领取并返回最小化 workerTask DTO。DTO 除提示词选择外还包含 video_mode、longform_mode、segment_duration_seconds、prompt_list、profile、sampling_steps 和 seed；开启优化时节点先 optimizing，再以 started + compiled_prompt + estimated_total_seconds 上报，关闭时直接以 started + estimated_total_seconds 开始生成且禁止改写 prompt。历史缺失选择字段的任务按开启兼容。dry_run=true 绝不领取任务或执行优化。DTO 不含 requester、价格、钱包流水或内部绑定信息。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "application/json": { schema: z.object({ bound_account_email: z.string().optional(), bound_account_id: z.string().optional(), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: z.object({ max_duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profiles: z.array(z.string()).min(1), sampling_steps: z.array(z.union([z.literal(4), z.literal(8), z.literal(20)])).min(1).optional(), longform_v1: z.boolean().optional(), gpu_name: z.string().max(160).optional(), vram_mb: z.number().int().min(0).optional(), max_image_count: z.number().int().min(0).max(9), max_video_count: z.number().int().min(0).max(3), max_audio_count: z.number().int().min(0).max(3), local_prompt_optimization_v1: z.boolean().optional(), batch_claim: z.boolean().optional(), max_concurrent_tasks: z.number().int().min(1).max(8).optional() }) }) } } } }, responses: { 200: { description: "dry_run 返回可达状态；正式领取返回原始提示词、完整视频参数、用户优化选择、素材下载票据、output_upload、进度回调合同和动态 claim_plan" }, 400: { description: "节点能力无效" }, 401: { description: "绑定无效" }, 429: { description: "未遵循轮询退避或请求频率过高" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/claim", tags: ["MiniMax H3 Shared Nodes"], summary: "按局域网集群负载原子调度最早等待任务", description: "轮询节点通过 lan_cluster.nodes 上报同一局域网内全部已绑定节点的 running_task_count、estimated_total_seconds 与能力。服务端先验证所有节点均属于当前 binding token 对应账号，再按预计剩余总耗时、运行任务数、node_id 排序，把按 createdAt、_id 最早且能力匹配的任务分配给耗时最少的节点；响应 workerTask.assigned_node 是唯一允许回调的执行节点。老客户端缺少 lan_cluster 时暂按单节点兼容。capabilities 必须上报 max_duration_seconds、profiles、sampling_steps 与素材上限；只有 longform_v1=true 的节点可领取 video_mode=extended。local_prompt_optimization_v1=true 表示节点能够处理用户开启魔法优化的任务。DTO 包含 assigned_node、dispatch_estimated_total_seconds、auto_cancel_at、素材短期下载票据与 output_upload，但不含 requester、价格、钱包流水或内部绑定信息。任务自创建起超过服务端预计总耗时 10 倍仍未完成会自动取消、幂等退款并提醒用户更换视频模型。dry_run=true 绝不领取任务。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "application/json": { schema: z.object({ bound_account_email: z.string().optional(), bound_account_id: z.string().optional(), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: h3NodeCapabilitiesSchema, lan_cluster: z.object({ cluster_id: z.string().min(12).max(160), observed_at: z.iso.datetime(), nodes: z.array(h3LanNodeSchema).min(1).max(H3_LAN_REPORT_MAX_NODES) }).optional() }) } } } }, responses: { 200: { description: "dry_run 返回可达状态；正式领取返回指定执行节点、素材票据、输出票据和动态 claim_plan" }, 400: { description: "节点能力或局域网报告无效/过期" }, 401: { description: "绑定无效" }, 403: { description: "局域网报告包含其他账号或未绑定节点" }, 409: { description: "回调节点不是 assigned_node" }, 429: { description: "未遵循轮询退避或请求频率过高" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/callback", tags: ["MiniMax H3 Shared Nodes"], summary: "执行节点回调可选本地优化、生成进度或结果", description: "multipart/form-data 仅发送 metadata 字段，不得上传 video 文件。prompt_optimization_enabled=true 的任务先发送 status=optimizing，成功后以 status=started、compiled_prompt、estimated_total_seconds 上报；false 的任务不得发送 optimizing 或 compiled_prompt，直接以原始 prompt 执行并在 started 中提交 estimated_total_seconds。后续 progress 回调发送 progress（0–99）与可选 remaining_seconds。成功状态还需 video.sha256/bytes/filename/object_key，服务端 HEAD 校验对象归属。失败任务按既有幂等规则退款。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "multipart/form-data": { schema: z.object({ metadata: z.string() }) } } } }, responses: { 200: { description: "可选本地优化阶段、生成进度或最终结果已幂等处理" }, 400: { description: "回执不完整、缺少必需 compiled_prompt 或在关闭优化时非法提交 compiled_prompt" }, 401: { description: "绑定无效" }, 409: { description: "用户优化选择、本地优化、COS 回执、上传票据或结算状态不匹配" }, 413: { description: "禁止把视频文件经 Vercel 中转" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/admin/h3/tasks", tags: ["Administration"], summary: "管理员筛选共享节点任务派单", responses: { 200: { description: "任务列表" }, 403: { description: "需要管理员角色" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/admin/h3/tasks/{id}", tags: ["Administration"], summary: "管理员查看共享节点任务、回调和审计详情", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "任务详情、回调和审计时间线" }, 404: { description: "任务不存在" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/admin/h3/tasks/{id}/cancel", tags: ["Administration"], summary: "管理员幂等取消任务并退款", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "取消状态和退款结果" }, 409: { description: "已完成任务不能取消" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/admin/h3/tasks/{id}/retry", tags: ["Administration"], summary: "管理员重新派发失败任务", description: "普通用户与订阅用户的已退款任务会重新原子预扣；管理员发起的免扣费任务直接重新排队，不产生扣款或分佣。", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "重新排队后的任务" }, 402: { description: "需求用户余额不足" }, 409: { description: "当前状态不可重试" } } });
-  app.openAPIRegistry.registerPath({ method: "get", path: "/api/cron/h3-output-cleanup", tags: ["Operations"], summary: "回填会话结果并清理过期 H3 视频", description: "Vercel Cron 使用 CRON_SECRET Bearer 鉴权。先安全幂等回填历史 website 任务，再删除 completedAt 后已满 24 小时的 COS 对象；删除失败记录指数退避并重试。", responses: { 200: { description: "回填与清理汇总" }, 401: { description: "Cron 鉴权失败" }, 503: { description: "Cron 未配置" } } });
+  app.openAPIRegistry.registerPath({ method: "get", path: "/api/cron/h3-output-cleanup", tags: ["Operations"], summary: "取消超时任务、回填会话结果并清理过期 H3 视频", description: "使用 CRON_SECRET Bearer 鉴权。先幂等取消超过预计总耗时 10 倍的活动任务并退款、提醒用户，再安全回填历史 website 结果，最后删除 completedAt 后已满 24 小时的 COS 对象；删除失败记录指数退避并重试。", responses: { 200: { description: "timeouts、backfill 与 cleanup 汇总" }, 401: { description: "Cron 鉴权失败" }, 503: { description: "Cron 未配置" } } });
 }

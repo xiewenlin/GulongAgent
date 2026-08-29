@@ -456,6 +456,10 @@ export async function ensureIndexes() {
           { bindingId: 1, createdAt: -1 },
           { name: "node_binding_audit_history" },
         ),
+        db.collection("h3LanClusterStates").createIndex(
+          { updatedAt: 1 },
+          { expireAfterSeconds: 30 * 24 * 60 * 60, name: "ttl_h3_lan_cluster_state" },
+        ),
         db.collection("h3SharedTasks").createIndex(
           { orderNo: 1 },
           { unique: true, name: "uniq_h3_order_no" },
@@ -471,6 +475,10 @@ export async function ensureIndexes() {
         db.collection("h3SharedTasks").createIndex(
           { status: 1, model: 1, createdAt: 1 },
           { name: "h3_claim_queue_fifo" },
+        ),
+        db.collection("h3SharedTasks").createIndex(
+          { status: 1, autoCancelAt: 1, createdAt: 1 },
+          { name: "h3_estimated_timeout_queue" },
         ),
         db.collection("h3SharedTasks").createIndex(
           { "claimedByNode.bindingId": 1, status: 1, claimLeaseUntil: 1 },

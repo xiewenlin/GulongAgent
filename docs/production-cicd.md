@@ -41,6 +41,7 @@
 - `gulong.service` 从 `/opt/gulong/current` 启动，并以 `gulong` 系统用户运行。
 - SSH 发布用户可创建 `/opt/gulong/releases`、切换 `/opt/gulong/current` 和重启 `gulong.service`。
 - HTTPS 与证书续签由 Caddy、Certbot 和 `gulong-certbot-renew.timer` 独立维护，应用发布不会覆盖证书或 `/etc/gulong/gulong.env`。
+- 原子激活前会安装并启用 `gulong-h3-maintenance.timer`；它每分钟以 `/etc/gulong/gulong.env` 中的 `CRON_SECRET` 调用本机维护接口，用于及时取消超时共享节点任务、幂等退款和清理到期视频。
 
 ## 故障处理
 
