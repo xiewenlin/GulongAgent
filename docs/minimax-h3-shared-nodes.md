@@ -61,7 +61,23 @@ X-Gulong-Account-Binding: gab_...
 
 ### 0.1 同机重装后的旧授权安全恢复
 
-仅当激活码在 v2 上线前已经使用、授权记录尚无 `hardwareBindingV2`，并且重装系统导致旧版 `deviceId` 变化时，客户端才追加：
+客户端必须使用两阶段调用，禁止看到任意 409 就自动恢复：
+
+1. 第一次按正常兑换请求提交完整 v2 摘要，但不带 `legacyRecovery`。
+2. 只有服务端精确返回 HTTP `409` 且 `code=LEGACY_RECOVERY_REQUIRED` 时，客户端才可以再次发送同一组硬件摘要，并追加 `legacyRecovery`。
+
+该唯一触发响应为：
+
+```json
+{
+  "code": "LEGACY_RECOVERY_REQUIRED",
+  "message": "检测到这是尚未绑定新版硬件指纹的旧授权，且重装后的旧版设备指纹已经变化；仅当确认仍是原电脑时，才可追加 legacyRecovery.mode=os_reinstall 重新请求安全恢复"
+}
+```
+
+服务端仅在以下条件全部成立时返回该码：激活码状态为 `used`、记录尚无 `hardwareBindingV2`、本次 `deviceId` 与旧记录不同、本次已提交格式有效的完整 v2 摘要、且请求尚未带 `legacyRecovery`。任一其他 400/409 都不是恢复触发码。
+
+第二阶段请求：
 
 ```json
 {
@@ -111,6 +127,7 @@ X-Gulong-Account-Binding: gab_...
 
 - `400 INVALID_LEGACY_RECOVERY_REQUEST`：`legacyRecovery` 格式不正确。
 - `400 LEGACY_RECOVERY_HARDWARE_REQUIRED`：未提交完整 v2 摘要。
+- `409 LEGACY_RECOVERY_REQUIRED`：唯一允许客户端进入第二阶段恢复的触发码。
 - `409 LEGACY_RECOVERY_EVIDENCE_INSUFFICIENT`：强主板证据或可信度不足。
 - `409 LEGACY_RECOVERY_MAC_MISMATCH`：历史 MAC 尾号不一致。
 - `409 LEGACY_RECOVERY_NOT_APPLICABLE`：授权已经绑定 v2，不能走旧授权迁移。

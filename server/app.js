@@ -394,6 +394,17 @@ function activationHardwareBindingAction(record, incomingBinding) {
   return existingHash === incomingBinding.hardwareHash ? "unchanged" : "mismatch";
 }
 
+function isLegacyActivationRecoveryRequired(record, deviceId, incomingBinding, recoveryRequest) {
+  return Boolean(
+    record?.status === "used"
+    && record.deviceId
+    && record.deviceId !== deviceId
+    && !record.hardwareBindingV2?.hardwareHash
+    && incomingBinding
+    && !recoveryRequest,
+  );
+}
+
 function assertLegacyActivationRecoveryEligible(record, incomingBinding, incomingMacHint) {
   if (!incomingBinding) {
     throw activationHardwareError(
@@ -3918,6 +3929,13 @@ app.post("/api/licenses/redeem", async (c) => {
       if (!error?.code) throw error;
       return c.json({ code: error.code, message: error.message }, error.status || 409);
     }
+  }
+
+  if (isLegacyActivationRecoveryRequired(record, deviceId, hardwareBindingV2, legacyRecoveryRequest)) {
+    return c.json({
+      code: "LEGACY_RECOVERY_REQUIRED",
+      message: "检测到这是尚未绑定新版硬件指纹的旧授权，且重装后的旧版设备指纹已经变化；仅当确认仍是原电脑时，才可追加 legacyRecovery.mode=os_reinstall 重新请求安全恢复",
+    }, 409);
   }
 
   if (!record || record.status !== "used" || record.deviceId !== deviceId) {
@@ -8379,7 +8397,7 @@ app.openAPIRegistry.registerPath({
   path: "/api/licenses/redeem",
   tags: ["Licensing"],
   summary: "兑换设备永久离线授权",
-  description: "安装器首次联网时必须提交当前产品标识、一次性激活码与旧版 deviceId。MiniMax H3 超清视频和越狱视频-MiniMax H3 超能视频使用独立激活码，跨产品兑换会在硬件摘要校验前返回易懂的产品不匹配提示。同一台电脑可分别持有两款产品授权。同一旧版 deviceId 可幂等恢复原 RS256 回执。新客户端可同时提交 h3-hw-v2 加权硬件分类摘要，服务端只保存 SHA-256 摘要和分类名，不接收原始主板、SMBIOS、TPM、MAC 或序列号值。v2 上线前已经使用、但重装后 legacy deviceId 因网卡变化而改变的授权，可显式提交 legacyRecovery.mode=os_reinstall；仅在授权尚无 v2 绑定、硬件置信度为 high、系统 UUID 与强主板锚点达到安全阈值，且历史 macHint 存在时尾号一致的情况下，原子更新 deviceId 并补录 v2。此恢复只允许一次，不改变 activatedAt，也不增加激活次数。已有 v2 绑定或不同主板一律拒绝。回执 canonical 字段与签名顺序保持兼容。所有错误响应固定为 JSON {code,message}，客户端应按 code 分支处理，不能把全部 HTTP 400 映射为格式错误。",
+  description: "安装器首次联网时必须提交当前产品标识、一次性激活码与旧版 deviceId。MiniMax H3 超清视频和越狱视频-MiniMax H3 超能视频使用独立激活码，跨产品兑换会在硬件摘要校验前返回易懂的产品不匹配提示。同一台电脑可分别持有两款产品授权。同一旧版 deviceId 可幂等恢复原 RS256 回执。新客户端可同时提交 h3-hw-v2 加权硬件分类摘要，服务端只保存 SHA-256 摘要和分类名，不接收原始主板、SMBIOS、TPM、MAC 或序列号值。v2 上线前已经使用、但重装后 legacy deviceId 因网卡变化而改变的授权，第一次不带 legacyRecovery 的正常兑换会且只会在授权已用、无 v2、deviceId 变化且本次 v2 摘要格式有效时返回 409 LEGACY_RECOVERY_REQUIRED；客户端只能在收到该精确 code 后追加 legacyRecovery.mode=os_reinstall。恢复仅在硬件置信度为 high、系统 UUID 与强主板锚点达到安全阈值，且历史 macHint 存在时尾号一致的情况下，原子更新 deviceId 并补录 v2。此恢复只允许一次，不改变 activatedAt，也不增加激活次数。已有 v2 绑定或不同主板一律拒绝。回执 canonical 字段与签名顺序保持兼容。所有错误响应固定为 JSON {code,message}，客户端应按 code 分支处理，不能把全部 HTTP 400 或 409 映射为格式错误或自动恢复。",
   security: [],
   request: { body: { required: true, content: { "application/json": { schema: ActivationRedeemRequestSchema } } } },
   responses: {
@@ -8387,7 +8405,7 @@ app.openAPIRegistry.registerPath({
     400: { description: "激活码、设备指纹、legacyRecovery 或硬件分类摘要格式不正确；原始硬件值会被拒绝。响应为 {code,message}", content: { "application/json": { schema: ErrorSchema } } },
     403: { description: "激活码已停用", content: { "application/json": { schema: ErrorSchema } } },
     404: { description: "激活码不存在", content: { "application/json": { schema: ErrorSchema } } },
-    409: { description: "激活码属于另一产品、已绑定其他设备、设备已有同产品授权、旧授权恢复证据不足、历史 MAC 尾号不一致，或 hardwareHash 与既有 v2 绑定不一致", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "LEGACY_RECOVERY_REQUIRED 是客户端唯一可进入第二阶段恢复的触发码；其余 409 表示激活码属于另一产品、已绑定其他设备、设备已有同产品授权、恢复证据不足、历史 MAC 尾号不一致，或 hardwareHash 与既有 v2 绑定不一致，客户端不得自动重试恢复", content: { "application/json": { schema: ErrorSchema } } },
     429: { description: "激活尝试过于频繁", content: { "application/json": { schema: ErrorSchema } } },
     503: { description: "生产签名密钥尚未正确配置", content: { "application/json": { schema: ErrorSchema } } },
   },
@@ -8406,7 +8424,7 @@ app.doc("/api/openapi.json", {
   openapi: "3.1.0",
   info: {
     title: "古龙 Gulong Agent Engine API",
-    version: "2.8.0",
+    version: "2.8.1",
     description: "已按 Chandler v3.9 与 PearAPI 统一接入升级：OAuth 应用密钥配置完成后，官网邮箱注册和已激活桌面客户端的邮箱/手机号注册均由官网服务端注入对应应用凭据，写入 Chandler 应用来源归因；client_secret 永不进入浏览器或桌面客户端。桌面端缺少归因凭据时故障关闭；官网公开邮箱注册按 Chandler 兼容合同保持可用但不伪造归因。邮箱和短信验证码统一为 6 位数字；服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。普通会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费；实付额外赠送 10% 钱包余额，单次充值满 500 元同样赠送 10%。短视频包月固定月费 5999 元、年费 59999 元，只支持线下审核，审核后实付金额按 1:1 组成可到期套餐余额，不额外赠送；有效期内 MiniMaxH3 套餐余额归零后仍可无限生成，但不再扣费或分佣。所有入账、扣款、退款和分账均使用独立幂等流水。MiniMax H3 共享节点支持钱包预扣、幂等退款与 50% 节点分成、激活设备账号绑定、按能力原子领取、腾讯云 COS 输入下载和输出直传票据，并提供仅按绑定账户聚合的桌面收益接口；工作器领取 DTO 不含需求用户身份和内部计费信息。永久离线授权继续签发旧版 canonical RS256 回执，同时可选绑定 h3-hw-v2 加权硬件分类摘要；v2 上线前的已用授权支持高置信度、一次性、保留激活时间的同机重装迁移，服务端不保存任何原始硬件值。另提供第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
   },
   servers: [
@@ -8436,6 +8454,7 @@ export {
   activationReceiptPayload,
   activationSearchConditions,
   activationSigningPrivateKey,
+  isLegacyActivationRecoveryRequired,
   parseActivationHardwareBindingV2,
   parseLegacyActivationRecovery,
   persistActivationHardwareBindingV2,

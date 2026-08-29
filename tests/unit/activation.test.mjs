@@ -12,6 +12,7 @@ import app, {
   activationReceiptPayload,
   activationSearchConditions,
   activationSigningPrivateKey,
+  isLegacyActivationRecoveryRequired,
   parseActivationHardwareBindingV2,
   parseLegacyActivationRecovery,
   persistActivationHardwareBindingV2,
@@ -185,6 +186,20 @@ test("legacy OS reinstall recovery requires explicit mode, strong anchors, and m
   );
 });
 
+test("only the exact pre-v2 device-change state triggers the second recovery stage", () => {
+  const binding = parseActivationHardwareBindingV2(hardwareV2());
+  const legacyRecord = {
+    status: "used",
+    deviceId: "a".repeat(64),
+  };
+  assert.equal(isLegacyActivationRecoveryRequired(legacyRecord, "b".repeat(64), binding, null), true);
+  assert.equal(isLegacyActivationRecoveryRequired(legacyRecord, "a".repeat(64), binding, null), false);
+  assert.equal(isLegacyActivationRecoveryRequired(legacyRecord, "b".repeat(64), null, null), false);
+  assert.equal(isLegacyActivationRecoveryRequired(legacyRecord, "b".repeat(64), binding, { mode: "os_reinstall" }), false);
+  assert.equal(isLegacyActivationRecoveryRequired({ ...legacyRecord, hardwareBindingV2: binding }, "b".repeat(64), binding, null), false);
+  assert.equal(isLegacyActivationRecoveryRequired({ ...legacyRecord, status: "revoked" }, "b".repeat(64), binding, null), false);
+});
+
 test("legacy OS reinstall recovery raises thresholds without historical MAC", () => {
   const insufficient = parseActivationHardwareBindingV2(hardwareV2());
   assert.throws(
@@ -293,6 +308,7 @@ test("public redeem validation is uncached and documented without bearer authent
   assert.match(contract, /legacyRecovery/);
   assert.match(contract, /os_reinstall/);
   assert.match(contract, /LEGACY_LICENSE_RECOVERED/);
+  assert.match(contract, /LEGACY_RECOVERY_REQUIRED/);
 });
 
 test("independent video products reject cross-product activation before hardware validation", async () => {
