@@ -371,7 +371,7 @@ test("activation management keeps full codes and copy actions on one line", asyn
   ]);
   assert.match(adminSource, /ACTIVATION_PRODUCT_OPTIONS/);
   assert.match(adminSource, /MiniMax H3 超清视频/);
-  assert.match(adminSource, /越狱视频-MiniMax H3 超能视频/);
+  assert.match(adminSource, /minimax-h3-super-video", name: "MiniMaxH3超能视频"/);
   assert.match(cssSource, /grid-template-columns: minmax\(350px, 1\.5fr\)/);
   assert.match(cssSource, /\.activation-row-actions \{[^}]+flex-wrap: nowrap/);
   assert.match(cssSource, /\.activation-row-actions \.button \{[^}]+white-space: nowrap/);

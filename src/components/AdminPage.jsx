@@ -956,7 +956,7 @@ function PearTokenManager() {
 
 const ACTIVATION_PRODUCT_OPTIONS = [
   { id: "minimax-h3-ultra-video", name: "MiniMax H3 超清视频" },
-  { id: "minimax-h3-super-video", name: "越狱视频-MiniMax H3 超能视频" },
+  { id: "minimax-h3-super-video", name: "MiniMaxH3超能视频" },
 ];
 
 function activationProductName(product) {
