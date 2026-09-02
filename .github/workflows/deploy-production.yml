@@ -180,7 +180,13 @@ jobs:
             -o UserKnownHostsFile="${{ steps.ssh.outputs.known_hosts }}" \
             -o StrictHostKeyChecking=yes \
             "deploy/tencent/deploy-release.sh" \
-            "$TENCENT_SSH_USER@$TENCENT_SSH_HOST:/tmp/"
+            "$TENCENT_SSH_USER@$TENCENT_SSH_HOST:/tmp/deploy-release.sh"
+          scp -P "${{ steps.ssh.outputs.port }}" \
+            -i "${{ steps.ssh.outputs.key }}" \
+            -o UserKnownHostsFile="${{ steps.ssh.outputs.known_hosts }}" \
+            -o StrictHostKeyChecking=yes \
+            "deploy/tencent/Caddyfile" \
+            "$TENCENT_SSH_USER@$TENCENT_SSH_HOST:/tmp/gulong-Caddyfile"
           ssh -p "${{ steps.ssh.outputs.port }}" \
             -i "${{ steps.ssh.outputs.key }}" \
             -o UserKnownHostsFile="${{ steps.ssh.outputs.known_hosts }}" \
@@ -218,3 +224,20 @@ jobs:
             --retry 8 --retry-delay 3 --retry-all-errors \
             "$health_url" >/dev/null
           printf '### Tencent Cloud production\n\n- Health: %s\n- Commit: `%s`\n' "$health_url" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+  frontend-parity:
+    name: Verify Vercel and Tencent frontend parity
+    needs: [vercel-production, tencent-production]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the parity verifier
+        uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Compare every published client file
+        run: node scripts/verify-production-parity.mjs https://sologle.com https://111.229.70.235

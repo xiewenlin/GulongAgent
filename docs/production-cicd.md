@@ -9,8 +9,10 @@
 3. Vercel 使用 Production 环境变量构建并发布，随后检查 `https://sologle.com/api/health`。
 4. 腾讯云从当前健康版本硬链接出隔离的暂存目录，再通过 rsync 校验和只传输制品中真正变化的文件；完整性验证后固化为 `/opt/gulong/releases/<commit>`。锁文件未变化时复用生产依赖，否则执行 `npm ci --omit=dev`，通过结构和 Node 语法检查后再原子切换 `/opt/gulong/current`。
 5. 腾讯云服务重启或本机健康检查失败时，脚本立即把软链接恢复到上一版本、重启服务并再次验活；失败版本不会保持在线。
+6. 每次构建都会生成包含 commit、文件大小和 SHA-256 的 `deployment-manifest.json`。两端发布后，流水线逐一下载并核对全部前端文件；只有 Vercel 与腾讯云文件完全一致，本次发布才算完成。
+7. 腾讯云发布同时校验并热更新版本化 Caddy 配置。SPA 页面和部署清单使用 `no-store`，每次打开或刷新都会获得当前入口；带内容哈希的 `/assets/*` 文件继续使用一年不可变缓存。
 
-两个目标都受 `gulong-production` 并发锁保护，新的提交不会中断正在执行的生产发布。GitHub Actions 页面保留每一步、commit、部署地址与健康检查结果，便于审计。
+两个目标都受 `gulong-production` 并发锁保护，新的提交不会中断正在执行的生产发布。GitHub Actions 页面保留每一步、commit、部署地址、健康检查和前端逐文件一致性结果，便于审计。
 
 ## GitHub Environment 与 Secrets
 

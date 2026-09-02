@@ -4,6 +4,9 @@ import test from "node:test";
 
 const workflowUrl = new URL("../../.github/workflows/deploy-production.yml", import.meta.url);
 const deployScriptUrl = new URL("../../deploy/tencent/deploy-release.sh", import.meta.url);
+const caddyUrl = new URL("../../deploy/tencent/Caddyfile", import.meta.url);
+const parityScriptUrl = new URL("../../scripts/verify-production-parity.mjs", import.meta.url);
+const vercelUrl = new URL("../../vercel.json", import.meta.url);
 
 test("production workflow gates both hosting targets behind tests and an immutable build", async () => {
   const source = await readFile(workflowUrl, "utf8");
@@ -20,6 +23,9 @@ test("production workflow gates both hosting targets behind tests and an immutab
   assert.match(source, /cp -a shared "\$bundle\/shared"/);
   assert.match(source, /cancel-in-progress: false/);
   assert.match(source, /curl --fail --silent --show-error[\s\S]*\/api\/health/);
+  assert.match(source, /name: Verify Vercel and Tencent frontend parity[\s\S]*needs: \[vercel-production, tencent-production\]/);
+  assert.match(source, /node scripts\/verify-production-parity\.mjs https:\/\/sologle\.com https:\/\/111\.229\.70\.235/);
+  assert.match(source, /deploy\/tencent\/Caddyfile[\s\S]*\/tmp\/gulong-Caddyfile/);
   assert.doesNotMatch(source, /BEGIN (?:RSA |OPENSSH )?PRIVATE KEY/);
 });
 
@@ -42,4 +48,36 @@ test("Tencent deployment validates its target and rolls back an unhealthy activa
   assert.match(source, /gulong-h3-maintenance\.timer/);
   assert.match(source, /OnUnitActiveSec=60s/);
   assert.match(source, /api\/cron\/h3-output-cleanup/);
+  assert.match(source, /apply_caddy_config/);
+  assert.match(source, /caddy validate --config "\$caddy_candidate"/);
+  assert.match(source, /systemctl reload caddy/);
+});
+
+test("Tencent serves the SPA shell without stale caching and keeps hashed assets immutable", async () => {
+  const source = await readFile(caddyUrl, "utf8");
+
+  assert.match(source, /handle \/assets\/\*/);
+  assert.match(source, /Cache-Control "public, max-age=31536000, immutable"/);
+  assert.match(source, /Cache-Control "no-store, max-age=0, must-revalidate"/);
+  assert.match(source, /Pragma "no-cache"/);
+  assert.match(source, /try_files \{path\} \/index\.html/);
+});
+
+test("Vercel never caches the deployment identity while preserving immutable assets", async () => {
+  const config = JSON.parse(await readFile(vercelUrl, "utf8"));
+  const deploymentHeader = config.headers.find((entry) => entry.source === "/deployment-manifest.json");
+  const assetHeader = config.headers.find((entry) => entry.source === "/assets/(.*)");
+
+  assert.equal(deploymentHeader?.headers?.find((entry) => entry.key === "Cache-Control")?.value, "no-store, max-age=0, must-revalidate");
+  assert.equal(assetHeader?.headers?.find((entry) => entry.key === "Cache-Control")?.value, "public, max-age=31536000, immutable");
+});
+
+test("production parity verifier checks manifests, commit identity, and every client hash", async () => {
+  const source = await readFile(parityScriptUrl, "utf8");
+
+  assert.match(source, /deployment-manifest\.json/);
+  assert.match(source, /assert\.deepEqual\(tencentManifest, vercelManifest/);
+  assert.match(source, /manifest\.commit, expectedCommit/);
+  assert.match(source, /sha256\(vercelBytes\)/);
+  assert.match(source, /sha256\(tencentBytes\)/);
 });

@@ -7,6 +7,8 @@ release_root="/opt/gulong/releases"
 current_link="/opt/gulong/current"
 service_name="gulong"
 local_health_url="http://127.0.0.1:8787/api/health"
+caddy_candidate="/tmp/gulong-Caddyfile"
+caddy_config="/etc/caddy/Caddyfile"
 
 if [[ "$mode" != "prepare" && "$mode" != "activate" ]]; then
   echo "Deployment mode must be prepare or activate." >&2
@@ -71,6 +73,35 @@ rollback() {
   mv -Tf "$rollback_link" "$current_link"
   systemctl restart "$service_name"
   health_check
+}
+
+apply_caddy_config() {
+  if [[ ! -f "$caddy_candidate" ]]; then
+    echo "Missing versioned Caddy configuration." >&2
+    return 1
+  fi
+
+  caddy validate --config "$caddy_candidate" --adapter caddyfile >/dev/null
+  local backup=""
+  if [[ -f "$caddy_config" ]]; then
+    backup="$(mktemp /tmp/gulong-Caddyfile.previous.XXXXXX)"
+    cp "$caddy_config" "$backup"
+  fi
+
+  install -m 0644 "$caddy_candidate" "$caddy_config"
+  if ! systemctl reload caddy; then
+    if [[ -n "$backup" ]]; then
+      install -m 0644 "$backup" "$caddy_config"
+    else
+      rm -f "$caddy_config"
+    fi
+    systemctl reload caddy || true
+    rm -f "$backup"
+    echo "Caddy reload failed; the previous configuration was restored." >&2
+    return 1
+  fi
+
+  rm -f "$backup" "$caddy_candidate"
 }
 
 if [[ -d "$target" ]]; then
@@ -149,6 +180,8 @@ WantedBy=timers.target
 EOF
 systemctl daemon-reload
 systemctl enable --now gulong-h3-maintenance.timer
+
+apply_caddy_config
 
 next_link="/opt/gulong/.current-next-${commit_sha}"
 ln -s "$target" "$next_link"

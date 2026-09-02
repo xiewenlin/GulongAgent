@@ -103,7 +103,7 @@ npm run dev
 
 ## 双目标生产发布
 
-`main` 分支每次更新都会触发 `.github/workflows/deploy-production.yml`：先执行完整测试、生产构建和 Sites 产物校验，再并行发布到 Vercel Production 与腾讯云 Debian 节点。腾讯云采用 `/opt/gulong/releases/<commit>` 不可变目录和 `/opt/gulong/current` 原子软链接；新版本重启或健康检查失败时自动恢复上一版本，避免把故障版本继续暴露给用户。
+`main` 分支每次更新都会触发 `.github/workflows/deploy-production.yml`：先执行完整测试、生产构建和 Sites 产物校验，再并行发布到 Vercel Production 与腾讯云 Debian 节点。腾讯云采用 `/opt/gulong/releases/<commit>` 不可变目录和 `/opt/gulong/current` 原子软链接；新版本重启或健康检查失败时自动恢复上一版本，避免把故障版本继续暴露给用户。两端发布后还会依据同一 commit 的部署清单逐一核对所有前端文件哈希，防止任一平台继续运行旧界面；腾讯云 SPA 入口禁止缓存，刷新即可加载新版本。
 
 部署密钥只存放在 GitHub `production` Environment / Actions Secrets，不进入 Git、构建产物或日志。首次启用需要配置的变量、环境保护和 SSH 主机指纹见 [双目标 CI/CD 部署说明](docs/production-cicd.md)。
 

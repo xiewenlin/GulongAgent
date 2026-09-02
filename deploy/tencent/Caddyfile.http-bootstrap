@@ -11,15 +11,21 @@ http://111.229.70.235 {
 		file_server
 	}
 
-	@assets path /assets/*
-	header @assets Cache-Control "public, max-age=31536000, immutable"
-
 	handle /api/* {
 		reverse_proxy 127.0.0.1:8787
 	}
 
+	handle /assets/* {
+		root * /opt/gulong/current/dist/client
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+
 	handle {
 		root * /opt/gulong/current/dist/client
+		header Cache-Control "no-store, max-age=0, must-revalidate"
+		header Pragma "no-cache"
+		header Expires "0"
 		try_files {path} /index.html
 		file_server
 	}
