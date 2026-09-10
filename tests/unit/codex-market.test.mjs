@@ -145,7 +145,7 @@ test("official Longtu and tiered Longyan prices match the desktop manifest", asy
   const f = fixture();
   const models = await f.call("/models");
   assert.equal(models.body.models[0].available, true);
-  assert.match(models.body.models[0].priceLabel, /3\.9.*19\.5.*7\.8.*29\.25/);
+  assert.match(models.body.models[0].priceLabel, /含缓存.*3\.9.*19\.5.*4\.875.*0\.39.*7\.8.*29\.25.*9\.75.*0\.78/);
   assert.equal(models.body.models[1].priceLabel, "¥0.14/次");
   const denied = await f.call("/quotes", { requestId: "request-text", model: "longyan", request: { prompt: "你好" } });
   assert.equal(denied.status, 400);

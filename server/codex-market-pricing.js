@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 export const CODEX_MARKET_MODELS = Object.freeze([
-  { id: "longyan", name: "龙言", modality: "text", priceLabel: "0–272K：输入 ¥3.9/百万 Tokens，输出 ¥19.5/百万 Tokens；272K+：输入 ¥7.8/百万 Tokens，输出 ¥29.25/百万 Tokens" },
+  { id: "longyan", name: "龙言", modality: "text", priceLabel: "按输入 Tokens（含缓存）分档：0–272K 输入 ¥3.9、输出 ¥19.5、缓存写入 ¥4.875、缓存读取 ¥0.39/百万 Tokens；272K+ 输入 ¥7.8、输出 ¥29.25、缓存写入 ¥9.75、缓存读取 ¥0.78/百万 Tokens" },
   { id: "longtu", name: "龙图", modality: "image", priceLabel: "¥0.14/次" },
 ]);
 export const CODEX_MARKET_PRICING_REVISION = "desktop-20260910-v4";
