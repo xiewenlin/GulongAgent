@@ -19,7 +19,10 @@ export async function ensureCodexMarketStore() {
       db.collection("codexMarketCallbacks").createIndex({ taskId: 1, claimId: 1, eventId: 1 }, { unique: true }),
       db.collection("codexMarketLedger").createIndex({ key: 1 }, { unique: true }),
       db.collection("codexMarketLedger").createIndex({ ownerId: 1, createdAt: -1 }),
-      db.collection("wallets").createIndex({ ownerId: 1 }, { unique: true }),
+      // Reuse the wallet index name installed by the platform database
+      // bootstrap. MongoDB reports IndexOptionsConflict when an equivalent
+      // key/options pair is requested under a different implicit name.
+      db.collection("wallets").createIndex({ ownerId: 1 }, { unique: true, name: "uniq_wallet_owner" }),
     ]);
   })().catch((error) => { indexes = null; throw error; });
   await indexes;

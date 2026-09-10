@@ -58,6 +58,10 @@
       "destination": "/api/platform?_platform_path=h3/:path*"
     },
     {
+      "source": "/api/codex-market/:path*",
+      "destination": "/api/platform?_platform_path=codex-market/:path*"
+    },
+    {
       "source": "/api/admin/h3/:path*",
       "destination": "/api/platform?_platform_path=admin/h3/:path*"
     },

@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { OpenAPIHono } from "@hono/zod-openapi";
 import { ObjectId } from "mongodb";
 import { registerCodexMarketRoutes, CODEX_NODE_HEADER } from "../../server/codex-market.js";
 import { calculateLongyanAmount, marketQuotePrice, normalizeMarketRequest, readMarketPricing } from "../../server/codex-market-pricing.js";
+
+test("Codex market reuses the platform wallet unique index name", async () => {
+  const source = await readFile(new URL("../../server/codex-market-store.js", import.meta.url), "utf8");
+  assert.match(source, /createIndex\(\{ ownerId: 1 \}, \{ unique: true, name: "uniq_wallet_owner" \}\)/);
+});
 
 const PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6jU8AAAAASUVORK5CYII=";
 const valueOf = (value) => value instanceof ObjectId ? value.toString() : value instanceof Date ? +value : value;
