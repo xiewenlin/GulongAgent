@@ -173,6 +173,54 @@ export function normalizeH3TaskInput(body = {}) {
   };
 }
 
+function canonicalH3FingerprintJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalH3FingerprintJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .filter((key) => value[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalH3FingerprintJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function h3FingerprintAssets(assets = {}) {
+  const project = (items) => (Array.isArray(items) ? items : []).map((asset) => ({
+    kind: String(asset?.kind || ""),
+    assetId: String(asset?.assetId || asset?.asset_id || ""),
+    objectKey: String(asset?.objectKey || asset?.object_key || ""),
+  }));
+  return {
+    images: project(assets.images),
+    videos: project(assets.videos),
+    audio: project(assets.audio),
+  };
+}
+
+export function h3TaskRequestFingerprint(input, { conversationId = "" } = {}) {
+  const normalizedConversationId = input?.sourceChannel === "website" && ObjectId.isValid(String(conversationId || "").trim())
+    ? String(conversationId).trim()
+    : null;
+  const normalized = {
+    ...input,
+    assets: h3FingerprintAssets(input?.assets),
+    conversationId: normalizedConversationId,
+  };
+  return createHash("sha256").update(canonicalH3FingerprintJson(normalized)).digest("hex");
+}
+
+function storedH3TaskRequestFingerprint(task) {
+  if (typeof task?.requestFingerprint === "string" && /^[a-f0-9]{64}$/.test(task.requestFingerprint)) {
+    return task.requestFingerprint;
+  }
+  const input = normalizeH3TaskInput(task || {});
+  const conversationId = task?.conversationAssociation === "client_supplied"
+    ? task?.conversationId?.toString?.() || task?.conversationId || ""
+    : "";
+  return h3TaskRequestFingerprint(input, { conversationId });
+}
+
 export async function resolveH3TaskPrompt(input, { loadCredential, callModel, preferModel = false } = {}) {
   const promptInput = {
     prompt: input.originalPrompt,
@@ -498,6 +546,7 @@ export async function cleanupExpiredH3Outputs({ getCollection, removeObject, own
 function taskBilling(task, wallet) {
   const charged = ["reserved", "settled"].includes(task?.chargeStatus);
   return {
+    ...(task?.sourceChannel === "desktop_agent" ? { chargeId: task.walletLedgerId || task.activeChargeKey || `h3:exempt:${task.orderNo}` } : {}),
     chargedFen: charged ? integer(task?.chargedFen, integer(task?.priceFen)) : 0,
     remainingBalanceFen: integer(wallet?.balanceFen),
     packageBalanceFen: integer(wallet?.shortVideoPackageBalanceFen),
@@ -1237,18 +1286,26 @@ export function registerH3SharedRoutes(app, dependencies) {
       if (rawIdempotency.length < 8 || rawIdempotency.length > 160) return c.json({ code: "IDEMPOTENCY_KEY_REQUIRED", message: "请提供 8–160 字符的 Idempotency-Key" }, 400);
       const ownerId = new ObjectId(auth.user.id);
       const idempotencyKey = createHash("sha256").update(`${ownerId}:${rawIdempotency}`).digest("hex");
+      const requestedConversationId = String(body.conversation_id || body.conversationId || "").trim();
+      const requestFingerprint = h3TaskRequestFingerprint(input, { conversationId: requestedConversationId });
       const tasks = await getCollection("h3SharedTasks");
-      const existing = await tasks.findOne({ idempotencyKey });
-      if (existing) {
+      const replayExisting = async (existing) => {
+        if (storedH3TaskRequestFingerprint(existing) !== requestFingerprint) {
+          return c.json({ code: "IDEMPOTENCY_KEY_CONFLICT", message: "同一 Idempotency-Key 不能用于不同的 MiniMax H3 创建请求" }, 409);
+        }
+        if (existing.status === "rejected" && existing.chargeStatus === "not_charged" && existing.error?.code === "INSUFFICIENT_BALANCE") {
+          return c.json({ code: "INSUFFICIENT_BALANCE", message: `可用余额不足，本次任务需要 ${(integer(existing.priceFen) / 100).toFixed(2)} 元`, requiredFen: integer(existing.priceFen), idempotent: true }, 402);
+        }
         await ensureH3ConversationMessages({ getCollection, task: existing });
         const wallet = await (await getCollection("wallets")).findOne({ ownerId: existing.requesterUserId });
         return c.json({ task: publicTask(existing), billing: taskBilling(existing, wallet), idempotent: true });
-      }
+      };
+      const existing = await tasks.findOne({ idempotencyKey });
+      if (existing) return replayExisting(existing);
       input.assets = await trustedAssets(ownerId, input.assets);
       const now = new Date();
       const orderNo = orderNumber();
       const taskId = new ObjectId();
-      const requestedConversationId = String(body.conversation_id || body.conversationId || "").trim();
       const conversation = input.sourceChannel === "website" ? {
         conversationId: ObjectId.isValid(requestedConversationId) ? new ObjectId(requestedConversationId) : new ObjectId(),
         requestMessageId: new ObjectId(),
@@ -1260,7 +1317,7 @@ export function registerH3SharedRoutes(app, dependencies) {
       const dispatchEstimatedTotalSeconds = estimateH3TaskTotalSeconds(input);
       const autoCancelAt = h3TaskAutoCancelAt(now, dispatchEstimatedTotalSeconds);
       const task = {
-        _id: taskId, orderNo, idempotencyKey, requesterUserId: ownerId, requesterEmailSnapshot: auth.user.email || null, requesterRoleSnapshot: auth.user.role || "user", ...input, ...conversation,
+        _id: taskId, orderNo, idempotencyKey, requestFingerprint, requesterUserId: ownerId, requesterEmailSnapshot: auth.user.email || null, requesterRoleSnapshot: auth.user.role || "user", ...input, ...conversation,
         ...(exempt ? {} : { walletLedgerId: chargeKey, activeChargeKey: chargeKey }),
         chargedFen: exempt ? 0 : input.priceFen,
         billingMode: exempt ? "administrator_exempt" : "wallet",
@@ -1272,9 +1329,8 @@ export function registerH3SharedRoutes(app, dependencies) {
       catch (error) {
         if (error?.code !== 11000) throw error;
         const duplicate = await tasks.findOne({ idempotencyKey });
-        await ensureH3ConversationMessages({ getCollection, task: duplicate });
-        const wallet = await (await getCollection("wallets")).findOne({ ownerId: duplicate.requesterUserId });
-        return c.json({ task: publicTask(duplicate), billing: taskBilling(duplicate, wallet), idempotent: true });
+        if (!duplicate) throw error;
+        return replayExisting(duplicate);
       }
       await ensureH3ConversationMessages({ getCollection, task });
       if (exempt) {
@@ -1306,7 +1362,7 @@ export function registerH3SharedRoutes(app, dependencies) {
       await audit(await getCollection("h3TaskAudits"), "created", { taskId, orderNo, actorUserId: ownerId, sourceChannel: input.sourceChannel, priceFen: input.priceFen, chargedFen: input.priceFen, billingMode: "wallet" });
       await queueCoordinator.invalidate().catch(() => {});
       const remainingBalanceFen = reserved.balanceFen == null ? integer((await (await getCollection("wallets")).findOne({ ownerId }))?.balanceFen) : integer(reserved.balanceFen);
-      return c.json({ task: publicTask(queued), billing: { chargedFen: input.priceFen, remainingBalanceFen, packageBalanceFen: integer(reserved.shortVideoPackageBalanceFen), billingMode: "wallet", exempt: false }, idempotent: false }, 201);
+      return c.json({ task: publicTask(queued), billing: { chargeId: chargeKey, chargedFen: input.priceFen, remainingBalanceFen, packageBalanceFen: integer(reserved.shortVideoPackageBalanceFen), billingMode: "wallet", exempt: false }, idempotent: false }, 201);
     } catch (error) { return routeError(c, error); }
   });
 
@@ -1908,7 +1964,7 @@ export function registerH3SharedRoutes(app, dependencies) {
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/prompts/optimize", tags: ["MiniMax H3 Shared Nodes"], summary: "已停用：服务端提示词优化", description: "官网服务端不执行提示词优化。网页版通过 prompt_optimization_enabled 让用户选择是否由 MiniMax H3 极速视频桌面端执行本地魔法优化。", deprecated: true, responses: { 410: { description: "PROMPT_OPTIMIZATION_MOVED_TO_DESKTOP" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/assets/presign", tags: ["MiniMax H3 Shared Nodes"], summary: "为输入素材签发账号专属 COS 直传票据", description: "签发前会幂等校验并补齐官网当前 HTTPS 来源的腾讯云 COS 浏览器跨域规则；大文件直接上传 COS，不经过官网请求体。", request: { body: { required: true, content: { "application/json": { schema: z.object({ kind: z.enum(["image", "video", "audio"]), filename: z.string(), content_type: z.string(), bytes: z.number().int().positive(), sha256: z.string().regex(/^[A-Fa-f0-9]{64}$/) }) } } } }, responses: { 201: { description: "返回 PUT URL、固定 headers、asset_id 与 object_key" }, 409: { description: "COS 回执不匹配" }, 503: { description: "COS 浏览器跨域规则暂时无法校验或配置" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/assets/{id}/complete", tags: ["MiniMax H3 Shared Nodes"], summary: "校验并完成 H3 输入素材上传", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "返回可用于任务 assets manifest 的素材记录" }, 409: { description: "对象大小、摘要或归属不匹配" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "使用原始中文提示词创建共享节点任务并原子预扣余额", description: "实际价格（分）= 时长秒数×20 + 图片数×5 + 视频数×20；音频免费。普通用户与会员用户原子预扣钱包余额；有效期内的短视频包月用户优先扣套餐额度并按实际扣款 50/50 分账，套餐额度归零后仍可无限创建 H3 任务且本次扣款、节点分佣和平台分佣均为 0。管理员始终免扣费且不参与分佣。服务端始终原样保存 prompt，不翻译；prompt_optimization_enabled=true 时由桌面节点执行本地魔法优化并回调 compiled_prompt，false 时必须直接使用原始提示词且禁止回传 compiled_prompt。video_mode、longform_mode、segment_duration_seconds、profile、sampling_steps 与 seed 会进入受信任节点任务合同；超长模式的 duration_seconds 由服务端按空行分段数乘单段时长重新计算。旧客户端省略字段时按全能参考、720P、4 步和随机种子兼容。必须提供 Idempotency-Key。", request: { body: { required: true, content: { "application/json": { schema: z.object({ source_channel: z.enum(["website", "desktop_agent"]), model: z.literal(H3_SHARED_MODEL), prompt: z.string().min(1).max(20_000), prompt_optimization_enabled: z.boolean().optional(), conversation_id: z.string().optional(), video_mode: z.enum(["all_reference", "first_last", "smart_multiframe", "extended"]).optional(), longform_mode: z.enum(["continuous", "independent"]).optional(), segment_duration_seconds: z.number().int().min(5).max(15).optional(), aspect_ratio: z.enum(["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]), duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profile: z.enum(["official_max", "ultra1080", "fast2k", "fast", "balanced", "turbo544", "quality", "preview"]), sampling_steps: z.union([z.literal(4), z.literal(8), z.literal(20)]).optional(), seed: z.number().int().min(-1).max(2_147_483_647).optional(), assets: z.object({ images: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(9), videos: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3), audio: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3) }), idempotency_key: z.string().min(8).max(160).optional() }) } } } }, responses: { 201: { description: "原始提示词、完整视频参数与用户优化选择已保存，并按账号类型完成扣费或零扣费排队" }, 402: { description: "非套餐用户余额不足" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "使用原始中文提示词创建共享节点任务并原子预扣余额", description: "实际价格（分）= 时长秒数×20 + 图片数×5 + 视频数×20；音频免费。普通用户与会员用户原子预扣钱包余额；有效期内的短视频包月用户优先扣套餐额度并按实际扣款 50/50 分账，套餐额度归零后仍可无限创建 H3 任务且本次扣款、节点分佣和平台分佣均为 0。管理员始终免扣费且不参与分佣。服务端始终原样保存 prompt，不翻译；prompt_optimization_enabled=true 时由桌面节点执行本地魔法优化并回调 compiled_prompt，false 时必须直接使用原始提示词且禁止回传 compiled_prompt。video_mode、longform_mode、segment_duration_seconds、profile、sampling_steps 与 seed 会进入受信任节点任务合同；超长模式的 duration_seconds 由服务端按空行分段数乘单段时长重新计算。旧客户端省略字段时按全能参考、720P、4 步和随机种子兼容。必须提供 Idempotency-Key；同一键只允许重放同一规范化请求。", request: { body: { required: true, content: { "application/json": { schema: z.object({ source_channel: z.enum(["website", "desktop_agent"]), model: z.literal(H3_SHARED_MODEL), prompt: z.string().min(1).max(20_000), prompt_optimization_enabled: z.boolean().optional(), conversation_id: z.string().optional(), video_mode: z.enum(["all_reference", "first_last", "smart_multiframe", "extended"]).optional(), longform_mode: z.enum(["continuous", "independent"]).optional(), segment_duration_seconds: z.number().int().min(5).max(15).optional(), aspect_ratio: z.enum(["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]), duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profile: z.enum(["official_max", "ultra1080", "fast2k", "fast", "balanced", "turbo544", "quality", "preview"]), sampling_steps: z.union([z.literal(4), z.literal(8), z.literal(20)]).optional(), seed: z.number().int().min(-1).max(2_147_483_647).optional(), assets: z.object({ images: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(9), videos: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3), audio: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3) }), idempotency_key: z.string().min(8).max(160).optional() }) } } } }, responses: { 201: { description: "原始提示词、完整视频参数与用户优化选择已保存，并按账号类型完成扣费或零扣费排队" }, 402: { description: "非套餐用户余额不足（同键同请求重放仍保持 402）" }, 409: { description: "Idempotency-Key 已绑定到不同的规范化请求" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "查看当前账号的共享节点订单", responses: { 200: { description: "最多返回最近 50 个订单" }, 401: { description: "未认证" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/conversations/recent", tags: ["MiniMax H3 Shared Nodes"], summary: "读取当前用户会话中的 H3 视频结果", description: "仅返回当前登录用户的 H3 assistant 结果消息；历史已完成任务会先进行同用户安全幂等回填。消息不包含 COS 永久地址。", request: { query: z.object({ conversation_id: z.string().optional() }) }, responses: { 200: { description: "当前会话及其 H3 视频结果" }, 401: { description: "未认证" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}", tags: ["MiniMax H3 Shared Nodes"], summary: "查看共享节点订单详情", description: "输出只包含受控 previewPath/downloadPath 和 24 小时到期状态，不返回 COS objectKey 或永久 URL。", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "订单详情" }, 404: { description: "订单不存在或无权查看" } } });

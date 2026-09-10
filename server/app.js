@@ -32,6 +32,7 @@ import {
   sealActivationCodeSecret,
   sealUserSecret,
 } from "./security.js";
+import { createSiteOrDesktopChandlerAuthenticate } from "./desktop-auth.js";
 import { enforceRateLimit } from "./rate-limit.js";
 import {
   createMockPaymentUrl,
@@ -101,6 +102,7 @@ import { buildAdminAnalyticsDashboard, recordAnalyticsEvent } from "./analytics.
 import { recoverExpiredDirectReleaseLock } from "./release-lock.js";
 import { buildPearAccountUsageSnapshot, creditPaymentBalanceWithPromotion, paymentPromotionBonusFen, registerPearApiRoutes } from "./pearapi.js";
 import { registerH3SharedRoutes } from "./h3-shared.js";
+import { registerCodexMarketRoutes } from "./codex-market.js";
 import {
   SHORT_VIDEO_MONTHLY_PRICE_FEN,
   SHORT_VIDEO_PLAN_ID,
@@ -1586,6 +1588,11 @@ async function authenticateDesktopChandler(c, { admin = false } = {}) {
   }
   return { accessToken, chandlerUser, user, identity };
 }
+
+const authenticateSiteOrDesktopChandler = createSiteOrDesktopChandlerAuthenticate({
+  authenticateSite: authenticate,
+  authenticateDesktop: authenticateDesktopChandler,
+});
 
 async function enqueueOfflineReviewEvent(order, source = "new-order") {
   const now = new Date();
@@ -3218,8 +3225,22 @@ app.notFound((c) =>
   c.json({ code: "NOT_FOUND", message: "接口不存在", requestId: c.get("requestId") }, 404),
 );
 
-registerPearApiRoutes(app, { authenticate, requireAdmin, requireTrustedMutation });
-registerH3SharedRoutes(app, { authenticate, requireAdmin, requireTrustedMutation, verifyActivationReceipt, notifyUserOnce });
+registerPearApiRoutes(app, {
+  authenticate: authenticateSiteOrDesktopChandler,
+  requireAdmin,
+  requireTrustedMutation,
+});
+registerH3SharedRoutes(app, {
+  authenticate: authenticateSiteOrDesktopChandler,
+  requireAdmin,
+  requireTrustedMutation,
+  verifyActivationReceipt,
+  notifyUserOnce,
+});
+registerCodexMarketRoutes(app, {
+  authenticate: authenticateSiteOrDesktopChandler,
+  requireTrustedMutation,
+});
 
 app.openapi(healthRoute, async (c) => {
   const database = await pingDatabase();
@@ -6919,11 +6940,127 @@ app.get("/api/cron/subscription-reminders", async (c) => {
   return c.json(await sendDailyRenewalReminders());
 });
 
+function billingRequestKey(headerValue, clientOrderNo) {
+  const value = String(headerValue || clientOrderNo || "").trim();
+  if (!value) return null;
+  return value.length >= 8 && value.length <= 160 && /^[A-Za-z0-9._:-]+$/.test(value) ? value : false;
+}
+
+function billingRequestFingerprint({ kind, provider, cycle, subscriptionPlan, amountFen, taskId = null }) {
+  return createHash("sha256").update(JSON.stringify({
+    kind,
+    provider,
+    cycle: kind === "subscription" ? cycle : null,
+    plan: kind === "subscription" ? subscriptionPlan : null,
+    amountFen: ["recharge", "custom"].includes(kind) ? amountFen : null,
+    taskId: kind === "worker_task" ? String(taskId || "") : null,
+    amountPolicy: kind === "worker_task" ? "authoritative_task_budget" : null,
+  })).digest("hex");
+}
+
+function billingReplayConflict(existing, fingerprint) {
+  return Boolean(existing && existing.requestFingerprint && existing.requestFingerprint !== fingerprint);
+}
+
+function billingOrderResponse(order, { offline = false, idempotent = true } = {}) {
+  if (offline) return {
+    id: order._id?.toString(),
+    orderNo: order.orderNo,
+    status: order.status === "pending" ? "pending_review" : order.status,
+    mode: "offline",
+    planType: order.subscriptionPlan || "member",
+    amountFen: order.amountFen,
+    bonusFen: order.promotionBonusFen || 0,
+    creditedFen: order.creditedFen || order.amountFen,
+    upgradeCreditFen: order.upgradeCreditFen || 0,
+    idempotent,
+  };
+  return {
+    orderNo: order.orderNo,
+    status: order.status || "creating",
+    paymentUrl: order.paymentUrl || null,
+    qrCodeDataUrl: order.qrCodeDataUrl || null,
+    mode: "chandler",
+    provider: order.provider,
+    amountFen: order.amountFen,
+    bonusFen: order.promotionBonusFen || 0,
+    creditedFen: order.creditedFen || order.amountFen,
+    upgradeCreditFen: order.upgradeCreditFen || 0,
+    ...(order.taskId ? { taskId: order.taskId.toString() } : {}),
+    idempotent,
+  };
+}
+
+async function reconcileBillingOrderRequest(journal, {
+  collectionProvider = getCollection,
+  fetchRemoteOrder = getDirectPaymentOrder,
+} = {}) {
+  if (!journal) return { error: { code: "BILLING_REQUEST_NOT_FOUND", message: "没有找到建单请求", status: 404 } };
+  if (journal.status === "final" && journal.response) return { response: { ...journal.response, idempotent: true }, status: 200 };
+  if (journal.provider === "offline") {
+    const offline = await (await collectionProvider("offlinePayments")).findOne({ ownerId: journal.ownerId, billingRequestKey: journal.requestKey });
+    if (offline) {
+      const response = billingOrderResponse(offline, { offline: true });
+      await (await collectionProvider("billingOrderRequests")).updateOne({ _id: journal._id }, { $set: { status: "final", response, finalizedAt: new Date(), updatedAt: new Date() } });
+      return { response, status: 200 };
+    }
+  } else {
+    try {
+      const remote = await fetchRemoteOrder(journal.orderNo);
+      const remoteOrderNo = String(remote.platform_order_no || remote.order_no || remote.id || journal.orderNo);
+      const prepay = remote.prepay || remote.payment || {};
+      const paymentUrl = prepay.pay_url || prepay.h5_url || prepay.code_url || remote.pay_url || remote.h5_url || remote.code_url || null;
+      const codeUrl = prepay.code_url || remote.code_url || null;
+      const qrCodeDataUrl = codeUrl ? await QRCode.toDataURL(codeUrl, { width: 280, margin: 1, color: { dark: "#0b3f3a", light: "#fffdfa" } }) : null;
+      const payment = {
+        orderNo: remoteOrderNo,
+        merchantOrderNo: journal.orderNo,
+        ownerId: journal.ownerId,
+        provider: journal.provider,
+        kind: journal.kind,
+        cycle: journal.cycle,
+        amountFen: journal.amountFen,
+        promotionBonusFen: journal.promotionBonusFen || 0,
+        creditedFen: journal.creditedFen || journal.amountFen,
+        ...(journal.taskId ? { taskId: journal.taskId } : {}),
+        chandler: true,
+        status: chandlerOrderPaid(remote) ? "pending" : "pending",
+        paymentUrl,
+        qrCodeDataUrl,
+        billingRequestKey: journal.requestKey,
+        requestFingerprint: journal.requestFingerprint,
+        createdAt: journal.createdAt || new Date(),
+        updatedAt: new Date(),
+      };
+      const payments = await collectionProvider("payments");
+      await payments.updateOne(
+        { ownerId: journal.ownerId, billingRequestKey: journal.requestKey },
+        { $set: payment },
+        { upsert: true },
+      );
+      if (chandlerOrderPaid(remote)) await activatePayment(remoteOrderNo, remote.transaction_id || remote.channel_transaction_no || remoteOrderNo);
+      const stored = await payments.findOne({ ownerId: journal.ownerId, billingRequestKey: journal.requestKey });
+      const response = billingOrderResponse(stored || payment);
+      await (await collectionProvider("billingOrderRequests")).updateOne({ _id: journal._id }, { $set: { status: "final", response, finalizedAt: new Date(), updatedAt: new Date() }, $unset: { lastError: "" } });
+      return { response, status: 200 };
+    } catch (error) {
+      const now = new Date();
+      await (await collectionProvider("billingOrderRequests")).updateOne(
+        { _id: journal._id },
+        { $set: { status: "failed_unknown", lastError: String(error?.message || error).slice(0, 500), lastReconciledAt: now, updatedAt: now }, $inc: { reconcileAttempts: 1 } },
+      );
+    }
+  }
+  return { error: { code: "BILLING_ORDER_OUTCOME_UNKNOWN", message: "支付平台建单结果暂未确认，请使用相同幂等键重试查询", status: 503, orderNo: journal.orderNo, retryable: true } };
+}
+
 app.post("/api/billing/orders", async (c) => {
   if (!isTrustedBrowserRequest(c)) return c.json({ code: "ORIGIN_REJECTED", message: "请求来源不受信任" }, 403);
   const auth = await authenticate(c);
   if (auth.error) return auth.error;
   const body = await c.req.json();
+  const requestKey = billingRequestKey(c.req.header("idempotency-key"), body.clientOrderNo);
+  if (requestKey === false) return c.json({ code: "INVALID_IDEMPOTENCY_KEY", message: "幂等键必须为 8–160 位字母、数字或 . _ : -" }, 400);
   const provider = ["wechat", "offline"].includes(body.provider) ? body.provider : null;
   const cycle = body.cycle === "year" ? "year" : body.cycle === "month" ? "month" : null;
   const kind = body.kind === "recharge"
@@ -6983,7 +7120,7 @@ app.post("/api/billing/orders", async (c) => {
   if (!cycle && kind === "subscription") return c.json({ code: "VALIDATION_ERROR", message: "订阅周期不正确" }, 400);
   if (provider === "offline" && !["subscription", "recharge"].includes(kind)) return c.json({ code: "VALIDATION_ERROR", message: "线下支付仅用于会员订阅或账户充值审核" }, 400);
   if (subscriptionPlan === SHORT_VIDEO_PLAN_ID && provider !== "offline") return c.json({ code: "OFFLINE_PAYMENT_REQUIRED", message: "短视频包月当前仅支持线下支付" }, 400);
-  const orderNo = `GL${Date.now()}${randomBytes(4).toString("hex").toUpperCase()}`;
+  let orderNo = `GL${Date.now()}${randomBytes(4).toString("hex").toUpperCase()}`;
   const autoRenewRequested = kind === "subscription" && Boolean(body.autoRenew);
   const activeSubscription = kind === "subscription" && subscriptionPlan === "member" && cycle === "year"
     ? await (await getCollection("subscriptions")).findOne({
@@ -6994,9 +7131,9 @@ app.post("/api/billing/orders", async (c) => {
       currentPeriodEnd: { $gt: now },
     })
     : null;
-  const isMonthlyUpgrade = Boolean(activeSubscription);
-  const upgradeCreditFen = isMonthlyUpgrade ? pricing.monthly.amountFen : 0;
-  const upgradeBaseStart = isMonthlyUpgrade
+  let isMonthlyUpgrade = Boolean(activeSubscription);
+  let upgradeCreditFen = isMonthlyUpgrade ? pricing.monthly.amountFen : 0;
+  let upgradeBaseStart = isMonthlyUpgrade
     ? new Date(activeSubscription.currentPeriodStart || now)
     : null;
   if (isMonthlyUpgrade) amountFen = Math.max(100, pricing.yearly.amountFen - upgradeCreditFen);
@@ -7005,6 +7142,47 @@ app.post("/api/billing/orders", async (c) => {
     : null;
   if (localPriceVersion) amountFen = localPriceVersion.amountFen;
   const autoRenew = false;
+  const requestFingerprint = requestKey ? billingRequestFingerprint({
+    kind, provider, cycle, subscriptionPlan, amountFen, taskId: workerTask?._id,
+  }) : null;
+  const targetOrders = await getCollection(provider === "offline" ? "offlinePayments" : "payments");
+  let billingJournal = null;
+  if (requestKey) {
+    const requests = await getCollection("billingOrderRequests");
+    const journal = {
+      ownerId, requestKey, requestFingerprint, orderNo, provider, kind, cycle,
+      subscriptionPlan, amountFen, ...(workerTask ? { taskId: workerTask._id } : {}),
+      isMonthlyUpgrade, upgradeCreditFen, upgradeBaseStart,
+      promotionBonusFen: paymentPromotionBonusFen({ amountFen, kind: kind === "subscription" ? "subscription_payment" : kind }),
+      creditedFen: amountFen + paymentPromotionBonusFen({ amountFen, kind: kind === "subscription" ? "subscription_payment" : kind }),
+      status: "processing", leaseUntil: new Date(now.getTime() + 30_000), createdAt: now, updatedAt: now,
+    };
+    try {
+      const inserted = await requests.insertOne(journal);
+      billingJournal = { ...journal, _id: inserted.insertedId };
+    } catch (error) {
+      if (error?.code !== 11000) throw error;
+      const existing = await requests.findOne({ ownerId, requestKey });
+      if (!existing || billingReplayConflict(existing, requestFingerprint)) return c.json({ code: "IDEMPOTENCY_KEY_CONFLICT", message: "该幂等键已绑定到不同的支付请求" }, 409);
+      const reconciled = await reconcileBillingOrderRequest(existing);
+      if (!reconciled.error) {
+        c.header("Cache-Control", "private, no-store, max-age=0");
+        return c.json(reconciled.response, reconciled.status);
+      }
+      const recoveryNow = new Date();
+      billingJournal = await requests.findOneAndUpdate(
+        { _id: existing._id, status: "failed_unknown", leaseUntil: { $lte: recoveryNow } },
+        { $set: { status: "processing", leaseUntil: new Date(recoveryNow.getTime() + 30_000), updatedAt: recoveryNow }, $inc: { createAttempts: 1 } },
+        { returnDocument: "after" },
+      );
+      if (!billingJournal) return c.json(reconciled.error, reconciled.error.status);
+      orderNo = billingJournal.orderNo;
+      amountFen = billingJournal.amountFen;
+      isMonthlyUpgrade = Boolean(billingJournal.isMonthlyUpgrade);
+      upgradeCreditFen = Number(billingJournal.upgradeCreditFen || 0);
+      upgradeBaseStart = billingJournal.upgradeBaseStart ? new Date(billingJournal.upgradeBaseStart) : null;
+    }
+  }
 
   if (provider === "offline") {
     const promotionBonusFen = subscriptionPlan === SHORT_VIDEO_PLAN_ID
@@ -7071,6 +7249,24 @@ app.post("/api/billing/orders", async (c) => {
       ...(isMonthlyUpgrade ? { upgrade_from: "month", upgrade_credit_fen: upgradeCreditFen, upgrade_base_start: upgradeBaseStart.toISOString() } : {}),
       ...(localPriceVersion ? { price_source: "website-local", price_version_id: localPriceVersion._id.toString() } : {}),
     };
+    const offlineDocument = {
+      orderNo, chandlerOrderNo: null, ownerId, chandlerUserId: partnerData.chandler_user_id, userEmail: auth.user.email,
+      kind, cycle, subscriptionPlan, amountFen, promotionBonusFen, creditedFen: amountFen + promotionBonusFen,
+      plan, partnerData, status: "pending",
+      ...(requestKey ? { billingRequestKey: requestKey, requestFingerprint } : {}),
+      ...(isMonthlyUpgrade ? { upgradeFrom: "month", upgradeCreditFen, upgradeBaseStart } : {}),
+      ...(localPriceVersion ? { localPriceVersionId: localPriceVersion._id } : {}),
+      createdAt: now, updatedAt: now,
+    };
+    let result;
+    try {
+      result = await targetOrders.insertOne(offlineDocument);
+    } catch (error) {
+      if (error?.code !== 11000 || !requestKey) throw error;
+      const duplicate = await targetOrders.findOne({ ownerId, billingRequestKey: requestKey });
+      if (!duplicate || billingReplayConflict(duplicate, requestFingerprint)) return c.json({ code: "IDEMPOTENCY_KEY_CONFLICT", message: "该幂等键已绑定到不同的支付请求" }, 409);
+      return c.json(billingOrderResponse(duplicate, { offline: true }), 200);
+    }
     let chandlerOrderNo = null;
     try {
       const mirrored = await createDirectPaymentOrder(offlineAccessToken || await getChandlerAccessToken(auth.session), {
@@ -7084,32 +7280,15 @@ app.post("/api/billing/orders", async (c) => {
         prepay: false,
       });
       chandlerOrderNo = mirrored.orderNo;
+      await targetOrders.updateOne({ _id: result.insertedId }, { $set: { chandlerOrderNo, updatedAt: new Date() } });
     } catch { /* MongoDB remains the durable queue before payment onboarding is complete. */ }
-    const result = await (await getCollection("offlinePayments")).insertOne({
-      orderNo,
-      chandlerOrderNo,
-      ownerId,
-      chandlerUserId: partnerData.chandler_user_id,
-      userEmail: auth.user.email,
-      kind,
-      cycle,
-      subscriptionPlan,
-      amountFen,
-      promotionBonusFen,
-      creditedFen: amountFen + promotionBonusFen,
-      plan,
-      partnerData,
-      status: "pending",
-      ...(isMonthlyUpgrade ? { upgradeFrom: "month", upgradeCreditFen, upgradeBaseStart } : {}),
-      ...(localPriceVersion ? { localPriceVersionId: localPriceVersion._id } : {}),
-      createdAt: now,
-      updatedAt: now,
-    });
     // The claim endpoint can backfill any pending order, so a transient queue
     // write must never turn a durably created payment order into a client-side
     // failure that the user may submit twice.
     await enqueueOfflineReviewEvent({ _id: result.insertedId, orderNo }, "new-order").catch(() => null);
-    return c.json({ id: result.insertedId.toString(), orderNo, status: "pending_review", mode: "offline", planType: subscriptionPlan, amountFen, bonusFen: promotionBonusFen, creditedFen: amountFen + promotionBonusFen, upgradeCreditFen }, 201);
+    const response = { id: result.insertedId.toString(), orderNo, status: "pending_review", mode: "offline", planType: subscriptionPlan, amountFen, bonusFen: promotionBonusFen, creditedFen: amountFen + promotionBonusFen, upgradeCreditFen };
+    if (billingJournal) await (await getCollection("billingOrderRequests")).updateOne({ _id: billingJournal._id }, { $set: { status: "final", response, finalizedAt: new Date(), updatedAt: new Date() } });
+    return c.json(response, 201);
   }
 
   // Creating an order is a service-side, role-guarded operation and is
@@ -7117,6 +7296,26 @@ app.post("/api/billing/orders", async (c) => {
   // Prepay deliberately retains the end-user token so Chandler can resolve
   // the real payer/openid for JSAPI and other user-bound payment modes.
   const accessToken = await getChandlerAccessToken(auth.session);
+  let claimedPayment = null;
+  if (requestKey) {
+    const reservation = {
+      orderNo, merchantOrderNo: orderNo, ownerId, provider, kind, cycle, amountFen,
+      promotionBonusFen: paymentPromotionBonusFen({ amountFen, kind: kind === "subscription" ? "subscription_payment" : kind }),
+      creditedFen: amountFen, ...(workerTask ? { taskId: workerTask._id } : {}),
+      autoRenew, chandler: true, status: "creating", billingRequestKey: requestKey,
+      requestFingerprint, createdAt: now, updatedAt: now,
+    };
+    try {
+      const inserted = await targetOrders.insertOne(reservation);
+      claimedPayment = { ...reservation, _id: inserted.insertedId };
+    } catch (error) {
+      if (error?.code !== 11000) throw error;
+      const duplicate = await targetOrders.findOne({ ownerId, billingRequestKey: requestKey });
+      if (!duplicate || billingReplayConflict(duplicate, requestFingerprint)) return c.json({ code: "IDEMPOTENCY_KEY_CONFLICT", message: "该幂等键已绑定到不同的支付请求" }, 409);
+      if (billingJournal && duplicate.status === "creating") claimedPayment = duplicate;
+      else return c.json(billingOrderResponse(duplicate), 200);
+    }
+  }
   let result;
   if (kind === "subscription" && !isMonthlyUpgrade) {
     result = await createSubscriptionCheckout(accessToken, {
@@ -7168,7 +7367,7 @@ app.post("/api/billing/orders", async (c) => {
   const prepay = result.prepay || result.payment || {};
   const paymentUrl = prepay.pay_url || prepay.h5_url || prepay.code_url;
   const qrCodeDataUrl = prepay.code_url ? await QRCode.toDataURL(prepay.code_url, { width: 280, margin: 1, color: { dark: "#0b3f3a", light: "#fffdfa" } }) : null;
-  await (await getCollection("payments")).insertOne({
+  const paymentDocument = {
     orderNo: actualOrderNo,
     merchantOrderNo: orderNo,
     ownerId,
@@ -7186,9 +7385,18 @@ app.post("/api/billing/orders", async (c) => {
     qrCodeDataUrl: qrCodeDataUrl || null,
     ...(isMonthlyUpgrade ? { upgradeFrom: "month", upgradeCreditFen, upgradeBaseStart } : {}),
     ...(localPriceVersion ? { localPriceVersionId: localPriceVersion._id } : {}),
+    ...(requestKey ? { billingRequestKey: requestKey, requestFingerprint } : {}),
     createdAt: now,
     updatedAt: now,
-  });
+  };
+  if (claimedPayment) {
+    await targetOrders.updateOne(
+      { _id: claimedPayment._id, status: "creating" },
+      { $set: paymentDocument },
+    );
+  } else {
+    await targetOrders.insertOne(paymentDocument);
+  }
   if (workerTask) {
     const linked = await (await getCollection("workerTasks")).updateOne(
       { _id: workerTask._id, publisherId: ownerId, status: { $in: ["awaiting_payment", "payment_rejected"] }, paymentStatus: { $in: ["awaiting_payment", "rejected"] } },
@@ -7209,7 +7417,7 @@ app.post("/api/billing/orders", async (c) => {
       return c.json({ code: "TASK_STATE_CHANGED", message: "任务状态已变化，请刷新后重试" }, 409);
     }
   }
-  return c.json({
+  const response = {
     orderNo: actualOrderNo,
     status: "pending",
     paymentUrl,
@@ -7224,84 +7432,116 @@ app.post("/api/billing/orders", async (c) => {
     autoRenewAvailable: !isMonthlyUpgrade,
     priceSource: kind === "subscription" ? "website-membership-ledger" : "chandler",
     ...(workerTask ? { taskId: workerTask._id.toString() } : {}),
-  }, 201);
+  };
+  if (billingJournal) await (await getCollection("billingOrderRequests")).updateOne({ _id: billingJournal._id }, { $set: { status: "final", response, finalizedAt: new Date(), updatedAt: new Date() } });
+  return c.json(response, 201);
 });
+
+function paymentEffectState(payment) {
+  if (["applied", "applying", "failed"].includes(payment?.effectStatus)) return payment.effectStatus;
+  if (payment?.status === "paid" && !payment?.effectStatus) return "legacy_assumed_applied";
+  return "pending";
+}
+
+async function applyPaidPaymentEffect(payment, {
+  collectionProvider = getCollection,
+  creditBalance = creditPaymentBalanceWithPromotion,
+  notifyOnce = notifyUserOnce,
+  notifyWorkerReady = notifyWorkerTaskReady,
+  now = new Date(),
+  leaseMs = 30_000,
+} = {}) {
+  if (!payment || payment.status !== "paid") return { applied: false, reason: "not_paid" };
+  if (["applied", "legacy_assumed_applied"].includes(paymentEffectState(payment))) return { applied: false, reason: "already_applied" };
+  const payments = await collectionProvider("payments");
+  const leaseOwner = `payment-effect:${randomBytes(12).toString("hex")}`;
+  const claimed = await payments.findOneAndUpdate(
+    {
+      _id: payment._id,
+      status: "paid",
+      $or: [
+        { effectStatus: { $in: ["pending", "failed"] } },
+        { effectStatus: "applying", effectLeaseUntil: { $lte: now } },
+      ],
+    },
+    { $set: { effectStatus: "applying", effectLeaseOwner: leaseOwner, effectLeaseUntil: new Date(now.getTime() + leaseMs), effectStartedAt: now, updatedAt: now }, $inc: { effectAttempts: 1 }, $unset: { effectError: "" } },
+    { returnDocument: "after" },
+  );
+  if (!claimed) return { applied: false, reason: "in_progress" };
+  payment = claimed;
+  try {
+    if (payment.kind === "subscription") {
+      const subscriptions = await collectionProvider("subscriptions");
+      const current = await subscriptions.findOne({ ownerId: payment.ownerId });
+      const alreadyExtended = Array.isArray(current?.appliedPaymentOrderNos) && current.appliedPaymentOrderNos.includes(payment.orderNo);
+      if (!alreadyExtended) {
+        const existingEnd = current?.currentPeriodEnd ? new Date(current.currentPeriodEnd) : null;
+        const extending = Boolean(existingEnd && existingEnd > now);
+        const renewalBase = extending ? existingEnd : now;
+        const start = payment.upgradeFrom === "month"
+          ? new Date(payment.upgradeBaseStart || current?.currentPeriodStart || now)
+          : extending ? new Date(current.currentPeriodStart || now) : now;
+        const end = new Date(payment.upgradeFrom === "month" ? start : renewalBase);
+        if (payment.cycle === "year") end.setFullYear(end.getFullYear() + 1);
+        else end.setMonth(end.getMonth() + 1);
+        await subscriptions.updateOne(
+          { ownerId: payment.ownerId, appliedPaymentOrderNos: { $ne: payment.orderNo } },
+          {
+            $set: { plan: "member", cycle: payment.cycle, provider: payment.provider, status: "active", currentPeriodStart: start, currentPeriodEnd: end, autoRenew: false, updatedAt: now },
+            $addToSet: { appliedPaymentOrderNos: payment.orderNo },
+            $setOnInsert: { createdAt: now },
+          },
+          { upsert: !current },
+        );
+      }
+      await creditBalance({ ownerId: payment.ownerId, amountFen: payment.amountFen, source: "online_subscription", sourceId: payment.orderNo, kind: "subscription_payment" });
+      await notifyOnce(payment.ownerId, "subscription_payment_succeeded", "会员续费已生效", `微信支付已到账，${payment.cycle === "year" ? "年度" : "月度"}会员权益已同步到官网与桌面端。`, { orderNo: payment.orderNo });
+    } else if (payment.kind === "recharge") {
+      await creditBalance({ ownerId: payment.ownerId, amountFen: payment.amountFen, source: "online_recharge", sourceId: payment.orderNo, kind: "recharge" });
+    } else if (payment.kind === "custom") {
+      await notifyOnce(payment.ownerId, "custom_order_paid", "深度定制订单支付成功", "微信支付已到账，我们会根据订单信息与你联系并推进交付。", { orderNo: payment.orderNo });
+    } else if (payment.kind === "worker_task" && payment.taskId) {
+      const tasks = await collectionProvider("workerTasks");
+      let task = await tasks.findOneAndUpdate(
+        { _id: payment.taskId, publisherId: payment.ownerId, paymentOrderNo: payment.orderNo, status: { $in: ["awaiting_payment", "payment_rejected"] }, paymentStatus: "pending_online" },
+        { $set: { status: "open", paymentStatus: "approved", paymentMethod: "wechat", paymentReviewedAt: now, onlinePaidAt: now, escrowStatus: "locked", updatedAt: now }, $unset: { paymentReviewReason: "", paymentReviewedBy: "" } },
+        { returnDocument: "after" },
+      );
+      if (!task) task = await tasks.findOne({ _id: payment.taskId, publisherId: payment.ownerId, paymentOrderNo: payment.orderNo, status: "open", paymentStatus: "approved" });
+      if (task) {
+        if (notifyWorkerReady === notifyWorkerTaskReady) await notifyWorkerTaskReady(task, { online: true });
+        else await notifyWorkerReady(task, { online: true });
+      }
+    }
+    const appliedAt = new Date();
+    await payments.updateOne(
+      { _id: payment._id, status: "paid", effectStatus: "applying", effectLeaseOwner: leaseOwner },
+      { $set: { effectStatus: "applied", effectAppliedAt: appliedAt, updatedAt: appliedAt }, $unset: { effectError: "", effectLeaseOwner: "", effectLeaseUntil: "" } },
+    );
+    return { applied: true };
+  } catch (error) {
+    const failedAt = new Date();
+    await payments.updateOne(
+      { _id: payment._id, status: "paid", effectStatus: "applying", effectLeaseOwner: leaseOwner },
+      { $set: { effectStatus: "failed", effectFailedAt: failedAt, effectError: String(error?.message || error).slice(0, 500), updatedAt: failedAt }, $unset: { effectLeaseOwner: "", effectLeaseUntil: "" } },
+    ).catch(() => null);
+    throw error;
+  }
+}
 
 async function activatePayment(orderNo, providerTransactionId) {
   const payments = await getCollection("payments");
   let payment = await payments.findOneAndUpdate(
     { orderNo, status: "pending" },
-    { $set: { status: "paid", providerTransactionId, paidAt: new Date(), updatedAt: new Date() } },
+    { $set: { status: "paid", effectStatus: "pending", providerTransactionId, paidAt: new Date(), updatedAt: new Date() } },
     { returnDocument: "after" },
   );
   if (!payment) {
     const completed = await payments.findOne({ orderNo, status: "paid" });
-    if (!completed || completed.kind !== "worker_task") return;
+    if (!completed) return;
     payment = completed;
   }
-  if (payment.kind === "subscription") {
-    const existingSubscription = await (await getCollection("subscriptions")).findOne({ ownerId: payment.ownerId });
-    const now = new Date();
-    const existingEnd = existingSubscription?.currentPeriodEnd ? new Date(existingSubscription.currentPeriodEnd) : null;
-    const extendingActivePeriod = Boolean(existingEnd && existingEnd > now);
-    const renewalBase = extendingActivePeriod ? existingEnd : now;
-    const start = payment.upgradeFrom === "month"
-      ? new Date(payment.upgradeBaseStart || existingSubscription?.currentPeriodStart || now)
-      : extendingActivePeriod ? new Date(existingSubscription.currentPeriodStart || now) : now;
-    const end = new Date(payment.upgradeFrom === "month" ? start : renewalBase);
-    if (payment.cycle === "year") end.setFullYear(end.getFullYear() + 1);
-    else end.setMonth(end.getMonth() + 1);
-    await (await getCollection("subscriptions")).updateOne(
-      { ownerId: payment.ownerId },
-      {
-        $set: {
-          plan: "member",
-          cycle: payment.cycle,
-          provider: payment.provider,
-          status: "active",
-          currentPeriodStart: start,
-          currentPeriodEnd: end,
-          autoRenew: false,
-          updatedAt: new Date(),
-        },
-        $setOnInsert: { createdAt: new Date() },
-      },
-      { upsert: true },
-    );
-    await creditPaymentBalanceWithPromotion({ ownerId: payment.ownerId, amountFen: payment.amountFen, source: "online_subscription", sourceId: payment.orderNo, kind: "subscription_payment" });
-    await notifyUserOnce(payment.ownerId, "subscription_payment_succeeded", "会员续费已生效", `微信支付已到账，${payment.cycle === "year" ? "年度" : "月度"}会员权益已同步到官网与桌面端。`, { orderNo: payment.orderNo });
-  } else if (payment.kind === "recharge") {
-    await creditPaymentBalanceWithPromotion({ ownerId: payment.ownerId, amountFen: payment.amountFen, source: "online_recharge", sourceId: payment.orderNo, kind: "recharge" });
-  } else if (payment.kind === "custom") {
-    await notifyUserOnce(payment.ownerId, "custom_order_paid", "深度定制订单支付成功", "微信支付已到账，我们会根据订单信息与你联系并推进交付。", { orderNo: payment.orderNo });
-  } else if (payment.kind === "worker_task" && payment.taskId) {
-    const now = new Date();
-    const tasks = await getCollection("workerTasks");
-    let task = await tasks.findOneAndUpdate(
-      {
-        _id: payment.taskId,
-        publisherId: payment.ownerId,
-        paymentOrderNo: payment.orderNo,
-        status: { $in: ["awaiting_payment", "payment_rejected"] },
-        paymentStatus: "pending_online",
-      },
-      {
-        $set: {
-          status: "open",
-          paymentStatus: "approved",
-          paymentMethod: "wechat",
-          paymentReviewedAt: now,
-          onlinePaidAt: now,
-          escrowStatus: "locked",
-          updatedAt: now,
-        },
-        $unset: { paymentReviewReason: "", paymentReviewedBy: "" },
-      },
-      { returnDocument: "after" },
-    );
-    if (!task) task = await tasks.findOne({ _id: payment.taskId, publisherId: payment.ownerId, paymentOrderNo: payment.orderNo, status: "open", paymentStatus: "approved" });
-    if (task) await notifyWorkerTaskReady(task, { online: true });
-  }
+  await applyPaidPaymentEffect(payment);
 }
 
 function chandlerOrderPaid(order = {}) {
@@ -7312,8 +7552,8 @@ async function reconcileChandlerPayment(orderNo) {
   const payment = await (await getCollection("payments")).findOne({ orderNo });
   if (!payment) return null;
   if (payment.status === "paid") {
-    if (payment.kind === "worker_task") await activatePayment(orderNo, payment.providerTransactionId || orderNo);
-    return payment;
+    await activatePayment(orderNo, payment.providerTransactionId || orderNo);
+    return (await getCollection("payments")).findOne({ orderNo });
   }
   const order = await getDirectPaymentOrder(orderNo);
   const remoteAmount = Number(order.amount);
@@ -7375,14 +7615,21 @@ app.get("/api/billing/payments/:orderNo/status", async (c) => {
   if (!payment) return c.json({ code: "ORDER_NOT_FOUND", message: "订单不存在" }, 404);
   const reconciled = await reconcileChandlerPayment(orderNo);
   c.header("Cache-Control", "no-store, max-age=0");
-  return c.json({ orderNo, status: reconciled?.status || "pending", remoteStatus: reconciled?.remoteStatus || null });
+  return c.json({ orderNo, status: reconciled?.status || "pending", effectStatus: paymentEffectState(reconciled), remoteStatus: reconciled?.remoteStatus || null });
 });
 
 app.get("/api/billing/subscription", async (c) => {
   const auth = await authenticate(c);
   if (auth.error) return auth.error;
   const ownerId = new ObjectId(auth.user.id);
-  const pendingOrders = await (await getCollection("payments")).find({ ownerId, chandler: true, status: "pending" }, { projection: { orderNo: 1 } }).sort({ createdAt: -1 }).limit(8).toArray();
+  const pendingOrders = await (await getCollection("payments")).find({
+    ownerId,
+    chandler: true,
+    $or: [
+      { status: "pending" },
+      { status: "paid", effectStatus: { $in: ["pending", "applying", "failed"] } },
+    ],
+  }, { projection: { orderNo: 1 } }).sort({ createdAt: -1 }).limit(8).toArray();
   await mapWithConcurrency(pendingOrders, 4, (item) => reconcileChandlerPayment(item.orderNo).catch(() => null));
   const evaluatedLifecycle = await refreshSubscriptionLifecycle(ownerId);
   const lifecycle = auth.user.role === "admin" ? { ...evaluatedLifecycle, restricted: false, renewalDue: false } : evaluatedLifecycle;
@@ -8448,14 +8695,21 @@ export {
   ACTIVATION_PRODUCT_DEFAULT,
   ACTIVATION_PRODUCT_SUPER_VIDEO,
   HARDWARE_COMPONENT_WEIGHTS,
+  applyPaidPaymentEffect,
   assertLegacyActivationRecoveryEligible,
   activationHardwareBindingAction,
   activationProductsCompatible,
+  billingOrderResponse,
+  billingReplayConflict,
+  billingRequestFingerprint,
+  billingRequestKey,
+  reconcileBillingOrderRequest,
   activationReceiptPayload,
   activationSearchConditions,
   activationSigningPrivateKey,
   isLegacyActivationRecoveryRequired,
   parseActivationHardwareBindingV2,
+  paymentEffectState,
   parseLegacyActivationRecovery,
   persistActivationHardwareBindingV2,
   recoverLegacyActivationHardwareV2,

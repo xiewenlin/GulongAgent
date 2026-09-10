@@ -20,6 +20,7 @@ import {
   reservePearMediaWallet,
 } from "../../server/pearapi.js";
 import { PEAR_API_IMAGE_MODELS, PEAR_API_VIDEO_MODELS, publicPearMediaModel, resolvePearAutoModel } from "../../server/pearapi-models.js";
+import { createSiteOrDesktopChandlerAuthenticate } from "../../server/desktop-auth.js";
 
 test("PearAPI web agent exposes nine approved free models with OX-Alpha as default", () => {
   assert.equal(PEAR_API_BASE_URL, "https://api.pearapi.ai");
@@ -215,6 +216,63 @@ test("PearAPI routes publish the free-model and protected admin contracts in Ope
   assert.match(JSON.stringify(document.paths["/api/agent/media"].post), /referenceAssets/);
 });
 
+test("POST /api/agent/chat accepts desktop Chandler bearer authentication", async () => {
+  const userId = new ObjectId();
+  const siteCalls = [];
+  let desktopCalls = 0;
+  const authenticate = createSiteOrDesktopChandlerAuthenticate({
+    authenticateSite: async (_c, options) => {
+      siteCalls.push(options);
+      return null;
+    },
+    authenticateDesktop: async (c) => {
+      desktopCalls += 1;
+      assert.equal(c.req.header("authorization"), "Bearer chandler.jwt.for-test");
+      return {
+        accessToken: "chandler.jwt.for-test",
+        chandlerUser: { id: "chandler-user-1" },
+        user: { _id: userId, displayName: "桌面用户" },
+        identity: { role: "user" },
+      };
+    },
+  });
+  const app = new OpenAPIHono();
+  app.post("/api/agent/chat", async (c) => {
+    const auth = await authenticate(c, { scopes: ["agent:chat"] });
+    if (auth?.error) return auth.error;
+    return c.json({
+      kind: auth.kind,
+      userId: auth.user.id,
+      role: auth.user.role,
+      authProvider: auth.user.authProvider,
+    });
+  });
+
+  const response = await app.request("/api/agent/chat", {
+    method: "POST",
+    headers: { authorization: "Bearer chandler.jwt.for-test" },
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    kind: "desktop-chandler",
+    userId: userId.toString(),
+    role: "user",
+    authProvider: "chandler",
+  });
+
+  const invalidApiKeyResponse = await app.request("/api/agent/chat", {
+    method: "POST",
+    headers: { authorization: "Bearer gla_live_invalid" },
+  });
+  assert.equal(invalidApiKeyResponse.status, 401);
+  assert.equal((await invalidApiKeyResponse.json()).code, "UNAUTHORIZED");
+  assert.deepEqual(siteCalls, [
+    { required: false, scopes: ["agent:chat"] },
+    { required: false, scopes: ["agent:chat"] },
+  ]);
+  assert.equal(desktopCalls, 1);
+});
+
 test("website reference images bypass the old inline size gate through trusted COS assets", async () => {
   const [agentSource, pearSource] = await Promise.all([
     readFile(new URL("../../src/components/WebAgentPage.jsx", import.meta.url), "utf8"),
@@ -286,7 +344,7 @@ test("monthly subscription payments credit the wallet once and PearAPI routes ar
     readFile(new URL("../../src/components/AccountDashboard.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../vercel.json", import.meta.url), "utf8"),
   ]);
-  assert.match(serverSource, /registerPearApiRoutes\(app, \{ authenticate, requireAdmin, requireTrustedMutation \}\)/);
+  assert.match(serverSource, /registerPearApiRoutes\(app,\s*\{\s*authenticate: authenticateSiteOrDesktopChandler,\s*requireAdmin,\s*requireTrustedMutation,\s*\}\)/);
   assert.match(serverSource, /source: "online_subscription"/);
   assert.match(serverSource, /source: "offline_subscription"/);
   assert.match(serverSource, /creditPaymentBalanceWithPromotion/);

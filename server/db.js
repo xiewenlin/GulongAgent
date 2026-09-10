@@ -68,6 +68,22 @@ export async function getCollection(name) {
   return (await getDb()).collection(name);
 }
 
+// Financial marketplace writes must commit as one transaction across tasks,
+// wallets and ledgers. A standalone MongoDB is intentionally not supported.
+export async function withDatabaseTransaction(operation) {
+  await getDb();
+  const session = (await clientPromise).startSession();
+  try {
+    return await session.withTransaction(() => operation(session), {
+      readConcern: { level: "snapshot" },
+      writeConcern: { w: "majority" },
+      maxCommitTimeMS: 10_000,
+    });
+  } finally {
+    await session.endSession();
+  }
+}
+
 export async function ensureIndexes() {
   if (!indexPromise) {
     indexPromise = (async () => {
@@ -128,6 +144,14 @@ export async function ensureIndexes() {
           { orderNo: 1 },
           { unique: true, name: "uniq_payment_order" },
         ),
+        db.collection("billingOrderRequests").createIndex(
+          { ownerId: 1, requestKey: 1 },
+          { unique: true, name: "uniq_billing_order_request_owner_key" },
+        ),
+        db.collection("billingOrderRequests").createIndex(
+          { status: 1, updatedAt: 1 },
+          { name: "billing_order_requests_by_status" },
+        ),
         db.collection("payments").createIndex(
           { merchantOrderNo: 1 },
           {
@@ -143,6 +167,10 @@ export async function ensureIndexes() {
             partialFilterExpression: { desktopRequestId: { $type: "string" } },
             name: "uniq_payment_desktop_request",
           },
+        ),
+        db.collection("payments").createIndex(
+          { ownerId: 1, billingRequestKey: 1 },
+          { unique: true, partialFilterExpression: { billingRequestKey: { $type: "string" } }, name: "uniq_payment_owner_billing_request" },
         ),
         db.collection("payments").createIndex(
           { status: 1, paidAt: -1, updatedAt: -1 },
@@ -263,6 +291,10 @@ export async function ensureIndexes() {
         db.collection("offlinePayments").createIndex(
           { desktopRequestId: 1 },
           { unique: true, sparse: true, name: "uniq_offline_payment_desktop_request" },
+        ),
+        db.collection("offlinePayments").createIndex(
+          { ownerId: 1, billingRequestKey: 1 },
+          { unique: true, partialFilterExpression: { billingRequestKey: { $type: "string" } }, name: "uniq_offline_payment_owner_billing_request" },
         ),
         db.collection("offlinePayments").createIndex(
           { status: 1, reviewedAt: -1, updatedAt: -1 },

@@ -849,6 +849,14 @@ test("H3 output signing is requester-only and expired output returns 410", async
   assert.equal((await expired.json()).message, "视频已过期并删除");
 });
 
+test("H3 shared routes use desktop Chandler-compatible authentication", async () => {
+  const serverSource = await readFile(new URL("../../server/app.js", import.meta.url), "utf8");
+  assert.match(
+    serverSource,
+    /registerH3SharedRoutes\(app,\s*\{\s*authenticate: authenticateSiteOrDesktopChandler,\s*requireAdmin,\s*requireTrustedMutation,\s*verifyActivationReceipt,\s*notifyUserOnce,\s*\}\)/,
+  );
+});
+
 test("H3 OpenAPI publishes binding, assets, desktop tool, claim and callback contracts", () => {
   const document = app.getOpenAPIDocument({ openapi: "3.1.0", info: { title: "test", version: "1" } });
   for (const path of [
