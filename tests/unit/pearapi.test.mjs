@@ -16,6 +16,8 @@ import {
   paymentPromotionBonusFen,
   pearApiMarkedUpFen,
   pearApiOutputRange,
+  pearProxyError,
+  pearProxyGenerationView,
   registerPearApiRoutes,
   reservePearMediaWallet,
 } from "../../server/pearapi.js";
@@ -211,9 +213,73 @@ test("PearAPI routes publish the free-model and protected admin contracts in Ope
   assert.ok(document.paths["/api/agent/bootstrap"]?.get);
   assert.ok(document.paths["/api/agent/media"]?.post);
   assert.ok(document.paths["/api/agent/media/{id}"]?.get);
+  assert.ok(document.paths["/api/v1/desktop/pearapi/models"]?.get);
+  assert.ok(document.paths["/api/v1/desktop/pearapi/assets/presign"]?.post);
+  assert.ok(document.paths["/api/v1/desktop/pearapi/assets/{id}/complete"]?.post);
+  assert.ok(document.paths["/api/v1/desktop/pearapi/generations"]?.post);
+  assert.ok(document.paths["/api/v1/desktop/pearapi/generations/{id}"]?.get);
+  assert.ok(document.paths["/api/v1/desktop/pearapi/generations/{id}/cancel"]?.post);
   assert.ok(document.paths["/api/admin/pearapi/config"]?.put);
   assert.ok(document.paths["/api/admin/pearapi/test"]?.post);
   assert.match(JSON.stringify(document.paths["/api/agent/media"].post), /referenceAssets/);
+});
+
+test("desktop PearAPI proxy normalizes errors and never exposes shared credentials", () => {
+  assert.deepEqual(pearProxyError({ code: "PEAR_API_KEY_NOT_CONFIGURED", message: "管理员尚未配置" }, 503), {
+    ok: false,
+    code: "PEAR_API_NOT_CONFIGURED",
+    message: "管理员尚未配置",
+    retryable: true,
+  });
+  const view = pearProxyGenerationView({
+    _id: new ObjectId("64b000000000000000000001"),
+    modality: "video",
+    requestedModel: "video-model",
+    model: "resolved-video-model",
+    status: "processing",
+    urls: [],
+    upstreamTaskId: "secret-upstream-id",
+    keyEncrypted: "encrypted-key",
+    tokenEncrypted: "encrypted-token",
+    ownerId: new ObjectId(),
+    createdAt: new Date("2026-09-11T00:00:00.000Z"),
+  });
+  assert.equal(view.id, "64b000000000000000000001");
+  assert.equal(view.status, "processing");
+  assert.equal(view.result, null);
+  assert.equal("upstreamTaskId" in view, false);
+  assert.equal("keyEncrypted" in view, false);
+  assert.equal("tokenEncrypted" in view, false);
+  assert.equal("ownerId" in view, false);
+});
+
+test("desktop PearAPI proxy rejects requests without a Chandler Bearer before data access", async () => {
+  let authenticationCalls = 0;
+  const app = new OpenAPIHono();
+  registerPearApiRoutes(app, {
+    authenticate: async () => { authenticationCalls += 1; return { error: new Response("unexpected", { status: 500 }) }; },
+    requireAdmin: async () => ({ error: new Response("forbidden", { status: 403 }) }),
+    requireTrustedMutation: () => null,
+  });
+  const response = await app.request("/api/v1/desktop/pearapi/models");
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), {
+    ok: false,
+    code: "DESKTOP_AUTH_REQUIRED",
+    message: "请使用桌面端 Chandler 登录令牌访问此接口",
+    retryable: false,
+  });
+  assert.equal(authenticationCalls, 0);
+});
+
+test("desktop Chandler free chat bypasses website membership but keeps rate limit and idempotency", async () => {
+  const source = await readFile(new URL("../../server/pearapi.js", import.meta.url), "utf8");
+  assert.match(source, /auth\.user\.role !== "admin" && auth\.kind !== "desktop-chandler"/);
+  assert.match(source, /enforceRateLimit\(`pear-chat:/);
+  assert.match(source, /normalizedIdempotencyKey\(c\)/);
+  assert.match(source, /idempotencyKeyHash/);
+  assert.match(source, /PEAR_API_NOT_CONFIGURED/);
+  assert.doesNotMatch(source, /return c\.json\([^\n]*keyEncrypted[^\n]*tokenEncrypted/);
 });
 
 test("POST /api/agent/chat accepts desktop Chandler bearer authentication", async () => {

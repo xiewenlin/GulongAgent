@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { ObjectId } from "mongodb";
 import { createRoute, z } from "@hono/zod-openapi";
 import { getCollection } from "./db.js";
@@ -76,6 +76,30 @@ function normalizedSecret(value) {
 function safeFen(value) {
   const number = Number(value || 0);
   return Number.isSafeInteger(number) && number >= 0 && number <= 10_000_000 ? number : 0;
+}
+
+function stableRequestHash(value) {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function normalizedIdempotencyKey(c, { required = false } = {}) {
+  const value = String(c.req.header("Idempotency-Key") || "").trim();
+  if (!value && !required) return { value: "" };
+  if (value.length < 8 || value.length > 160) {
+    return { error: c.json({ code: "IDEMPOTENCY_KEY_REQUIRED", message: "请提供 8–160 字符的 Idempotency-Key", retryable: false }, 400) };
+  }
+  return { value };
+}
+
+export function pearProxyError(payload, status = 500) {
+  const originalCode = String(payload?.code || "PEAR_API_ERROR");
+  const code = originalCode === "PEAR_API_KEY_NOT_CONFIGURED" ? "PEAR_API_NOT_CONFIGURED" : originalCode;
+  return {
+    ok: false,
+    code,
+    message: localizeErrorMessage(payload?.message || "", "远程模型服务暂时不可用，请稍后重试"),
+    retryable: Boolean(payload?.retryable) || status === 408 || status === 409 || status === 425 || status === 429 || status >= 500,
+  };
 }
 
 function normalizedPricing(value = {}) {
@@ -425,6 +449,28 @@ function mediaPublicView(job) {
     error: job.error ? localizeErrorMessage(job.error, "媒体生成失败，费用已退回") : null,
     createdAt: job.createdAt,
     completedAt: job.completedAt || null,
+    cancelledAt: job.cancelledAt || null,
+  };
+}
+
+export function pearProxyGenerationView(record) {
+  if (!record) return null;
+  const type = record.type || record.modality || "text";
+  const status = ["reserving", "submitting"].includes(record.status) ? "queued" : record.status === "rejected" ? "failed" : record.status;
+  const result = type === "text"
+    ? (record.response?.message?.content ? { text: record.response.message.content } : null)
+    : ((record.urls || []).length ? { urls: record.urls } : null);
+  return {
+    id: record.proxyId || record._id?.toString?.() || String(record._id || ""),
+    type,
+    status,
+    model: record.requestedModel || record.model,
+    resolved_model: record.response?.resolvedModel || record.model || null,
+    result,
+    error: record.error ? { code: record.errorCode || "GENERATION_FAILED", message: localizeErrorMessage(record.error, "生成失败，请稍后重试") } : null,
+    created_at: record.createdAt || null,
+    completed_at: record.completedAt || null,
+    cancelled_at: record.cancelledAt || null,
   };
 }
 
@@ -434,7 +480,7 @@ async function refundMediaJob(job, error) {
   const localizedError = localizeErrorMessage(error, "媒体生成失败，费用已退回").slice(0, 500);
   if (job.chargeStatus === "exempt") {
     const failed = await jobs.findOneAndUpdate(
-      { _id: job._id, chargeStatus: "exempt", status: { $nin: ["succeeded", "failed"] } },
+      { _id: job._id, chargeStatus: "exempt", status: { $nin: ["succeeded", "failed", "cancelled"] } },
       { $set: { status: "failed", error: localizedError, failedAt: now, updatedAt: now } },
       { returnDocument: "after" },
     );
@@ -445,7 +491,7 @@ async function refundMediaJob(job, error) {
     return failed || jobs.findOne({ _id: job._id });
   }
   const claimed = await jobs.findOneAndUpdate(
-    { _id: job._id, chargeStatus: "reserved", status: { $nin: ["succeeded", "failed"] } },
+    { _id: job._id, chargeStatus: "reserved", status: { $nin: ["succeeded", "failed", "cancelled"] } },
     { $set: { status: "failed", chargeStatus: "refunding", error: localizedError, failedAt: now, updatedAt: now } },
     { returnDocument: "after" },
   );
@@ -460,6 +506,48 @@ async function refundMediaJob(job, error) {
     (await getCollection("agentUsage")).updateOne({ requestId: job.requestId }, { $set: { status: "failed", refundedFen: job.chargedFen, errorCode: "MEDIA_GENERATION_FAILED", failedAt: now, updatedAt: now } }),
   ]);
   return jobs.findOne({ _id: job._id });
+}
+
+async function cancelMediaJob(job) {
+  const jobs = await getCollection("agentMediaJobs");
+  if (["succeeded", "failed", "cancelled"].includes(job.status)) return jobs.findOne({ _id: job._id });
+  const now = new Date();
+  const claimed = await jobs.findOneAndUpdate(
+    { _id: job._id, status: { $nin: ["succeeded", "failed", "cancelled", "cancelling"] } },
+    { $set: { status: "cancelling", cancelRequestedAt: now, updatedAt: now } },
+    { returnDocument: "after" },
+  );
+  if (!claimed) return jobs.findOne({ _id: job._id });
+
+  let chargeStatus = claimed.chargeStatus;
+  if (claimed.chargeStatus === "reserved") {
+    const refundKey = `refund:${claimed.chargeLedgerKey || claimed.requestId}`;
+    await (await getCollection("wallets")).updateOne(
+      { ownerId: claimed.ownerId, ledgerKeys: { $ne: refundKey } },
+      {
+        $inc: { balanceFen: claimed.chargedFen },
+        $push: {
+          ledgerKeys: { $each: [refundKey], $slice: -600 },
+          ledgerEntries: { $each: [{ key: refundKey, kind: "pear_media_refund", amountFen: claimed.chargedFen, requestId: claimed.requestId, mediaJobId: claimed._id, reason: "user_cancelled", createdAt: now }], $slice: -600 },
+        },
+        $set: { updatedAt: now },
+      },
+    );
+    chargeStatus = "refunded";
+  } else if (!["exempt", "refunded"].includes(claimed.chargeStatus)) {
+    chargeStatus = "cancelled";
+  }
+  await Promise.all([
+    jobs.updateOne(
+      { _id: claimed._id, status: "cancelling" },
+      { $set: { status: "cancelled", chargeStatus, cancelledAt: now, updatedAt: now }, $unset: { pollingUntil: "", nextPollAt: "" } },
+    ),
+    (await getCollection("agentUsage")).updateOne(
+      { requestId: claimed.requestId },
+      { $set: { status: "cancelled", refundedFen: claimed.chargeStatus === "reserved" ? claimed.chargedFen : 0, errorCode: "GENERATION_CANCELLED", cancelledAt: now, updatedAt: now } },
+    ),
+  ]);
+  return jobs.findOne({ _id: claimed._id });
 }
 
 async function requestPearApiChat({ token, model, messages, fetchImpl, timeoutMs }) {
@@ -651,6 +739,48 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     request: { params: z.object({ id: z.string() }) },
     responses: { 200: { description: "媒体任务状态" }, 404: { description: "任务不存在", content: { "application/json": { schema: ErrorSchema } } } },
   });
+  const desktopModelsRoute = createRoute({
+    method: "get", path: "/api/v1/desktop/pearapi/models", tags: ["Desktop PearAPI Proxy"], summary: "读取桌面端可用模型与代理配置状态",
+    description: "使用 Chandler Bearer 登录令牌。响应仅包含模型目录和是否已配置，不返回 PearAPI Key、令牌或渠道值。",
+    responses: { 200: { description: "安全模型目录" }, 401: { description: "桌面登录令牌无效", content: { "application/json": { schema: ErrorSchema } } } },
+  });
+  const desktopAssetPresignRoute = createRoute({
+    method: "post", path: "/api/v1/desktop/pearapi/assets/presign", tags: ["Desktop PearAPI Proxy"], summary: "签发账号专属参考素材 COS 直传票据",
+    request: { body: { required: true, content: { "application/json": { schema: z.object({ kind: z.enum(["image", "video", "audio"]), filename: z.string().trim().min(1).max(240), content_type: z.string().trim().min(3).max(120), bytes: z.number().int().positive().max(2 * 1024 * 1024 * 1024), sha256: z.string().regex(/^[A-Fa-f0-9]{64}$/) }) } } } },
+    responses: { 201: { description: "短时 PUT 票据；不含任何共享凭据" }, 400: { description: "素材参数无效", content: { "application/json": { schema: ErrorSchema } } }, 401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } } },
+  });
+  const desktopAssetCompleteRoute = createRoute({
+    method: "post", path: "/api/v1/desktop/pearapi/assets/{id}/complete", tags: ["Desktop PearAPI Proxy"], summary: "校验 COS 回执并生成安全素材引用",
+    request: { params: z.object({ id: z.string() }) },
+    responses: { 200: { description: "返回仅属于当前账号的 asset_id" }, 401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } }, 409: { description: "对象大小、摘要或归属不匹配", content: { "application/json": { schema: ErrorSchema } } } },
+  });
+  const DesktopGenerationRequestSchema = z.object({
+    type: z.enum(["text", "image", "video"]),
+    model: z.string().trim().min(1).max(160),
+    prompt: z.string().trim().max(12_000).optional(),
+    messages: z.array(MessageSchema).min(1).max(24).optional(),
+    conversation_id: z.string().trim().max(80).optional(),
+    assets: z.array(z.object({ asset_id: z.string().trim().min(1).max(80) })).max(16).default([]),
+    image_size: z.enum(PEAR_IMAGE_SIZES).default("1:1"),
+    aspect_ratio: z.enum(["16:9", "9:16"]).default("16:9"),
+    duration_seconds: z.number().int().refine((value) => PEAR_VIDEO_DURATIONS.includes(value), "不支持的视频时长").default(5),
+  });
+  const desktopGenerationCreateRoute = createRoute({
+    method: "post", path: "/api/v1/desktop/pearapi/generations", tags: ["Desktop PearAPI Proxy"], summary: "幂等提交文本、图片或视频生成",
+    description: "必须使用 Chandler Bearer 令牌和 8–160 字符 Idempotency-Key。媒体只接受已完成 COS 回执校验的 asset_id，不接受任意 URL。",
+    request: { body: { required: true, content: { "application/json": { schema: DesktopGenerationRequestSchema } } } },
+    responses: { 201: { description: "已提交或已完成" }, 400: { description: "请求无效", content: { "application/json": { schema: ErrorSchema } } }, 401: { description: "桌面登录令牌无效", content: { "application/json": { schema: ErrorSchema } } }, 402: { description: "余额不足或订阅无效", content: { "application/json": { schema: ErrorSchema } } }, 409: { description: "幂等键冲突", content: { "application/json": { schema: ErrorSchema } } }, 503: { description: "官网管理员尚未配置 PearAPI", content: { "application/json": { schema: ErrorSchema } } } },
+  });
+  const desktopGenerationStatusRoute = createRoute({
+    method: "get", path: "/api/v1/desktop/pearapi/generations/{id}", tags: ["Desktop PearAPI Proxy"], summary: "轮询当前账号的生成任务",
+    request: { params: z.object({ id: z.string().trim().min(1).max(96) }) },
+    responses: { 200: { description: "标准化生成状态" }, 401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } }, 404: { description: "任务不存在", content: { "application/json": { schema: ErrorSchema } } } },
+  });
+  const desktopGenerationCancelRoute = createRoute({
+    method: "post", path: "/api/v1/desktop/pearapi/generations/{id}/cancel", tags: ["Desktop PearAPI Proxy"], summary: "幂等取消生成任务并按账本边界退款",
+    request: { params: z.object({ id: z.string().trim().min(1).max(96) }) },
+    responses: { 200: { description: "已取消或返回既有终态" }, 401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } }, 404: { description: "任务不存在", content: { "application/json": { schema: ErrorSchema } } } },
+  });
   const adminGetRoute = createRoute({
     method: "get", path: "/api/admin/pearapi/config", tags: ["Admin"], summary: "读取 PearAPI 全局配置（仅返回掩码）",
     responses: { 200: { description: "PearAPI 配置状态" }, 401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } }, 403: { description: "仅管理员", content: { "application/json": { schema: ErrorSchema } } } },
@@ -710,10 +840,12 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     const rate = await enforceRateLimit(`pear-chat:${auth.user.id}`, { limit: 30, windowMs: 5 * 60_000 });
     if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "对话请求过于频繁，请稍后再试" }, 429);
     const input = c.req.valid("json");
+    const idempotency = normalizedIdempotencyKey(c);
+    if (idempotency.error) return idempotency.error;
     if (!FREE_MODEL_IDS.has(input.model)) return c.json({ code: "MODEL_NOT_ALLOWED", message: "请选择管理员公布的 PearAPI 免费模型" }, 400);
     const ownerId = new ObjectId(auth.user.id);
     const now = new Date();
-    if (auth.user.role !== "admin") {
+    if (auth.user.role !== "admin" && auth.kind !== "desktop-chandler") {
       const subscription = await (await getCollection("subscriptions")).findOne({ ownerId });
       if (!subscription || subscription.currentPeriodStart > now || subscription.currentPeriodEnd <= now || ["cancelled", "canceled", "expired"].includes(subscription.status)) {
         return c.json({ code: "SUBSCRIPTION_REQUIRED", message: "网页版古龙 Agent 需要生效中的会员订阅，请先续费后使用" }, 402);
@@ -723,12 +855,29 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     const token = credentialSecrets(record).token;
     if (!token) return c.json({ code: "PEAR_API_NOT_CONFIGURED", message: "管理员尚未配置 PearAPI 免费渠道令牌" }, 503);
     const workflows = await getCollection("agentWorkflows");
-    const operationId = input.operationId || `pearop_${Date.now().toString(36)}_${randomBytes(5).toString("hex")}`;
+    const operationId = input.operationId || (idempotency.value ? `pearop_idem_${stableRequestHash(`${ownerId}:${idempotency.value}`).slice(0, 32)}` : `pearop_${Date.now().toString(36)}_${randomBytes(5).toString("hex")}`);
+    const requestFingerprint = stableRequestHash({ model: input.model, conversationId: input.conversationId || null, messages: input.messages });
+    const existingWorkflow = await workflows.findOne({ operationId, ownerId });
+    if (existingWorkflow) {
+      if (idempotency.value && existingWorkflow.requestFingerprint && existingWorkflow.requestFingerprint !== requestFingerprint) {
+        return c.json({ code: "IDEMPOTENCY_KEY_CONFLICT", message: "同一幂等键不能用于不同的对话请求" }, 409);
+      }
+      if (idempotency.value && existingWorkflow.response) {
+        c.header("Cache-Control", "private, no-store, max-age=0");
+        return c.json({ ...existingWorkflow.response, idempotent: true });
+      }
+      if (idempotency.value && existingWorkflow.errorResponse) {
+        return c.json(existingWorkflow.errorResponse.payload, existingWorkflow.errorResponse.status);
+      }
+      return idempotency.value
+        ? c.json({ code: "REQUEST_IN_PROGRESS", message: "这次对话仍在处理中，请稍后查询处理状态" }, 409)
+        : c.json({ code: "WORKFLOW_ID_CONFLICT", message: "本次对话编号已使用，请重新发送" }, 409);
+    }
     const hasAttachments = /\[(?:文本)?附件：/.test(input.messages.at(-1)?.content || "");
     let workflowNodes = textWorkflowNodes(now, hasAttachments);
     const workflowCreated = await workflows.updateOne(
       { operationId, ownerId },
-      { $setOnInsert: { operationId, ownerId, conversationId: input.conversationId || null, model: input.model, status: "running", startedAt: now, createdAt: now, updatedAt: now, nodes: workflowNodes } },
+      { $setOnInsert: { operationId, ownerId, conversationId: input.conversationId || null, model: input.model, requestFingerprint, idempotencyKeyHash: idempotency.value ? stableRequestHash(`${ownerId}:${idempotency.value}`) : null, status: "running", startedAt: now, createdAt: now, updatedAt: now, nodes: workflowNodes } },
       { upsert: true },
     );
     if (!workflowCreated.upsertedCount) return c.json({ code: "WORKFLOW_ID_CONFLICT", message: "本次对话编号已使用，请重新发送" }, 409);
@@ -765,18 +914,21 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
       ]);
       const workflowCompletedAt = new Date();
       workflowNodes = completeWorkflowNode(workflowNodes, "format", workflowCompletedAt);
-      await workflows.updateOne({ operationId, ownerId }, { $set: { nodes: workflowNodes, status: "completed", completedAt: workflowCompletedAt, updatedAt: workflowCompletedAt } });
       const workflow = workflowPublicView({ operationId, status: "completed", startedAt: now, completedAt: workflowCompletedAt, nodes: workflowNodes });
+      const response = { conversationId: conversationId.toString(), requestId, operationId, message: { role: "assistant", content: result.text, createdAt: completedAt }, model: input.model, resolvedModel: result.resolvedModel, fallback: result.fallback, workflow, chargedFen: 0, free: true, usage: result.usage };
+      await workflows.updateOne({ operationId, ownerId }, { $set: { nodes: workflowNodes, status: "completed", response, completedAt: workflowCompletedAt, updatedAt: workflowCompletedAt } });
       c.header("Cache-Control", "private, no-store, max-age=0");
-      return c.json({ conversationId: conversationId.toString(), requestId, operationId, message: { role: "assistant", content: result.text, createdAt: completedAt }, model: input.model, resolvedModel: result.resolvedModel, fallback: result.fallback, workflow, chargedFen: 0, free: true, usage: result.usage });
+      return c.json({ ...response, idempotent: false });
     } catch (error) {
       const failedAt = new Date();
+      const errorPayload = { code: error.code || "PEAR_API_ERROR", message: localizeErrorMessage(error, "远程模型调用失败，请稍后重试") };
+      const errorStatus = error.status || 502;
       workflowNodes = advanceWorkflowNode(workflowNodes, workflowNodes.find((node) => node.status === "running")?.id || "inference", failedAt, { detail: error.code || "PEAR_API_ERROR", failed: true });
       await Promise.all([
         (await getCollection("agentUsage")).updateOne({ requestId }, { $set: { status: "failed", errorCode: error.code || "PEAR_API_ERROR", failedAt, updatedAt: failedAt } }),
-        workflows.updateOne({ operationId, ownerId }, { $set: { nodes: workflowNodes, status: "failed", errorCode: error.code || "PEAR_API_ERROR", completedAt: failedAt, updatedAt: failedAt } }),
+        workflows.updateOne({ operationId, ownerId }, { $set: { nodes: workflowNodes, status: "failed", errorCode: error.code || "PEAR_API_ERROR", errorResponse: { payload: errorPayload, status: errorStatus }, completedAt: failedAt, updatedAt: failedAt } }),
       ]);
-      return c.json({ code: error.code || "PEAR_API_ERROR", message: localizeErrorMessage(error, "远程模型调用失败，请稍后重试") }, error.status || 502);
+      return c.json(errorPayload, errorStatus);
     }
   });
 
@@ -786,8 +938,9 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     const rate = await enforceRateLimit(`pear-media:${auth.user.id}`, { limit: 12, windowMs: 10 * 60_000 });
     if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "媒体生成请求过于频繁，请稍后再试" }, 429);
     const input = c.req.valid("json");
-    const idempotencyKey = String(c.req.header("Idempotency-Key") || "").trim();
-    if (idempotencyKey.length < 8 || idempotencyKey.length > 160) return c.json({ code: "IDEMPOTENCY_KEY_REQUIRED", message: "请提供 8–160 字符的 Idempotency-Key" }, 400);
+    const idempotency = normalizedIdempotencyKey(c, { required: true });
+    if (idempotency.error) return idempotency.error;
+    const idempotencyKey = idempotency.value;
     const requested = PEAR_API_MEDIA_MODEL_MAP.get(input.model);
     if (!requested || requested.modality !== input.modality) return c.json({ code: "MODEL_NOT_ALLOWED", message: "请选择当前创作类型对应的 PearAPI 模型" }, 400);
     const ownerId = new ObjectId(auth.user.id);
@@ -801,7 +954,7 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     }
     const record = await credentialRecord();
     const key = credentialSecrets(record).key;
-    if (!key) return c.json({ code: "PEAR_API_KEY_NOT_CONFIGURED", message: "管理员尚未配置 PearAPI Key" }, 503);
+    if (!key) return c.json({ code: "PEAR_API_NOT_CONFIGURED", message: "官网管理员尚未配置远程媒体模型服务，请稍后重试" }, 503);
     const actual = requested.auto ? resolvePearAutoModel(input.modality, input.prompt) : requested;
     if (input.referenceImages.reduce((total, value) => total + value.length, 0) > 3_200_000) return c.json({ code: "REFERENCE_IMAGES_TOO_LARGE", message: "参考图编码后总大小不能超过 3.2 MB，请压缩后重试" }, 413);
     const requestedReferenceCount = input.referenceImages.length + input.referenceAssets.length;
@@ -822,12 +975,17 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
       });
     }
     const referenceImages = [...input.referenceImages, ...trustedReferenceAssets];
+    const requestFingerprint = stableRequestHash({
+      modality: input.modality, model: requested.id, prompt: input.prompt, conversationId: input.conversationId || null,
+      referenceImages: input.referenceImages, referenceAssetIds: trustedReferenceAssets.map((asset) => asset.assetId),
+      imageSize: input.imageSize, aspectRatio: input.aspectRatio, duration: input.duration,
+    });
     const chargedFen = unlimited ? 0 : chargedFenForModel(actual, input.modality, input.duration);
     const conversationId = ObjectId.isValid(input.conversationId) ? new ObjectId(input.conversationId) : new ObjectId();
     const requestId = `pear_media_${Date.now().toString(36)}_${randomBytes(6).toString("hex")}`;
     const jobs = await getCollection("agentMediaJobs");
     let job = await jobs.findOne({ ownerId, idempotencyKey });
-    if (job && (job.modality !== input.modality || job.requestedModel !== requested.id || job.prompt !== input.prompt)) return c.json({ code: "IDEMPOTENCY_KEY_CONFLICT", message: "这个 Idempotency-Key 已用于另一项媒体任务" }, 409);
+    if (job && ((job.requestFingerprint && job.requestFingerprint !== requestFingerprint) || (!job.requestFingerprint && (job.modality !== input.modality || job.requestedModel !== requested.id || job.prompt !== input.prompt)))) return c.json({ code: "IDEMPOTENCY_KEY_CONFLICT", message: "这个 Idempotency-Key 已用于另一项媒体任务" }, 409);
     if (job && job.status !== "reserving") {
       const wallet = await (await getCollection("wallets")).findOne({ ownerId });
       if (job.status === "rejected") return c.json({ code: "INSUFFICIENT_BALANCE", message: job.error || `可用额度不足，本次预计需要 ${chargedFen / 100} 元` }, 402);
@@ -838,7 +996,7 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
       try {
         await jobs.insertOne({
           _id: jobId, ownerId, conversationId, requestId, idempotencyKey, modality: input.modality, requestedModel: requested.id, model: actual.id, modelName: actual.name,
-          prompt: input.prompt, referenceCount: referenceImages.length, referenceAssetIds: trustedReferenceAssets.map((asset) => asset.assetId), referenceObjectKeys: trustedReferenceAssets.map((asset) => asset.objectKey), imageSize: input.imageSize, aspectRatio: input.aspectRatio, duration: input.duration,
+          prompt: input.prompt, requestFingerprint, referenceCount: referenceImages.length, referenceAssetIds: trustedReferenceAssets.map((asset) => asset.assetId), referenceObjectKeys: trustedReferenceAssets.map((asset) => asset.objectKey), imageSize: input.imageSize, aspectRatio: input.aspectRatio, duration: input.duration,
           baseCostMilliFen: actual.baseCostMilliFen, chargedFen, markupRate: PEAR_API_MARKUP_RATE, chargeStatus: unlimited ? "exempt" : "pending", status: "reserving", createdAt: now, updatedAt: now,
         });
         job = await jobs.findOne({ _id: jobId });
@@ -894,15 +1052,15 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
       const completedAt = parsed.status === "succeeded" ? new Date() : null;
       const update = { status: parsed.status, upstreamTaskId, urls: parsed.urls, nextPollAt: new Date(Date.now() + 4_000), updatedAt: new Date() };
       if (completedAt) Object.assign(update, { completedAt, chargeStatus: unlimited ? "exempt" : "confirmed" });
-      await jobs.updateOne({ _id: job._id }, { $set: update });
-      if (completedAt) await Promise.all([
+      const committed = await jobs.findOneAndUpdate({ _id: job._id, status: "submitting" }, { $set: update }, { returnDocument: "after" });
+      if (completedAt && committed) await Promise.all([
         (await getCollection("agentUsage")).updateOne({ requestId }, { $set: { status: "succeeded", completedAt, updatedAt: completedAt } }),
         (await getCollection("agentMessages")).insertMany([
           { ownerId, conversationId, requestId, role: "user", content: input.prompt, modality: input.modality, model: actual.id, createdAt: now },
           { ownerId, conversationId, requestId, role: "assistant", content: `${actual.name} 创作完成`, modality: input.modality, model: actual.id, urls: parsed.urls, createdAt: completedAt },
         ]),
       ]);
-      const current = await jobs.findOne({ _id: job._id });
+      const current = committed || await jobs.findOne({ _id: job._id });
       c.header("Cache-Control", "private, no-store, max-age=0");
       return c.json({ job: mediaPublicView(current), billing: { chargedFen, remainingBalanceFen, exempt: unlimited }, idempotent: false }, 201);
     } catch (error) {
@@ -919,7 +1077,7 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     const jobs = await getCollection("agentMediaJobs");
     let job = await jobs.findOne({ _id: new ObjectId(id), ...(auth.user.role === "admin" ? {} : { ownerId }) });
     if (!job) return c.json({ code: "NOT_FOUND", message: "媒体任务不存在" }, 404);
-    if (["succeeded", "failed"].includes(job.status)) return c.json({ job: mediaPublicView(job) });
+    if (["succeeded", "failed", "cancelled"].includes(job.status)) return c.json({ job: mediaPublicView(job) });
     const now = new Date();
     if (!job.upstreamTaskId || (job.nextPollAt && job.nextPollAt > now)) return c.json({ job: mediaPublicView(job) });
     const leased = await jobs.findOneAndUpdate(
@@ -930,20 +1088,23 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     if (!leased) return c.json({ job: mediaPublicView(await jobs.findOne({ _id: job._id })) });
     try {
       const key = credentialSecrets(await credentialRecord()).key;
-      if (!key) throw new PearApiError("管理员尚未配置 PearAPI Key", { status: 503, code: "PEAR_API_KEY_NOT_CONFIGURED" });
+      if (!key) throw new PearApiError("官网管理员尚未配置远程媒体模型服务，请稍后重试", { status: 503, code: "PEAR_API_NOT_CONFIGURED" });
       const payload = await pollPearMedia({ key, modality: job.modality, upstreamTaskId: job.upstreamTaskId });
       const parsed = mediaStatus(payload, job.modality);
       if (parsed.status === "failed") job = await refundMediaJob(job, parsed.error);
       else if (parsed.status === "succeeded") {
         const completedAt = new Date();
-        job = await jobs.findOneAndUpdate({ _id: job._id, status: "processing" }, { $set: { status: "succeeded", chargeStatus: job.chargeStatus === "exempt" ? "exempt" : "confirmed", urls: parsed.urls, completedAt, updatedAt: completedAt }, $unset: { pollingUntil: "" } }, { returnDocument: "after" });
-        await Promise.all([
+        const completed = await jobs.findOneAndUpdate({ _id: job._id, status: "processing" }, { $set: { status: "succeeded", chargeStatus: job.chargeStatus === "exempt" ? "exempt" : "confirmed", urls: parsed.urls, completedAt, updatedAt: completedAt }, $unset: { pollingUntil: "" } }, { returnDocument: "after" });
+        if (!completed) {
+          job = await jobs.findOne({ _id: job._id });
+        } else await Promise.all([
           (await getCollection("agentUsage")).updateOne({ requestId: job.requestId }, { $set: { status: "succeeded", completedAt, updatedAt: completedAt } }),
           (await getCollection("agentMessages")).insertMany([
             { ownerId: job.ownerId, conversationId: job.conversationId, requestId: job.requestId, role: "user", content: job.prompt, modality: job.modality, model: job.model, createdAt: job.createdAt },
             { ownerId: job.ownerId, conversationId: job.conversationId, requestId: job.requestId, role: "assistant", content: `${job.modelName} 创作完成`, modality: job.modality, model: job.model, urls: parsed.urls, createdAt: completedAt },
           ]),
         ]);
+        if (completed) job = completed;
       } else {
         await jobs.updateOne({ _id: job._id }, { $set: { nextPollAt: new Date(Date.now() + 5_000), updatedAt: new Date() }, $unset: { pollingUntil: "" } });
         job = await jobs.findOne({ _id: job._id });
@@ -954,6 +1115,192 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     }
     c.header("Cache-Control", "private, no-store, max-age=0");
     return c.json({ job: mediaPublicView(job) });
+  });
+
+  async function requireDesktopChandler(c) {
+    if (!/^Bearer\s+\S+/i.test(String(c.req.header("authorization") || ""))) {
+      return { error: c.json({ ok: false, code: "DESKTOP_AUTH_REQUIRED", message: "请使用桌面端 Chandler 登录令牌访问此接口", retryable: false }, 401) };
+    }
+    const auth = await authenticate(c);
+    if (auth.error) return auth;
+    if (auth.kind !== "desktop-chandler") {
+      return { error: c.json({ ok: false, code: "DESKTOP_AUTH_REQUIRED", message: "当前凭据不是有效的桌面端 Chandler 登录令牌", retryable: false }, 401) };
+    }
+    return auth;
+  }
+
+  function desktopInternalHeaders(c, extra = {}) {
+    return {
+      authorization: c.req.header("authorization"),
+      "content-type": "application/json",
+      ...extra,
+    };
+  }
+
+  app.openapi(desktopModelsRoute, async (c) => {
+    const auth = await requireDesktopChandler(c); if (auth.error) return auth.error;
+    const record = await credentialRecord();
+    c.header("Cache-Control", "private, no-store, max-age=0");
+    return c.json({
+      ok: true,
+      configured: Boolean(record?.tokenEncrypted),
+      media_configured: Boolean(record?.keyEncrypted),
+      default_text_model: PEAR_API_DEFAULT_TEXT_MODEL_ID,
+      text_models: PEAR_API_FREE_MODELS.map((model) => ({ ...model, free: true })),
+      image_models: PEAR_API_IMAGE_MODELS.map((model) => publicPearMediaModel(model, PEAR_API_MARKUP_RATE)),
+      video_models: PEAR_API_VIDEO_MODELS.map((model) => publicPearMediaModel(model, PEAR_API_MARKUP_RATE)),
+    });
+  });
+
+  app.openapi(desktopAssetPresignRoute, async (c) => {
+    const auth = await requireDesktopChandler(c); if (auth.error) return auth.error;
+    const response = await app.request("/api/h3/assets/presign", {
+      method: "POST",
+      headers: desktopInternalHeaders(c),
+      body: JSON.stringify(c.req.valid("json")),
+    });
+    return response;
+  });
+
+  app.openapi(desktopAssetCompleteRoute, async (c) => {
+    const auth = await requireDesktopChandler(c); if (auth.error) return auth.error;
+    return app.request(`/api/h3/assets/${encodeURIComponent(c.req.valid("param").id)}/complete`, {
+      method: "POST",
+      headers: desktopInternalHeaders(c),
+      body: "{}",
+    });
+  });
+
+  app.openapi(desktopGenerationCreateRoute, async (c) => {
+    const auth = await requireDesktopChandler(c); if (auth.error) return auth.error;
+    const idempotency = normalizedIdempotencyKey(c, { required: true });
+    if (idempotency.error) return idempotency.error;
+    const input = c.req.valid("json");
+    const ownerId = new ObjectId(auth.user.id);
+    const prompt = String(input.prompt || "").trim();
+    if (input.type === "text") {
+      if (input.assets.length) return c.json({ ok: false, code: "UNSUPPORTED_TEXT_ASSETS", message: "免费文本模型暂不接收媒体素材，请移除素材后重试", retryable: false }, 400);
+      const messages = input.messages?.length ? input.messages : (prompt ? [{ role: "user", content: prompt }] : []);
+      if (!messages.length) return c.json({ ok: false, code: "VALIDATION_ERROR", message: "请输入文本提示词或消息", retryable: false }, 400);
+      const operationId = `pearop_idem_${stableRequestHash(`${ownerId}:${idempotency.value}`).slice(0, 32)}`;
+      const response = await app.request("/api/agent/chat", {
+        method: "POST",
+        headers: desktopInternalHeaders(c, { "Idempotency-Key": idempotency.value }),
+        body: JSON.stringify({ operationId, model: input.model, conversationId: input.conversation_id, messages }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) return c.json(pearProxyError(payload, response.status), response.status);
+      c.header("Cache-Control", "private, no-store, max-age=0");
+      return c.json({
+        ok: true,
+        generation: {
+          id: payload.operationId,
+          type: "text",
+          status: "succeeded",
+          model: input.model,
+          resolved_model: payload.resolvedModel || input.model,
+          result: { text: payload.message?.content || "" },
+          error: null,
+          created_at: payload.message?.createdAt || new Date().toISOString(),
+          completed_at: payload.message?.createdAt || new Date().toISOString(),
+          cancelled_at: null,
+        },
+        billing: { charged_fen: 0, free: true, refunded_fen: 0 },
+        idempotent: Boolean(payload.idempotent),
+      }, 201);
+    }
+
+    if (!prompt) return c.json({ ok: false, code: "VALIDATION_ERROR", message: "请输入图片或视频生成提示词", retryable: false }, 400);
+    const response = await app.request("/api/agent/media", {
+      method: "POST",
+      headers: desktopInternalHeaders(c, { "Idempotency-Key": idempotency.value }),
+      body: JSON.stringify({
+        modality: input.type,
+        model: input.model,
+        prompt,
+        conversationId: input.conversation_id,
+        referenceImages: [],
+        referenceAssets: input.assets.map((asset) => ({ asset_id: asset.asset_id })),
+        imageSize: input.image_size,
+        aspectRatio: input.aspect_ratio,
+        duration: input.duration_seconds,
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) return c.json(pearProxyError(payload, response.status), response.status);
+    c.header("Cache-Control", "private, no-store, max-age=0");
+    return c.json({
+      ok: true,
+      generation: pearProxyGenerationView({ ...payload.job, proxyId: payload.job?.id }),
+      billing: { charged_fen: Number(payload.billing?.chargedFen || 0), remaining_balance_fen: Number(payload.billing?.remainingBalanceFen || 0), exempt: Boolean(payload.billing?.exempt), refunded_fen: 0 },
+      idempotent: Boolean(payload.idempotent),
+    }, 201);
+  });
+
+  app.openapi(desktopGenerationStatusRoute, async (c) => {
+    const auth = await requireDesktopChandler(c); if (auth.error) return auth.error;
+    const rate = await enforceRateLimit(`pear-desktop-status:${auth.user.id}`, { limit: 180, windowMs: 60_000 });
+    if (!rate.allowed) return c.json({ ok: false, code: "RATE_LIMITED", message: "任务状态查询过于频繁，请稍后重试", retryable: true }, 429);
+    const id = c.req.valid("param").id;
+    const ownerId = new ObjectId(auth.user.id);
+    if (id.startsWith("pearop_")) {
+      const workflow = await (await getCollection("agentWorkflows")).findOne({ operationId: id, ownerId });
+      if (!workflow) return c.json({ ok: false, code: "GENERATION_NOT_FOUND", message: "生成任务不存在", retryable: false }, 404);
+      const response = workflow.response;
+      return c.json({ ok: true, generation: {
+        id,
+        type: "text",
+        status: workflow.status === "running" ? "processing" : workflow.status,
+        model: workflow.model,
+        resolved_model: response?.resolvedModel || workflow.resolvedModel || null,
+        result: response?.message?.content ? { text: response.message.content } : null,
+        error: workflow.status === "failed" ? { code: workflow.errorCode || "PEAR_API_ERROR", message: "文本生成失败，请稍后重试" } : null,
+        created_at: workflow.createdAt,
+        completed_at: workflow.completedAt || null,
+        cancelled_at: workflow.cancelledAt || null,
+      } });
+    }
+    if (!ObjectId.isValid(id)) return c.json({ ok: false, code: "GENERATION_NOT_FOUND", message: "生成任务不存在", retryable: false }, 404);
+    const owned = await (await getCollection("agentMediaJobs")).findOne({ _id: new ObjectId(id), ownerId });
+    if (!owned) return c.json({ ok: false, code: "GENERATION_NOT_FOUND", message: "生成任务不存在", retryable: false }, 404);
+    if (!["succeeded", "failed", "cancelled"].includes(owned.status) && !credentialSecrets(await credentialRecord()).key) {
+      return c.json({ ok: false, code: "PEAR_API_NOT_CONFIGURED", message: "官网管理员尚未配置远程媒体模型服务，请稍后重试", retryable: true }, 503);
+    }
+    const response = await app.request(`/api/agent/media/${id}`, { headers: desktopInternalHeaders(c) });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) return c.json(pearProxyError(payload, response.status), response.status);
+    return c.json({ ok: true, generation: pearProxyGenerationView({ ...payload.job, proxyId: payload.job?.id }) });
+  });
+
+  app.openapi(desktopGenerationCancelRoute, async (c) => {
+    const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+    const auth = await requireDesktopChandler(c); if (auth.error) return auth.error;
+    const rate = await enforceRateLimit(`pear-desktop-cancel:${auth.user.id}`, { limit: 30, windowMs: 10 * 60_000 });
+    if (!rate.allowed) return c.json({ ok: false, code: "RATE_LIMITED", message: "取消请求过于频繁，请稍后重试", retryable: true }, 429);
+    const id = c.req.valid("param").id;
+    const ownerId = new ObjectId(auth.user.id);
+    if (id.startsWith("pearop_")) {
+      const workflows = await getCollection("agentWorkflows");
+      const now = new Date();
+      const existing = await workflows.findOne({ operationId: id, ownerId });
+      if (!existing) return c.json({ ok: false, code: "GENERATION_NOT_FOUND", message: "生成任务不存在", retryable: false }, 404);
+      const wasTerminal = ["completed", "failed", "cancelled"].includes(existing.status);
+      let workflow = await workflows.findOneAndUpdate(
+        { operationId: id, ownerId, status: "running" },
+        { $set: { status: "cancelled", cancelledAt: now, completedAt: now, updatedAt: now } },
+        { returnDocument: "after" },
+      );
+      workflow ||= await workflows.findOne({ operationId: id, ownerId });
+      return c.json({ ok: true, generation: { id, type: "text", status: workflow.status === "running" ? "processing" : workflow.status, model: workflow.model, result: workflow.response?.message?.content ? { text: workflow.response.message.content } : null, error: null, created_at: workflow.createdAt, completed_at: workflow.completedAt || null, cancelled_at: workflow.cancelledAt || null }, billing: { charged_fen: 0, refunded_fen: 0, free: true }, idempotent: wasTerminal });
+    }
+    if (!ObjectId.isValid(id)) return c.json({ ok: false, code: "GENERATION_NOT_FOUND", message: "生成任务不存在", retryable: false }, 404);
+    const jobs = await getCollection("agentMediaJobs");
+    const job = await jobs.findOne({ _id: new ObjectId(id), ownerId });
+    if (!job) return c.json({ ok: false, code: "GENERATION_NOT_FOUND", message: "生成任务不存在", retryable: false }, 404);
+    const wasTerminal = ["succeeded", "failed", "cancelled"].includes(job.status);
+    const cancelled = await cancelMediaJob(job);
+    const wallet = await (await getCollection("wallets")).findOne({ ownerId });
+    return c.json({ ok: true, generation: pearProxyGenerationView({ ...cancelled, proxyId: cancelled._id.toString() }), billing: { charged_fen: Number(cancelled.chargedFen || 0), refunded_fen: cancelled.chargeStatus === "refunded" ? Number(cancelled.chargedFen || 0) : 0, remaining_balance_fen: Number(wallet?.balanceFen || 0), exempt: cancelled.chargeStatus === "exempt" }, idempotent: wasTerminal });
   });
 
   function adminView(record) {
