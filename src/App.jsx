@@ -279,7 +279,7 @@ export function App() {
   else if (pathname === "/brain") page = <SecondBrainPage user={user} openAuth={openAuth} navigate={navigate} />;
   else if (pathname === "/worker") page = <WorkerPage key={route} user={user} openAuth={openAuth} navigate={navigate} />;
   else if (pathname === "/workflows") page = <WorkflowPage navigate={navigate} />;
-  else if (pathname === "/short-drama") page = <ShortDramaPage user={user} authResolved={authResolved} openAuth={openAuth} />;
+  else if (pathname === "/short-drama") page = <ShortDramaPage navigate={navigate} />;
   else if (pathname === "/download") page = <DownloadPage />;
   else if (pathname === "/developer") page = <DeveloperPage user={user} openAuth={openAuth} />;
   else if (pathname === "/pricing") page = <PricingPage user={user} openAuth={openAuth} navigate={navigate} />;

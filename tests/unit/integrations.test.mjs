@@ -586,7 +586,7 @@ test("worker assignment search, visibility, notifications and publishing control
   assert.match(adminPageSource, /item\.assignment\?\.label/);
 });
 
-test("primary navigation keeps short drama embedded and restores Worker immediately after it", async () => {
+test("primary navigation opens the native short-drama showcase and keeps Worker immediately after it", async () => {
   const source = await readFile(new URL("../../src/App.jsx", import.meta.url), "utf8");
   assert.match(source, /\{ label: "工作流", href: "\/workflows" \}/);
   assert.match(source, /const SHORT_DRAMA_ROUTE = "\/short-drama"/);
@@ -594,20 +594,24 @@ test("primary navigation keeps short drama embedded and restores Worker immediat
   assert.match(source, /\{ label: "短剧", href: SHORT_DRAMA_ROUTE \},\s*\{ label: "威客", href: "\/worker" \}/);
   assert.match(source, /navigate\(SHORT_DRAMA_ROUTE\)\}>短剧/);
   assert.match(source, /navigate\("\/worker"\)\}>威客/);
-  assert.match(source, /<ShortDramaPage user=\{user\} authResolved=\{authResolved\} openAuth=\{openAuth\}/);
+  assert.match(source, /<ShortDramaPage navigate=\{navigate\}/);
 });
 
-test("short-drama authentication waits for the official session before opening login", async () => {
+test("short-drama route is a native interactive website experience without an external project link", async () => {
   const [appSource, workflowSource] = await Promise.all([
     readFile(new URL("../../src/App.jsx", import.meta.url), "utf8"),
-    readFile(new URL("../../src/components/WorkflowPages.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/ShortDramaPage.jsx", import.meta.url), "utf8"),
   ]);
-  assert.match(appSource, /const \[authResolved, setAuthResolved\] = useState\(false\)/);
-  assert.match(appSource, /\.finally\(\(\) => setAuthResolved\(true\)\)/);
-  assert.match(appSource, /<ShortDramaPage user=\{user\} authResolved=\{authResolved\} openAuth=\{openAuth\}/);
-  assert.match(workflowSource, /if \(authResolved\) openAuth\(mode\)/);
-  assert.match(workflowSource, /else pendingAuthModeRef\.current = mode/);
-  assert.match(workflowSource, /if \(!authResolved \|\| queryAuthHandledRef\.current\) return/);
+  assert.match(appSource, /<ShortDramaPage navigate=\{navigate\}/);
+  assert.match(workflowSource, /一部小说，沿一张画布/);
+  assert.match(workflowSource, /无限画布/);
+  assert.match(workflowSource, /小说原文/);
+  assert.match(workflowSource, /小说剧本/);
+  assert.match(workflowSource, /视觉资产/);
+  assert.match(workflowSource, /镜头任务/);
+  assert.match(workflowSource, /批量生成视频/);
+  assert.match(workflowSource, /官网原生功能展示/);
+  assert.doesNotMatch(workflowSource, /<iframe|aipdd-drameclaw-new|embed\.html|window\.open/);
 });
 
 test("the primary navigation omits the complaint entry while the feedback page stays reachable", async () => {

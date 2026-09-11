@@ -607,15 +607,198 @@ img[src*="/assets/gulong-agent-icon.png"] {
 .home-workflows { margin-top: 46px; padding: 42px; border: 1px solid var(--line); border-radius: 28px; background: linear-gradient(145deg, var(--panel), var(--bg-soft)); }
 .home-workflows .section-heading { max-width: 780px; margin-bottom: 28px; }
 .home-workflows > .text-link { margin: 26px auto 0; display: flex; }
-.short-drama-page { min-height: calc(100dvh - 74px); background: #151515; }
-.short-drama-embed-shell { width: 100%; min-height: calc(100dvh - 74px); display: flex; flex-direction: column; }
-.short-drama-embed-bar { width: 100%; min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 22px; color: #eee; }
-.short-drama-embed-bar > div { display: flex; align-items: baseline; gap: 13px; }
-.short-drama-embed-bar span { color: #c9a46d; font-size: .6875rem; font-weight: 800; letter-spacing: .14em; }
-.short-drama-embed-bar strong { font-size: 1rem; }
-.short-drama-embed-bar small { color: #aaa; }
-.short-drama-embed-error { padding: 10px 24px; color: #ffd6d6; background: #7f1d1d; text-align: center; }
-.short-drama-frame { width: 100%; min-height: calc(100dvh - 132px); flex: 1; border: 0; background: #181818; }
+.short-drama-page { min-height: calc(100dvh - 74px); padding: 58px 0 92px; overflow-x: clip; background: var(--bg); }
+.short-drama-hero { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(380px, .72fr); gap: clamp(46px, 7vw, 100px); align-items: center; }
+.short-drama-hero-copy > span, .short-drama-process > header > span { color: var(--gold); font-size: 18px; font-weight: 900; letter-spacing: .15em; }
+.short-drama-hero h1 { max-width: 850px; margin: 17px 0 22px; color: var(--ink-strong); font-size: clamp(46px, 4.7vw, 72px); line-height: 1.08; letter-spacing: -.055em; }
+.short-drama-hero-copy > p { max-width: 780px; margin: 0; color: var(--muted); font-size: 21px; line-height: 1.9; }
+.short-drama-hero-copy > div { margin-top: 31px; display: flex; flex-wrap: wrap; gap: 13px; }
+.short-drama-hero-copy > small { margin-top: 22px; display: flex; align-items: center; gap: 8px; color: var(--jade); font-size: 18px; }
+.short-drama-hero-map { min-height: 560px; padding: 34px; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 12px; border: 1px solid var(--line-strong); border-radius: 30px; background: var(--surface); box-shadow: var(--shadow-soft); }
+.short-drama-hero-map > span, .short-drama-hero-map > strong, .short-drama-hero-map > div > span { min-height: 56px; padding: 13px 18px; display: flex; align-items: center; justify-content: center; gap: 10px; border: 1px solid var(--line); border-radius: 15px; color: var(--ink); background: var(--surface-strong); font-size: 18px; font-weight: 800; }
+.short-drama-hero-map > span { width: min(330px, 100%); }
+.short-drama-hero-map > strong { width: min(360px, 100%); color: var(--jade); border-color: color-mix(in srgb, var(--jade) 32%, var(--line)); background: var(--jade-soft); }
+.short-drama-hero-map > div { width: 100%; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
+.short-drama-hero-map > div > span { padding-inline: 9px; color: var(--muted); }
+.short-drama-hero-map > svg { color: var(--gold); }
+
+.short-drama-promise { margin-top: 54px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: 22px; background: var(--surface); box-shadow: 0 16px 44px rgba(32, 54, 49, .055); }
+.short-drama-promise article { min-width: 0; padding: 25px 27px; border-right: 1px solid var(--line); }
+.short-drama-promise article:last-child { border-right: 0; }
+.short-drama-promise strong, .short-drama-promise span { display: block; }
+.short-drama-promise strong { color: var(--ink); font-size: 20px; }
+.short-drama-promise span { margin-top: 7px; color: var(--muted); font-size: 18px; line-height: 1.55; }
+
+.short-drama-demo { margin-top: 54px; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 28px; background: var(--surface); box-shadow: 0 30px 90px rgba(27, 50, 44, .12); scroll-margin-top: 92px; }
+.short-drama-demo-bar { min-height: 72px; padding: 12px 22px; display: grid; grid-template-columns: minmax(250px, 1fr) auto minmax(250px, 1fr); align-items: center; gap: 22px; border-bottom: 1px solid var(--line); background: var(--surface-strong); }
+.short-drama-demo-brand, .short-drama-demo-context, .short-drama-demo-actions { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.short-drama-demo-brand > span { width: 41px; height: 41px; display: grid; place-items: center; flex: none; border-radius: 12px; color: var(--jade); background: var(--jade-soft); }
+.short-drama-demo-brand strong { font-size: 21px; }
+.short-drama-demo-brand small { color: var(--muted); font-size: 18px; }
+.short-drama-demo-context { justify-content: center; color: var(--muted); font-size: 18px; white-space: nowrap; }
+.short-drama-demo-context i { color: var(--line-strong); font-style: normal; }
+.short-drama-demo-context strong { color: var(--ink); }
+.short-drama-demo-actions { justify-content: flex-end; }
+.short-drama-demo-actions > span, .short-drama-project-menu > button { min-height: 42px; padding: 8px 12px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 11px; color: var(--muted); background: var(--surface); font-size: 18px; }
+.short-drama-demo-pill { color: #8b7137 !important; background: var(--gold-soft) !important; }
+.short-drama-live i { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 5px color-mix(in srgb, var(--success) 12%, transparent); }
+.short-drama-project-menu { position: relative; }
+.short-drama-project-menu > button { cursor: pointer; }
+.short-drama-project-menu > div { width: 230px; padding: 8px; position: absolute; z-index: 20; top: calc(100% + 9px); right: 0; display: grid; gap: 5px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-strong); box-shadow: var(--shadow-float); }
+.short-drama-project-menu > div > button { padding: 10px 11px; display: grid; gap: 3px; border: 0; border-radius: 9px; color: var(--ink); background: transparent; font-size: 18px; text-align: left; cursor: pointer; }
+.short-drama-project-menu > div > button span { color: var(--muted); font-size: 18px; }
+.short-drama-project-menu > div > button.active, .short-drama-project-menu > div > button:hover { color: var(--jade); background: var(--jade-soft); }
+
+.short-drama-demo-toolbar { min-height: 96px; padding: 15px 22px; display: grid; grid-template-columns: minmax(235px, 1fr) minmax(310px, 500px) minmax(270px, 1fr); align-items: center; gap: 22px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.short-drama-demo-toolbar > div:first-child { min-width: 0; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.short-drama-demo-toolbar > div:first-child > span { width: 100%; color: var(--gold); font-size: 18px; font-weight: 900; letter-spacing: .14em; }
+.short-drama-demo-toolbar h2 { margin: 0; font-size: 28px; }
+.short-drama-demo-toolbar em { padding: 5px 9px; border-radius: 999px; color: var(--jade); background: var(--jade-soft); font-size: 18px; font-style: normal; font-weight: 800; }
+.short-drama-demo-toolbar form { min-height: 50px; padding: 5px 6px 5px 14px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface-strong); }
+.short-drama-demo-toolbar form svg { color: var(--muted); }
+.short-drama-demo-toolbar input { min-width: 0; border: 0; outline: 0; color: var(--ink); background: transparent; font-size: 18px; }
+.short-drama-demo-toolbar form button { min-height: 38px; padding: 0 12px; border: 0; border-radius: 9px; color: var(--jade); background: var(--jade-soft); font-size: 18px; font-weight: 800; cursor: pointer; }
+.short-drama-view-switch { justify-self: end; padding: 5px; display: flex; gap: 4px; border: 1px solid var(--line); border-radius: 13px; background: var(--bg-soft); }
+.short-drama-view-switch button { min-height: 38px; padding: 0 11px; display: flex; align-items: center; gap: 6px; border: 0; border-radius: 9px; color: var(--muted); background: transparent; font-size: 18px; cursor: pointer; }
+.short-drama-view-switch button.active { color: var(--jade); background: var(--surface-strong); box-shadow: 0 4px 13px rgba(25, 52, 45, .08); }
+
+.short-drama-workspace { min-height: 820px; display: grid; grid-template-columns: 220px minmax(0, 1fr) 330px; background: var(--surface); }
+.short-drama-stage-nav { padding: 22px 14px; display: flex; flex-direction: column; border-right: 1px solid var(--line); background: color-mix(in srgb, var(--bg-soft) 48%, var(--surface)); }
+.short-drama-stage-nav > span, .short-drama-stage-nav > div > span { padding: 0 10px 11px; color: var(--muted); font-size: 18px; font-weight: 850; letter-spacing: .08em; }
+.short-drama-stage-nav > button { width: 100%; min-height: 52px; padding: 10px; display: grid; grid-template-columns: 27px 22px minmax(0, 1fr) 18px; align-items: center; gap: 7px; border: 0; border-radius: 11px; color: var(--muted); background: transparent; font-size: 18px; text-align: left; cursor: pointer; }
+.short-drama-stage-nav > button > b { font-size: 18px; font-weight: 700; }
+.short-drama-stage-nav > button > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.short-drama-stage-nav > button > svg:last-child { color: var(--success); }
+.short-drama-stage-nav > button > i { width: 8px; height: 8px; border-radius: 50%; background: var(--gold); }
+.short-drama-stage-nav > button.active { color: var(--jade); background: var(--jade-soft); box-shadow: inset 3px 0 0 var(--jade); }
+.short-drama-stage-nav > div { margin: auto 8px 0; padding: 18px 0 0; border-top: 1px solid var(--line); }
+.short-drama-stage-nav > div p { margin: 9px 10px 0; display: flex; justify-content: space-between; color: var(--muted); font-size: 18px; }
+.short-drama-stage-nav > div p strong { color: var(--ink); }
+
+.short-drama-canvas-shell { min-width: 0; min-height: 820px; position: relative; overflow: hidden; background: #fbfcf9; }
+.short-drama-canvas-tools { position: absolute; z-index: 5; top: 17px; right: 18px; padding: 5px; display: flex; gap: 4px; border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--surface-strong) 94%, transparent); box-shadow: 0 7px 22px rgba(27, 49, 44, .08); }
+.short-drama-canvas-tools button { min-height: 38px; padding: 0 10px; display: flex; align-items: center; gap: 6px; border: 0; border-radius: 8px; color: var(--muted); background: transparent; font-size: 18px; cursor: pointer; }
+.short-drama-canvas-tools button:hover { color: var(--jade); background: var(--jade-soft); }
+.short-drama-canvas { height: 820px; padding: 72px 44px 80px; display: flex; align-items: center; flex-direction: column; overflow: auto; scrollbar-width: thin; }
+.short-drama-node { width: min(370px, 100%); min-height: 208px; padding: 19px; display: flex; align-items: stretch; flex-direction: column; border: 1px solid var(--line-strong); border-radius: 16px; color: var(--ink); background: var(--surface-strong); box-shadow: 0 9px 25px rgba(27, 50, 44, .07); text-align: left; cursor: pointer; transition: transform .2s ease, border-color .2s ease, opacity .2s ease, box-shadow .2s ease; }
+.short-drama-node:hover { transform: translateY(-3px); border-color: color-mix(in srgb, var(--jade) 44%, var(--line)); box-shadow: 0 16px 34px rgba(27, 50, 44, .1); }
+.short-drama-node.active { border-color: var(--jade); box-shadow: 0 0 0 4px color-mix(in srgb, var(--jade) 10%, transparent), 0 14px 36px rgba(27, 50, 44, .11); }
+.short-drama-node.dimmed { opacity: .3; }
+.short-drama-node-kicker { display: flex; align-items: center; gap: 7px; color: var(--gold); font-size: 18px; font-weight: 800; letter-spacing: .08em; }
+.short-drama-node > strong { margin-top: 10px; color: var(--ink-strong); font-size: 23px; }
+.short-drama-node > small { margin-top: 8px; color: var(--muted); font-size: 18px; line-height: 1.55; }
+.short-drama-node-status { margin-top: 18px; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 18px; }
+.short-drama-node-status b { margin-left: auto; color: var(--ink); font-size: 18px; }
+.short-drama-node-status > i, .short-drama-detail-status i { width: 8px; height: 8px; border-radius: 50%; }
+.short-drama-node-status > i.done, .short-drama-detail-status i.done { background: var(--success); }
+.short-drama-node-status > i.running, .short-drama-detail-status i.running { background: var(--gold); box-shadow: 0 0 0 4px var(--gold-soft); }
+.short-drama-node-status > i.waiting, .short-drama-detail-status i.waiting { background: #aab4b1; }
+.short-drama-progress, .short-drama-detail-progress { width: 100%; height: 5px; margin-top: 9px; display: block; overflow: hidden; border-radius: 999px; background: var(--bg-soft); }
+.short-drama-progress i, .short-drama-detail-progress i { display: block; height: 100%; border-radius: inherit; background: var(--jade); }
+.short-drama-node > em { margin-top: 9px; overflow: hidden; color: var(--muted); font-size: 18px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.short-drama-node-arrow { margin: 12px 0; flex: none; color: var(--gold); }
+.short-drama-asset-branches { width: min(100%, 990px); display: grid; grid-template-columns: repeat(3, minmax(240px, 1fr)); gap: 14px; }
+.short-drama-asset-branches .short-drama-node { width: 100%; }
+.short-drama-canvas-caption { position: absolute; left: 19px; bottom: 17px; padding: 8px 11px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: color-mix(in srgb, var(--surface-strong) 94%, transparent); font-size: 18px; }
+.short-drama-canvas-caption i { width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
+
+.short-drama-pipeline-list { height: 820px; padding: 78px 25px 74px; overflow-y: auto; scrollbar-width: thin; }
+.short-drama-pipeline-list > button { width: 100%; min-height: 95px; margin-bottom: 11px; padding: 15px 17px; display: grid; grid-template-columns: 40px 48px minmax(0, 1fr) auto minmax(110px, 18%); align-items: center; gap: 13px; border: 1px solid var(--line); border-radius: 14px; color: var(--ink); background: var(--surface); text-align: left; cursor: pointer; }
+.short-drama-pipeline-list > button.active { border-color: var(--jade); background: var(--jade-soft); }
+.short-drama-pipeline-list > button > b { color: var(--gold); font-size: 18px; }
+.short-drama-pipeline-list > button > span:nth-child(2) { width: 45px; height: 45px; display: grid; place-items: center; border-radius: 12px; color: var(--jade); background: var(--surface-strong); }
+.short-drama-pipeline-list > button > div strong, .short-drama-pipeline-list > button > div small { display: block; }
+.short-drama-pipeline-list > button > div strong { font-size: 20px; }
+.short-drama-pipeline-list > button > div small { margin-top: 4px; color: var(--muted); font-size: 18px; }
+.short-drama-pipeline-list > button > em { color: var(--muted); font-size: 18px; font-style: normal; }
+.short-drama-pipeline-list > button > i { height: 6px; overflow: hidden; border-radius: 999px; background: var(--bg-soft); }
+.short-drama-pipeline-list > button > i span { display: block; height: 100%; border-radius: inherit; background: var(--jade); }
+
+.short-drama-inspector { min-width: 0; border-left: 1px solid var(--line); background: var(--surface-strong); }
+.short-drama-inspector > header { min-height: 57px; padding: 0 22px; display: flex; align-items: center; gap: 25px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 18px; }
+.short-drama-inspector > header span:first-child { min-height: 57px; display: flex; align-items: center; color: var(--jade); border-bottom: 2px solid var(--jade); font-weight: 800; }
+.short-drama-inspector-body { height: 763px; padding: 25px 23px 34px; overflow-y: auto; scrollbar-width: thin; }
+.short-drama-detail-icon { width: 60px; height: 60px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 15px; color: var(--jade); background: var(--jade-soft); }
+.short-drama-inspector-body > small { margin-top: 22px; display: block; color: var(--gold); font-size: 18px; font-weight: 850; letter-spacing: .08em; }
+.short-drama-inspector-body h2 { margin: 9px 0 23px; font-size: 29px; line-height: 1.35; }
+.short-drama-detail-status { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 18px; }
+.short-drama-detail-status > span { display: flex; align-items: center; gap: 8px; }
+.short-drama-detail-status strong { color: var(--ink); }
+.short-drama-detail-progress { margin-top: 12px; }
+.short-drama-inspector-body > p { margin: 12px 0 0; color: var(--muted); font-size: 18px; line-height: 1.65; }
+.short-drama-detail-metric { margin-top: 22px; padding: 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--line); border-radius: 13px; color: var(--muted); background: var(--bg-soft); font-size: 18px; }
+.short-drama-detail-metric strong { color: var(--jade); }
+.short-drama-inspector-body section { margin-top: 27px; padding-top: 23px; border-top: 1px solid var(--line); }
+.short-drama-inspector-body section h3 { margin: 0 0 10px; color: var(--ink); font-size: 20px; }
+.short-drama-inspector-body section p { margin: 0; color: var(--muted); font-size: 18px; line-height: 1.78; }
+.short-drama-demo-footer { min-height: 40px; padding: 8px 17px; display: flex; align-items: center; justify-content: space-between; gap: 14px; border-top: 1px solid var(--line); color: var(--muted); background: var(--surface-strong); font-size: 18px; }
+.short-drama-demo-footer span { display: flex; align-items: center; gap: 7px; }
+
+.short-drama-process { margin-top: 78px; }
+.short-drama-process > header { max-width: 860px; }
+.short-drama-process > header h2 { margin: 12px 0 15px; font-size: clamp(36px, 4.5vw, 58px); line-height: 1.15; }
+.short-drama-process > header p { margin: 0; color: var(--muted); font-size: 20px; line-height: 1.75; }
+.short-drama-process > div { margin-top: 30px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.short-drama-process article { min-height: 260px; padding: 25px; position: relative; border: 1px solid var(--line); border-radius: 20px; background: var(--surface); box-shadow: 0 12px 38px rgba(28, 52, 46, .055); }
+.short-drama-process article > span { width: 52px; height: 52px; display: grid; place-items: center; border-radius: 14px; color: var(--jade); background: var(--jade-soft); }
+.short-drama-process article > small { position: absolute; top: 25px; right: 25px; color: var(--gold); font-size: 18px; font-weight: 900; }
+.short-drama-process h3 { margin: 22px 0 10px; font-size: 25px; }
+.short-drama-process article p { margin: 0; color: var(--muted); font-size: 18px; line-height: 1.75; }
+.short-drama-cta { margin-top: 52px; padding: clamp(30px, 5vw, 55px); display: flex; align-items: center; justify-content: space-between; gap: 36px; border: 1px solid color-mix(in srgb, var(--jade) 32%, var(--line)); border-radius: 26px; background: var(--surface); box-shadow: var(--shadow-soft); }
+.short-drama-cta > div:first-child > span { color: var(--gold); font-size: 18px; font-weight: 850; }
+.short-drama-cta h2 { max-width: 780px; margin: 10px 0 0; font-size: clamp(30px, 3vw, 44px); line-height: 1.25; }
+.short-drama-cta > div:last-child { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 11px; }
+
+@media (max-width: 1250px) {
+  .short-drama-demo-bar { grid-template-columns: 1fr auto; }
+  .short-drama-demo-context { display: none; }
+  .short-drama-demo-toolbar { grid-template-columns: minmax(210px, .8fr) minmax(310px, 1.25fr); }
+  .short-drama-view-switch { grid-column: 1 / -1; justify-self: stretch; }
+  .short-drama-view-switch button { flex: 1; justify-content: center; }
+  .short-drama-workspace { grid-template-columns: 190px minmax(0, 1fr) 300px; }
+  .short-drama-asset-branches { grid-template-columns: 1fr; max-width: 390px; }
+}
+@media (max-width: 980px) {
+  .short-drama-hero { grid-template-columns: 1fr; }
+  .short-drama-hero-map { min-height: auto; }
+  .short-drama-promise { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .short-drama-promise article:nth-child(2) { border-right: 0; }
+  .short-drama-promise article:nth-child(-n + 2) { border-bottom: 1px solid var(--line); }
+  .short-drama-workspace { grid-template-columns: 180px minmax(0, 1fr); }
+  .short-drama-inspector { grid-column: 1 / -1; border-top: 1px solid var(--line); border-left: 0; }
+  .short-drama-inspector-body { height: auto; min-height: 420px; }
+  .short-drama-process > div { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .short-drama-cta { align-items: flex-start; flex-direction: column; }
+  .short-drama-cta > div:last-child { justify-content: flex-start; }
+}
+@media (max-width: 700px) {
+  .short-drama-page { padding-top: 34px; }
+  .short-drama-hero { gap: 34px; }
+  .short-drama-hero h1 { font-size: 44px; }
+  .short-drama-hero-map { padding: 22px 16px; border-radius: 22px; }
+  .short-drama-hero-map > div { grid-template-columns: 1fr; }
+  .short-drama-promise { grid-template-columns: 1fr; }
+  .short-drama-promise article { border-right: 0; border-bottom: 1px solid var(--line); }
+  .short-drama-promise article:last-child { border-bottom: 0; }
+  .short-drama-demo { width: calc(100% - 16px); }
+  .short-drama-demo-bar { grid-template-columns: 1fr; }
+  .short-drama-demo-actions { justify-content: flex-start; flex-wrap: wrap; }
+  .short-drama-demo-toolbar { grid-template-columns: 1fr; }
+  .short-drama-view-switch { grid-column: auto; }
+  .short-drama-workspace { grid-template-columns: 1fr; }
+  .short-drama-stage-nav { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+  .short-drama-stage-nav > span, .short-drama-stage-nav > div { display: none; }
+  .short-drama-stage-nav > button { grid-template-columns: 20px 20px minmax(0, 1fr); white-space: nowrap; }
+  .short-drama-stage-nav > button > svg:last-child, .short-drama-stage-nav > button > i { display: none; }
+  .short-drama-canvas { padding-inline: 18px; }
+  .short-drama-canvas-tools { right: 10px; }
+  .short-drama-pipeline-list { padding-inline: 13px; }
+  .short-drama-pipeline-list > button { grid-template-columns: 34px 44px minmax(0, 1fr); }
+  .short-drama-pipeline-list > button > em, .short-drama-pipeline-list > button > i { display: none; }
+  .short-drama-demo-footer { align-items: flex-start; flex-direction: column; }
+  .short-drama-process > div { grid-template-columns: 1fr; }
+  .short-drama-cta > div:last-child, .short-drama-cta .button { width: 100%; }
+}
 .admin-workflow-grid { display: grid; gap: 16px; }
 .admin-workflow-grid > article { padding: 18px; display: grid; grid-template-columns: 112px minmax(0, 1fr) auto; align-items: center; gap: 20px; border: 1px solid var(--line); border-radius: 20px; background: var(--panel); }
 .admin-workflow-grid img { width: 112px; height: 112px; object-fit: cover; border-radius: 22px; }

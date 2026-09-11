@@ -1,6 +1,6 @@
 import { ArrowRight, MagnifyingGlass, Sparkle } from "@phosphor-icons/react";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { apiFetch, localizeErrorMessage } from "../api.js";
+import { useEffect, useState } from "react";
+import { apiFetch } from "../api.js";
 
 export function WorkflowCard({ workflow, navigate }) {
   const external = /^https?:\/\//i.test(workflow.url);
@@ -58,91 +58,4 @@ export function WorkflowPage({ navigate }) {
   );
 }
 
-const SHORT_DRAMA_ORIGIN = "https://aipdd-drameclaw-new.vercel.app";
-
-export function ShortDramaPage({ user, authResolved, openAuth }) {
-  const frameRef = useRef(null);
-  const issueInFlightRef = useRef(null);
-  const pendingAuthModeRef = useRef(null);
-  const queryAuthHandledRef = useRef(false);
-  const [frameReady, setFrameReady] = useState(false);
-  const [error, setError] = useState("");
-
-  const sendSso = useCallback((target = frameRef.current?.contentWindow) => {
-    if (!user?.id || !target) return Promise.resolve();
-    if (issueInFlightRef.current) return issueInFlightRef.current;
-    const request = apiFetch("/api/auth/short-drama-sso", { method: "POST" })
-      .then((result) => {
-        target.postMessage({ type: "gulong:sso", token: result.token }, SHORT_DRAMA_ORIGIN);
-        setError("");
-      })
-      .catch((reason) => setError(reason.message || "短剧账号授权失败，请重试"))
-      .finally(() => { issueInFlightRef.current = null; });
-    issueInFlightRef.current = request;
-    return request;
-  }, [user?.id]);
-
-  useEffect(() => {
-    function onMessage(event) {
-      if (event.origin !== SHORT_DRAMA_ORIGIN) return;
-      if (event.source !== frameRef.current?.contentWindow) return;
-      if (event.data?.type === "dramaclaw:ready") {
-        setFrameReady(true);
-        if (user?.id) void sendSso(event.source);
-      } else if (event.data?.type === "dramaclaw:auth-request") {
-        if (user?.id) void sendSso(event.source);
-        else {
-          const mode = event.data.mode === "register" ? "register" : "login";
-          if (authResolved) openAuth(mode);
-          else pendingAuthModeRef.current = mode;
-        }
-      } else if (event.data?.type === "dramaclaw:sso-error") {
-        setError(localizeErrorMessage(event.data.message, "短剧账号授权失败，请重试"));
-      }
-    }
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, [authResolved, openAuth, sendSso, user?.id]);
-
-  useEffect(() => {
-    if (frameReady && user?.id) void sendSso();
-  }, [frameReady, sendSso, user?.id]);
-
-  useEffect(() => {
-    const pendingMode = pendingAuthModeRef.current;
-    if (!pendingMode) return;
-    if (user?.id) void sendSso();
-    else if (authResolved) openAuth(pendingMode);
-    if (user?.id || authResolved) pendingAuthModeRef.current = null;
-  }, [authResolved, openAuth, sendSso, user?.id]);
-
-  useEffect(() => {
-    if (!authResolved || queryAuthHandledRef.current) return;
-    const mode = new URLSearchParams(window.location.search).get("auth");
-    if (mode !== "login" && mode !== "register") return;
-    queryAuthHandledRef.current = true;
-    if (!user?.id) openAuth(mode);
-  }, [authResolved, openAuth, user?.id]);
-
-  return (
-    <main id="main-content" className="short-drama-page">
-      <section className="short-drama-embed-shell">
-        <div className="short-drama-embed-bar section-shell">
-          <div><span>GULONG SHORT DRAMA</span><strong>短剧生产站</strong></div>
-          {user ? <small>{`已使用古龙账号：${user.displayName || user.username || "用户"}`}</small> : null}
-        </div>
-        {error && <div className="short-drama-embed-error" role="alert">{error}</div>}
-        <iframe
-          ref={frameRef}
-          className="short-drama-frame"
-          src={`${SHORT_DRAMA_ORIGIN}/embed.html`}
-          title="古龙短剧生产站"
-          allow="autoplay; fullscreen; clipboard-read; clipboard-write"
-          loading="eager"
-          fetchPriority="high"
-          referrerPolicy="strict-origin-when-cross-origin"
-        />
-      </section>
-    </main>
-  );
-}
+export { ShortDramaPage } from "./ShortDramaPage.jsx";
