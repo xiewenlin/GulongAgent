@@ -4,7 +4,17 @@ import test from "node:test";
 import { OpenAPIHono } from "@hono/zod-openapi";
 import { ObjectId } from "mongodb";
 import { registerCodexMarketRoutes, CODEX_NODE_HEADER } from "../../server/codex-market.js";
-import { calculateLongyanAmount, marketQuotePrice, normalizeMarketRequest, readMarketPricing } from "../../server/codex-market-pricing.js";
+import { calculateLongyanAmount, marketQuotePrice, normalizeMarketRequest, readMarketPricing, readMarketWalletAmount } from "../../server/codex-market-pricing.js";
+
+test("precise wallet balance keeps the milli-yuan remainder for desktop status", () => {
+  assert.deepEqual(readMarketWalletAmount({ balanceFen: 81, codexMarketRemainderMilliYuan: 8 }), {
+    balanceFen: 81,
+    balanceMilliYuan: 818,
+    accountingUnit: "CNY_MILLIYUAN",
+    milliYuanPerYuan: 1_000,
+  });
+  assert.equal(readMarketWalletAmount({ balanceFen: 81, codexMarketRemainderMilliYuan: 99 }).balanceMilliYuan, 810);
+});
 
 test("Codex market reuses the platform wallet unique index name", async () => {
   const source = await readFile(new URL("../../server/codex-market-store.js", import.meta.url), "utf8");
@@ -70,10 +80,21 @@ function fixture({ balance = 100, failStore = false, getPricing = readMarketPric
         const cursor = { sort: () => cursor, limit: (count) => { result = result.slice(0, count); return cursor; }, toArray: async () => clone(result) };
         return cursor;
       },
-      insertOne: async (document, options) => { check(options); rows[name].push(clone(document)); return { insertedId: document._id }; },
+      insertOne: async (document, options) => {
+        check(options);
+        if (failPlatformCredit && name === "wallets" && equal(document.ownerId, administrator)) throw new Error("Injected platform wallet failure");
+        rows[name].push(clone(document)); return { insertedId: document._id };
+      },
       updateOne: async (filter, operations, options) => {
         check(options);
-        if (failPlatformCredit && name === "wallets" && equal(filter.ownerId, administrator) && operations.$inc?.balanceFen > 0) throw new Error("Injected platform wallet failure");
+        if (failPlatformCredit && name === "wallets") {
+          const current = rows[name].find((item) => matches(item, filter));
+          if (current && equal(current.ownerId, administrator)) {
+            const before = current.balanceFen * 10 + (current.codexMarketRemainderMilliYuan || 0);
+            const after = (operations.$set?.balanceFen ?? current.balanceFen) * 10 + (operations.$set?.codexMarketRemainderMilliYuan ?? current.codexMarketRemainderMilliYuan ?? 0);
+            if (after > before) throw new Error("Injected platform wallet failure");
+          }
+        }
         let row = rows[name].find((item) => matches(item, filter));
         if (!row && options?.upsert) { row = { _id: new ObjectId(), ...clone(filter) }; update(row, operations, true); rows[name].push(row); }
         else if (row) update(row, operations);
@@ -136,23 +157,32 @@ function fixture({ balance = 100, failStore = false, getPricing = readMarketPric
 }
 
 test("official Longtu and tiered Longyan prices match the desktop manifest", async () => {
-  assert.deepEqual(marketQuotePrice(readMarketPricing(), "longtu").chargedFen, 14);
-  assert.equal(marketQuotePrice(readMarketPricing(), "longtu").nodeShareFen, 7);
+  const longtu = marketQuotePrice(readMarketPricing(), "longtu");
+  assert.equal(longtu.chargedMilliYuan, 182);
+  assert.equal(longtu.chargedFen, 19);
+  assert.equal(longtu.nodeShareMilliYuan, 91);
+  assert.equal(longtu.platformShareMilliYuan, 91);
   const standard = calculateLongyanAmount({ inputTokens: 271_999, outputTokens: 1_000, cacheWriteTokens: 0, cacheReadTokens: 1 });
   const extended = calculateLongyanAmount({ inputTokens: 271_999, outputTokens: 1_000, cacheWriteTokens: 0, cacheReadTokens: 2 });
   assert.deepEqual({ tier: standard.tier, amountFen: standard.amountFen, totalInputTokens: standard.totalInputTokens }, { tier: "standard", amountFen: 109, totalInputTokens: 272_000 });
+  assert.equal(standard.amountMilliYuan, 1_081);
   assert.deepEqual({ tier: extended.tier, amountFen: extended.amountFen, totalInputTokens: extended.totalInputTokens }, { tier: "extended", amountFen: 216, totalInputTokens: 272_001 });
+  assert.equal(extended.amountMilliYuan, 2_151);
   assert.equal(calculateLongyanAmount({ inputTokens: 100_000, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0 }).amountFen, 39);
   assert.equal(calculateLongyanAmount({ inputTokens: 0, outputTokens: 100_000, cacheWriteTokens: 0, cacheReadTokens: 0 }).amountFen, 195);
   assert.equal(calculateLongyanAmount({ inputTokens: 0, outputTokens: 0, cacheWriteTokens: 100_000, cacheReadTokens: 0 }).amountFen, 49);
   assert.equal(calculateLongyanAmount({ inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 100_000 }).amountFen, 4);
-  assert.equal(calculateLongyanAmount({ inputTokens: 65_536, outputTokens: 8_192, cacheWriteTokens: 65_536, cacheReadTokens: 65_536 }).amountFen, 77);
+  const defaultReservation = calculateLongyanAmount({ inputTokens: 65_536, outputTokens: 8_192, cacheWriteTokens: 65_536, cacheReadTokens: 65_536 });
+  assert.equal(defaultReservation.amountMilliYuan, 761);
+  assert.equal(defaultReservation.amountFen, 77);
   assert.throws(() => marketQuotePrice(null, "longtu"), { code: "OFFICIAL_PRICING_UNAVAILABLE" });
   const f = fixture();
   const models = await f.call("/models");
   assert.equal(models.body.models[0].available, true);
   assert.match(models.body.models[0].priceLabel, /含缓存.*3\.9.*19\.5.*4\.875.*0\.39.*7\.8.*29\.25.*9\.75.*0\.78/);
-  assert.equal(models.body.models[1].priceLabel, "¥0.14/次");
+  assert.equal(models.body.models[1].priceLabel, "¥0.182/次");
+  assert.equal(models.body.models[1].officialAmountMilliYuan, 182);
+  assert.equal(models.body.accountingUnit, "CNY_MILLIYUAN");
   const denied = await f.call("/quotes", { requestId: "request-text", model: "longyan", request: { prompt: "你好" } });
   assert.equal(denied.status, 400);
   assert.equal(denied.body.code, "USAGE_LIMIT_REQUIRED");
@@ -178,14 +208,21 @@ test("request normalization validates real image type, message roles and payload
 test("quote and task keys persistently bind their payloads; concurrent replay debits once", async () => {
   const f = fixture();
   const quote = await f.quote();
+  assert.equal(quote.body.requiredMilliYuan, 182);
+  assert.equal(quote.body.requiredFen, 19);
+  assert.equal(quote.body.availableBalanceMilliYuan, 1_000);
+  assert.equal(quote.body.affordable, true);
   const changed = await f.call("/quotes", { requestId: "request-0001", model: "longtu", request: { prompt: "different" } });
   assert.equal(changed.status, 409);
   const input = { quoteId: quote.body.quoteId, requestId: "request-0001" };
   const results = await Promise.all([f.call("/tasks", input), f.call("/tasks", input)]);
   assert.deepEqual(results.map((item) => item.status).sort(), [200, 201]);
-  assert.equal(f.rows.wallets[0].balanceFen, 86);
+  assert.equal(f.rows.wallets[0].balanceFen, 81);
+  assert.equal(f.rows.wallets[0].codexMarketRemainderMilliYuan, 8);
+  assert.equal(results[0].body.billing.remainingBalanceMilliYuan, 818);
   assert.equal(f.rows.codexMarketTasks.length, 1);
   assert.equal(f.rows.codexMarketLedger.length, 1);
+  assert.equal(f.rows.codexMarketLedger[0].amountMilliYuan, -182);
   const swappedQuote = await f.quote("request-0002");
   assert.equal((await f.call("/tasks", { ...input, quoteId: swappedQuote.body.quoteId })).status, 409);
   assert.equal((await f.call(`/tasks/${results[0].body.task.id}`, undefined, { account: "executor" })).status, 404);
@@ -195,6 +232,11 @@ test("insufficient balance is a durable rejected order, and quote expiry never c
   const f = fixture({ balance: 1 });
   const first = await f.create();
   assert.equal(first.status, 402);
+  assert.equal(first.body.code, "INSUFFICIENT_BALANCE");
+  assert.equal(first.body.billing.requiredMilliYuan, 182);
+  assert.equal(first.body.billing.chargedMilliYuan, 0);
+  assert.equal(first.body.billing.affordable, false);
+  assert.equal(f.rows.codexMarketTasks[0].status, "rejected");
   f.rows.wallets[0].balanceFen = 100;
   const replay = await f.create();
   assert.equal(replay.status, 402);
@@ -225,7 +267,7 @@ test("lease replay is stable; stale claims and another node cannot submit result
   assert.equal((await f.callback(nextNode, next)).status, 200);
 });
 
-test("heartbeat extends only its own current lease; completion settles exactly 7/7 once", async () => {
+test("heartbeat extends only its own current lease; Longtu completion settles exactly 91/91 milliyuan once", async () => {
   const f = fixture();
   await f.create();
   const node = await f.register();
@@ -237,8 +279,11 @@ test("heartbeat extends only its own current lease; completion settles exactly 7
   const replay = await f.callback(node, task);
   assert.equal(replay.status, 200);
   assert.equal(replay.body.idempotent, true);
-  assert.equal(f.rows.wallets.find((row) => equal(row.ownerId, f.accounts.executor)).balanceFen, 7);
-  assert.equal(f.rows.wallets.find((row) => equal(row.ownerId, f.accounts.administrator)).balanceFen, 7);
+  const executorWallet = f.rows.wallets.find((row) => equal(row.ownerId, f.accounts.executor));
+  const platformWallet = f.rows.wallets.find((row) => equal(row.ownerId, f.accounts.administrator));
+  assert.deepEqual([executorWallet.balanceFen, executorWallet.codexMarketRemainderMilliYuan], [9, 1]);
+  assert.deepEqual([platformWallet.balanceFen, platformWallet.codexMarketRemainderMilliYuan], [9, 1]);
+  assert.deepEqual(f.rows.codexMarketLedger.filter((row) => row.kind.endsWith("commission")).map((row) => row.amountMilliYuan).sort(), [91, 91]);
   assert.equal(f.rows.codexMarketLedger.length, 3);
   const changed = await f.callback(node, task, { status: "failed", error: { message: "later error" } });
   assert.equal(changed.body.code, "CALLBACK_CONFLICT");
@@ -270,18 +315,23 @@ test("failed tasks refund once, and timed out queued tasks refund when read", as
   assert.equal((await f.callback(node, task, failed)).status, 200);
   assert.equal((await f.callback(node, task, failed)).body.idempotent, true);
   assert.equal(f.rows.wallets[0].balanceFen, 100);
+  assert.equal(f.rows.wallets[0].codexMarketRemainderMilliYuan, 0);
   assert.equal(f.rows.codexMarketLedger.filter((row) => row.kind === "refund").length, 1);
   const queued = await f.create("request-timeout");
   f.advance(3601_000);
   assert.equal((await f.call(`/tasks/${queued.body.task.id}`)).body.task.status, "failed");
   assert.equal(f.rows.wallets[0].balanceFen, 100);
-  assert.equal((await f.call(`/tasks/${queued.body.task.id}`)).body.task.refundedFen, 14);
+  const timedOut = (await f.call(`/tasks/${queued.body.task.id}`)).body.task;
+  assert.equal(timedOut.refundedMilliYuan, 182);
+  assert.equal(timedOut.refundedFen, 19);
 });
 
 test("administrator exemption creates no reservation or commission", async () => {
   const f = fixture();
   const quote = await f.quote("admin-request", "administrator");
-  assert.equal(quote.body.officialAmountFen, 14);
+  assert.equal(quote.body.officialAmountMilliYuan, 182);
+  assert.equal(quote.body.officialAmountFen, 19);
+  assert.equal(quote.body.requiredMilliYuan, 0);
   assert.equal(quote.body.chargedFen, 0);
   assert.equal(quote.body.billingExempt, true);
   await f.create("admin-request", "administrator");
@@ -296,8 +346,10 @@ test("Longyan reserves a billing ceiling and settles authenticated actual usage 
   const usageLimit = { inputTokens: 271_999, outputTokens: 1_000, cacheWriteTokens: 0, cacheReadTokens: 1 };
   const created = await f.create("longyan-request", "requester", "longyan", usageLimit);
   assert.equal(created.status, 201);
+  assert.equal(created.body.billing.chargedMilliYuan, 1_081);
   assert.equal(created.body.billing.chargedFen, 109);
   assert.equal(f.rows.wallets[0].balanceFen, 91);
+  assert.equal(f.rows.wallets[0].codexMarketRemainderMilliYuan, 9);
 
   const legacyNode = await f.register("legacy-node-01", null);
   assert.equal((await f.claim(legacyNode)).body.task, null, "nodes without actual-usage reporting must not claim paid text work");
@@ -321,17 +373,23 @@ test("Longyan reserves a billing ceiling and settles authenticated actual usage 
   assert.equal(completed.status, 200);
   assert.equal((await f.callback(node, task, { result: { text: "完成" }, usage })).body.idempotent, true);
   const saved = f.rows.codexMarketTasks[0];
+  assert.equal(saved.reservedMilliYuan, 1_081);
   assert.equal(saved.reservedFen, 109);
+  assert.equal(saved.chargedMilliYuan, 390);
   assert.equal(saved.chargedFen, 39);
+  assert.equal(saved.refundedMilliYuan, 691);
   assert.equal(saved.refundedFen, 70);
+  assert.equal(saved.nodeShareMilliYuan, 195);
+  assert.equal(saved.platformShareMilliYuan, 195);
   assert.equal(saved.nodeShareFen, 19);
   assert.equal(saved.platformShareFen, 20);
-  assert.equal(saved.pricingRevision, "desktop-20260910-v4");
+  assert.equal(saved.pricingRevision, "desktop-20260911-v5");
   assert.equal(saved.usage.cacheWriteTokens, null);
   assert.equal(saved.usage.cacheWriteTokensMeasured, false);
   assert.equal(f.rows.wallets.find((row) => equal(row.ownerId, f.accounts.requester)).balanceFen, 161);
-  assert.equal(f.rows.wallets.find((row) => equal(row.ownerId, f.accounts.executor)).balanceFen, 19);
-  assert.equal(f.rows.wallets.find((row) => equal(row.ownerId, f.accounts.administrator)).balanceFen, 20);
+  assert.deepEqual([f.rows.wallets.find((row) => equal(row.ownerId, f.accounts.executor)).balanceFen, f.rows.wallets.find((row) => equal(row.ownerId, f.accounts.executor)).codexMarketRemainderMilliYuan], [19, 5]);
+  assert.deepEqual([f.rows.wallets.find((row) => equal(row.ownerId, f.accounts.administrator)).balanceFen, f.rows.wallets.find((row) => equal(row.ownerId, f.accounts.administrator)).codexMarketRemainderMilliYuan], [19, 5]);
+  assert.equal(f.rows.codexMarketLedger.reduce((sum, row) => sum + row.amountMilliYuan, 0), 0);
   assert.deepEqual(f.rows.codexMarketLedger.map((row) => row.kind).sort(), ["node_commission", "platform_commission", "reservation_adjustment_refund", "reserve"]);
 });
 
@@ -360,8 +418,9 @@ test("Longyan settlement uses the order pricing snapshot after the directory rev
   const task = (await f.claim(node)).body.task;
   const usage = { source: "codex_app_server", providerRequestId: "codex-snapshot-01", inputTokens: 100_000, outputTokens: 0, cacheWriteTokens: null, cacheReadTokens: 0, cacheWriteTokensMeasured: false };
   assert.equal((await f.callback(node, task, { result: { text: "按原价结算" }, usage })).status, 200);
+  assert.equal(f.rows.codexMarketTasks[0].chargedMilliYuan, 390);
   assert.equal(f.rows.codexMarketTasks[0].chargedFen, 39);
-  assert.equal(f.rows.codexMarketTasks[0].pricingRevision, "desktop-20260910-v4");
+  assert.equal(f.rows.codexMarketTasks[0].pricingRevision, "desktop-20260911-v5");
 });
 
 test("re-registering a node revokes its prior token and lease", async () => {

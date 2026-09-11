@@ -2,13 +2,17 @@ import { createHash } from "node:crypto";
 
 export const CODEX_MARKET_MODELS = Object.freeze([
   { id: "longyan", name: "龙言", modality: "text", priceLabel: "按输入 Tokens（含缓存）分档：0–272K 输入 ¥3.9、输出 ¥19.5、缓存写入 ¥4.875、缓存读取 ¥0.39/百万 Tokens；272K+ 输入 ¥7.8、输出 ¥29.25、缓存写入 ¥9.75、缓存读取 ¥0.78/百万 Tokens" },
-  { id: "longtu", name: "龙图", modality: "image", priceLabel: "¥0.14/次" },
+  { id: "longtu", name: "龙图", modality: "image", priceLabel: "¥0.182/次" },
 ]);
-export const CODEX_MARKET_PRICING_REVISION = "desktop-20260910-v4";
+export const CODEX_MARKET_PRICING_REVISION = "desktop-20260911-v5";
 export const CODEX_MARKET_MAX_JSON_BYTES = 3_000_000;
 export const CODEX_MARKET_MAX_IMAGE_BYTES = 2_500_000;
 export const LONGYAN_CONTEXT_TIER_THRESHOLD = 272_000;
 const NANO_FEN_PER_FEN = 1_000_000_000n;
+const NANO_FEN_PER_MILLIYUAN = 100_000_000n;
+export const MILLIYUAN_PER_FEN = 10;
+export const MILLIYUAN_PER_YUAN = 1_000;
+export const CODEX_MARKET_WALLET_REMAINDER_FIELD = "codexMarketRemainderMilliYuan";
 const MAX_USAGE_TOKENS = 2_000_000;
 
 const LONGYAN_RATES = Object.freeze({
@@ -114,14 +118,51 @@ export function calculateLongyanAmount(usage, pricingSnapshot = null) {
   for (const field of ["inputTokens", "outputTokens", "cacheWriteTokens", "cacheReadTokens"]) {
     amountNanoFen += BigInt(normalized[field] || 0) * BigInt(rates[field]);
   }
+  const amountMilliYuan = Number((amountNanoFen + NANO_FEN_PER_MILLIYUAN - 1n) / NANO_FEN_PER_MILLIYUAN);
   const amountFen = Number((amountNanoFen + NANO_FEN_PER_FEN - 1n) / NANO_FEN_PER_FEN);
   return {
     tier,
     thresholdTokens,
     totalInputTokens,
+    amountMilliYuan,
     amountFen,
     exactAmountNanoFen: amountNanoFen.toString(),
     ratesNanoFenPerToken: { ...rates },
+  };
+}
+
+export function milliYuanToFen(amountMilliYuan) {
+  if (!Number.isSafeInteger(amountMilliYuan)) throw marketError("INVALID_AMOUNT", "精确记账金额必须是整数毫元");
+  const sign = amountMilliYuan < 0 ? -1 : 1;
+  return sign * Math.ceil(Math.abs(amountMilliYuan) / MILLIYUAN_PER_FEN);
+}
+
+export function readMarketWalletAmount(wallet) {
+  const balanceFen = Number.isSafeInteger(wallet?.balanceFen) ? Math.max(0, wallet.balanceFen) : 0;
+  const remainder = Number.isSafeInteger(wallet?.[CODEX_MARKET_WALLET_REMAINDER_FIELD])
+    && wallet[CODEX_MARKET_WALLET_REMAINDER_FIELD] >= 0
+    && wallet[CODEX_MARKET_WALLET_REMAINDER_FIELD] < MILLIYUAN_PER_FEN
+    ? wallet[CODEX_MARKET_WALLET_REMAINDER_FIELD]
+    : 0;
+  return {
+    balanceFen,
+    balanceMilliYuan: balanceFen * MILLIYUAN_PER_FEN + remainder,
+    accountingUnit: "CNY_MILLIYUAN",
+    milliYuanPerYuan: MILLIYUAN_PER_YUAN,
+  };
+}
+
+export function splitMarketAmount(amountMilliYuan) {
+  if (!Number.isSafeInteger(amountMilliYuan) || amountMilliYuan < 0) throw marketError("INVALID_AMOUNT", "精确分账金额无效");
+  const nodeShareMilliYuan = Math.floor(amountMilliYuan / 2);
+  const platformShareMilliYuan = amountMilliYuan - nodeShareMilliYuan;
+  const chargedFen = milliYuanToFen(amountMilliYuan);
+  const nodeShareFen = Math.floor(nodeShareMilliYuan / MILLIYUAN_PER_FEN);
+  return {
+    nodeShareMilliYuan,
+    platformShareMilliYuan,
+    nodeShareFen,
+    platformShareFen: chargedFen - nodeShareFen,
   };
 }
 
@@ -145,7 +186,7 @@ export function readMarketPricing() {
     officialSourceUrl: "gulong-desktop-model-catalog",
     models: [
       { ...CODEX_MARKET_MODELS[0], executionModel: "gpt-6-astra", reasoningEffort: "low", rates: LONGYAN_RATES, thresholdTokens: LONGYAN_CONTEXT_TIER_THRESHOLD },
-      { ...CODEX_MARKET_MODELS[1], executionModel: "gpt-image-2", officialAmountFen: 14 },
+      { ...CODEX_MARKET_MODELS[1], executionModel: "gpt-image-2", officialAmountMilliYuan: 182 },
     ],
   };
 }
@@ -154,19 +195,27 @@ export function marketQuotePrice(pricing, model, { administrator = false, usageL
   const rate = pricing?.models.find((item) => item.id === model);
   if (!rate) throw marketError("OFFICIAL_PRICING_UNAVAILABLE", "官网尚未配置经过核验的官方报价，暂不能创建收费订单", 503);
   const usagePricing = model === "longyan" ? calculateLongyanAmount(normalizeLongyanUsage(usageLimit)) : null;
-  const officialAmountFen = usagePricing?.amountFen ?? rate.officialAmountFen;
-  const chargedFen = administrator ? 0 : officialAmountFen;
-  const nodeShareFen = Math.floor(chargedFen / 2);
+  const officialAmountMilliYuan = usagePricing?.amountMilliYuan ?? rate.officialAmountMilliYuan;
+  const officialAmountFen = milliYuanToFen(officialAmountMilliYuan);
+  const chargedMilliYuan = administrator ? 0 : officialAmountMilliYuan;
+  const chargedFen = milliYuanToFen(chargedMilliYuan);
+  const split = splitMarketAmount(chargedMilliYuan);
   return {
     executionModel: rate.executionModel,
     reasoningEffort: rate.reasoningEffort || null,
+    accountingUnit: "CNY_MILLIYUAN",
+    milliYuanPerYuan: MILLIYUAN_PER_YUAN,
+    officialAmountMilliYuan,
     officialAmountFen,
+    chargedMilliYuan,
     chargedFen,
-    nodeShareFen,
-    platformShareFen: chargedFen - nodeShareFen,
+    nodeShareMilliYuan: split.nodeShareMilliYuan,
+    platformShareMilliYuan: split.platformShareMilliYuan,
+    nodeShareFen: split.nodeShareFen,
+    platformShareFen: split.platformShareFen,
     pricingRevision: pricing.revision,
     currency: "CNY",
     officialSourceUrl: pricing.officialSourceUrl,
-    ...(usagePricing ? { usageLimit: normalizeLongyanUsage(usageLimit), usagePricing, pricingSnapshot: { thresholdTokens: rate.thresholdTokens, rates: rate.rates } } : {}),
+    ...(usagePricing ? { usageLimit: normalizeLongyanUsage(usageLimit), usagePricing, pricingSnapshot: { accountingUnit: "CNY_MILLIYUAN", milliYuanPerYuan: MILLIYUAN_PER_YUAN, thresholdTokens: rate.thresholdTokens, rates: rate.rates } } : {}),
   };
 }

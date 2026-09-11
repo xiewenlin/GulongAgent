@@ -15,7 +15,7 @@
 
 请求头：`Authorization: Bearer <Chandler Access Token>`
 
-返回当前账号的会员状态、续费提醒、钱包余额和短视频包月权益。线下订阅审核通过后，下一次读取立即生效。
+返回当前账号的会员状态、续费提醒、钱包余额和短视频包月权益。精确余额字段为 `balanceMilliYuan`，同时返回 `accountingUnit=CNY_MILLIYUAN` 与 `milliYuanPerYuan=1000`；`balanceFen` 仅用于旧客户端兼容。线下订阅审核通过后，下一次读取立即生效。
 
 ## 剩余用量
 
@@ -23,12 +23,15 @@
 
 请求头：`Authorization: Bearer <Chandler Access Token>`
 
-金额全部为整数分。响应结构：
+Codex 市场使用整数毫元精确记账；`balanceMilliYuan` 是权威余额，旧 `balanceFen` 只作兼容展示。响应结构：
 
 ```json
 {
   "currency": "CNY",
   "quota": {
+    "balanceMilliYuan": 550008,
+    "accountingUnit": "CNY_MILLIYUAN",
+    "milliYuanPerYuan": 1000,
     "balanceFen": 55000,
     "unlimited": false,
     "estimates": {

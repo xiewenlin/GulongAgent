@@ -181,6 +181,12 @@ img[src*="/assets/gulong-agent-icon.png"] {
 .agent-composer-orb img { width: 58px; height: 58px; display: block; border-radius: 50%; object-fit: contain; background: #fff; }
 .agent-composer-orb svg { position: absolute; right: -3px; bottom: -2px; padding: 4px; overflow: visible; border: 2px solid #fff; border-radius: 50%; color: #fff; background: var(--primary); }
 .agent-composer-orb.working { animation: agent-composer-working 1.6s ease-in-out infinite; }
+.deployment-update-notice { position: fixed; z-index: 3000; right: 24px; bottom: 24px; width: min(430px, calc(100vw - 32px)); padding: 16px; display: flex; align-items: center; gap: 16px; border: 1px solid color-mix(in srgb, var(--primary) 34%, var(--line)); border-radius: 18px; color: var(--text); background: color-mix(in srgb, var(--surface-strong) 96%, transparent); box-shadow: 0 22px 64px rgba(12, 42, 36, .22); backdrop-filter: blur(18px); }
+.deployment-update-notice > div { min-width: 0; display: grid; gap: 3px; }
+.deployment-update-notice strong, .deployment-update-notice span { font-size: 18px; line-height: 1.45; }
+.deployment-update-notice span { color: var(--muted); }
+.deployment-update-notice button { min-height: 44px; padding: 0 15px; flex: none; border: 1px solid var(--primary); border-radius: 12px; color: #fff; background: var(--primary); font-size: 18px; font-weight: 800; cursor: pointer; }
+.deployment-update-notice button:hover { transform: translateY(-1px); box-shadow: 0 9px 22px color-mix(in srgb, var(--primary) 24%, transparent); }
 @keyframes agent-composer-enter { from { opacity: 0; transform: translate(-50%, calc(-50% + 18px)) scale(.97); } to { opacity: 1; transform: translate(-50%, -50%) scale(1); } }
 @keyframes agent-composer-working { 50% { box-shadow: 0 20px 58px color-mix(in srgb, var(--accent) 58%, transparent); } }
 .agent-mode-row { min-height: 36px; display: flex; align-items: center; justify-content: space-between; gap: 18px; }
@@ -480,6 +486,8 @@ img[src*="/assets/gulong-agent-icon.png"] {
 .web-agent-gate p { max-width: 680px; margin: 0 0 26px; color: var(--muted); font-size: 19px; line-height: 1.8; }
 
 @media (max-width: 760px) {
+  .deployment-update-notice { right: 12px; bottom: 12px; left: 12px; width: auto; align-items: stretch; flex-direction: column; gap: 11px; }
+  .deployment-update-notice button { width: 100%; }
   .agent-topbar { min-height: 62px; gap: 8px; }
   .agent-home small { display: none; }
   .agent-home-cluster { gap: 8px; }

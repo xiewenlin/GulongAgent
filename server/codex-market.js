@@ -7,9 +7,10 @@ import { enforceRateLimit as databaseRateLimit } from "./rate-limit.js";
 import { codexMarketStorage } from "./codex-market-store.js";
 import {
   CODEX_MARKET_MODELS, CODEX_MARKET_PRICING_REVISION, CODEX_MARKET_MAX_JSON_BYTES,
+  CODEX_MARKET_WALLET_REMAINDER_FIELD,
   assertUsageWithinLimit, calculateLongyanAmount, marketError, marketFingerprint,
-  marketQuotePrice, normalizeLongyanUsage, normalizeMarketImages, normalizeMarketRequest,
-  readMarketPricing,
+  marketQuotePrice, milliYuanToFen, normalizeLongyanUsage, normalizeMarketImages,
+  normalizeMarketRequest, readMarketPricing, readMarketWalletAmount, splitMarketAmount,
 } from "./codex-market-pricing.js";
 
 export const CODEX_NODE_HEADER = "X-Gulong-Codex-Node";
@@ -34,22 +35,53 @@ function capabilities(value = {}) {
   const usageReportingVersion = value.usageReportingVersion === "codex-app-server-v1" ? value.usageReportingVersion : null;
   return { codexAvailable: value.codexAvailable === true, models, usageReportingVersion };
 }
+function exactAmount(record, name, fallbackName = null) {
+  const exact = record?.[`${name}MilliYuan`];
+  if (Number.isSafeInteger(exact)) return exact;
+  const legacy = record?.[`${name}Fen`] ?? (fallbackName ? record?.[`${fallbackName}Fen`] : 0);
+  return Number.isSafeInteger(legacy) ? legacy * 10 : 0;
+}
+function preciseTask(task) {
+  return task?.pricingSnapshot?.accountingUnit === "CNY_MILLIYUAN" || Number.isSafeInteger(task?.reservedMilliYuan);
+}
+function exactFields(name, amountMilliYuan) {
+  return { [`${name}MilliYuan`]: amountMilliYuan, [`${name}Fen`]: milliYuanToFen(amountMilliYuan) };
+}
 function publicTask(task) {
   return {
     id: String(task._id), orderNo: task.orderNo, model: task.model, status: task.status,
+    accountingUnit: "CNY_MILLIYUAN", milliYuanPerYuan: 1_000,
+    requiredMilliYuan: exactAmount(task, "required", "reserved"),
+    reservedMilliYuan: exactAmount(task, "reserved", "charged"), chargedMilliYuan: exactAmount(task, "charged"),
+    nodeShareMilliYuan: exactAmount(task, "nodeShare"), platformShareMilliYuan: exactAmount(task, "platformShare"),
     reservedFen: task.reservedFen ?? task.chargedFen, chargedFen: task.chargedFen,
     nodeShareFen: task.nodeShareFen, platformShareFen: task.platformShareFen,
     pricingRevision: task.pricingRevision, progress: task.progress || 0,
     result: task.status === "completed" ? task.result : null, error: task.error || null,
     createdAt: task.createdAt, completedAt: task.completedAt || null,
-    deadlineAt: task.deadlineAt, refundedFen: task.refundedFen || 0,
+    deadlineAt: task.deadlineAt, refundedMilliYuan: exactAmount(task, "refunded"), refundedFen: task.refundedFen || 0,
     settlementStatus: task.settlementStatus,
     ...(task.model === "longyan" ? { usageLimit: task.usageLimit, usage: task.status === "completed" ? task.usage : null, usagePricing: task.status === "completed" ? task.usagePricing : null } : {}),
   };
 }
-function publicQuote(quote) {
-  const { executionModel, reasoningEffort, officialAmountFen, chargedFen, nodeShareFen, platformShareFen, pricingRevision, currency, officialSourceUrl, expiresAt, usageLimit, usagePricing } = quote;
-  return { quoteId: String(quote._id), executionModel, reasoningEffort, officialAmountFen, chargedFen, reservedFen: chargedFen, nodeShareFen, platformShareFen, billingExempt: chargedFen === 0, pricingRevision, currency, officialSourceUrl, expiresAt, ...(usageLimit ? { usageLimit, usagePricing } : {}) };
+function publicQuote(quote, wallet = null) {
+  const { executionModel, reasoningEffort, officialAmountFen, officialAmountMilliYuan, chargedFen, chargedMilliYuan, nodeShareFen, nodeShareMilliYuan, platformShareFen, platformShareMilliYuan, pricingRevision, currency, officialSourceUrl, expiresAt, usageLimit, usagePricing } = quote;
+  const available = readMarketWalletAmount(wallet);
+  const requiredMilliYuan = Number.isSafeInteger(chargedMilliYuan) ? chargedMilliYuan : chargedFen * 10;
+  return {
+    quoteId: String(quote._id), executionModel, reasoningEffort,
+    accountingUnit: "CNY_MILLIYUAN", milliYuanPerYuan: 1_000,
+    officialAmountMilliYuan: Number.isSafeInteger(officialAmountMilliYuan) ? officialAmountMilliYuan : officialAmountFen * 10,
+    officialAmountFen, requiredMilliYuan, requiredFen: milliYuanToFen(requiredMilliYuan),
+    chargedMilliYuan: requiredMilliYuan, chargedFen, reservedMilliYuan: requiredMilliYuan, reservedFen: chargedFen,
+    nodeShareMilliYuan: Number.isSafeInteger(nodeShareMilliYuan) ? nodeShareMilliYuan : nodeShareFen * 10,
+    platformShareMilliYuan: Number.isSafeInteger(platformShareMilliYuan) ? platformShareMilliYuan : platformShareFen * 10,
+    nodeShareFen, platformShareFen,
+    availableBalanceMilliYuan: available.balanceMilliYuan, availableBalanceFen: available.balanceFen,
+    affordable: requiredMilliYuan === 0 || available.balanceMilliYuan >= requiredMilliYuan,
+    billingExempt: requiredMilliYuan === 0, pricingRevision, currency, officialSourceUrl, expiresAt,
+    ...(usageLimit ? { usageLimit, usagePricing } : {}),
+  };
 }
 function validateResult(model, value = {}) {
   const images = normalizeMarketImages(value.images);
@@ -119,27 +151,47 @@ export function registerCodexMarketRoutes(app, dependencies) {
     if (!task || String(task.assignedNodeId) !== String(auth._id) || task.claimId !== input.claimId || typeof input.leaseToken !== "string" || task.leaseTokenHash !== hash(input.leaseToken, "codex-market-task-lease")) throw marketError("LEASE_CONFLICT", "任务已由其他节点或新租约接管", 409);
     if (!TERMINAL.has(task.status) && (!task.leaseExpiresAt || new Date(task.leaseExpiresAt) <= now)) throw marketError("LEASE_EXPIRED", "领取租约已过期，不能回调或结算", 409);
   }
-  async function writeLedger(session, { key, ownerId, task, kind, amountFen }) {
+  async function writeLedger(session, { key, ownerId, task, kind, amountMilliYuan }) {
     const ledgers = await collection("Ledger");
     const existing = await ledgers.findOne({ key }, { session });
     if (existing) {
-      if (String(existing.ownerId) !== String(ownerId) || existing.amountFen !== amountFen || existing.kind !== kind) throw marketError("LEDGER_CONFLICT", "订单账本内容冲突", 409);
+      const existingExact = Number.isSafeInteger(existing.amountMilliYuan) ? existing.amountMilliYuan : Number(existing.amountFen || 0) * 10;
+      if (String(existing.ownerId) !== String(ownerId) || existingExact !== amountMilliYuan || existing.kind !== kind) throw marketError("LEDGER_CONFLICT", "订单账本内容冲突", 409);
       return false;
     }
-    await ledgers.insertOne({ key, ownerId, taskId: task._id, orderNo: task.orderNo, kind, amountFen, createdAt: clock() }, { session });
+    await ledgers.insertOne({ key, ownerId, taskId: task._id, orderNo: task.orderNo, kind, amountMilliYuan, amountFen: milliYuanToFen(amountMilliYuan), accountingUnit: "CNY_MILLIYUAN", createdAt: clock() }, { session });
     return true;
   }
-  async function credit(session, task, ownerId, amountFen, kind) {
-    if (!amountFen) return;
-    if (await writeLedger(session, { key: `${task._id}:${kind}`, ownerId, task, kind, amountFen })) {
-      await (await getCollection("wallets")).updateOne({ ownerId }, { $inc: { balanceFen: amountFen }, $set: { updatedAt: clock() }, $setOnInsert: { createdAt: clock() } }, { upsert: true, session });
+  async function mutateWallet(session, ownerId, deltaMilliYuan, { requireFunds = false } = {}) {
+    const wallets = await getCollection("wallets");
+    const current = await wallets.findOne({ ownerId }, { session });
+    const available = readMarketWalletAmount(current).balanceMilliYuan;
+    if (requireFunds && available < -deltaMilliYuan) return null;
+    const next = available + deltaMilliYuan;
+    if (!Number.isSafeInteger(next) || next < 0) throw marketError("WALLET_AMOUNT_INVALID", "钱包精确余额无效", 409);
+    const balanceFen = Math.floor(next / 10);
+    const remainder = next % 10;
+    const updatedAt = clock();
+    if (current) {
+      await wallets.updateOne({ _id: current._id }, { $set: { balanceFen, [CODEX_MARKET_WALLET_REMAINDER_FIELD]: remainder, updatedAt } }, { session });
+      return { ...current, balanceFen, [CODEX_MARKET_WALLET_REMAINDER_FIELD]: remainder, updatedAt };
+    }
+    if (deltaMilliYuan < 0) return null;
+    const created = { _id: new ObjectId(), ownerId, balanceFen, [CODEX_MARKET_WALLET_REMAINDER_FIELD]: remainder, createdAt: updatedAt, updatedAt };
+    await wallets.insertOne(created, { session });
+    return created;
+  }
+  async function credit(session, task, ownerId, amountMilliYuan, kind) {
+    if (!amountMilliYuan) return;
+    if (await writeLedger(session, { key: `${task._id}:${kind}`, ownerId, task, kind, amountMilliYuan })) {
+      await mutateWallet(session, ownerId, amountMilliYuan);
     }
   }
   async function failTask(session, task, code, message) {
     if (TERMINAL.has(task.status)) return task;
-    const reservedFen = task.reservedFen ?? task.chargedFen;
-    await credit(session, task, task.ownerId, reservedFen, "refund");
-    const changes = { status: "failed", error: { code, message }, chargedFen: 0, nodeShareFen: 0, platformShareFen: 0, refundedFen: reservedFen, settlementStatus: "refunded", failedAt: clock(), updatedAt: clock() };
+    const reservedMilliYuan = exactAmount(task, "reserved", "charged");
+    await credit(session, task, task.ownerId, reservedMilliYuan, "refund");
+    const changes = { status: "failed", error: { code, message }, ...exactFields("charged", 0), ...exactFields("nodeShare", 0), ...exactFields("platformShare", 0), ...exactFields("refunded", reservedMilliYuan), settlementStatus: "refunded", failedAt: clock(), updatedAt: clock() };
     await (await collection("Tasks")).updateOne({ _id: task._id }, { $set: changes }, { session });
     if (task.assignedNodeId) await (await collection("Nodes")).updateOne({ _id: task.assignedNodeId, activeTaskId: task._id }, { $unset: { activeTaskId: "" } }, { session });
     return { ...task, ...changes };
@@ -155,9 +207,15 @@ export function registerCodexMarketRoutes(app, dependencies) {
     let storeReady = false;
     if (pricing) { try { await ensureStore(); storeReady = true; } catch {} }
     return c.json({ models: CODEX_MARKET_MODELS.map((model) => {
-      const configured = Boolean(pricing?.models.some((rate) => rate.id === model.id));
-      return { ...model, available: storeReady && configured, pricingRevision: pricing?.revision || CODEX_MARKET_PRICING_REVISION, unavailableCode: !pricing || !configured ? "OFFICIAL_PRICING_UNAVAILABLE" : !storeReady ? "TRANSACTIONAL_STORE_REQUIRED" : null };
-    }), nodeShareBps: 5000, currency: "CNY", maxJsonBytes: CODEX_MARKET_MAX_JSON_BYTES });
+      const rate = pricing?.models.find((candidate) => candidate.id === model.id);
+      const configured = Boolean(rate);
+      return {
+        ...model,
+        ...(Number.isSafeInteger(rate?.officialAmountMilliYuan) ? { officialAmountMilliYuan: rate.officialAmountMilliYuan, officialAmountFen: milliYuanToFen(rate.officialAmountMilliYuan) } : {}),
+        available: storeReady && configured, pricingRevision: pricing?.revision || CODEX_MARKET_PRICING_REVISION,
+        unavailableCode: !pricing || !configured ? "OFFICIAL_PRICING_UNAVAILABLE" : !storeReady ? "TRANSACTIONAL_STORE_REQUIRED" : null,
+      };
+    }), nodeShareBps: 5000, currency: "CNY", accountingUnit: "CNY_MILLIYUAN", milliYuanPerYuan: 1_000, maxJsonBytes: CODEX_MARKET_MAX_JSON_BYTES });
   });
   route("post", "/quotes", async (c) => {
     const auth = await account(c, true); if (auth.error) return auth.error;
@@ -169,19 +227,19 @@ export function registerCodexMarketRoutes(app, dependencies) {
     const ownerId = id(auth.user.id);
     await limit(`quotes:${ownerId}`, 30);
     const fingerprint = marketFingerprint({ model: input.model, request, usageLimit });
-    const quote = await atomic(async (session) => {
+    const result = await atomic(async (session) => {
       const quotes = await collection("Quotes");
       const previous = await quotes.findOne({ ownerId, requestId: key }, { session });
       if (previous) {
         if (previous.fingerprint !== fingerprint) throw marketError("IDEMPOTENCY_KEY_CONFLICT", "同一 requestId 不能用于不同的报价请求", 409);
-        return previous;
+        return { quote: previous, wallet: await (await getCollection("wallets")).findOne({ ownerId }, { session }) };
       }
       const now = clock();
       const quote = { _id: new ObjectId(), ownerId, requestId: key, model: input.model, request, usageLimit, fingerprint, ...price, expiresAt: new Date(+now + 5 * 60_000), createdAt: now };
       await quotes.insertOne(quote, { session });
-      return quote;
+      return { quote, wallet: await (await getCollection("wallets")).findOne({ ownerId }, { session }) };
     });
-    return c.json(publicQuote(quote), 201);
+    return c.json(publicQuote(result.quote, result.wallet), 201);
   });
   route("post", "/tasks", async (c) => {
     const auth = await account(c, true); if (auth.error) return auth.error;
@@ -203,30 +261,54 @@ export function registerCodexMarketRoutes(app, dependencies) {
       if (quote.taskId) throw marketError("QUOTE_ALREADY_USED", "该报价已创建订单，请使用原 requestId 查询", 409);
       if (quote.expiresAt <= clock()) throw marketError("QUOTE_EXPIRED", "报价已过期，请重新获取报价", 409);
       marketQuotePrice(getPricing(), quote.model, { usageLimit: quote.usageLimit });
-      if ((quote.chargedFen === 0) !== (auth.user.role === "admin")) throw marketError("QUOTE_AUTHORIZATION_CHANGED", "账号计费权限已变化，请重新获取报价", 409);
+      const quotedChargeMilliYuan = exactAmount(quote, "charged");
+      if ((quotedChargeMilliYuan === 0) !== (auth.user.role === "admin")) throw marketError("QUOTE_AUTHORIZATION_CHANGED", "账号计费权限已变化，请重新获取报价", 409);
       const now = clock();
-      const task = { _id: new ObjectId(), ownerId, requestId: key, quoteId, model: quote.model, request: quote.request, executionModel: quote.executionModel, reasoningEffort: quote.reasoningEffort || null, officialAmountFen: quote.officialAmountFen, reservedFen: quote.chargedFen, chargedFen: quote.chargedFen, nodeShareFen: quote.nodeShareFen, platformShareFen: quote.platformShareFen, usageLimit: quote.usageLimit || null, pricingSnapshot: quote.pricingSnapshot || null, pricingRevision: quote.pricingRevision, status: "queued", settlementStatus: "reserved", createdAt: now, updatedAt: now, deadlineAt: new Date(+now + 60 * 60_000), attempt: 0 };
+      const task = {
+        _id: new ObjectId(), ownerId, requestId: key, quoteId, model: quote.model, request: quote.request,
+        executionModel: quote.executionModel, reasoningEffort: quote.reasoningEffort || null,
+        accountingUnit: "CNY_MILLIYUAN", milliYuanPerYuan: 1_000,
+        ...exactFields("officialAmount", exactAmount(quote, "officialAmount")),
+        ...exactFields("required", quotedChargeMilliYuan), ...exactFields("reserved", quotedChargeMilliYuan),
+        ...exactFields("charged", quotedChargeMilliYuan),
+        nodeShareMilliYuan: exactAmount(quote, "nodeShare"), platformShareMilliYuan: exactAmount(quote, "platformShare"),
+        nodeShareFen: quote.nodeShareFen, platformShareFen: quote.platformShareFen,
+        usageLimit: quote.usageLimit || null, pricingSnapshot: quote.pricingSnapshot || null, pricingRevision: quote.pricingRevision,
+        status: "queued", settlementStatus: "reserved", createdAt: now, updatedAt: now, deadlineAt: new Date(+now + 60 * 60_000), attempt: 0,
+      };
       task.orderNo = `CM-${task._id}`;
       let wallet = await walletCollection.findOne({ ownerId }, { session });
-      if (task.chargedFen > 0) {
+      if (task.chargedMilliYuan > 0) {
         // Bind the platform recipient before charging, so completion never
         // depends on whichever administrator happens to exist later.
         const platform = await (await getCollection("users")).findOne({ role: "admin", status: "active" }, { session, sort: { createdAt: 1, _id: 1 } });
         if (!platform) throw marketError("PLATFORM_ACCOUNT_REQUIRED", "尚未配置平台结算账号，订单未收费", 503);
         task.platformOwnerId = platform._id;
-        wallet = await walletCollection.findOneAndUpdate({ ownerId, balanceFen: { $gte: task.chargedFen } }, { $inc: { balanceFen: -task.chargedFen }, $set: { updatedAt: now } }, { session, returnDocument: "after" });
+        wallet = await mutateWallet(session, ownerId, -task.chargedMilliYuan, { requireFunds: true });
         if (!wallet) {
           wallet = await walletCollection.findOne({ ownerId }, { session });
           task.status = "rejected"; task.settlementStatus = "not_charged";
           task.error = { code: "INSUFFICIENT_BALANCE", message: "账号余额不足，本次订单未扣款" };
-          task.reservedFen = 0; task.chargedFen = 0; task.nodeShareFen = 0; task.platformShareFen = 0;
-        } else await writeLedger(session, { key: `${task._id}:reserve`, ownerId, task, kind: "reserve", amountFen: -task.chargedFen });
+          Object.assign(task, exactFields("reserved", 0), exactFields("charged", 0), exactFields("nodeShare", 0), exactFields("platformShare", 0));
+        } else await writeLedger(session, { key: `${task._id}:reserve`, ownerId, task, kind: "reserve", amountMilliYuan: -task.chargedMilliYuan });
       }
       await tasks.insertOne(task, { session });
       await (await collection("Quotes")).updateOne({ _id: quoteId }, { $set: { taskId: task._id } }, { session });
       return { task, wallet, idempotent: false };
     });
-    return c.json({ task: publicTask(result.task), billing: { chargedFen: result.task.chargedFen, remainingBalanceFen: result.wallet?.balanceFen || 0 }, idempotent: result.idempotent, ...(result.task.status === "rejected" ? result.task.error : {}) }, result.task.status === "rejected" ? 402 : result.idempotent ? 200 : 201);
+    const remaining = readMarketWalletAmount(result.wallet);
+    return c.json({
+      task: publicTask(result.task),
+      billing: {
+        accountingUnit: "CNY_MILLIYUAN", milliYuanPerYuan: 1_000,
+        requiredMilliYuan: exactAmount(result.task, "required", "reserved"), requiredFen: result.task.requiredFen ?? result.task.reservedFen,
+        chargedMilliYuan: exactAmount(result.task, "charged"), chargedFen: result.task.chargedFen,
+        remainingBalanceMilliYuan: remaining.balanceMilliYuan, remainingBalanceFen: remaining.balanceFen,
+        affordable: result.task.status !== "rejected",
+      },
+      idempotent: result.idempotent,
+      ...(result.task.status === "rejected" ? result.task.error : {}),
+    }, result.task.status === "rejected" ? 402 : result.idempotent ? 200 : 201);
   });
   route("get", "/tasks/:id", async (c) => {
     const auth = await account(c); if (auth.error) return auth.error;
@@ -325,18 +407,33 @@ export function registerCodexMarketRoutes(app, dependencies) {
       if (task.deadlineAt <= clock()) { task = await failTask(session, task, "TASK_TIMEOUT", "共享节点任务超时，已退款"); return { task, idempotent: false }; }
       if (input.status === "failed") task = await failTask(session, task, error.code, error.message);
       else if (input.status === "completed") {
-        const reservedFen = task.reservedFen ?? task.chargedFen;
+        const reservedMilliYuan = exactAmount(task, "reserved", "charged");
         const usagePricing = task.model === "longyan" ? calculateLongyanAmount(usage, task.pricingSnapshot) : null;
-        const actualOfficialAmountFen = usagePricing?.amountFen ?? task.officialAmountFen;
-        const actualChargedFen = reservedFen === 0 ? 0 : actualOfficialAmountFen;
-        if (actualChargedFen > reservedFen) throw marketError("USAGE_EXCEEDS_RESERVATION", "真实用量费用超过已授权的预留金额，未结算本次结果", 409);
-        const refundFen = reservedFen - actualChargedFen;
-        const nodeShareFen = Math.floor(actualChargedFen / 2);
-        const platformShareFen = actualChargedFen - nodeShareFen;
-        if (refundFen) await credit(session, task, task.ownerId, refundFen, "reservation_adjustment_refund");
-        await credit(session, task, task.executorOwnerId, nodeShareFen, "node_commission");
-        await credit(session, task, task.platformOwnerId, platformShareFen, "platform_commission");
-        const changes = { status: "completed", result: output, progress: 100, officialAmountFen: actualOfficialAmountFen, chargedFen: actualChargedFen, nodeShareFen, platformShareFen, refundedFen: refundFen, ...(usage ? { usage, usagePricing } : {}), settlementStatus: "settled", completedAt: clock(), updatedAt: clock() };
+        const actualOfficialAmountMilliYuan = usagePricing
+          ? (preciseTask(task) ? usagePricing.amountMilliYuan : usagePricing.amountFen * 10)
+          : exactAmount(task, "officialAmount");
+        const actualChargedMilliYuan = reservedMilliYuan === 0 ? 0 : actualOfficialAmountMilliYuan;
+        if (actualChargedMilliYuan > reservedMilliYuan) throw marketError("USAGE_EXCEEDS_RESERVATION", "真实用量费用超过已授权的预留金额，未结算本次结果", 409);
+        const refundMilliYuan = reservedMilliYuan - actualChargedMilliYuan;
+        const split = preciseTask(task)
+          ? splitMarketAmount(actualChargedMilliYuan)
+          : (() => {
+              const chargedFen = milliYuanToFen(actualChargedMilliYuan);
+              const nodeShareFen = Math.floor(chargedFen / 2);
+              return { nodeShareMilliYuan: nodeShareFen * 10, platformShareMilliYuan: (chargedFen - nodeShareFen) * 10, nodeShareFen, platformShareFen: chargedFen - nodeShareFen };
+            })();
+        if (refundMilliYuan) await credit(session, task, task.ownerId, refundMilliYuan, "reservation_adjustment_refund");
+        await credit(session, task, task.executorOwnerId, split.nodeShareMilliYuan, "node_commission");
+        await credit(session, task, task.platformOwnerId, split.platformShareMilliYuan, "platform_commission");
+        const changes = {
+          status: "completed", result: output, progress: 100,
+          ...exactFields("officialAmount", actualOfficialAmountMilliYuan),
+          ...exactFields("charged", actualChargedMilliYuan),
+          nodeShareMilliYuan: split.nodeShareMilliYuan, platformShareMilliYuan: split.platformShareMilliYuan,
+          nodeShareFen: split.nodeShareFen, platformShareFen: split.platformShareFen,
+          ...exactFields("refunded", refundMilliYuan),
+          ...(usage ? { usage, usagePricing } : {}), settlementStatus: "settled", completedAt: clock(), updatedAt: clock(),
+        };
         await tasks.updateOne({ _id: task._id }, { $set: changes }, { session });
         task = { ...task, ...changes };
       } else {
@@ -358,15 +455,41 @@ export function registerCodexMarketRoutes(app, dependencies) {
     const nodeCapabilities = z.object({ codexAvailable: z.boolean(), models: z.array(z.enum(["longyan", "longtu"])), usageReportingVersion: z.literal("codex-app-server-v1").nullable().optional() });
     const nodeRequest = z.object({ nodeId: z.string().min(8).max(160) });
     const lease = z.object({ taskId: z.string(), claimId: z.string(), leaseToken: z.string() });
+    const preciseBilling = z.object({
+      accountingUnit: z.literal("CNY_MILLIYUAN"), milliYuanPerYuan: z.literal(1_000),
+      requiredMilliYuan: z.number().int().min(0), requiredFen: z.number().int().min(0),
+      chargedMilliYuan: z.number().int().min(0), chargedFen: z.number().int().min(0),
+      remainingBalanceMilliYuan: z.number().int().min(0), remainingBalanceFen: z.number().int().min(0), affordable: z.boolean(),
+    });
+    const preciseQuote = z.object({
+      quoteId: z.string(), executionModel: z.string(), reasoningEffort: z.string().nullable(),
+      accountingUnit: z.literal("CNY_MILLIYUAN"), milliYuanPerYuan: z.literal(1_000),
+      officialAmountMilliYuan: z.number().int().min(0), officialAmountFen: z.number().int().min(0),
+      requiredMilliYuan: z.number().int().min(0), requiredFen: z.number().int().min(0),
+      chargedMilliYuan: z.number().int().min(0), chargedFen: z.number().int().min(0),
+      reservedMilliYuan: z.number().int().min(0), reservedFen: z.number().int().min(0),
+      nodeShareMilliYuan: z.number().int().min(0), platformShareMilliYuan: z.number().int().min(0),
+      nodeShareFen: z.number().int().min(0), platformShareFen: z.number().int().min(0),
+      availableBalanceMilliYuan: z.number().int().min(0), availableBalanceFen: z.number().int().min(0),
+      affordable: z.boolean(), billingExempt: z.boolean(), pricingRevision: z.string(), currency: z.literal("CNY"), expiresAt: z.string(),
+      usageLimit: usageLimit.optional(), usagePricing: z.record(z.string(), z.unknown()).optional(),
+    });
+    const taskCreateResponse = z.object({
+      task: z.object({ id: z.string(), status: z.string(), requiredMilliYuan: z.number().int().min(0), reservedMilliYuan: z.number().int().min(0), chargedMilliYuan: z.number().int().min(0) }).passthrough(),
+      billing: preciseBilling, idempotent: z.boolean(), code: z.string().optional(), message: z.string().optional(),
+    });
+    app.openAPIRegistry.registerComponent("schemas", "CodexMarketPreciseBilling", preciseBilling);
+    app.openAPIRegistry.registerComponent("schemas", "CodexMarketQuoteResponse", preciseQuote);
+    app.openAPIRegistry.registerComponent("schemas", "CodexMarketTaskCreateResponse", taskCreateResponse);
     const schemas = [
-      ["get", "/models", "查看龙言分档 Token 费率和龙图每次 14 分报价", null, false],
-      ["post", "/quotes", "获取五分钟有效报价；龙言按 usageLimit 预留上限费用，龙图固定 14 分", z.object({ model: z.enum(["longyan", "longtu"]), requestId: z.string().min(8).max(160), usageLimit: usageLimit.optional(), request: z.object({ prompt: z.string().min(1).max(32_000), images: z.array(z.union([z.string(), z.object({ dataUrl: z.string() })])).optional(), size: z.string().optional(), messages: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string() })).optional() }) }), false],
-      ["post", "/tasks", "按 quoteId 和持久 requestId 幂等下单，事务预扣报价上限；管理员免扣费", z.object({ quoteId: z.string(), requestId: z.string().min(8).max(160) }), false],
+      ["get", "/models", "查看龙言分档 Token 费率和龙图每次 182 毫元精确报价", null, false, null],
+      ["post", "/quotes", "获取五分钟有效报价；返回 requiredMilliYuan、availableBalanceMilliYuan 与 affordable；龙言按 usageLimit 预留，龙图固定 182 毫元", z.object({ model: z.enum(["longyan", "longtu"]), requestId: z.string().min(8).max(160), usageLimit: usageLimit.optional(), request: z.object({ prompt: z.string().min(1).max(32_000), images: z.array(z.union([z.string(), z.object({ dataUrl: z.string() })])).optional(), size: z.string().optional(), messages: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string() })).optional() }) }), false, preciseQuote],
+      ["post", "/tasks", "按 quoteId 和持久 requestId 幂等下单，事务预扣精确毫元报价；余额不足不入队，管理员免扣费", z.object({ quoteId: z.string(), requestId: z.string().min(8).max(160) }), false, taskCreateResponse],
       ["get", "/tasks/{id}", "请求者或管理员查询任务；超时原子退款", null, false],
       ["post", "/nodes/register", "使用登录账号绑定 Codex 节点；重新注册会撤销旧 token 和租约", nodeRequest.extend({ nodeName: z.string(), appVersion: z.string().optional(), capabilities: nodeCapabilities }), false],
       ["post", "/nodes/heartbeat", "更新节点能力和当前任务租约", nodeRequest.extend({ capabilities: nodeCapabilities.optional(), activeTask: lease.optional() }), true],
       ["post", "/tasks/claim", "FIFO 领取兼容任务，返回 120 秒的独立领取租约；每节点最多一个活动任务", nodeRequest, true],
-      ["post", "/tasks/callback", "使用领取租约幂等回调；龙言 completed 必须携带 Codex 应用服务真实 usage，按实际用量结算并退回预留差额；节点与平台五五分账", nodeRequest.merge(lease).extend({ eventId: z.string().min(8).max(160), status: z.enum(["started", "progress", "completed", "failed"]), progress: z.number().int().min(0).max(99).optional(), usage: actualUsage.optional(), result: z.object({ text: z.string().optional(), images: z.array(z.object({ dataUrl: z.string() })).optional() }).optional(), error: z.object({ code: z.string().optional(), message: z.string() }).optional() }), true],
+      ["post", "/tasks/callback", "使用领取租约幂等回调；龙言 completed 必须携带 Codex 应用服务真实 usage，按订单价格快照精确结算并退回预留差额；节点与平台按毫元五五分账", nodeRequest.merge(lease).extend({ eventId: z.string().min(8).max(160), status: z.enum(["started", "progress", "completed", "failed"]), progress: z.number().int().min(0).max(99).optional(), usage: actualUsage.optional(), result: z.object({ text: z.string().optional(), images: z.array(z.object({ dataUrl: z.string() })).optional() }).optional(), error: z.object({ code: z.string().optional(), message: z.string() }).optional() }), true],
     ];
     for (const [method, path, summary, schema, nodeAuth] of schemas) {
       app.openAPIRegistry.registerPath({ method, path: `${PREFIX}${path}`, tags: ["Codex Marketplace"], summary, ...(nodeAuth ? { security: [{ codexNode: [] }] } : {}), ...(schema ? { request: { body: { required: true, content: { "application/json": { schema } } } } } : {}), responses: { 200: { description: "请求成功或幂等重放" }, ...(method === "post" ? { 201: { description: "报价、订单或节点已创建" } } : {}), 400: { description: "请求合同无效" }, 401: { description: "登录或节点认证无效" }, 402: { description: "可用余额不足，订单未扣费" }, 409: { description: "报价、幂等键、租约、用量上限或任务状态冲突" }, 413: { description: "JSON 总量超过 3 MB" }, 422: { description: "龙言完成回调缺少可接受的真实用量" }, 503: { description: "报价已停用或数据库不支持事务，拒绝收费" } } });

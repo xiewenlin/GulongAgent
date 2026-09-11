@@ -44,7 +44,7 @@ try {
       db.collection("codexMarketNodes").createIndex({ tokenHash: 1 }, { unique: true }),
       db.collection("codexMarketCallbacks").createIndex({ taskId: 1, claimId: 1, eventId: 1 }, { unique: true }),
       db.collection("codexMarketLedger").createIndex({ key: 1 }, { unique: true }),
-      db.collection("wallets").createIndex({ ownerId: 1 }, { unique: true }),
+      db.collection("wallets").createIndex({ ownerId: 1 }, { unique: true, name: "uniq_wallet_owner" }),
     ]);
   }
 
@@ -53,11 +53,11 @@ try {
     if (name !== "wallets") return collection;
     return new Proxy(collection, {
       get(target, property) {
-        if (property === "updateOne") return async (filter, update, options) => {
-          if (injectPlatformCreditFailure && String(filter.ownerId) === String(administrator) && Number(update?.$inc?.balanceFen) > 0) {
+        if (property === "insertOne") return async (document, options) => {
+          if (injectPlatformCreditFailure && String(document.ownerId) === String(administrator)) {
             throw new Error("注入的平台钱包写入失败");
           }
-          return target.updateOne(filter, update, options);
+          return target.insertOne(document, options);
         };
         const value = target[property];
         return typeof value === "function" ? value.bind(target) : value;
@@ -106,12 +106,16 @@ try {
   const usageLimit = { inputTokens: 271_999, outputTokens: 1_000, cacheWriteTokens: 0, cacheReadTokens: 1 };
   const quote = await call("/quotes", { model: "longyan", requestId: "mongo-longyan-quote", request: { prompt: "真实事务验收" }, usageLimit });
   assert.equal(quote.status, 201);
+  assert.equal(quote.body.requiredMilliYuan, 1_081);
   assert.equal(quote.body.chargedFen, 109);
+  assert.equal(quote.body.availableBalanceMilliYuan, 10_000);
+  assert.equal(quote.body.affordable, true);
   const created = await call("/tasks", { quoteId: quote.body.quoteId, requestId: "mongo-longyan-task" });
   assert.equal(created.status, 201);
   const replay = await call("/tasks", { quoteId: quote.body.quoteId, requestId: "mongo-longyan-task" });
   assert.equal(replay.status, 200);
   assert.equal((await db.collection("wallets").findOne({ ownerId: requester })).balanceFen, 891);
+  assert.equal((await db.collection("wallets").findOne({ ownerId: requester })).codexMarketRemainderMilliYuan, 9);
   assert.equal(await db.collection("codexMarketTasks").countDocuments(), 1);
   assert.equal(await db.collection("codexMarketLedger").countDocuments({ kind: "reserve" }), 1);
 
@@ -148,14 +152,21 @@ try {
 
   const wallets = await db.collection("wallets").find({}).toArray();
   const balance = (ownerId) => wallets.find((wallet) => String(wallet.ownerId) === String(ownerId))?.balanceFen || 0;
+  const exactBalance = (ownerId) => {
+    const wallet = wallets.find((entry) => String(entry.ownerId) === String(ownerId));
+    return (wallet?.balanceFen || 0) * 10 + (wallet?.codexMarketRemainderMilliYuan || 0);
+  };
   assert.equal(balance(requester), 961);
   assert.equal(balance(executor), 19);
-  assert.equal(balance(administrator), 20);
-  assert.equal(balance(requester) + balance(executor) + balance(administrator), 1_000, "请求者扣款必须完整转入节点和平台，三方总账守恒");
+  assert.equal(balance(administrator), 19);
+  assert.equal(exactBalance(requester), 9_610);
+  assert.equal(exactBalance(executor), 195);
+  assert.equal(exactBalance(administrator), 195);
+  assert.equal(exactBalance(requester) + exactBalance(executor) + exactBalance(administrator), 10_000, "请求者精确扣款必须完整转入节点和平台，三方总账守恒");
   assert.equal(await db.collection("codexMarketCallbacks").countDocuments(), 1);
   assert.equal(await db.collection("codexMarketLedger").countDocuments(), 4);
 
-  process.stdout.write(JSON.stringify({ ok: true, database: "isolated-temporary", transactionStore: hello.msg === "isdbgrid" ? "mongos" : "replica-set", pricingRevision: quote.body.pricingRevision, reservedFen: 109, actualFen: 39, refundFen: 70, nodeShareFen: 19, platformShareFen: 20, duplicateCallbackIdempotent: true, injectedFailureRolledBack: true }) + "\n");
+  process.stdout.write(JSON.stringify({ ok: true, database: "isolated-temporary", transactionStore: hello.msg === "isdbgrid" ? "mongos" : "replica-set", pricingRevision: quote.body.pricingRevision, reservedMilliYuan: 1_081, actualMilliYuan: 390, refundMilliYuan: 691, nodeShareMilliYuan: 195, platformShareMilliYuan: 195, duplicateCallbackIdempotent: true, injectedFailureRolledBack: true }) + "\n");
   }
 } finally {
   if (client.topology && /^gcm_test_/.test(databaseName)) {

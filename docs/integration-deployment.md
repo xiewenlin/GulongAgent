@@ -151,7 +151,7 @@ SESSION_COOKIE_SECURE=
 短视频包月使用独立计划标识 `short_video_monthly`，月费 599900 分、年费 5999900 分，只通过线下支付审核开通。审核通过后，钱包按实付金额 1:1 幂等入账，不额外赠送；套餐额度是总余额中的可到期组成部分，不会覆盖用户另外充值的余额。
 
 - 定价：`GET /api/v1/pricing/subscriptions`，读取 `shortVideo`。
-- 订阅状态：`GET /api/v1/desktop/account/subscription`，沿用桌面 Chandler Bearer，读取 `subscription.plan`、`balanceFen` 与 `shortVideoPackage`。
+- 订阅状态：`GET /api/v1/desktop/account/subscription`，沿用桌面 Chandler Bearer，读取 `subscription.plan`、`balanceMilliYuan`、`accountingUnit=CNY_MILLIYUAN`、`milliYuanPerYuan=1000` 与 `shortVideoPackage`；`balanceFen` 仅保留给旧客户端兼容展示。
 - H3 任务：`POST /api/h3/tasks`，继续提交 `model=minimax_h3_shared` 与 `source_channel=website|desktop_agent`，计费结果以响应 `billing.chargedFen` 为准。
 - 管理员设置：`PUT /api/admin/users/{id}/subscription-period`，`plan` 可为 `member` 或 `short_video_monthly`。
 

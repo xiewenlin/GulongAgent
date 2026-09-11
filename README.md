@@ -87,7 +87,7 @@ npm run dev
 - `/api/openapi.json`：OpenAPI 3.1 规范
 - 永久授权：两款视频产品分别使用 `minimax-h3-ultra-video` 与 `minimax-h3-super-video`；同一台电脑可分别激活，激活码不可跨产品混用
 - [MiniMax H3 共享节点接入合同](docs/minimax-h3-shared-nodes.md)：桌面账号绑定、能力领取、COS 直传、回调与余额账本
-- [Codex 共享节点接入合同](docs/codex-market-integration.md)：龙言分档 Token 预留与真实用量结算、龙图固定报价、租约、幂等退款及五五分账
+- [Codex 共享节点接入合同](docs/codex-market-integration.md)：龙言分档 Token 预留与真实用量结算、龙图 0.182 元精确毫元报价、租约、幂等退款及五五分账
 - 开放接口认证：`Authorization: Bearer gla_live_...`
 - 按日期下载附件：`GET /api/v1/brain/attachments/latest?date=YYYY-MM-DD`
 - 桌面端用户配置：`GET /api/v1/configuration/minimax`（需要 `configuration:read`）

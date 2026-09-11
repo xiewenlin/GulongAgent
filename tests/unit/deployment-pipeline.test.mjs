@@ -7,6 +7,7 @@ const deployScriptUrl = new URL("../../deploy/tencent/deploy-release.sh", import
 const caddyUrl = new URL("../../deploy/tencent/Caddyfile", import.meta.url);
 const parityScriptUrl = new URL("../../scripts/verify-production-parity.mjs", import.meta.url);
 const vercelUrl = new URL("../../vercel.json", import.meta.url);
+const appUrl = new URL("../../src/App.jsx", import.meta.url);
 
 test("production workflow gates both hosting targets behind tests and an immutable build", async () => {
   const source = await readFile(workflowUrl, "utf8");
@@ -80,4 +81,15 @@ test("production parity verifier checks manifests, commit identity, and every cl
   assert.match(source, /manifest\.commit, expectedCommit/);
   assert.match(source, /sha256\(vercelBytes\)/);
   assert.match(source, /sha256\(tencentBytes\)/);
+});
+
+test("long-lived browser sessions detect a newer dual-target deployment without discarding drafts", async () => {
+  const source = await readFile(appUrl, "utf8");
+
+  assert.match(source, /deployment-manifest\.json\?check=/);
+  assert.match(source, /cache:\s*"no-store"/);
+  assert.match(source, /window\.setInterval\(checkDeploymentVersion,\s*30_000\)/);
+  assert.match(source, /当前输入内容不会被自动打断/);
+  assert.match(source, /立即刷新/);
+  assert.doesNotMatch(source, /nextCommit[\s\S]{0,120}window\.location\.reload\(\)/);
 });

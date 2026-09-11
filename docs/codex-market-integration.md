@@ -5,26 +5,26 @@
 ## 路由与计费边界
 
 - 龙言：本机 Codex 或可信 LAN 节点免费；需要官网共享节点时创建收费订单。执行模型固定为 `gpt-6-astra`、推理强度 `low`。
-- 龙图：本机或可信 LAN 节点免费；官网共享节点固定 **0.14 元/次**。
-- 官网收费成功后，执行节点与平台按实际订单金额五五分账。钱包按整数分记账；奇数分时节点取得向下取整的一半，平台取得余数，确保总账守恒。
+- 龙图：本机或可信 LAN 节点免费；官网共享节点固定 **0.182 元/次**（基础价 0.14 元加 30%）。
+- 官网收费成功后，执行节点与平台按实际订单金额五五分账。Codex 市场以整数毫元记账（`CNY_MILLIYUAN`，1 元 = 1000 毫元），节点取得向下取整的一半，平台取得余数，确保精确总账守恒。
 - 管理员订单仍走完整任务、租约和回调流程，但 `chargedFen=0`，不产生节点或平台分成。
 - `GULONG_CODEX_MARKET_DISABLED=true` 只关闭新报价和新订单；已创建任务仍可查询、回调和退款。
 - MongoDB 必须是支持事务的副本集或 mongos。数据库不可达、standalone、缺少平台管理员账户时拒绝收费，绝不回退内存锁。
 
-价格版本 `desktop-20260910-v4`（已包含一次 30% 加价）：
+价格版本 `desktop-20260911-v5`（已包含一次 30% 加价）：
 
 | 输入总量 | 非缓存输入 | 输出 | 缓存写入 | 缓存读取 |
 | --- | ---: | ---: | ---: | ---: |
 | 0–272,000 Tokens | ¥3.9/百万 | ¥19.5/百万 | ¥4.875/百万 | ¥0.39/百万 |
 | 272,001+ Tokens | ¥7.8/百万 | ¥29.25/百万 | ¥9.75/百万 | ¥0.78/百万 |
 
-`inputTokens` 专指非缓存输入，`cacheWriteTokens` 和 `cacheReadTokens` 是互斥缓存分类；分档量为三者之和。服务端用整数纳分/Token 计算各项总和，最后只向上取整一次到人民币分。订单保存完整 `pricingSnapshot`，后续价格升级不会重算旧订单；v3 及更早版本不再用于新报价。
+`inputTokens` 专指非缓存输入，`cacheWriteTokens` 和 `cacheReadTokens` 是互斥缓存分类；分档量为三者之和。服务端用整数纳分/Token 计算各项总和，最后只向上取整一次到人民币毫元。订单保存完整 `pricingSnapshot`，后续价格升级不会重算旧订单；v4 及更早版本不再用于新报价。
 
 边界验算：
 
-- `271999` 非缓存输入、`1000` 输出、`1` 缓存读取，总输入 `272000`，费用 `109` 分。
-- 上述缓存读取改成 `2`，总输入 `272001`，费用 `216` 分。
-- 单类 `100000` Tokens：输入 `39` 分、输出 `195` 分、缓存写入 `49` 分、缓存读取 `4` 分。
+- `271999` 非缓存输入、`1000` 输出、`1` 缓存读取，总输入 `272000`，精确费用 `1081` 毫元（兼容展示 `109` 分）。
+- 上述缓存读取改成 `2`，总输入 `272001`，精确费用 `2151` 毫元（兼容展示 `216` 分）。
+- 单类 `100000` Tokens：输入 `390` 毫元、输出 `1950` 毫元、缓存写入 `488` 毫元、缓存读取 `39` 毫元。
 
 ## 请求者流程
 
@@ -58,9 +58,9 @@
 }
 ```
 
-上述默认上限在 v4 的预留金额为 77 分。`usageLimit` 是用户授权的预留和结算上限，不是 Codex 上游生成硬限制。每项必须为 `0–2000000` 的整数，四项不能全为零。服务端按它计算最坏情况金额；同一账号、同一 `requestId` 只能重放完全相同的规范化请求及用量上限。
+上述默认上限在 v5 的精确预留金额为 `761` 毫元（兼容展示 `77` 分）。`usageLimit` 是用户授权的预留和结算上限，不是 Codex 上游生成硬限制。每项必须为 `0–2000000` 的整数，四项不能全为零。服务端按它计算最坏情况金额；同一账号、同一 `requestId` 只能重放完全相同的规范化请求及用量上限。
 
-报价返回 HTTP 201，包含 `quoteId`、`executionModel`、`reasoningEffort`、`officialAmountFen`、`chargedFen`、`reservedFen`、两方预估分成、`billingExempt`、`pricingRevision`、`currency`、`usageLimit` 和 `expiresAt`。龙言缺少 `usageLimit` 返回 400 `USAGE_LIMIT_REQUIRED`，不进入事务收费。
+报价返回 HTTP 201。精确字段为 `officialAmountMilliYuan`、`requiredMilliYuan`、`chargedMilliYuan`、`reservedMilliYuan`、`nodeShareMilliYuan`、`platformShareMilliYuan`、`availableBalanceMilliYuan` 和 `affordable`；`accountingUnit=CNY_MILLIYUAN`、`milliYuanPerYuan=1000`。旧 `*Fen` 字段继续返回向上取整的兼容展示值，但不得用于扣款或分账。另含 `quoteId`、`executionModel`、`reasoningEffort`、`billingExempt`、`pricingRevision`、`currency`、`usageLimit` 和 `expiresAt`。龙言缺少 `usageLimit` 返回 400 `USAGE_LIMIT_REQUIRED`，不进入事务收费。
 
 `POST /api/codex-market/tasks`：
 
@@ -68,9 +68,9 @@
 { "quoteId": "报价返回的ID", "requestId": "desktop-request-0002" }
 ```
 
-创建返回 201，幂等重放返回 200。任务创建、钱包预扣和 `reserve` 流水同一事务提交。余额不足返回 402，持久保存 `rejected` 结果；充值后重放不会意外扣款。一个 quoteId 只能创建一个订单。
+创建返回 201，幂等重放返回 200。任务创建、精确钱包预扣和 `reserve` 流水同一事务提交。余额不足返回 402 `INSUFFICIENT_BALANCE`，持久保存 `rejected` 结果且绝不入队；充值后重放不会意外扣款。响应 `billing` 返回 `requiredMilliYuan`、`chargedMilliYuan`、`remainingBalanceMilliYuan`、`affordable` 及兼容分字段。一个 quoteId 只能创建一个订单。
 
-`GET /api/codex-market/tasks/{id}` 仅请求者或管理员可访问。任务公开字段含 `reservedFen`、最终 `chargedFen`、`refundedFen`、分成、状态、进度和截止时间；龙言完成后另含真实 `usage` 与计算快照。客户端只展示官网账本结果，不自行改余额。
+`GET /api/codex-market/tasks/{id}` 仅请求者或管理员可访问。任务公开字段以 `requiredMilliYuan`、`reservedMilliYuan`、最终 `chargedMilliYuan`、`refundedMilliYuan` 和毫元分成为准，同时保留兼容分字段；龙言完成后另含真实 `usage` 与计算快照。客户端只展示官网账本结果，不自行改余额。
 
 ## 节点注册、领取与租约
 
@@ -132,7 +132,7 @@
 
 缺少整个 usage、非缓存输入、缓存读取、输出或 providerRequestId 时返回 422；`measured=false` 却传入整数写缓存值也返回 422。真实用量超过任一授权上限返回 409 `USAGE_EXCEEDS_RESERVATION`，不追加扣款、不接收 completed。
 
-真实用量低于预留上限时，服务端在同一 MongoDB 事务中：按订单价格快照计算实际金额、退回预留差额、节点入账、平台入账、保存结果、写回调幂等记录。任一步失败整笔回滚，节点以原 eventId 重试。失败和超时按原预留金额退款一次；完成与退款互斥。
+真实用量低于预留上限时，服务端在同一 MongoDB 事务中：按订单价格快照计算精确毫元金额、退回预留差额、节点入账、平台入账、保存结果、写回调幂等记录。任一步失败整笔回滚，节点以原 eventId 重试。失败和超时按原预留金额退款一次；完成与退款互斥。若上游没有独立缓存写入字段，必须保留 `cacheWriteTokens:null`、`cacheWriteTokensMeasured:false`；未命中缓存的输入仍按普通输入价结算，不另收缓存写入费。
 
 龙图 completed 仍要求恰好一张有效 PNG/JPEG/WebP base64 图片。输入最多四张参考图、原始图像总量 2.5 MB、JSON 总量 3 MB。超限返回 413。任务最长一小时；查询或领取会在事务内补偿到期任务并退款。
 
@@ -140,4 +140,4 @@
 
 集合：`codexMarketQuotes`、`codexMarketTasks`、`codexMarketNodes`、`codexMarketCallbacks`、`codexMarketLedger`，余额使用统一 `wallets`。报价 requestId、订单 requestId、quoteId、节点绑定、节点 token 哈希、回调 event 和账本 key 均有唯一索引；财务记录不设置 TTL。
 
-流水类型：`reserve`、`reservation_adjustment_refund`、`node_commission`、`platform_commission`、`refund`。所有钱包变更必须携带同一 MongoDB session。单元事务模拟器用于故障注入；生产发布前还必须在真实 MongoDB 副本集的隔离测试库验证提交、回滚、重复回调和余额守恒，不能以模拟器替代。
+流水类型：`reserve`、`reservation_adjustment_refund`、`node_commission`、`platform_commission`、`refund`。流水的 `amountMilliYuan` 是权威值，`amountFen` 仅用于旧客户端兼容展示。钱包以 `balanceFen` 加 `codexMarketRemainderMilliYuan`（0–9）的方式无损兼容旧分账本；精确可用余额等于前者乘 10 再加后者。所有钱包变更必须携带同一 MongoDB session。单元事务模拟器用于故障注入；生产发布前还必须在真实 MongoDB 副本集的隔离测试库验证提交、回滚、重复回调和余额守恒，不能以模拟器替代。

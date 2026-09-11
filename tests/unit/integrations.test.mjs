@@ -859,9 +859,17 @@ test("OpenAPI document includes Chandler admin, offline credentials, dated attac
   assert.ok(document.paths["/api/release-worker/releases/{publishId}/fail"]);
   assert.equal(document.paths["/api/billing/orders"].post.requestBody.content["application/json"].schema.properties.planType.enum.includes("short_video_monthly"), true);
   assert.deepEqual(document.paths["/api/v1/pricing/subscriptions"].get.responses["200"].content["application/json"].schema.properties.shortVideo.properties.walletCreditMultiplier.enum, [1]);
-  assert.equal(document.paths["/api/v1/desktop/account/subscription"].get.responses["200"].content["application/json"].schema.properties.shortVideoPackage.properties.unlimitedH3.type, "boolean");
+  const subscriptionSchema = document.paths["/api/v1/desktop/account/subscription"].get.responses["200"].content["application/json"].schema;
+  assert.equal(subscriptionSchema.properties.shortVideoPackage.properties.unlimitedH3.type, "boolean");
+  assert.equal(subscriptionSchema.properties.balanceMilliYuan.type, "integer");
+  assert.deepEqual(subscriptionSchema.properties.accountingUnit.enum, ["CNY_MILLIYUAN"]);
+  assert.deepEqual(subscriptionSchema.properties.milliYuanPerYuan.enum, [1_000]);
+  assert.equal(subscriptionSchema.properties.balanceFen.type, "integer");
   const usageSchema = document.paths["/api/v1/desktop/account/usage"].get.responses["200"].content["application/json"].schema;
   assert.deepEqual(usageSchema.properties.currency.enum, ["CNY"]);
+  assert.equal(usageSchema.properties.quota.properties.balanceMilliYuan.type, "integer");
+  assert.deepEqual(usageSchema.properties.quota.properties.accountingUnit.enum, ["CNY_MILLIYUAN"]);
+  assert.deepEqual(usageSchema.properties.quota.properties.milliYuanPerYuan.enum, [1_000]);
   assert.equal(usageSchema.properties.quota.properties.balanceFen.type, "integer");
   assert.equal(usageSchema.properties.quota.properties.weekly.properties.days.type, "array");
   for (const path of [

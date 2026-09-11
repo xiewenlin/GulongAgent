@@ -51,6 +51,7 @@ const primaryNav = [
 ];
 
 const THEME_ICON_VERSION = "20260826-gulong-icon-2";
+const DEPLOYMENT_VERSION_STORAGE_KEY = "gulong-active-deployment-commit";
 
 function themeIconUrl(theme) {
   return `${theme.icon}?theme=${theme.id}&v=${THEME_ICON_VERSION}`;
@@ -72,6 +73,7 @@ export function App() {
   const [notificationCount, setNotificationCount] = useState(0);
   const [subscriptionLifecycle, setSubscriptionLifecycle] = useState(null);
   const [renewalOpen, setRenewalOpen] = useState(false);
+  const [availableDeployment, setAvailableDeployment] = useState(null);
   const [theme, setTheme] = useState(() => window.localStorage.getItem("gulong-web-theme") || "porcelain");
   const activeTheme = themes.find((item) => item.id === theme) || themes[0];
   const themeIcon = themeIconUrl(activeTheme);
@@ -81,6 +83,43 @@ export function App() {
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function checkDeploymentVersion() {
+      try {
+        const response = await fetch(`/deployment-manifest.json?check=${Date.now()}`, { cache: "no-store" });
+        if (!response.ok) return;
+        const manifest = await response.json();
+        const nextCommit = /^[0-9a-f]{40}$/i.test(manifest?.commit || "") ? manifest.commit.toLowerCase() : null;
+        if (!nextCommit || cancelled) return;
+        const activeCommit = window.sessionStorage.getItem(DEPLOYMENT_VERSION_STORAGE_KEY);
+        if (activeCommit && activeCommit !== nextCommit) setAvailableDeployment(nextCommit);
+        else window.sessionStorage.setItem(DEPLOYMENT_VERSION_STORAGE_KEY, nextCommit);
+      } catch {
+        // 版本探测失败不能影响页面的核心业务；下一个周期会自动重试。
+      }
+    }
+    const onVisible = () => { if (document.visibilityState === "visible") checkDeploymentVersion(); };
+    checkDeploymentVersion();
+    const timer = window.setInterval(checkDeploymentVersion, 30_000);
+    window.addEventListener("focus", checkDeploymentVersion);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", checkDeploymentVersion);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
+
+  function refreshDeployment() {
+    if (!availableDeployment) return;
+    window.sessionStorage.setItem(DEPLOYMENT_VERSION_STORAGE_KEY, availableDeployment);
+    const target = new URL(window.location.href);
+    target.searchParams.set("deployment", availableDeployment.slice(0, 12));
+    window.location.replace(target.toString());
+  }
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -289,6 +328,8 @@ export function App() {
       </footer>}
 
       {pathname !== "/agent" && <button className="floating-feedback" type="button" onClick={() => navigate("/feedback")}><ChatCircleText size={20} /><span>反馈</span></button>}
+
+      {availableDeployment && <aside className="deployment-update-notice" role="status" aria-live="polite"><div><strong>古龙官网已更新</strong><span>刷新后即可使用两端同步的最新功能；当前输入内容不会被自动打断。</span></div><button type="button" onClick={refreshDeployment}>立即刷新</button></aside>}
 
       <AccountModal open={authOpen} initialMode={authMode} onClose={() => setAuthOpen(false)} onUser={(nextUser) => { setUser(nextUser); setAuthResolved(true); }} themeIcon={themeIcon} />
       {renewalOpen && subscriptionLifecycle && <SubscriptionReminderDialog lifecycle={subscriptionLifecycle} onRenew={() => { setRenewalOpen(false); navigate("/pricing"); }} onClose={() => { window.localStorage.setItem(`gulong-renewal-reminder-${new Date().toISOString().slice(0, 10)}`, "dismissed"); setRenewalOpen(false); }} />}

@@ -6,6 +6,7 @@ import { enforceRateLimit } from "./rate-limit.js";
 import { readUserSecret, sealUserSecret } from "./security.js";
 import { localizeErrorMessage } from "../shared/error-messages.js";
 import { createPresignedDownloadUrl } from "./cos.js";
+import { readMarketWalletAmount } from "./codex-market-pricing.js";
 import {
   SHORT_VIDEO_PLAN_ID,
   expireShortVideoPackageAllowance,
@@ -124,7 +125,9 @@ function rollingDays(count, now = new Date()) {
   return days;
 }
 
-async function usageSnapshot(ownerId, balanceFen, pricing, now = new Date()) {
+async function usageSnapshot(ownerId, wallet, pricing, now = new Date()) {
+  const preciseBalance = readMarketWalletAmount(wallet);
+  const { balanceFen } = preciseBalance;
   const from = new Date(now);
   from.setUTCHours(0, 0, 0, 0);
   from.setUTCDate(from.getUTCDate() - 29);
@@ -138,7 +141,7 @@ async function usageSnapshot(ownerId, balanceFen, pricing, now = new Date()) {
   const weekly = monthly.slice(-7);
   const sum = (items, field) => items.reduce((total, item) => total + Number(item[field] || 0), 0);
   return {
-    balanceFen,
+    ...preciseBalance,
     weekly: { days: weekly, usedFen: sum(weekly, "usedFen"), calls: sum(weekly, "calls"), rollingDays: 7 },
     monthly: { days: monthly, usedFen: sum(monthly, "usedFen"), calls: sum(monthly, "calls"), rollingDays: 30 },
     estimates: {
@@ -165,7 +168,7 @@ export async function buildPearAccountUsageSnapshot({ ownerId, unlimited = false
     && !["cancelled", "canceled", "expired"].includes(String(subscription?.status || "").toLowerCase()),
   );
   const pricing = normalizedPricing(credential?.pricing || DEFAULT_PRICING);
-  const quota = await usageSnapshot(ownerId, Number(wallet?.balanceFen || 0), pricing, now);
+  const quota = await usageSnapshot(ownerId, wallet, pricing, now);
   return {
     subscription: {
       active,

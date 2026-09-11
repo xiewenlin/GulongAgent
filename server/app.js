@@ -103,6 +103,7 @@ import { recoverExpiredDirectReleaseLock } from "./release-lock.js";
 import { buildPearAccountUsageSnapshot, creditPaymentBalanceWithPromotion, paymentPromotionBonusFen, registerPearApiRoutes } from "./pearapi.js";
 import { registerH3SharedRoutes } from "./h3-shared.js";
 import { registerCodexMarketRoutes } from "./codex-market.js";
+import { readMarketWalletAmount } from "./codex-market-pricing.js";
 import {
   SHORT_VIDEO_MONTHLY_PRICE_FEN,
   SHORT_VIDEO_PLAN_ID,
@@ -2384,9 +2385,9 @@ const desktopSubscriptionStatusRoute = createRoute({
   path: "/api/v1/desktop/account/subscription",
   tags: ["Desktop Synchronization"],
   summary: "桌面端读取官网实时会员权益",
-  description: "使用当前 Chandler Bearer Token 映射官网账号，返回 MongoDB 权威订阅状态；短视频包月返回剩余套餐额度和 H3 无限使用标记，线下订单通过后桌面端下次轮询即可立即解锁。",
+  description: "使用当前 Chandler Bearer Token 映射官网账号，返回 MongoDB 权威订阅状态；balanceMilliYuan 是精确权威余额，balanceFen 仅为兼容展示。短视频包月返回剩余套餐额度和 H3 无限使用标记，线下订单通过后桌面端下次轮询即可立即解锁。",
   security: [{ bearerAuth: [] }],
-  responses: { 200: { description: "实时订阅状态", content: { "application/json": { schema: z.object({ isMember: z.boolean(), balanceFen: z.number().int(), shortVideoPackage: z.object({ active: z.boolean(), unlimitedH3: z.boolean(), packageBalanceFen: z.number().int(), packageExpiresAt: z.coerce.date().nullable(), chargeMode: z.literal("deduct_until_exhausted_then_free") }), subscription: z.record(z.string(), z.unknown()).nullable(), checkedAt: z.coerce.date() }) } } }, 401: { description: "Chandler 登录失效", content: { "application/json": { schema: ErrorSchema } } } },
+  responses: { 200: { description: "实时订阅状态", content: { "application/json": { schema: z.object({ isMember: z.boolean(), balanceMilliYuan: z.number().int().min(0), accountingUnit: z.literal("CNY_MILLIYUAN"), milliYuanPerYuan: z.literal(1_000), balanceFen: z.number().int(), shortVideoPackage: z.object({ active: z.boolean(), unlimitedH3: z.boolean(), packageBalanceFen: z.number().int(), packageExpiresAt: z.coerce.date().nullable(), chargeMode: z.literal("deduct_until_exhausted_then_free") }), subscription: z.record(z.string(), z.unknown()).nullable(), checkedAt: z.coerce.date() }) } } }, 401: { description: "Chandler 登录失效", content: { "application/json": { schema: ErrorSchema } } } },
 });
 
 const RollingUsageDaySchema = z.object({
@@ -2411,7 +2412,7 @@ const desktopAccountUsageRoute = createRoute({
   path: "/api/v1/desktop/account/usage",
   tags: ["Desktop Synchronization"],
   summary: "读取官网剩余用量面板数据",
-  description: "使用桌面端当前 Chandler Bearer Token，返回与官网右上角“剩余用量”面板同口径的钱包余额、图片/视频预计创作范围，以及滚动 7 天和 30 天真实用量。金额均为整数分。",
+  description: "使用桌面端当前 Chandler Bearer Token，返回与官网右上角“剩余用量”面板同口径的钱包余额、图片/视频预计创作范围，以及滚动 7 天和 30 天真实用量。balanceMilliYuan 为精确权威余额，balanceFen 仅为旧客户端兼容展示。",
   security: [{ bearerAuth: [] }],
   responses: {
     200: {
@@ -2419,6 +2420,9 @@ const desktopAccountUsageRoute = createRoute({
       content: { "application/json": { schema: z.object({
         currency: z.literal("CNY"),
         quota: z.object({
+          balanceMilliYuan: z.number().int().min(0),
+          accountingUnit: z.literal("CNY_MILLIYUAN"),
+          milliYuanPerYuan: z.literal(1_000),
           balanceFen: z.number().int().min(0),
           unlimited: z.boolean(),
           estimates: z.object({ images: UsageEstimateSchema, videos: UsageEstimateSchema }),
@@ -4336,6 +4340,7 @@ app.get("/api/account/dashboard", async (c) => {
     : localSubscriptionStatus === "active"
       ? localSubscription
       : remoteSubscriptionView || localSubscription;
+  const preciseBalance = readMarketWalletAmount(wallet);
   return c.json({
     profile: {
       id: auth.user.id,
@@ -4364,7 +4369,7 @@ app.get("/api/account/dashboard", async (c) => {
       cancelAtPeriodEnd: Boolean(effectiveSubscription.cancelAtPeriodEnd),
     } : null,
     subscriptionLifecycle: lifecycle,
-    balanceFen: wallet?.balanceFen || 0,
+    ...preciseBalance,
     shortVideoPackage: shortVideoPackageView(effectiveSubscription, wallet),
     brainUploads: uploads.map((item) => ({
       id: item._id.toString(),
@@ -7635,13 +7640,14 @@ app.get("/api/billing/subscription", async (c) => {
   const lifecycle = auth.user.role === "admin" ? { ...evaluatedLifecycle, restricted: false, renewalDue: false } : evaluatedLifecycle;
   const subscription = await (await getCollection("subscriptions")).findOne({ ownerId });
   const wallet = await (await getCollection("wallets")).findOne({ ownerId });
+  const preciseBalance = readMarketWalletAmount(wallet);
   const subscriptionStatus = subscription
     ? subscriptionPeriodState(subscription.currentPeriodStart, subscription.currentPeriodEnd)
     : null;
   return c.json({
     subscription: subscription ? { ...subscription, status: subscriptionStatus, id: subscription._id.toString(), _id: undefined, ownerId: undefined } : null,
     subscriptionLifecycle: lifecycle,
-    balanceFen: wallet?.balanceFen || 0,
+    ...preciseBalance,
     shortVideoPackage: shortVideoPackageView(subscription, wallet),
   });
 });
@@ -8145,6 +8151,7 @@ app.openapi(desktopSubscriptionStatusRoute, async (c) => {
   const lifecycle = await refreshSubscriptionLifecycle(auth.user._id, now);
   const subscription = await (await getCollection("subscriptions")).findOne({ ownerId: auth.user._id });
   const wallet = await (await getCollection("wallets")).findOne({ ownerId: auth.user._id });
+  const preciseBalance = readMarketWalletAmount(wallet);
   const status = subscription
     ? subscriptionPeriodState(subscription.currentPeriodStart, subscription.currentPeriodEnd, now)
     : "inactive";
@@ -8167,7 +8174,7 @@ app.openapi(desktopSubscriptionStatusRoute, async (c) => {
       autoRenew: false,
       renewalMode: "manual",
     } : null,
-    balanceFen: wallet?.balanceFen || 0,
+    ...preciseBalance,
     shortVideoPackage: shortVideoPackageView(subscription, wallet, now),
     checkedAt: now,
   });
@@ -8671,7 +8678,7 @@ app.doc("/api/openapi.json", {
   openapi: "3.1.0",
   info: {
     title: "古龙 Gulong Agent Engine API",
-    version: "2.8.1",
+    version: "2.8.2",
     description: "已按 Chandler v3.9 与 PearAPI 统一接入升级：OAuth 应用密钥配置完成后，官网邮箱注册和已激活桌面客户端的邮箱/手机号注册均由官网服务端注入对应应用凭据，写入 Chandler 应用来源归因；client_secret 永不进入浏览器或桌面客户端。桌面端缺少归因凭据时故障关闭；官网公开邮箱注册按 Chandler 兼容合同保持可用但不伪造归因。邮箱和短信验证码统一为 6 位数字；服务端管理与支付调用使用受保护 API Key，线上收银仅支持微信单次付款，Webhook 使用原始请求体 HMAC-SHA256 验签并二次查询订单。网页版古龙 Agent 只允许管理员公布的 PearAPI 免费模型，令牌经 AES-256-GCM 加密保存且不会返回浏览器。普通会员由古龙维护月/年有效期，到期前 7 天每天提醒手动续费；实付额外赠送 10% 钱包余额，单次充值满 500 元同样赠送 10%。短视频包月固定月费 5999 元、年费 59999 元，只支持线下审核，审核后实付金额按 1:1 组成可到期套餐余额，不额外赠送；有效期内 MiniMaxH3 套餐余额归零后仍可无限生成，但不再扣费或分佣。所有入账、扣款、退款和分账均使用独立幂等流水。MiniMax H3 共享节点支持钱包预扣、幂等退款与 50% 节点分成、激活设备账号绑定、按能力原子领取、腾讯云 COS 输入下载和输出直传票据，并提供仅按绑定账户聚合的桌面收益接口；工作器领取 DTO 不含需求用户身份和内部计费信息。永久离线授权继续签发旧版 canonical RS256 回执，同时可选绑定 h3-hw-v2 加权硬件分类摘要；v2 上线前的已用授权支持高置信度、一次性、保留激活时间的同机重装迁移，服务端不保存任何原始硬件值。另提供第二大脑、工作流、发行版本、管理员经营分析与桌面同步接口。古龙开发者 API Key 仅在创建时显示一次；COS 下载链接默认 15 分钟失效。",
   },
   servers: [
