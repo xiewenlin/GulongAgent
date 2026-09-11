@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { OpenAPIHono } from "@hono/zod-openapi";
 import { ObjectId } from "mongodb";
-import { registerCodexMarketRoutes, CODEX_NODE_HEADER } from "../../server/codex-market.js";
+import { registerCodexMarketRoutes, CODEX_CAPACITY_SCOPE, CODEX_CAPACITY_TOTAL, CODEX_NODE_HEADER } from "../../server/codex-market.js";
 import { calculateLongyanAmount, marketQuotePrice, normalizeMarketRequest, readMarketPricing, readMarketWalletAmount } from "../../server/codex-market-pricing.js";
 
 test("precise wallet balance keeps the milli-yuan remainder for desktop status", () => {
@@ -146,13 +146,13 @@ function fixture({ balance = 100, failStore = false, getPricing = readMarketPric
     assert.equal(quoted.status, 201);
     return call("/tasks", { quoteId: quoted.body.quoteId, requestId: requestKey }, { account });
   };
-  const register = async (clientNodeId = "test-node-01", usageReportingVersion = "codex-app-server-v1") => {
-    const result = await call("/nodes/register", { nodeId: clientNodeId, nodeName: "测试节点", appVersion: "1.0", capabilities: { codexAvailable: true, models: ["longyan", "longtu"], usageReportingVersion } }, { account: "executor" });
+  const register = async (clientNodeId = "test-node-01", usageReportingVersion = "codex-app-server-v1", cooperative = false) => {
+    const result = await call("/nodes/register", { nodeId: clientNodeId, ...(cooperative ? { clientId: clientNodeId } : {}), nodeName: "测试节点", appVersion: "1.0", capabilities: { codexAvailable: true, models: ["longyan", "longtu"], usageReportingVersion, ...(cooperative ? { capacityScope: CODEX_CAPACITY_SCOPE, capacityTotal: CODEX_CAPACITY_TOTAL, maxConcurrentTasks: CODEX_CAPACITY_TOTAL } : {}) } }, { account: "executor" });
     assert.equal(result.status, 201);
-    return { nodeId: clientNodeId, token: result.body.nodeToken };
+    return { nodeId: clientNodeId, clientId: cooperative ? clientNodeId : null, token: result.body.nodeToken, registration: result.body };
   };
-  const claim = async (node) => call("/tasks/claim", { nodeId: node.nodeId }, { token: node.token });
-  const callback = async (node, task, overrides = {}) => call("/tasks/callback", { nodeId: node.nodeId, taskId: task.id, claimId: task.claimId, leaseToken: task.leaseToken, eventId: "complete-0001", status: "completed", result: { images: [{ dataUrl: PNG }] }, ...overrides }, { token: node.token });
+  const claim = async (node, overrides = {}) => call("/tasks/claim", { nodeId: node.nodeId, ...(node.clientId ? { clientId: node.clientId } : {}), ...overrides }, { token: node.token });
+  const callback = async (node, task, overrides = {}) => call("/tasks/callback", { nodeId: node.nodeId, ...(node.clientId ? { clientId: node.clientId } : {}), taskId: task.id, claimId: task.claimId, leaseToken: task.leaseToken, eventId: "complete-0001", status: "completed", result: { images: [{ dataUrl: PNG }] }, ...overrides }, { token: node.token });
   return { app, call, quote, create, register, claim, callback, rows, accounts, advance: (ms) => { now = new Date(+now + ms); }, setPlatformFailure: (value) => { failPlatformCredit = value; }, transactionCount: () => transactionCount };
 }
 
@@ -287,6 +287,60 @@ test("heartbeat extends only its own current lease; Longtu completion settles ex
   assert.equal(f.rows.codexMarketLedger.length, 3);
   const changed = await f.callback(node, task, { status: "failed", error: { message: "later error" } });
   assert.equal(changed.body.code, "CALLBACK_CONFLICT");
+});
+
+test("cooperative host v2 holds ten independent leases and leaves the eleventh task queued", async () => {
+  const f = fixture({ balance: 500 });
+  for (let index = 0; index < 11; index += 1) await f.create(`capacity-${String(index).padStart(4, "0")}`);
+  const node = await f.register("cooperative-node-01", "codex-app-server-v1", true);
+  assert.equal(node.registration.capacityScope, CODEX_CAPACITY_SCOPE);
+  assert.equal(node.registration.capacityTotal, 10);
+  assert.equal(node.registration.maxConcurrentTasks, 10);
+  const leases = [];
+  for (let index = 0; index < 10; index += 1) {
+    const response = await f.claim(node);
+    assert.equal(response.status, 200);
+    assert.ok(response.body.task);
+    leases.push(response.body.task);
+  }
+  assert.equal(new Set(leases.map((task) => task.id)).size, 10);
+  const busy = await f.claim(node);
+  assert.equal(busy.status, 200);
+  assert.equal(busy.body.task, null);
+  assert.deepEqual(busy.body.capacity, { scope: CODEX_CAPACITY_SCOPE, total: 10 });
+  assert.equal(f.rows.codexMarketTasks.filter((task) => task.status === "queued").length, 1);
+
+  const heartbeat = await f.call("/nodes/heartbeat", { nodeId: node.nodeId, clientId: node.clientId, activeTasks: leases.map(({ id: taskId, claimId, leaseToken }) => ({ taskId, claimId, leaseToken })) }, { token: node.token });
+  assert.equal(heartbeat.status, 200);
+  assert.equal(heartbeat.body.leases.length, 10);
+
+  assert.equal((await f.callback(node, leases[0], { eventId: "capacity-complete-0001" })).status, 200);
+  assert.equal(f.rows.codexMarketTasks.filter((task) => task.status === "claimed").length, 9);
+  const replacement = await f.claim(node);
+  assert.ok(replacement.body.task);
+  assert.notEqual(replacement.body.task.id, leases[0].id);
+  assert.equal(f.rows.codexMarketTasks.filter((task) => task.status === "claimed").length, 10);
+  const cancelled = await f.call(`/tasks/${leases[1].id}/cancel`, {});
+  assert.equal(cancelled.status, 200);
+  assert.equal(cancelled.body.task.status, "cancelled");
+  assert.equal(f.rows.codexMarketTasks.find((task) => String(task._id) === leases[2].id).status, "claimed");
+  assert.equal((await f.callback(node, leases[2], { eventId: "capacity-complete-0002" })).status, 200);
+});
+
+test("legacy capacity claims stay single-slot and v2 lease identity is client-bound", async () => {
+  const f = fixture();
+  await f.create("legacy-capacity-0001");
+  await f.create("legacy-capacity-0002");
+  const legacy = await f.register("legacy-capacity-node", "codex-app-server-v1");
+  assert.equal(legacy.registration.capacityScope, "legacy-single-slot");
+  assert.equal(legacy.registration.maxConcurrentTasks, 1);
+  const first = (await f.claim(legacy)).body.task;
+  assert.equal((await f.claim(legacy)).body.task.id, first.id);
+
+  const cooperative = await f.register("cooperative-node-02", "codex-app-server-v1", true);
+  const mismatch = await f.call("/tasks/claim", { nodeId: cooperative.nodeId, clientId: "different-client-02" }, { token: cooperative.token });
+  assert.equal(mismatch.status, 409);
+  assert.equal(mismatch.body.code, "CLIENT_ID_MISMATCH");
 });
 
 test("platform credit failure rolls back node credit, result and event; retry completes", async () => {

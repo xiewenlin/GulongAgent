@@ -74,7 +74,7 @@
 
 ## 节点注册、领取与租约
 
-`POST /api/codex-market/nodes/register` 使用账号 Bearer。能够回传龙言真实用量的节点声明：
+`POST /api/codex-market/nodes/register` 使用账号 Bearer。新版 Windows 协同宿主固定声明 10 个共享执行槽；旧客户端即使自报 4/10 槽，只要合同不完整，服务端仍按单槽兼容：
 
 ```json
 {
@@ -84,20 +84,23 @@
   "capabilities": {
     "codexAvailable": true,
     "models": ["longyan", "longtu"],
-    "usageReportingVersion": "codex-app-server-v1"
+    "usageReportingVersion": "codex-app-server-v1",
+    "capacityScope": "cooperative-host-slots-v2",
+    "capacityTotal": 10,
+    "maxConcurrentTasks": 10
   }
 }
 ```
 
 返回 `{nodeId,nodeToken,heartbeatIntervalSeconds:30,leaseSeconds:120}`。服务端只保存 token 哈希。重新注册会轮换 token、撤销旧租约并重新排队未完成任务。没有 `usageReportingVersion=codex-app-server-v1` 的节点不能领取龙言收费订单。
 
-节点请求使用 `X-Gulong-Codex-Node: cmn_...`。`POST /api/codex-market/nodes/heartbeat` 每 30 秒更新能力；执行中携带 `activeTask:{taskId,claimId,leaseToken}` 延长 120 秒租约，但不超过订单截止时间。
+节点请求使用 `X-Gulong-Codex-Node: cmn_...`。新版 claim、heartbeat、callback 同时携带注册返回的 `clientId`，服务端校验它与节点令牌绑定身份一致。`POST /api/codex-market/nodes/heartbeat` 每 30 秒更新能力；新版用 `activeTasks:[{taskId,claimId,leaseToken}]` 独立延长最多 10 条 120 秒租约，旧版单个 `activeTask` 继续兼容。任何一条租约都不能替另一任务续租。
 
-`POST /api/codex-market/tasks/claim` 请求 `{nodeId}`，按创建时间 FIFO 原子领取能力匹配任务，每节点最多一个活动订单。龙言任务额外返回 `executionModel:gpt-6-astra`、`reasoningEffort:low`、`usageLimit` 和 `usageReportingVersion:codex-app-server-v1`。领取 DTO 不含请求者身份、余额、钱包流水或分成账户。网络重试返回当前活动任务和同一领取令牌；旧租约不能回调或结算。
+`POST /api/codex-market/tasks/claim` 新版请求 `{nodeId,clientId}`，按创建时间 FIFO 原子领取能力匹配任务。`cooperative-host-slots-v2` 节点最多持有 10 个活动租约，第 11 个请求返回 `task:null`，订单继续保持 queued；旧节点保持一个活动订单。对指定租约进行网络重试时同时提交 `taskId + claimId + leaseToken`，只返回该任务。龙言任务额外返回 `executionModel:gpt-6-astra`、`reasoningEffort:low`、`usageLimit` 和 `usageReportingVersion:codex-app-server-v1`。领取 DTO 不含请求者身份、余额、钱包流水或分成账户；旧租约不能回调或结算。
 
 ## 回调、真实用量与结算
 
-`POST /api/codex-market/tasks/callback` 接受 `started`、`progress`、`completed`、`failed`。每个逻辑事件使用稳定 `eventId`；相同事件重试必须保持同一正文。
+`POST /api/codex-market/tasks/callback` 接受 `started`、`progress`、`completed`、`failed`、`cancelled`。新版必须提交 `clientId + taskId + claimId + leaseToken`；每个逻辑事件使用稳定 `eventId`，相同事件重试必须保持同一正文。每个任务独立终态、退款和五五分账，一个回调不会清除或修改同节点其他活动租约。请求者或管理员也可调用 `POST /api/codex-market/tasks/{id}/cancel` 幂等取消单个任务并退款。
 
 龙言完成回调：
 

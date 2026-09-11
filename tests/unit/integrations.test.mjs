@@ -1125,22 +1125,37 @@ test("desktop WeChat review API validates Chandler administrators and a bound wo
   }
 });
 
-test("download page explains both desktop editions", async () => {
+test("download page explains all three desktop editions", async () => {
   const [source, adminSource] = await Promise.all([
     readFile(new URL("../../src/components/PlatformPages.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
   ]);
   assert.match(source, /古龙基础版/);
   assert.match(source, /MiniMax H3 极速视频版/);
+  assert.match(source, /短剧工作台/);
+  assert.match(source, /小说、剧本与分镜逐层拆解/);
   assert.match(source, /PromptEngine、Z-Image 与 ComfyUI/);
   assert.doesNotMatch(source, /永生花定制版/);
-  assert.equal((source.match(/gulong-agent-icon\.png/g) || []).length, 2);
+  assert.equal((source.match(/gulong-agent-icon\.png/g) || []).length, 3);
   assert.match(adminSource, /return "MiniMax H3 极速视频版"/);
+  assert.match(adminSource, /return "短剧工作台"/);
+  assert.match(adminSource, /官网独立产品渠道 · 仅支持手动上传安装包/);
   assert.match(source, /\/api\/downloads\/\$\{editionKey\}\/download/);
   assert.match(source, /\/api\/platform\?_platform_path=downloads/);
   assert.match(source, /\/api\/releases\/\$\{encodeURIComponent\(channelId\)\}\/download/);
   assert.doesNotMatch(source, /备用下载通道|ALTERNATIVE DOWNLOAD|飞书下载|夸克网盘|百度网盘/);
   assert.doesNotMatch(source, /download-providers|download-provider/);
+});
+
+test("short drama release channel is website managed and manual-upload only", async () => {
+  const serverSource = await readFile(new URL("../../server/app.js", import.meta.url), "utf8");
+  assert.match(serverSource, /SHORT_DRAMA_RELEASE_GROUP_ID = "website-short-drama-workbench"/);
+  assert.match(serverSource, /key: "short_drama", name: "短剧工作台"/);
+  assert.match(serverSource, /source: "website-managed"/);
+  assert.match(serverSource, /manualUploadOnly: true/);
+  assert.match(serverSource, /MANUAL_UPLOAD_ONLY/);
+  assert.match(serverSource, /\["gulong", "yongshenghua", "short_drama"\]/);
+  assert.match(serverSource, /source: "desktop-theme-access", groupId: \{ \$nin: seen \}/);
 });
 
 test("admin subscriptions localize review state and keep the three-column detail layout readable", async () => {

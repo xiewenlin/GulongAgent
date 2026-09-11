@@ -1847,7 +1847,41 @@ async function rejectOfflinePayment({ orderId, actorUserId, actorChandlerUserId,
   return { ok: true, orderNo: order.orderNo, status: "rejected", reason: normalizedReason, message: `审核已拒绝，原因已经同步给用户：${normalizedReason}` };
 }
 
-function publicReleaseMetadata(channel, edition = productEditionFromChannel(channel)) {
+const SHORT_DRAMA_RELEASE_EDITION = Object.freeze({ key: "short_drama", name: "短剧工作台" });
+const SHORT_DRAMA_RELEASE_GROUP_ID = "website-short-drama-workbench";
+
+function releaseEditionFromChannel(channel) {
+  if (!channel) return null;
+  if (channel.groupId === SHORT_DRAMA_RELEASE_GROUP_ID || channel.profileKey === "short-drama-workbench") {
+    return SHORT_DRAMA_RELEASE_EDITION;
+  }
+  return productEditionFromChannel(channel);
+}
+
+async function ensureWebsiteReleaseChannels() {
+  if (!isDatabaseConfigured()) return;
+  const now = new Date();
+  await (await getCollection("releaseChannels")).updateOne(
+    { groupId: SHORT_DRAMA_RELEASE_GROUP_ID },
+    {
+      $set: {
+        name: "短剧工作台",
+        themeNames: ["短剧工作台"],
+        profileKey: "short-drama-workbench",
+        enabled: true,
+        isDefault: false,
+        sort: 900,
+        source: "website-managed",
+        manualUploadOnly: true,
+        updatedAt: now,
+      },
+      $setOnInsert: { createdAt: now },
+    },
+    { upsert: true },
+  );
+}
+
+function publicReleaseMetadata(channel, edition = releaseEditionFromChannel(channel)) {
   const latest = channel?.latestRelease;
   if (!edition || channel?.distributionStatus === "uploading" || !latest?.objectKey) return null;
   return {
@@ -1866,6 +1900,7 @@ function publicReleaseMetadata(channel, edition = productEditionFromChannel(chan
 
 async function publicEditionChannels() {
   if (!isDatabaseConfigured()) return new Map();
+  await ensureWebsiteReleaseChannels();
   const channels = await (await getCollection("releaseChannels"))
     .find({ enabled: true, distributionStatus: { $ne: "uploading" }, "latestRelease.objectKey": { $exists: true } })
     .sort({ isDefault: -1, "latestRelease.publishedAt": -1, sort: 1 })
@@ -1873,7 +1908,7 @@ async function publicEditionChannels() {
     .toArray();
   const result = new Map();
   for (const channel of channels) {
-    const edition = productEditionFromChannel(channel);
+    const edition = releaseEditionFromChannel(channel);
     if (edition && !result.has(edition.key)) result.set(edition.key, channel);
   }
   return result;
@@ -5355,6 +5390,7 @@ app.get("/api/releases/:channelId/download", async (c) => {
 
 app.get("/api/admin/release-channels", async (c) => {
   const auth = await requireAdmin(c); if (auth.error) return auth.error;
+  await ensureWebsiteReleaseChannels();
   const keyword = String(c.req.query("keyword") || "").trim();
   const filter = keyword ? { name: { $regex: keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), $options: "i" } } : {};
   const [channels, jobs] = await Promise.all([
@@ -5374,6 +5410,7 @@ app.post("/api/admin/release-jobs", async (c) => {
   if (!ObjectId.isValid(body.channelId)) return c.json({ code: "VALIDATION_ERROR", message: "发行渠道无效" }, 400);
   let channel = await (await getCollection("releaseChannels")).findOne({ _id: new ObjectId(body.channelId), enabled: true });
   if (!channel) return c.json({ code: "CHANNEL_NOT_FOUND", message: "发行渠道不存在或已停用" }, 404);
+  if (channel.manualUploadOnly) return c.json({ code: "MANUAL_UPLOAD_ONLY", message: "短剧工作台只支持管理员手动上传安装包" }, 409);
   const availability = await releaseChannelAvailability(channel);
   if (availability.blocked) return c.json({ code: "RELEASE_IN_PROGRESS", message: "该渠道已有上传任务正在进行" }, 409);
   channel = availability.channel;
@@ -5544,7 +5581,10 @@ app.post("/api/release-worker/channels/sync", async (c) => {
       { upsert: true },
     );
   }
-  await collection.updateMany({ groupId: { $nin: seen } }, { $set: { enabled: false, isDefault: false, updatedAt: now } });
+  await collection.updateMany(
+    { source: "desktop-theme-access", groupId: { $nin: seen } },
+    { $set: { enabled: false, isDefault: false, updatedAt: now } },
+  );
   const channels = await collection.find({ groupId: { $in: seen } }).toArray();
   const channelMap = new Map(channels.map((channel) => [channel.groupId, channel]));
   const assignmentMap = new Map();
@@ -5689,7 +5729,7 @@ app.get("/api/downloads", async (c) => {
     (await getCollection("downloadLinks")).find({ enabled: true }).sort({ sort: 1 }).toArray(),
     publicEditionChannels(),
   ]);
-  const editions = ["gulong", "yongshenghua"]
+  const editions = ["gulong", "yongshenghua", "short_drama"]
     .map((key) => publicReleaseMetadata(editionChannels.get(key)))
     .filter(Boolean);
   return c.json({
@@ -5704,7 +5744,7 @@ app.get("/api/downloads", async (c) => {
 app.get("/api/downloads/:edition/download", async (c) => {
   c.header("Cache-Control", "private, no-store, max-age=0");
   const editionKey = String(c.req.param("edition") || "").trim().toLowerCase();
-  if (!["gulong", "yongshenghua"].includes(editionKey)) return c.json({ code: "RELEASE_NOT_FOUND", message: "桌面版本类型不存在" }, 404);
+  if (!["gulong", "yongshenghua", "short_drama"].includes(editionKey)) return c.json({ code: "RELEASE_NOT_FOUND", message: "桌面版本类型不存在" }, 404);
   const channels = await publicEditionChannels();
   const channel = channels.get(editionKey);
   if (!channel?.latestRelease?.objectKey) return c.json({ code: "RELEASE_NOT_FOUND", message: "该桌面版本正在准备中" }, 404);

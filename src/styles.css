@@ -4974,7 +4974,7 @@ textarea:focus {
 }
 .edition-choice-intro span { flex: 0 0 auto; color: var(--gold); font-size: 18px; font-weight: 900; letter-spacing: .08em; }
 .edition-choice-intro strong { font-size: 18px; line-height: 1.65; text-align: right; }
-.download-edition-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.download-edition-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
 .download-edition-card {
   min-width: 0;
   padding: 30px;
@@ -4986,10 +4986,12 @@ textarea:focus {
   box-shadow: 0 16px 46px rgba(22, 54, 49, .06);
 }
 .download-edition-card.custom { border-color: color-mix(in srgb, var(--gold) 58%, var(--line)); background: linear-gradient(150deg, color-mix(in srgb, var(--gold-soft) 52%, var(--surface)) 0%, var(--surface) 38%); }
+.download-edition-card.studio { border-color: color-mix(in srgb, var(--jade) 52%, var(--line)); background: linear-gradient(150deg, color-mix(in srgb, var(--jade-soft) 64%, var(--surface)) 0%, var(--surface) 40%); }
 .download-edition-card > header { display: grid; grid-template-columns: 82px minmax(0, 1fr); align-items: center; gap: 18px; }
 .download-edition-mark { width: 82px; height: 82px; display: grid; place-items: center; overflow: hidden; color: var(--jade); border: 1px solid var(--line-strong); border-radius: 50%; background: var(--surface-strong); box-shadow: 0 12px 28px rgba(23, 59, 53, .12); }
 .download-edition-mark img { width: 100%; height: 100%; display: block; object-fit: cover; }
 .download-edition-mark.flower { color: #9c7133; border-color: color-mix(in srgb, var(--gold) 64%, var(--line)); background: color-mix(in srgb, var(--gold-soft) 68%, white); }
+.download-edition-mark.studio { border-color: color-mix(in srgb, var(--jade) 58%, var(--line)); box-shadow: 0 12px 30px color-mix(in srgb, var(--jade) 18%, transparent); }
 .download-edition-card header span { display: block; margin-bottom: 5px; color: var(--gold); font-size: 18px; font-weight: 900; letter-spacing: .09em; }
 .download-edition-card h2 { margin: 0; color: var(--ink-strong); font-size: 32px; letter-spacing: -.035em; }
 .download-edition-card header strong { display: block; margin-top: 5px; color: var(--jade); font-size: 18px; }

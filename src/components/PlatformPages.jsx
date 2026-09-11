@@ -105,6 +105,16 @@ export function DownloadPage() {
       features: ["MiniMax H3 本地视频创作链路", "针对 16GB 显存场景持续优化", "PromptEngine、Z-Image 与 ComfyUI 一体化", "可作为共享节点接单并查看真实收益"],
       icon: "/assets/gulong-agent-icon.png",
     },
+    {
+      key: "short_drama",
+      eyebrow: "SHORT DRAMA STUDIO",
+      name: "短剧工作台",
+      tagline: "一张画布，贯通短剧全流程",
+      description: "面向短剧创作者与内容团队的可视化生产工作台。从小说原文、剧本拆解到角色、场景、道具、分镜与批量视频生成，把分散环节收进同一张流程画布。",
+      suitable: "适合需要管理连续剧集、统一视觉资产、追踪生成进度，并希望把重复制作流程沉淀为团队生产线的用户。",
+      features: ["小说、剧本与分镜逐层拆解", "角色、场景、道具视觉资产统一管理", "节点状态、生成进度与结果集中查看", "支持批量视频生成与流程复用"],
+      icon: "/assets/gulong-agent-icon.png",
+    },
   ];
 
   async function downloadRelease(editionKey) {
@@ -131,16 +141,17 @@ export function DownloadPage() {
 
   return (
     <main id="main-content">
-      <PageIntro eyebrow="WINDOWS DESKTOP" title="选择适合你的古龙桌面版" description="古龙基础版适合通用智能体工作；MiniMax H3 极速视频版面向本地 AI 视频创作与共享节点计算，两条产品路线按你的主要任务选择。" />
+      <PageIntro eyebrow="WINDOWS DESKTOP" title="选择适合你的古龙桌面版" description="古龙基础版负责通用智能体工作，MiniMax H3 极速视频版负责本地视频生成与共享节点计算，短剧工作台负责贯通从故事到成片的完整生产流程。" />
       <section className="download-layout section-shell">
-        <div className="edition-choice-intro"><span>一分钟选对版本</span><strong>日常智能体与知识工作选基础版；本地生成 MiniMax H3 视频、参与共享节点计算，选极速视频版。</strong></div>
+        <div className="edition-choice-intro"><span>一分钟选对版本</span><strong>日常智能体选基础版；本地视频生成选极速视频版；管理剧本、资产、分镜与批量成片，选短剧工作台。</strong></div>
         <div className="download-edition-grid">
           {editions.map((edition) => {
             const release = releases[edition.key];
             const isCustom = edition.key === "yongshenghua";
-            return <article key={edition.key} className={`download-edition-card ${isCustom ? "custom" : "essential"}`}>
+            const isStudio = edition.key === "short_drama";
+            return <article key={edition.key} className={`download-edition-card ${isCustom ? "custom" : isStudio ? "studio" : "essential"}`}>
               <header>
-                <div className={`download-edition-mark ${isCustom ? "flower" : ""}`}><img src={edition.icon} alt={`${edition.name}圆形图标`} /></div>
+                <div className={`download-edition-mark ${isCustom ? "flower" : isStudio ? "studio" : ""}`}><img src={edition.icon} alt={`${edition.name}圆形图标`} /></div>
                 <div><span>{edition.eyebrow}</span><h2>{edition.name}</h2><strong>{edition.tagline}</strong></div>
               </header>
               <p className="edition-description">{edition.description}</p>
@@ -148,15 +159,15 @@ export function DownloadPage() {
               <ul>{edition.features.map((feature) => <li key={feature}><CheckCircle size={20} weight="fill" /> {feature}</li>)}</ul>
               <div className="edition-release">
                 <div><span>Windows 10 / 11 · x64</span><strong>{release?.version ? `v${release.version.replace(/^v/i, "")}` : loading ? "正在读取版本" : "版本准备中"}</strong><small>{release?.filename || "完整离线安装包"}</small></div>
-                <button className={`button full ${isCustom ? "secondary" : "primary"}`} type="button" disabled={!release || downloading === edition.key} onClick={() => downloadRelease(edition.key)}><DownloadSimple size={19} /> {downloading === edition.key ? "正在获取安全链接" : release ? `下载${edition.name}` : "安装包准备中"}</button>
+                <button className={`button full ${isCustom || isStudio ? "secondary" : "primary"}`} type="button" disabled={!release || downloading === edition.key} onClick={() => downloadRelease(edition.key)}><DownloadSimple size={19} /> {downloading === edition.key ? "正在获取安全链接" : release ? `下载${edition.name}` : "安装包准备中"}</button>
               </div>
               {release && <div className="edition-integrity"><span>SHA-256</span><code title={release.sha256}>{release.sha256 || "发布后公布"}</code><small>{release.bytes ? `${(release.bytes / 1024 / 1024).toFixed(1)} MB` : ""} · {release.signatureStatus || "签名状态待确认"}</small></div>}
             </article>;
           })}
         </div>
-        <div className="edition-decision-guide"><div><span>01</span><p><strong>日常智能体工作</strong>选择古龙基础版，配置直接，标准能力完整。</p></div><div><span>02</span><p><strong>本地视频创作</strong>选择 MiniMax H3 极速视频版，使用本地模型链路完成高质量视频任务。</p></div><div><span>03</span><p><strong>共享节点收益</strong>选择 MiniMax H3 极速视频版，将闲置算力接入平台任务队列并查看真实结算。</p></div></div>
+        <div className="edition-decision-guide"><div><span>01</span><p><strong>日常智能体工作</strong>选择古龙基础版，配置直接，标准能力完整。</p></div><div><span>02</span><p><strong>本地视频与节点收益</strong>选择 MiniMax H3 极速视频版，本地生成视频，也可将闲置算力接入共享任务。</p></div><div><span>03</span><p><strong>团队化短剧生产</strong>选择短剧工作台，用一张画布管理故事、视觉资产、分镜、生成状态与批量成片。</p></div></div>
         {downloadError && <div className="form-error">{downloadError}</div>}
-        <div className="download-note"><ShieldCheck size={22} /><div><strong>安装包安全说明</strong><p>两个版本分别读取所属发行渠道的唯一最新版。直接下载链接为腾讯云 COS 的 15 分钟限时签名地址；下载后可核对页面公布的版本号、文件大小与 SHA-256。</p></div></div>
+        <div className="download-note"><ShieldCheck size={22} /><div><strong>安装包安全说明</strong><p>三个版本分别读取所属发行渠道的唯一最新版。直接下载链接为腾讯云 COS 的 15 分钟限时签名地址；下载后可核对页面公布的版本号、文件大小与 SHA-256。</p></div></div>
       </section>
     </main>
   );
