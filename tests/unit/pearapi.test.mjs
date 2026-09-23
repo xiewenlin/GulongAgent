@@ -253,7 +253,7 @@ test("desktop PearAPI proxy normalizes errors and never exposes shared credentia
   assert.equal("ownerId" in view, false);
 });
 
-test("desktop PearAPI proxy rejects requests without a Chandler Bearer before data access", async () => {
+test("desktop PearAPI proxy rejects requests without a desktop Bearer before data access", async () => {
   let authenticationCalls = 0;
   const app = new OpenAPIHono();
   registerPearApiRoutes(app, {
@@ -266,7 +266,7 @@ test("desktop PearAPI proxy rejects requests without a Chandler Bearer before da
   assert.deepEqual(await response.json(), {
     ok: false,
     code: "DESKTOP_AUTH_REQUIRED",
-    message: "请使用桌面端 Chandler 登录令牌访问此接口",
+    message: "请使用有效的桌面登录令牌访问此接口",
     retryable: false,
   });
   assert.equal(authenticationCalls, 0);
