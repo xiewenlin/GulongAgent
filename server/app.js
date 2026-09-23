@@ -103,6 +103,7 @@ import { recoverExpiredDirectReleaseLock } from "./release-lock.js";
 import { buildPearAccountUsageSnapshot, creditPaymentBalanceWithPromotion, paymentPromotionBonusFen, registerPearApiRoutes } from "./pearapi.js";
 import { registerH3SharedRoutes } from "./h3-shared.js";
 import { registerCodexMarketRoutes } from "./codex-market.js";
+import { registerCapabilityOrderRoutes } from "./capability-orders.js";
 import { readMarketWalletAmount } from "./codex-market-pricing.js";
 import {
   SHORT_VIDEO_MONTHLY_PRICE_FEN,
@@ -3277,6 +3278,10 @@ registerH3SharedRoutes(app, {
   notifyUserOnce,
 });
 registerCodexMarketRoutes(app, {
+  authenticate: authenticateSiteOrDesktopChandler,
+  requireTrustedMutation,
+});
+registerCapabilityOrderRoutes(app, {
   authenticate: authenticateSiteOrDesktopChandler,
   requireTrustedMutation,
 });

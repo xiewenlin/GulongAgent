@@ -564,6 +564,50 @@ export async function ensureIndexes() {
           { ownerId: 1, status: 1, createdAt: -1 },
           { name: "h3_assets_by_owner" },
         ),
+        db.collection("capabilityOrders").createIndex(
+          { orderNo: 1 },
+          { unique: true, name: "uniq_capability_order_no" },
+        ),
+        db.collection("capabilityOrders").createIndex(
+          { idempotencyKey: 1 },
+          { unique: true, name: "uniq_capability_order_idempotency" },
+        ),
+        db.collection("capabilityOrders").createIndex(
+          { requesterUserId: 1, status: 1, nextEligibleAt: 1, createdAt: 1 },
+          { name: "capability_orders_same_account_queue" },
+        ),
+        db.collection("capabilityOrders").createIndex(
+          { status: 1, claimLeaseUntil: 1 },
+          { name: "capability_orders_expired_claims" },
+        ),
+        db.collection("capabilityOrderCallbacks").createIndex(
+          { orderId: 1, eventId: 1 },
+          { unique: true, name: "uniq_capability_order_callback_event" },
+        ),
+        db.collection("capabilityAssetUploads").createIndex(
+          { objectKey: 1 },
+          { unique: true, name: "uniq_capability_asset_object" },
+        ),
+        db.collection("capabilityAssetUploads").createIndex(
+          { ownerId: 1, status: 1, createdAt: -1 },
+          { name: "capability_assets_by_owner" },
+        ),
+        db.collection("capabilityOutputUploads").createIndex(
+          { outputId: 1 },
+          { unique: true, name: "uniq_capability_output_id" },
+        ),
+        db.collection("capabilityOutputUploads").createIndex(
+          { orderId: 1, status: 1, createdAt: -1 },
+          { name: "capability_outputs_by_order" },
+        ),
+        db.collection("capabilityNodeReports").createIndex(
+          { bindingId: 1 },
+          { unique: true, name: "uniq_capability_node_report_binding" },
+        ),
+        db.collection("capabilityNodeReports").createIndex(
+          { updatedAt: 1 },
+          { expireAfterSeconds: 30 * 24 * 60 * 60, name: "ttl_capability_node_reports" },
+        ),
         db.collection("h3WalletLedger").createIndex(
           { ledgerKey: 1 },
           { unique: true, name: "uniq_h3_wallet_ledger" },
