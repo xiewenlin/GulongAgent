@@ -96,6 +96,8 @@ npm run dev
 - [桌面订阅、充值与剩余用量合同](docs/desktop-billing-integration.md)：稳定官网深链、线下充值订单、桌面刷新机制，以及 `GET /api/v1/desktop/account/usage` 的完整字段
 - [PearAPI 桌面安全代理 v1](docs/pearapi-desktop-proxy-v1.md)：管理员统一托管共享凭据，桌面使用 Chandler Bearer 完成模型目录、COS 安全素材、幂等生成、轮询、取消与退款
 - [古龙官网统一能力订单 v1](docs/unified-capability-orders-v1.md)：同账户本机/LAN 节点能力发现、FIFO 负载调度、COS 输入输出票据、进度 ETA、幂等回调、失败重试与旧 H3 视频兼容
+- [英语教练桌面端与绿色版下载](docs/english-coach-desktop.md)：独立包月权益、英语能力订单、管理员 ZIP 发版渠道和限时下载
+- [古龙引擎包月桌面端](docs/gulong-engine-desktop.md)：独立桌面会话、九个免费文本模型、零单次价格共享能力与订单恢复
 - 登录能力：`GET /api/auth/capabilities`；发送/校验登录验证码：`POST /api/auth/otp/send`、`POST /api/auth/otp/login`
 - 已激活桌面客户端邮箱注册：`POST /api/v1/desktop/auth/email/register`；手机号注册：`POST /api/v1/desktop/auth/phone/send-otp`、`POST /api/v1/desktop/auth/phone/register`（桌面只提交公开应用 ID 与激活回执；OAuth 密钥只保存在官网服务端）
 - 账号安全：`GET /api/account/security`；邮箱验证、手机号绑定/验证/解绑、主身份切换、修改密码与注销全部设备接口见在线 OpenAPI

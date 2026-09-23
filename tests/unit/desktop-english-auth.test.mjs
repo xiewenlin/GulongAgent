@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Hono } from "hono";
-import { createEnglishSessionStore } from "../../server/desktop-english-sessions.js";
+import { createEnglishSessionStore, createGulongEngineSessionStore } from "../../server/desktop-english-sessions.js";
 import { createEnglishDesktopAuth, ENGLISH_DESKTOP_ROOT as root } from "../../server/desktop-english-auth.js";
+import { createGulongEngineDesktopAuth, GULONG_ENGINE_DESKTOP_ROOT as greenRoot } from "../../server/desktop-gulong-auth.js";
 
-function fixture() {
+function fixture(green = false) {
   let time = Date.parse("2026-09-24T00:00:00Z");
   const rows = new Map(); const user = { _id: "stable-owner-1", status: "active", email: "demo@example.test", username: "Demo" };
   const matches = (row, query) => Object.entries(query).every(([key, value]) => {
@@ -23,7 +24,7 @@ function fixture() {
       return { modifiedCount: 1 };
     },
   };
-  const sessions = createEnglishSessionStore({ now: () => new Date(time), getCollection: async (name) => name === "users"
+  const sessions = (green ? createGulongEngineSessionStore : createEnglishSessionStore)({ now: () => new Date(time), getCollection: async (name) => name === "users"
     ? { findOne: async (query) => matches(user, query) ? structuredClone(user) : null } : collection });
   return { sessions, rows, user, advance: (milliseconds) => { time += milliseconds; } };
 }
@@ -64,15 +65,16 @@ test("expired access, absolute refresh expiry and disabled users are denied", as
   f.user.status = "active"; f.advance(31 * 86_400_000);
   await assert.rejects(f.sessions.refresh(rotated.refresh_token), authExpired);
 });
-function routes(options = {}) {
-  const f = fixture(); const app = new Hono();
-  const auth = createEnglishDesktopAuth({ sessions: f.sessions, rateLimit: async () => ({ allowed: true }),
+function routes(options = {}, green = false) {
+  const f = fixture(green); const app = new Hono();
+  const auth = (green ? createGulongEngineDesktopAuth : createEnglishDesktopAuth)({ sessions: f.sessions, rateLimit: async () => ({ allowed: true }),
     verifyPassword: async (identifier, password) => {
       if (identifier !== "Demo" || password !== "dummy-test-only") throw Object.assign(new Error("secret upstream payload"), { status: 401 });
       return f.user;
-    }, readEntitlement: async (owner) => ({ product: "english_coach", active: false, status: "inactive", owner }), ...options });
+    }, readEntitlement: async (owner) => ({ product: green ? "gulong_engine" : "english_coach", active: false, status: "inactive", owner }), ...options });
   auth.register(app);
-  const post = (path, body, token) => app.request(`${root}/auth/${path}`, { method: "POST", headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) });
+  const selectedRoot = green ? greenRoot : root;
+  const post = (path, body, token) => app.request(`${selectedRoot}/auth/${path}`, { method: "POST", headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) });
   return { ...f, app, auth, post };
 }
 test("desktop route login supports username, never returns upstream token, and reads inactive English entitlement", async () => {
@@ -99,4 +101,22 @@ test("dedicated authenticate declines unrelated bearer credentials and rejects m
   const unrelated = await f.app.request("/test", { headers: { Authorization: "Bearer chandler-token" } });
   assert.deepEqual(await unrelated.json(), { handled: false });
   assert.equal((await f.app.request("/test", { headers: { Authorization: "Bearer gec_at_invalid" } })).status, 401);
+});
+
+test("green desktop auth issues isolated gge tokens and reads only its independent entitlement", async () => {
+  const green = routes({}, true);
+  const response = await green.post("login", { identifier: "Demo", password: "dummy-test-only" });
+  assert.equal(response.status, 200);
+  const tokens = await response.json();
+  assert.match(tokens.access_token, /^gge_at_/);
+  assert.match(tokens.refresh_token, /^gge_rt_/);
+  const account = await green.app.request(`${greenRoot}/account`, { headers: { Authorization: `Bearer ${tokens.access_token}` } });
+  assert.equal(account.status, 200);
+  assert.equal((await account.json()).entitlement.product, "gulong_engine");
+  const english = routes();
+  assert.equal((await english.app.request(`${root}/account`, { headers: { Authorization: `Bearer ${tokens.access_token}` } })).status, 401);
+  const rotated = await green.post("refresh", { refresh_token: tokens.refresh_token });
+  assert.equal(rotated.status, 200);
+  assert.match((await rotated.json()).access_token, /^gge_at_/);
+  assert.equal((await green.app.request(`${greenRoot}/account`, { headers: { Authorization: `Bearer ${tokens.access_token}` } })).status, 401);
 });

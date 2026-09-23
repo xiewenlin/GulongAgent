@@ -1129,7 +1129,7 @@ test("desktop WeChat review API validates Chandler administrators and a bound wo
   }
 });
 
-test("download page explains all three desktop editions", async () => {
+test("download page explains all four desktop editions including English Coach portable ZIP", async () => {
   const [source, adminSource] = await Promise.all([
     readFile(new URL("../../src/components/PlatformPages.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
@@ -1137,12 +1137,16 @@ test("download page explains all three desktop editions", async () => {
   assert.match(source, /古龙基础版/);
   assert.match(source, /MiniMax H3 极速视频版/);
   assert.match(source, /短剧工作台/);
+  assert.match(source, /英语教练/);
+  assert.match(source, /绿色软件以 ZIP 压缩包提供/);
   assert.match(source, /小说、剧本与分镜逐层拆解/);
   assert.match(source, /PromptEngine、Z-Image 与 ComfyUI/);
   assert.doesNotMatch(source, /永生花定制版/);
-  assert.equal((source.match(/gulong-agent-icon\.png/g) || []).length, 3);
+  assert.equal((source.match(/gulong-agent-icon\.png/g) || []).length, 4);
   assert.match(adminSource, /return "MiniMax H3 极速视频版"/);
   assert.match(adminSource, /return "短剧工作台"/);
+  assert.match(adminSource, /return "英语教练"/);
+  assert.match(adminSource, /绿色软件 ZIP 压缩包/);
   assert.match(adminSource, /官网独立产品渠道 · 仅支持手动上传安装包/);
   assert.match(source, /\/api\/downloads\/\$\{editionKey\}\/download/);
   assert.match(source, /\/api\/platform\?_platform_path=downloads/);
@@ -1158,8 +1162,19 @@ test("short drama release channel is website managed and manual-upload only", as
   assert.match(serverSource, /source: "website-managed"/);
   assert.match(serverSource, /manualUploadOnly: true/);
   assert.match(serverSource, /MANUAL_UPLOAD_ONLY/);
-  assert.match(serverSource, /\["gulong", "yongshenghua", "short_drama"\]/);
+  assert.match(serverSource, /\["gulong", "yongshenghua", "short_drama", "english_coach"\]/);
   assert.match(serverSource, /source: "desktop-theme-access", groupId: \{ \$nin: seen \}/);
+});
+
+test("English Coach has an independent public download channel and ZIP-only manual upload", async () => {
+  const serverSource = await readFile(new URL("../../server/app.js", import.meta.url), "utf8");
+  assert.match(serverSource, /ENGLISH_COACH_RELEASE_GROUP_ID = "website-english-coach"/);
+  assert.match(serverSource, /key: "english_coach", name: "英语教练"/);
+  assert.match(serverSource, /profileKey: "english-coach-portable"/);
+  assert.match(serverSource, /releaseEditionFromChannel\(channel\)\?\.key === ENGLISH_COACH_RELEASE_EDITION\.key && extension !== "zip"/);
+  assert.match(serverSource, /code: "PORTABLE_ZIP_REQUIRED"/);
+  assert.match(serverSource, /\["gulong", "yongshenghua", "short_drama", "english_coach"\]\.includes\(editionKey\)/);
+  assert.match(serverSource, /createPresignedDownloadUrl\(channel\.latestRelease\.objectKey/);
 });
 
 test("English Coach desktop authentication and subscription are documented in OpenAPI", async () => {
@@ -1173,8 +1188,22 @@ test("English Coach desktop authentication and subscription are documented in Op
     "/api/v1/desktop/english-coach/account",
     "/api/v1/capability-orders/by-request/{key}",
   ]) assert.ok(document.paths[path], `${path} must be documented`);
-  assert.equal(document.info.version, "2.9.0");
+  assert.equal(document.info.version, "2.10.0");
   assert.ok(document.components.securitySchemes.englishCoachDesktopBearer);
+});
+
+test("Gulong Engine desktop account and free text recovery routes are documented in OpenAPI", async () => {
+  const response = await app.request("https://example.test/api/openapi.json");
+  assert.equal(response.status, 200);
+  const document = await response.json();
+  for (const path of [
+    "/api/v1/desktop/gulong-engine/auth/login",
+    "/api/v1/desktop/gulong-engine/auth/refresh",
+    "/api/v1/desktop/gulong-engine/auth/logout",
+    "/api/v1/desktop/gulong-engine/account",
+    "/api/v1/desktop/pearapi/generations/by-request/{key}",
+  ]) assert.ok(document.paths[path], `${path} must be documented`);
+  assert.equal(document.components.securitySchemes.gulongEngineDesktopBearer.type, "http");
 });
 
 test("admin subscriptions use a full-screen multi-product editor", async () => {

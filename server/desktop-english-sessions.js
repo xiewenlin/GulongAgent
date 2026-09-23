@@ -2,25 +2,25 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 export const ACCESS_SECONDS = 900;
 const REFRESH_MS = 30 * 24 * 60 * 60_000;
-const TOKEN_RE = /^gec_(at|rt)_([a-f0-9-]{36})\.([A-Za-z0-9_-]{43})$/;
 const digest = (token) => createHash("sha256").update(token).digest("hex");
 const failure = () => Object.assign(new Error("桌面登录已失效，请重新登录"), { status: 401, code: "AUTH_EXPIRED" });
-function parse(token, kind) {
-  const match = TOKEN_RE.exec(String(token || ""));
+function parse(token, kind, prefix) {
+  const match = new RegExp(`^${prefix}_(at|rt)_([a-f0-9-]{36})\\.([A-Za-z0-9_-]{43})$`).exec(String(token || ""));
   if (!match || match[1] !== kind) throw failure();
   return { id: match[2], hash: digest(token) };
 }
-function pair(id) {
-  const token = (kind) => `gec_${kind}_${id}.${randomBytes(32).toString("base64url")}`;
+function pair(id, prefix) {
+  const token = (kind) => `${prefix}_${kind}_${id}.${randomBytes(32).toString("base64url")}`;
   return { access_token: token("at"), refresh_token: token("rt"), expires_in: ACCESS_SECONDS, token_type: "Bearer" };
 }
 
 // A family is one atomic document. No password or upstream token is persisted.
-export function createEnglishSessionStore({ getCollection, now = () => new Date() }) {
+export function createScopedDesktopSessionStore({ getCollection, now = () => new Date(), prefix, collectionName }) {
+  if (!/^[a-z]{2,8}$/.test(prefix) || !/^[a-zA-Z]{3,80}$/.test(collectionName)) throw new TypeError("Invalid desktop session scope");
   let indexes;
   async function collection() {
-    const rows = await getCollection("englishDesktopSessions");
-    indexes ||= rows.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0, name: "ttl_english_desktop_sessions" })
+    const rows = await getCollection(collectionName);
+    indexes ||= rows.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0, name: `ttl_${collectionName}` })
       .catch((error) => { indexes = undefined; throw error; });
     await indexes;
     return rows;
@@ -34,7 +34,7 @@ export function createEnglishSessionStore({ getCollection, now = () => new Date(
   return {
     async issue(user) {
       if (!user?._id || user.status !== "active") throw failure();
-      const time = now(); const id = randomUUID(); const tokens = pair(id);
+      const time = now(); const id = randomUUID(); const tokens = pair(id, prefix);
       await (await collection()).insertOne({ _id: id, ownerId: user._id,
         accessHash: digest(tokens.access_token), refreshHash: digest(tokens.refresh_token),
         usedRefreshHashes: [], createdAt: time, updatedAt: time, revokedAt: null,
@@ -42,14 +42,14 @@ export function createEnglishSessionStore({ getCollection, now = () => new Date(
       return tokens;
     },
     async authenticate(token) {
-      const { id, hash } = parse(token, "at"); const time = now();
+      const { id, hash } = parse(token, "at", prefix); const time = now();
       const session = await (await collection()).findOne({ _id: id, accessHash: hash,
         revokedAt: null, accessExpiresAt: { $gt: time }, expiresAt: { $gt: time } });
       if (!session) throw failure();
       return userFor(session.ownerId);
     },
     async refresh(token) {
-      const { id, hash } = parse(token, "rt"); const time = now(); const rows = await collection();
+      const { id, hash } = parse(token, "rt", prefix); const time = now(); const rows = await collection();
       const session = await rows.findOne({ _id: id, revokedAt: null, expiresAt: { $gt: time } });
       if (!session) throw failure();
       if (session.refreshHash !== hash) {
@@ -59,7 +59,7 @@ export function createEnglishSessionStore({ getCollection, now = () => new Date(
       }
       await userFor(session.ownerId);
       if ((session.usedRefreshHashes?.length || 0) >= 4096) throw failure();
-      const tokens = pair(id);
+      const tokens = pair(id, prefix);
       const updated = await rows.updateOne({ _id: id, refreshHash: hash, revokedAt: null, expiresAt: { $gt: time } }, {
         $set: { refreshHash: digest(tokens.refresh_token), accessHash: digest(tokens.access_token),
           accessExpiresAt: new Date(Math.min(+session.expiresAt, +time + ACCESS_SECONDS * 1000)), updatedAt: time },
@@ -76,9 +76,15 @@ export function createEnglishSessionStore({ getCollection, now = () => new Date(
       for (const [token, kind, field] of [[accessToken, "at", "accessHash"], [refreshToken, "rt", "refreshHash"]]) {
         if (!token) continue;
         let parsed;
-        try { parsed = parse(token, kind); } catch { continue; }
+        try { parsed = parse(token, kind, prefix); } catch { continue; }
         await rows.updateOne({ _id: parsed.id, [field]: parsed.hash }, { $set: { revokedAt: time } });
       }
     },
   };
+}
+export function createEnglishSessionStore(options) {
+  return createScopedDesktopSessionStore({ ...options, prefix: "gec", collectionName: "englishDesktopSessions" });
+}
+export function createGulongEngineSessionStore(options) {
+  return createScopedDesktopSessionStore({ ...options, prefix: "gge", collectionName: "gulongEngineDesktopSessions" });
 }

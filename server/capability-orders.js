@@ -6,8 +6,9 @@ import { enforceRateLimit as databaseRateLimit } from "./rate-limit.js";
 import { fingerprintIp, hashOpaqueToken } from "./security.js";
 import { createPresignedDownloadUrl, createPresignedPutUrl, deleteObject, ensureBrowserUploadCors, headObject, sanitizeFilename } from "./cos.js";
 import { localizeErrorMessage } from "../shared/error-messages.js";
-import { readEnglishEntitlement } from "./english-coach-products.js";
+import { readEnglishEntitlement, readGulongEngineEntitlement } from "./english-coach-products.js";
 import { ENGLISH_AUDIO_MAX_BYTES, ENGLISH_AUDIO_MIME, ENGLISH_CAPABILITY_DEFINITIONS, englishNodeSharesCapability, englishWorkerOwnsClaim, isEnglishCapability, validateEnglishInlineResult } from "./english-coach-capabilities.js";
+import { GULONG_ENGINE_CAPABILITY_DEFINITIONS, gulongEngineNodeSharesCapability, isGulongEngineCapability, validateGulongEngineInlineResult } from "./gulong-engine-capabilities.js";
 
 export const CAPABILITY_ORDER_PROTOCOL = "gulong-capability-orders-v1";
 export const CAPABILITY_BINDING_HEADER = "X-Gulong-Account-Binding";
@@ -220,6 +221,7 @@ function definition(id, inputMime, outputMime, options = {}) {
 
 export const CAPABILITY_ORDER_DEFINITIONS = Object.freeze([
   ...ENGLISH_CAPABILITY_DEFINITIONS,
+  ...GULONG_ENGINE_CAPABILITY_DEFINITIONS,
   definition("qwen_image_2_1.text_to_image", [], ["image/png", "image/jpeg", "image/webp"], { defaultEtaSeconds: 180, maxRuntimeSeconds: 1800 }),
   definition("qwen_image_2_1.multi_image_edit", ["image/png", "image/jpeg", "image/webp"], ["image/png", "image/jpeg", "image/webp"], { maxAssets: 9, maxTotalInputBytes: 512 * 1024 * 1024, defaultEtaSeconds: 240, maxRuntimeSeconds: 2400 }),
   definition("minimax_music_3.generate", AUDIO_MIME, ["audio/mpeg", "audio/wav", "audio/flac"], { maxAssets: 1, maxTotalInputBytes: 512 * 1024 * 1024, defaultEtaSeconds: 300, maxRuntimeSeconds: 3600 }),
@@ -379,7 +381,9 @@ export function normalizeCapabilityReport(value = {}, now = new Date()) {
     validated,
     enabled,
     maxConcurrent,
-    sharingOptIn: isEnglishCapability(capabilityId) && value.sharing_opt_in === true,
+    sharingOptIn: (isEnglishCapability(capabilityId) || isGulongEngineCapability(capabilityId)) && value.sharing_opt_in === true,
+    supportedModels: isGulongEngineCapability(capabilityId) && Array.isArray(value.supported_models)
+      ? value.supported_models.filter((model) => typeof model === "string" && /^[a-zA-Z0-9_.:-]{1,120}$/.test(model)).slice(0, 32) : [],
     validation: {
       testedAt,
       artifactSha256,
@@ -393,10 +397,13 @@ export function capabilityNodeCanRunOrder(node, order) {
   if (!node || node.availableSlots < 1) return false;
   if (order.preferredNodeId && order.preferredNodeId !== node.nodeId) return false;
   if (node.binding?.userId && String(node.binding.userId) !== String(order.requesterUserId)
-    && !(order.sharingScope === "english_shared" && englishNodeSharesCapability(node, order.capabilityId))) return false;
+    && !(order.sharingScope === "english_shared" && englishNodeSharesCapability(node, order.capabilityId))
+    && !(order.sharingScope === "gulong_shared" && gulongEngineNodeSharesCapability(node, order.capabilityId))) return false;
   return Boolean(node.capabilities?.some((item) => item.capabilityId === order.capabilityId
     && (!order.capabilityVersion || item.capabilityVersion === order.capabilityVersion)
-    && item.installed && item.validated && item.enabled));
+    && item.installed && item.validated && item.enabled
+    && (!isGulongEngineCapability(order.capabilityId) || !order.parameters?.model || order.parameters.model === "auto"
+      || (item.supportedModels || []).includes(order.parameters.model))));
 }
 
 function publicDefinition(item) {
@@ -505,12 +512,24 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
   const ensureUploadCors = dependencies.ensureBrowserUploadCors || ensureBrowserUploadCors;
   const { authenticate, requireTrustedMutation } = dependencies;
   const englishEntitlement = dependencies.readEnglishEntitlement || ((ownerId, now) => readEnglishEntitlement(ownerId, now, getCollection));
+  const gulongEntitlement = dependencies.readGulongEngineEntitlement || ((ownerId, now) => readGulongEngineEntitlement(ownerId, now, getCollection));
   const requestKey = (ownerId, key) => createHash("sha256").update(`${ownerId}:${key}`).digest("hex");
 
   async function requireEnglish(c, ownerId) {
     const entitlement = await englishEntitlement(ownerId, new Date());
     return entitlement.active ? null : c.json({ code: "ENGLISH_SUBSCRIPTION_REQUIRED", message: "请开通生效中的英语教练月套餐后使用共享英语能力", entitlement }, 403);
   }
+  async function requireGulong(c, ownerId) {
+    const entitlement = await gulongEntitlement(ownerId, new Date());
+    return entitlement.active ? null : c.json({ code: "GULONG_ENGINE_SUBSCRIPTION_REQUIRED", message: "请开通生效中的古龙绿色版月套餐后使用共享能力", entitlement }, 403);
+  }
+  const clientMayReadOrder = (auth, order) => auth.kind !== "desktop-english" || isEnglishCapability(order.capabilityId) || order.cancellationTombstone;
+  const scopedMayReadOrder = (auth, order) => clientMayReadOrder(auth, order)
+    && (auth.kind !== "desktop-gulong-engine" || isGulongEngineCapability(order.capabilityId) || order.cancellationTombstone);
+  const workerOwnsClaim = (order, auth) => englishWorkerOwnsClaim(order, auth)
+    || (isGulongEngineCapability(order.capabilityId) && order.sharingScope === "gulong_shared"
+      && String(order.assignedNode?.userId) === String(auth.user._id)
+      && String(order.assignedNode?.bindingId) === String(auth.binding._id));
 
   async function cancelOwnedOrder(order, now = new Date()) {
     const orders = await getCollection("capabilityOrders");
@@ -567,7 +586,8 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
 
   app.get("/api/v1/capability-orders/catalog", async (c) => {
     const auth = await authenticate(c); if (auth.error) return auth.error;
-    const definitions = auth.kind === "desktop-english" ? CAPABILITY_ORDER_DEFINITIONS.filter((item) => isEnglishCapability(item.capabilityId)) : CAPABILITY_ORDER_DEFINITIONS;
+    const definitions = auth.kind === "desktop-english" ? CAPABILITY_ORDER_DEFINITIONS.filter((item) => isEnglishCapability(item.capabilityId))
+      : auth.kind === "desktop-gulong-engine" ? CAPABILITY_ORDER_DEFINITIONS.filter((item) => isGulongEngineCapability(item.capabilityId)) : CAPABILITY_ORDER_DEFINITIONS;
     c.header("Cache-Control", "private, no-store, max-age=0");
     return c.json({ protocol_version: CAPABILITY_ORDER_PROTOCOL, capabilities: definitions.map(publicDefinition) });
   });
@@ -585,6 +605,10 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     if (auth.kind === "desktop-english") {
       const rejected = await requireEnglish(c, auth.user.id); if (rejected) return rejected;
       if (bytes > ENGLISH_AUDIO_MAX_BYTES || !ENGLISH_AUDIO_MIME.includes(contentType)) return c.json({ code: "CAPABILITY_INPUT_LIMIT_EXCEEDED", message: "英语录音仅支持不超过 20 MiB 的 WAV、MP3、FLAC 或 WebM 音频" }, 400);
+    }
+    if (auth.kind === "desktop-gulong-engine") {
+      const rejected = await requireGulong(c, auth.user.id); if (rejected) return rejected;
+      if (bytes > 40 * 1024 * 1024 || !IMAGE_MIME.includes(contentType)) return c.json({ code: "CAPABILITY_INPUT_LIMIT_EXCEEDED", message: "古龙绿色版共享素材仅支持不超过 40 MiB 的 PNG、JPEG 或 WebP 图片" }, 400);
     }
     if (bytes < 1 || bytes > CAPABILITY_MAX_ASSET_BYTES || !/^[A-F0-9]{64}$/.test(sha256) || !/^(image|audio|video)\/[a-z0-9.+-]+$/i.test(contentType)) return c.json({ code: "VALIDATION_ERROR", message: "素材类型、大小或 SHA-256 不正确" }, 400);
     await ensureUploadCors();
@@ -633,6 +657,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     if (rawKey.length < 8 || rawKey.length > 160) return c.json({ code: "IDEMPOTENCY_KEY_REQUIRED", message: "请提供 8–160 字符的 Idempotency-Key" }, 400);
     const capabilityId = String(body.capability_id || "").trim().toLowerCase();
     if (auth.kind === "desktop-english" && !isEnglishCapability(capabilityId)) return c.json({ code: "ENGLISH_CAPABILITY_ONLY", message: "英语教练凭据仅可用于英语学习能力" }, 403);
+    if (auth.kind === "desktop-gulong-engine" && !isGulongEngineCapability(capabilityId)) return c.json({ code: "GULONG_ENGINE_CAPABILITY_ONLY", message: "古龙绿色版凭据仅可用于本产品共享能力" }, 403);
     const capability = CAPABILITY_MAP.get(capabilityId);
     if (!capability) return c.json({ code: "UNKNOWN_CAPABILITY", message: "该能力未注册到官网统一订单目录" }, 400);
     if (capability.legacyRoute) return c.json({ code: "USE_LEGACY_H3_API", message: "MiniMax H3 视频任务继续使用现有 /api/h3/tasks 合同", legacy_route: capability.legacyRoute }, 409);
@@ -662,6 +687,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       return c.json({ order: publicOrder(existing, issueDownloadUrl), idempotent: true }, 201);
     }
     if (isEnglishCapability(capabilityId)) { const rejected = await requireEnglish(c, ownerId); if (rejected) return rejected; }
+    if (isGulongEngineCapability(capabilityId)) { const rejected = await requireGulong(c, ownerId); if (rejected) return rejected; }
     const now = new Date();
     const orderId = new ObjectId();
     const estimate = capability.defaultEtaSeconds;
@@ -673,6 +699,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       sourceChannel: body.source_channel === "desktop_agent" ? "desktop_agent" : "website",
       capabilityId,
       ...(isEnglishCapability(capabilityId) ? { sharingScope: "english_shared", entitlementPlan: "english_coach_monthly" } : {}),
+      ...(isGulongEngineCapability(capabilityId) ? { sharingScope: "gulong_shared", entitlementPlan: "gulong_engine_monthly" } : {}),
       capabilityVersion: requestedCapabilityVersion,
       parameters,
       assets,
@@ -712,7 +739,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const ownerId = new ObjectId(auth.user.id);
     await recoverExpired();
     const order = await (await getCollection("capabilityOrders")).findOne({ idempotencyKey: requestKey(ownerId, key), requesterUserId: ownerId });
-    if (!order || (auth.kind === "desktop-english" && !isEnglishCapability(order.capabilityId) && !order.cancellationTombstone)) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
+    if (!order || !scopedMayReadOrder(auth, order)) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
     c.header("Cache-Control", "private, no-store, max-age=0");
     return c.json({ order: publicOrder(order, issueDownloadUrl) });
   });
@@ -735,7 +762,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     try { await orders.updateOne({ idempotencyKey }, { $setOnInsert: tombstone }, { upsert: true }); }
     catch (error) { if (error?.code !== 11000) throw error; }
     const before = await orders.findOne({ idempotencyKey, requesterUserId: ownerId });
-    if (!before || (auth.kind === "desktop-english" && !isEnglishCapability(before.capabilityId) && !before.cancellationTombstone)) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
+    if (!before || !scopedMayReadOrder(auth, before)) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
     const order = await cancelOwnedOrder(before, now);
     return c.json({ order: publicOrder(order, issueDownloadUrl), idempotent: CAPABILITY_TERMINAL.has(before.status) });
   });
@@ -745,7 +772,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
     await recoverExpired();
     const order = await (await getCollection("capabilityOrders")).findOne({ _id: new ObjectId(c.req.param("id")), requesterUserId: new ObjectId(auth.user.id) });
-    if (!order || (auth.kind === "desktop-english" && !isEnglishCapability(order.capabilityId) && !order.cancellationTombstone)) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
+    if (!order || !scopedMayReadOrder(auth, order)) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
     c.header("Cache-Control", "private, no-store, max-age=0");
     return c.json({ order: publicOrder(order, issueDownloadUrl) });
   });
@@ -757,7 +784,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const orders = await getCollection("capabilityOrders");
     const filter = { _id: new ObjectId(c.req.param("id")), requesterUserId: new ObjectId(auth.user.id) };
     const before = await orders.findOne(filter);
-    if (!before || (auth.kind === "desktop-english" && !isEnglishCapability(before.capabilityId) && !before.cancellationTombstone)) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
+    if (!before || !scopedMayReadOrder(auth, before)) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
     return c.json({ order: publicOrder(await cancelOwnedOrder(before), issueDownloadUrl), idempotent: CAPABILITY_TERMINAL.has(before.status) });
   });
 
@@ -766,7 +793,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const order = await (await getCollection("capabilityOrders")).findOne({ _id: new ObjectId(c.req.param("id")) });
     if (!order?.assignedNode?.nodeId) return c.json({ code: "ORDER_NOT_ASSIGNED", message: "能力订单尚未分配执行节点" }, 409);
     const auth = await authenticateBinding(c, order.assignedNode.nodeId); if (auth.error) return auth.error;
-    if (!englishWorkerOwnsClaim(order, auth) || String(c.req.query("claim_id") || "") !== order.claimId) return c.json({ code: "CLAIM_MISMATCH", message: "订单领取身份不匹配" }, 409);
+    if (!workerOwnsClaim(order, auth) || String(c.req.query("claim_id") || "") !== order.claimId) return c.json({ code: "CLAIM_MISMATCH", message: "订单领取身份不匹配" }, 409);
     const terminal = CAPABILITY_TERMINAL.has(order.status);
     const cancellationRequested = order.status === "cancelled";
     const leaseExpired = !terminal && order.claimLeaseUntil && new Date(order.claimLeaseUntil) <= new Date();
@@ -821,12 +848,19 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     nodes.sort((a, b) => a.estimatedTotalSeconds - b.estimatedTotalSeconds || a.runningTaskCount - b.runningTaskCount || a.nodeId.localeCompare(b.nodeId));
     const capabilityIds = [...new Set(nodes.flatMap((item) => item.capabilities.map((capability) => capability.capabilityId)))];
     const sharedEnglishIds = ownCapabilities.filter((item) => isEnglishCapability(item.capabilityId) && item.sharingOptIn).map((item) => item.capabilityId);
-    const ownerScope = sharedEnglishIds.length ? { $or: [{ requesterUserId: auth.user._id }, { capabilityId: { $in: sharedEnglishIds }, sharingScope: "english_shared" }] } : { requesterUserId: auth.user._id };
+    const sharedGulongIds = ownCapabilities.filter((item) => isGulongEngineCapability(item.capabilityId) && item.sharingOptIn).map((item) => item.capabilityId);
+    const ownerScope = { $or: [{ requesterUserId: auth.user._id },
+      ...(sharedEnglishIds.length ? [{ capabilityId: { $in: sharedEnglishIds }, sharingScope: "english_shared" }] : []),
+      ...(sharedGulongIds.length ? [{ capabilityId: { $in: sharedGulongIds }, sharingScope: "gulong_shared" }] : [])] };
     const candidates = await (await getCollection("capabilityOrders")).find({ ...ownerScope, status: "queued", capabilityId: { $in: capabilityIds }, nextEligibleAt: { $lte: now }, autoCancelAt: { $gt: now } }).sort({ createdAt: 1, _id: 1 }).limit(100).toArray();
     let selected = null;
     for (const order of candidates) {
       if (isEnglishCapability(order.capabilityId) && !(await englishEntitlement(order.requesterUserId, now)).active) {
         await (await getCollection("capabilityOrders")).updateOne({ _id: order._id, status: "queued" }, { $set: { status: "cancelled", stage: "cancelled", cancelReason: "english_subscription_inactive", error: { code: "ENGLISH_SUBSCRIPTION_REQUIRED", message: "英语教练套餐尚未生效、已到期或已撤销" }, cancelledAt: now, updatedAt: now } });
+        continue;
+      }
+      if (isGulongEngineCapability(order.capabilityId) && !(await gulongEntitlement(order.requesterUserId, now)).active) {
+        await (await getCollection("capabilityOrders")).updateOne({ _id: order._id, status: "queued" }, { $set: { status: "cancelled", stage: "cancelled", cancelReason: "gulong_engine_subscription_inactive", error: { code: "GULONG_ENGINE_SUBSCRIPTION_REQUIRED", message: "古龙绿色版套餐尚未生效、已到期或已撤销" }, cancelledAt: now, updatedAt: now } });
         continue;
       }
       // A LAN proxy cannot opt another node into serving unrelated accounts.
@@ -852,7 +886,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     if (!order) return c.json({ code: "ORDER_NOT_ACTIVE", message: "能力订单不存在或不再执行" }, 409);
     if (!order.claimLeaseUntil || new Date(order.claimLeaseUntil) <= now) return c.json({ code: "CLAIM_LEASE_EXPIRED", message: "订单领取租约已过期，不能再签发输出票据" }, 409);
     const auth = await authenticateBinding(c, order.assignedNode?.nodeId); if (auth.error) return auth.error;
-    if (!englishWorkerOwnsClaim(order, auth)) return c.json({ code: "CLAIM_MISMATCH", message: "订单执行账户不匹配" }, 409);
+    if (!workerOwnsClaim(order, auth)) return c.json({ code: "CLAIM_MISMATCH", message: "订单执行账户不匹配" }, 409);
     if (String(body.claim_id || "") !== order.claimId) return c.json({ code: "CLAIM_MISMATCH", message: "订单领取凭据不匹配" }, 409);
     const capability = CAPABILITY_MAP.get(order.capabilityId);
     const contentType = String(body.content_type || "").trim().toLowerCase();
@@ -890,7 +924,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     let order = await orders.findOne({ _id: new ObjectId(body.order_id) });
     if (!order) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
     const auth = await authenticateBinding(c, order.assignedNode?.nodeId); if (auth.error) return auth.error;
-    if (!englishWorkerOwnsClaim(order, auth) || String(body.claim_id || "") !== order.claimId) return c.json({ code: "CLAIM_MISMATCH", message: "订单领取身份不匹配" }, 409);
+    if (!workerOwnsClaim(order, auth) || String(body.claim_id || "") !== order.claimId) return c.json({ code: "CLAIM_MISMATCH", message: "订单领取身份不匹配" }, 409);
     const eventId = String(body.event_id || "").trim();
     if (!/^[A-Za-z0-9._:-]{8,160}$/.test(eventId)) return c.json({ code: "CALLBACK_EVENT_REQUIRED", message: "回调必须提供稳定 event_id" }, 400);
     const callbacks = await getCollection("capabilityOrderCallbacks");
@@ -925,6 +959,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       const capability = CAPABILITY_MAP.get(order.capabilityId);
       const inlineResult = body.inline_result == null ? null : body.inline_result;
       if (!validateEnglishInlineResult(order.capabilityId, inlineResult, order.parameters)) return c.json({ code: "ENGLISH_RESULT_INVALID", message: "英语结果必须符合文本或声学发音评估合同" }, 400);
+      if (!validateGulongEngineInlineResult(order.capabilityId, inlineResult)) return c.json({ code: "GULONG_ENGINE_RESULT_INVALID", message: "绿色版文本结果必须包含不超过 64 KB 的文字" }, 400);
       const outputRefs = Array.isArray(body.outputs) ? body.outputs : [];
       if (inlineResult != null && (!capability.inlineResult || JSON.stringify(inlineResult).length > 64_000)) return c.json({ code: "INLINE_RESULT_NOT_ALLOWED", message: "该能力不允许此内联结果或结果超过 64 KB" }, 400);
       if (!outputRefs.length && inlineResult == null) return c.json({ code: "OUTPUT_REQUIRED", message: "完成回调必须包含输出清单或允许的内联结果" }, 400);

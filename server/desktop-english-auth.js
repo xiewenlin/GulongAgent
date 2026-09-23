@@ -53,7 +53,11 @@ async function verifyPassword(identifier, password) {
   }
 }
 
-export function createEnglishDesktopAuth(dependencies = {}) {
+export function createScopedDesktopAuth(dependencies = {}) {
+  const root = dependencies.root || ENGLISH_DESKTOP_ROOT;
+  const tokenPrefix = dependencies.tokenPrefix || "gec";
+  const scope = dependencies.scope || "english-desktop";
+  const authKind = dependencies.authKind || "desktop-english";
   const sessions = dependencies.sessions || createEnglishSessionStore({ getCollection });
   const verify = dependencies.verifyPassword || verifyPassword;
   const entitlement = dependencies.readEntitlement || readEnglishEntitlement;
@@ -62,40 +66,40 @@ export function createEnglishDesktopAuth(dependencies = {}) {
     // The identifier limiter below remains effective even when a proxy header is forged.
     // Treat this header as only a secondary throttle key, never as the sole login guard.
     const ip = digest(String(c.req.header("x-forwarded-for") || "local").slice(0, 256));
-    const rate = await rateLimit(`english-desktop:${key}:${ip}`, { limit, windowMs });
+    const rate = await rateLimit(`${scope}:${key}:${ip}`, { limit, windowMs });
     if (!rate.allowed) throw Object.assign(new Error("请求过于频繁"), { status: 429 });
   }
   async function authenticate(c) {
     const token = bearer(c);
-    if (!token.startsWith("gec_at_")) return null;
+    if (!token.startsWith(`${tokenPrefix}_at_`)) return null;
     try {
       const user = await sessions.authenticate(token);
-      return { kind: "desktop-english", user: { ...user, id: user._id.toString() }, session: null };
+      return { kind: authKind, user: { ...user, id: user._id.toString() }, session: null };
     } catch (error) { return { error: fail(c, error) }; }
   }
   function register(app) {
-    app.use(`${ENGLISH_DESKTOP_ROOT}/*`, async (c, next) => { c.header("Cache-Control", "no-store, max-age=0"); c.header("Pragma", "no-cache"); await next(); });
-    app.post(`${ENGLISH_DESKTOP_ROOT}/auth/login`, async (c) => {
+    app.use(`${root}/*`, async (c, next) => { c.header("Cache-Control", "no-store, max-age=0"); c.header("Pragma", "no-cache"); await next(); });
+    app.post(`${root}/auth/login`, async (c) => {
       try {
         await limited(c, "login", 10, 10 * 60_000);
         const body = await readBody(c);
         const identifier = typeof body.identifier === "string" ? body.identifier.trim() : "";
         if (!identifier || identifier.length > 320 || /[\r\n\0]/.test(identifier)
           || typeof body.password !== "string" || !body.password || body.password.length > 1024 || body.password.includes("\0")) throw invalid();
-        const accountRate = await rateLimit(`english-desktop:identifier:${digest(identifier.toLowerCase())}`, { limit: 20, windowMs: 10 * 60_000 });
+        const accountRate = await rateLimit(`${scope}:identifier:${digest(identifier.toLowerCase())}`, { limit: 20, windowMs: 10 * 60_000 });
         if (!accountRate.allowed) throw Object.assign(new Error("请求过于频繁"), { status: 429 });
         return c.json(await sessions.issue(await verify(identifier, body.password)));
       } catch (error) { return fail(c, error, true); }
     });
-    app.post(`${ENGLISH_DESKTOP_ROOT}/auth/refresh`, async (c) => {
+    app.post(`${root}/auth/refresh`, async (c) => {
       try { await limited(c, "refresh", 120, 60_000); const body = await readBody(c); return c.json(await sessions.refresh(body.refresh_token)); }
       catch (error) { return fail(c, error); }
     });
-    app.post(`${ENGLISH_DESKTOP_ROOT}/auth/logout`, async (c) => {
+    app.post(`${root}/auth/logout`, async (c) => {
       try { await limited(c, "logout", 120, 60_000); const body = await readBody(c); await sessions.revoke(bearer(c), body.refresh_token); return c.json({ ok: true }); }
       catch (error) { return fail(c, error); }
     });
-    app.get(`${ENGLISH_DESKTOP_ROOT}/account`, async (c) => {
+    app.get(`${root}/account`, async (c) => {
       try {
         await limited(c, "account", 180, 60_000);
         const auth = await authenticate(c);
@@ -107,6 +111,9 @@ export function createEnglishDesktopAuth(dependencies = {}) {
     });
   }
   return { register, authenticate };
+}
+export function createEnglishDesktopAuth(dependencies = {}) {
+  return createScopedDesktopAuth(dependencies);
 }
 const production = createEnglishDesktopAuth();
 export const registerEnglishDesktopAuthRoutes = production.register;

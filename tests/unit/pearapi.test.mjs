@@ -410,7 +410,9 @@ test("monthly subscription payments credit the wallet once and PearAPI routes ar
     readFile(new URL("../../src/components/AccountDashboard.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../vercel.json", import.meta.url), "utf8"),
   ]);
-  assert.match(serverSource, /registerPearApiRoutes\(app,\s*\{\s*authenticate: authenticateSiteOrDesktopChandler,\s*requireAdmin,\s*requireTrustedMutation,\s*\}\)/);
+  assert.match(serverSource, /registerPearApiRoutes\(app,\s*\{\s*authenticate: async \(c, options\) =>/);
+  assert.match(serverSource, /authenticateGulongEngineDesktop\(c\)/);
+  assert.match(serverSource, /return authenticateSiteOrDesktopChandler\(c, options\)/);
   assert.match(serverSource, /source: "online_subscription"/);
   assert.match(serverSource, /source: "offline_subscription"/);
   assert.match(serverSource, /creditPaymentBalanceWithPromotion/);

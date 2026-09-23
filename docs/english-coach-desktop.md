@@ -2,6 +2,12 @@
 
 生产基址：`https://www.sologle.com`。机器可读文档：`/api/openapi.json`；交互文档：`/api/docs`。请求与响应均为 JSON，音频通过短期票据直传私有腾讯云 COS。用户使用已有官网账号，不需要开发者 API Key。
 
+## 桌面绿色版下载与发布
+
+- 官网 `/download` 的“英语教练”卡片读取独立发行渠道 `website-english-coach`，未上传版本时明确显示“绿色版准备中”。
+- 管理员在“版本管理”中选择“英语教练”，只可手动上传 `.zip` 绿色软件压缩包；非 ZIP 文件由前端和服务端双重拒绝。文件从浏览器直传成都 COS，完成大小核验后成为该渠道唯一最新版，随后清理旧版本对象。
+- `GET /api/downloads` 的 `editions[]` 在有最新版时包含 `editionKey: "english_coach"`；`GET /api/downloads/english_coach/download` 返回 15 分钟有效的私有 COS 下载链接与文件名。无已上传版本返回 `404 RELEASE_NOT_FOUND`。
+
 ## 登录、刷新与权益
 
 | 操作 | 路径 | 请求 | 返回 |

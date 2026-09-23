@@ -7,6 +7,7 @@ import { readUserSecret, sealUserSecret } from "./security.js";
 import { localizeErrorMessage } from "../shared/error-messages.js";
 import { createPresignedDownloadUrl } from "./cos.js";
 import { readMarketWalletAmount } from "./codex-market-pricing.js";
+import { readGulongEngineEntitlement } from "./english-coach-products.js";
 import {
   SHORT_VIDEO_PLAN_ID,
   expireShortVideoPackageAllowance,
@@ -767,7 +768,7 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
   });
   const desktopGenerationCreateRoute = createRoute({
     method: "post", path: "/api/v1/desktop/pearapi/generations", tags: ["Desktop PearAPI Proxy"], summary: "幂等提交文本、图片或视频生成",
-    description: "必须使用 Chandler Bearer 令牌和 8–160 字符 Idempotency-Key。媒体只接受已完成 COS 回执校验的 asset_id，不接受任意 URL。",
+    description: "使用桌面 Chandler Bearer 或古龙引擎包月专用 gge_at_ 令牌，以及 8–160 字符 Idempotency-Key。gge_at_ 只允许目录内的九个免费文本模型；付费媒体不接受绿色版令牌。其他桌面媒体仅接受已完成 COS 回执校验的 asset_id。",
     request: { body: { required: true, content: { "application/json": { schema: DesktopGenerationRequestSchema } } } },
     responses: { 201: { description: "已提交或已完成" }, 400: { description: "请求无效", content: { "application/json": { schema: ErrorSchema } } }, 401: { description: "桌面登录令牌无效", content: { "application/json": { schema: ErrorSchema } } }, 402: { description: "余额不足或订阅无效", content: { "application/json": { schema: ErrorSchema } } }, 409: { description: "幂等键冲突", content: { "application/json": { schema: ErrorSchema } } }, 503: { description: "官网管理员尚未配置 PearAPI", content: { "application/json": { schema: ErrorSchema } } } },
   });
@@ -775,6 +776,12 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     method: "get", path: "/api/v1/desktop/pearapi/generations/{id}", tags: ["Desktop PearAPI Proxy"], summary: "轮询当前账号的生成任务",
     request: { params: z.object({ id: z.string().trim().min(1).max(96) }) },
     responses: { 200: { description: "标准化生成状态" }, 401: { description: "未登录", content: { "application/json": { schema: ErrorSchema } } }, 404: { description: "任务不存在", content: { "application/json": { schema: ErrorSchema } } } },
+  });
+  const desktopGenerationByRequestRoute = createRoute({
+    method: "get", path: "/api/v1/desktop/pearapi/generations/by-request/{key}", tags: ["Desktop PearAPI Proxy"],
+    summary: "按原始幂等键找回免费文本生成结果，不重新发起模型调用",
+    request: { params: z.object({ key: z.string().regex(/^[A-Za-z0-9._:-]{8,160}$/) }) },
+    responses: { 200: { description: "只返回当前登录账号原请求的状态与结果" }, 401: { description: "未登录" }, 404: { description: "请求不存在" } },
   });
   const desktopGenerationCancelRoute = createRoute({
     method: "post", path: "/api/v1/desktop/pearapi/generations/{id}/cancel", tags: ["Desktop PearAPI Proxy"], summary: "幂等取消生成任务并按账本边界退款",
@@ -845,7 +852,10 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     if (!FREE_MODEL_IDS.has(input.model)) return c.json({ code: "MODEL_NOT_ALLOWED", message: "请选择管理员公布的 PearAPI 免费模型" }, 400);
     const ownerId = new ObjectId(auth.user.id);
     const now = new Date();
-    if (auth.user.role !== "admin" && auth.kind !== "desktop-chandler") {
+    if (auth.kind === "desktop-gulong-engine") {
+      const entitlement = await readGulongEngineEntitlement(ownerId, now);
+      if (!entitlement.active) return c.json({ code: "GULONG_ENGINE_SUBSCRIPTION_REQUIRED", message: "请先开通有效的古龙引擎包月套餐", entitlement }, 403);
+    } else if (auth.user.role !== "admin" && auth.kind !== "desktop-chandler") {
       const subscription = await (await getCollection("subscriptions")).findOne({ ownerId });
       if (!subscription || subscription.currentPeriodStart > now || subscription.currentPeriodEnd <= now || ["cancelled", "canceled", "expired"].includes(subscription.status)) {
         return c.json({ code: "SUBSCRIPTION_REQUIRED", message: "网页版古龙 Agent 需要生效中的会员订阅，请先续费后使用" }, 402);
@@ -1117,14 +1127,18 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     return c.json({ job: mediaPublicView(job) });
   });
 
-  async function requireDesktopChandler(c) {
+  async function requireDesktopChandler(c, { requireEntitlement = false } = {}) {
     if (!/^Bearer\s+\S+/i.test(String(c.req.header("authorization") || ""))) {
-      return { error: c.json({ ok: false, code: "DESKTOP_AUTH_REQUIRED", message: "请使用桌面端 Chandler 登录令牌访问此接口", retryable: false }, 401) };
+      return { error: c.json({ ok: false, code: "DESKTOP_AUTH_REQUIRED", message: "请使用有效的桌面登录令牌访问此接口", retryable: false }, 401) };
     }
     const auth = await authenticate(c);
     if (auth.error) return auth;
-    if (auth.kind !== "desktop-chandler") {
-      return { error: c.json({ ok: false, code: "DESKTOP_AUTH_REQUIRED", message: "当前凭据不是有效的桌面端 Chandler 登录令牌", retryable: false }, 401) };
+    if (!["desktop-chandler", "desktop-gulong-engine"].includes(auth.kind)) {
+      return { error: c.json({ ok: false, code: "DESKTOP_AUTH_REQUIRED", message: "当前凭据不是有效的桌面登录令牌", retryable: false }, 401) };
+    }
+    if (auth.kind === "desktop-gulong-engine" && requireEntitlement) {
+      const entitlement = await readGulongEngineEntitlement(auth.user.id);
+      if (!entitlement.active) return { error: c.json({ ok: false, code: "GULONG_ENGINE_SUBSCRIPTION_REQUIRED", message: "请先开通有效的古龙引擎包月套餐", entitlement, retryable: false }, 403) };
     }
     return auth;
   }
@@ -1144,16 +1158,17 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     return c.json({
       ok: true,
       configured: Boolean(record?.tokenEncrypted),
-      media_configured: Boolean(record?.keyEncrypted),
+      media_configured: auth.kind === "desktop-gulong-engine" ? false : Boolean(record?.keyEncrypted),
       default_text_model: PEAR_API_DEFAULT_TEXT_MODEL_ID,
       text_models: PEAR_API_FREE_MODELS.map((model) => ({ ...model, free: true })),
-      image_models: PEAR_API_IMAGE_MODELS.map((model) => publicPearMediaModel(model, PEAR_API_MARKUP_RATE)),
-      video_models: PEAR_API_VIDEO_MODELS.map((model) => publicPearMediaModel(model, PEAR_API_MARKUP_RATE)),
+      image_models: auth.kind === "desktop-gulong-engine" ? [] : PEAR_API_IMAGE_MODELS.map((model) => publicPearMediaModel(model, PEAR_API_MARKUP_RATE)),
+      video_models: auth.kind === "desktop-gulong-engine" ? [] : PEAR_API_VIDEO_MODELS.map((model) => publicPearMediaModel(model, PEAR_API_MARKUP_RATE)),
     });
   });
 
   app.openapi(desktopAssetPresignRoute, async (c) => {
     const auth = await requireDesktopChandler(c); if (auth.error) return auth.error;
+    if (auth.kind === "desktop-gulong-engine") return c.json({ code: "FREE_TEXT_ONLY", message: "古龙绿色版令牌不能购买 PearAPI 媒体模型；本地共享素材请使用统一能力订单接口" }, 403);
     const response = await app.request("/api/h3/assets/presign", {
       method: "POST",
       headers: desktopInternalHeaders(c),
@@ -1164,6 +1179,7 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
 
   app.openapi(desktopAssetCompleteRoute, async (c) => {
     const auth = await requireDesktopChandler(c); if (auth.error) return auth.error;
+    if (auth.kind === "desktop-gulong-engine") return c.json({ code: "FREE_TEXT_ONLY", message: "古龙绿色版令牌不能访问 PearAPI 媒体素材" }, 403);
     return app.request(`/api/h3/assets/${encodeURIComponent(c.req.valid("param").id)}/complete`, {
       method: "POST",
       headers: desktopInternalHeaders(c),
@@ -1172,10 +1188,11 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
   });
 
   app.openapi(desktopGenerationCreateRoute, async (c) => {
-    const auth = await requireDesktopChandler(c); if (auth.error) return auth.error;
+    const auth = await requireDesktopChandler(c, { requireEntitlement: true }); if (auth.error) return auth.error;
     const idempotency = normalizedIdempotencyKey(c, { required: true });
     if (idempotency.error) return idempotency.error;
     const input = c.req.valid("json");
+    if (auth.kind === "desktop-gulong-engine" && input.type !== "text") return c.json({ code: "FREE_TEXT_ONLY", message: "古龙绿色版仅可通过此接口调用九个免费文本模型；图片与视频请走明确的共享节点能力合同" }, 403);
     const ownerId = new ObjectId(auth.user.id);
     const prompt = String(input.prompt || "").trim();
     if (input.type === "text") {
@@ -1242,6 +1259,7 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     const rate = await enforceRateLimit(`pear-desktop-status:${auth.user.id}`, { limit: 180, windowMs: 60_000 });
     if (!rate.allowed) return c.json({ ok: false, code: "RATE_LIMITED", message: "任务状态查询过于频繁，请稍后重试", retryable: true }, 429);
     const id = c.req.valid("param").id;
+    if (auth.kind === "desktop-gulong-engine" && !id.startsWith("pearop_")) return c.json({ code: "FREE_TEXT_ONLY", message: "古龙绿色版令牌只能查询免费文本任务" }, 403);
     const ownerId = new ObjectId(auth.user.id);
     if (id.startsWith("pearop_")) {
       const workflow = await (await getCollection("agentWorkflows")).findOne({ operationId: id, ownerId });
@@ -1272,12 +1290,20 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     return c.json({ ok: true, generation: pearProxyGenerationView({ ...payload.job, proxyId: payload.job?.id }) });
   });
 
+  app.openapi(desktopGenerationByRequestRoute, async (c) => {
+    const auth = await requireDesktopChandler(c); if (auth.error) return auth.error;
+    const ownerId = new ObjectId(auth.user.id);
+    const id = `pearop_idem_${stableRequestHash(`${ownerId}:${c.req.valid("param").key}`).slice(0, 32)}`;
+    return app.request(`/api/v1/desktop/pearapi/generations/${id}`, { headers: desktopInternalHeaders(c) });
+  });
+
   app.openapi(desktopGenerationCancelRoute, async (c) => {
     const rejected = requireTrustedMutation(c); if (rejected) return rejected;
     const auth = await requireDesktopChandler(c); if (auth.error) return auth.error;
     const rate = await enforceRateLimit(`pear-desktop-cancel:${auth.user.id}`, { limit: 30, windowMs: 10 * 60_000 });
     if (!rate.allowed) return c.json({ ok: false, code: "RATE_LIMITED", message: "取消请求过于频繁，请稍后重试", retryable: true }, 429);
     const id = c.req.valid("param").id;
+    if (auth.kind === "desktop-gulong-engine" && !id.startsWith("pearop_")) return c.json({ code: "FREE_TEXT_ONLY", message: "古龙绿色版令牌只能取消免费文本任务" }, 403);
     const ownerId = new ObjectId(auth.user.id);
     if (id.startsWith("pearop_")) {
       const workflows = await getCollection("agentWorkflows");

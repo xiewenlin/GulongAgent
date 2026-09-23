@@ -2,6 +2,7 @@ export const SUBSCRIPTION_PRODUCTS = [
   {id:"member",name:"古龙会员",description:"第二大脑与官网会员能力，按此产品的独立有效期生效。"},
   {id:"short_video_monthly",name:"短视频包月",description:"MiniMaxH3共享节点订阅；手动修改有效期不会增加付费额度。"},
   {id:"english_coach_monthly",name:"英语教练包月",monthlyFen:19800,description:"¥198 / 月 · 英语教练桌面端与订阅内共享能力，独立于其他会员。"},
+  {id:"gulong_engine_monthly",name:"古龙引擎包月",monthlyFen:19800,description:"¥198 / 月 · 绿色版 Agent、免费文本模型与已验证共享节点，独立于其他会员。"},
 ];
 export function localSubscriptionDate(value) {
   if(!value)return "";
@@ -39,7 +40,8 @@ export function subscriptionChanges(rows,baseline) {
 export function subscriptionOrderName(order) {
   const plan=order.planType||order.subscriptionPlan||order.partnerData?.subscription_plan;
   if(plan==="english_coach_monthly")return "英语教练包月 · 月度";
+  if(plan==="gulong_engine_monthly")return "古龙引擎包月 · 月度";
   if(plan==="short_video_monthly")return `短视频包月 · ${order.cycle==="year"?"年度":"月度"}`;
   return order.cycle==="year"?"年度会员":"月度会员";
 }
-export function subscriptionCycle(plan,cycle) {return plan.id==="english_coach_monthly"?"month":cycle;}
+export function subscriptionCycle(plan,cycle) {return ["english_coach_monthly","gulong_engine_monthly"].includes(plan.id)?"month":cycle;}

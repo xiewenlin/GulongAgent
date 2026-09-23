@@ -5,9 +5,12 @@ import { SHORT_VIDEO_MONTHLY_PRICE_FEN, SHORT_VIDEO_YEARLY_PRICE_FEN } from "./s
 export const ENGLISH_COACH_PLAN_ID = "english_coach_monthly";
 export const ENGLISH_COACH_PLAN_NAME = "英语教练包月";
 export const ENGLISH_COACH_MONTHLY_PRICE_FEN = 19_800;
-export const SUBSCRIPTION_PRODUCT_IDS = Object.freeze(["member", "short_video_monthly", ENGLISH_COACH_PLAN_ID]);
+export const GULONG_ENGINE_PLAN_ID = "gulong_engine_monthly";
+export const GULONG_ENGINE_MONTHLY_PRICE_FEN = 19_800;
+export const GULONG_ENGINE_PRODUCT = Object.freeze({ id: GULONG_ENGINE_PLAN_ID, name: "古龙引擎包月", monthlyFen: GULONG_ENGINE_MONTHLY_PRICE_FEN, yearlyFen: null, paymentProviders: ["offline"], autoRenew: false, renewalMode: "manual" });
+export const SUBSCRIPTION_PRODUCT_IDS = Object.freeze(["member", "short_video_monthly", ENGLISH_COACH_PLAN_ID, GULONG_ENGINE_PLAN_ID]);
 export const ENGLISH_COACH_PRODUCT = Object.freeze({ id: ENGLISH_COACH_PLAN_ID, name: ENGLISH_COACH_PLAN_NAME, monthlyFen: ENGLISH_COACH_MONTHLY_PRICE_FEN, yearlyFen: null, paymentProviders: ["offline"], autoRenew: false, renewalMode: "manual" });
-const NAMES = { member: "普通会员", short_video_monthly: "短视频包月", [ENGLISH_COACH_PLAN_ID]: ENGLISH_COACH_PLAN_NAME };
+const NAMES = { member: "普通会员", short_video_monthly: "短视频包月", [ENGLISH_COACH_PLAN_ID]: ENGLISH_COACH_PLAN_NAME, [GULONG_ENGINE_PLAN_ID]: "古龙引擎包月" };
 const CAPABILITIES = Object.freeze(["text", "speech", "transcribe", "assess"]);
 
 export function productSubscription(subscription, id) {
@@ -36,9 +39,9 @@ export function subscriptionProducts(subscription, now = new Date()) {
       enabled: Boolean(product && product.enabled !== false && !["cancelled", "canceled", "revoked"].includes(product.status)),
       currentPeriodStart: product?.currentPeriodStart || null,
       currentPeriodEnd: product?.currentPeriodEnd || null,
-      monthlyFen: id === ENGLISH_COACH_PLAN_ID ? ENGLISH_COACH_MONTHLY_PRICE_FEN : id === "short_video_monthly" ? SHORT_VIDEO_MONTHLY_PRICE_FEN : null,
+      monthlyFen: id === ENGLISH_COACH_PLAN_ID ? ENGLISH_COACH_MONTHLY_PRICE_FEN : id === GULONG_ENGINE_PLAN_ID ? GULONG_ENGINE_MONTHLY_PRICE_FEN : id === "short_video_monthly" ? SHORT_VIDEO_MONTHLY_PRICE_FEN : null,
       yearlyFen: id === "short_video_monthly" ? SHORT_VIDEO_YEARLY_PRICE_FEN : null,
-      cycle: product?.cycle || (id === ENGLISH_COACH_PLAN_ID ? "month" : null),
+      cycle: product?.cycle || ([ENGLISH_COACH_PLAN_ID, GULONG_ENGINE_PLAN_ID].includes(id) ? "month" : null),
       autoRenew: false,
     };
   });
@@ -55,9 +58,20 @@ export function englishEntitlement(subscription, now = new Date()) {
   };
 }
 
+export function gulongEngineEntitlement(subscription, now = new Date()) {
+  const product = productSubscription(subscription, GULONG_ENGINE_PLAN_ID);
+  const status = productPeriodStatus(product, now);
+  return {
+    product: "gulong_engine", plan_id: GULONG_ENGINE_PLAN_ID, active: status === "active", status,
+    starts_at: product?.currentPeriodStart || null, expires_at: product?.currentPeriodEnd || null,
+    capabilities: status === "active" ? ["pearapi.free_text", "gulong_engine.text", "gulong_engine.image", "gulong_engine.video"] : [],
+    monthly_price_fen: GULONG_ENGINE_MONTHLY_PRICE_FEN,
+  };
+}
+
 export function legacyAccessSubscription(subscription, now = new Date()) {
   if (!subscription) return null;
-  if (!subscription.products && subscription.plan !== ENGLISH_COACH_PLAN_ID) return subscription;
+  if (!subscription.products && ![ENGLISH_COACH_PLAN_ID, GULONG_ENGINE_PLAN_ID].includes(subscription.plan)) return subscription;
   const candidates = ["member", "short_video_monthly"].map((id) => productSubscription(subscription, id)).filter(Boolean);
   const selected = candidates.find((product) => productPeriodStatus(product, now) === "active")
     || candidates.find((product) => product.plan === subscription.plan)
@@ -72,6 +86,12 @@ export async function readEnglishEntitlement(ownerId, now = new Date(), collecti
   if (!ObjectId.isValid(ownerId)) return englishEntitlement(null, now);
   const subscription = await (await collectionProvider("subscriptions")).findOne({ ownerId: new ObjectId(ownerId) });
   return englishEntitlement(subscription, now);
+}
+
+export async function readGulongEngineEntitlement(ownerId, now = new Date(), collectionProvider = databaseCollection) {
+  if (!ObjectId.isValid(ownerId)) return gulongEngineEntitlement(null, now);
+  const subscription = await (await collectionProvider("subscriptions")).findOne({ ownerId: new ObjectId(ownerId) });
+  return gulongEngineEntitlement(subscription, now);
 }
 
 function periodError(message) {

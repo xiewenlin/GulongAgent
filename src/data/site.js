@@ -56,6 +56,16 @@ export const plans = [
     features: ["四六级、考研、雅思、托福与专四专八", "写作、阅读、口语与发音教练", "本地优先远程兜底 / 远程模式", "古龙官网账号登录，有效期独立管理"],
   },
   {
+    id: "gulong_engine_monthly",
+    name: "古龙引擎包月",
+    eyebrow: "轻装上阵",
+    monthlyFen: 19800,
+    yearlyFen: null,
+    paymentProviders: ["offline"],
+    subpricing: "独立月度订阅 · ¥198 / 月",
+    features: ["九个免费文字模型，由官网安全代理", "本地 Agent 与第二大脑", "已验证且自愿共享的文字与图片节点", "视频共享节点待适配验收后开放"],
+  },
+  {
     id: "custom",
     name: "深度定制",
     eyebrow: "共同增长",

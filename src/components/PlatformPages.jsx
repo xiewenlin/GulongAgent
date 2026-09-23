@@ -116,6 +116,16 @@ export function DownloadPage() {
       features: ["小说、剧本与分镜逐层拆解", "角色、场景、道具视觉资产统一管理", "节点状态、生成进度与结果集中查看", "支持批量视频生成与流程复用"],
       icon: "/assets/gulong-agent-icon.png",
     },
+    {
+      key: "english_coach",
+      eyebrow: "ENGLISH COACH · PORTABLE",
+      name: "英语教练",
+      tagline: "轻装启动，随时练习英语",
+      description: "面向日常英语学习与表达练习的独立桌面产品。绿色软件以 ZIP 压缩包提供，下载后解压使用，无需运行安装程序。",
+      suitable: "适合希望练习英语对话、写作、听力与发音，并使用独立英语教练月度权益的学习者。",
+      features: ["英语对话与写作辅助", "听力转写与发音评估", "独立账号登录与月度权益", "绿色 ZIP 下载，解压后使用"],
+      icon: "/assets/gulong-agent-icon.png",
+    },
   ];
 
   async function downloadRelease(editionKey) {
@@ -142,33 +152,34 @@ export function DownloadPage() {
 
   return (
     <main id="main-content">
-      <PageIntro eyebrow="WINDOWS DESKTOP" title="选择适合你的古龙桌面版" description="古龙基础版负责通用智能体工作，MiniMax H3 极速视频版负责本地视频生成与共享节点计算，短剧工作台负责贯通从故事到成片的完整生产流程。" />
+      <PageIntro eyebrow="WINDOWS DESKTOP" title="选择适合你的古龙桌面版" description="从通用智能体、本地视频、短剧生产到英语学习，按你的使用场景选择桌面产品。" />
       <section className="download-layout section-shell">
-        <div className="edition-choice-intro"><span>一分钟选对版本</span><strong>日常智能体选基础版；本地视频生成选极速视频版；管理剧本、资产、分镜与批量成片，选短剧工作台。</strong></div>
+        <div className="edition-choice-intro"><span>一分钟选对版本</span><strong>日常智能体选基础版；本地视频选极速视频版；短剧制作选工作台；专注英语学习选英语教练。</strong></div>
         <div className="download-edition-grid">
           {editions.map((edition) => {
             const release = releases[edition.key];
             const isCustom = edition.key === "yongshenghua";
             const isStudio = edition.key === "short_drama";
-            return <article key={edition.key} className={`download-edition-card ${isCustom ? "custom" : isStudio ? "studio" : "essential"}`}>
+            const isCoach = edition.key === "english_coach";
+            return <article key={edition.key} className={`download-edition-card ${isCustom ? "custom" : isStudio ? "studio" : isCoach ? "coach" : "essential"}`}>
               <header>
-                <div className={`download-edition-mark ${isCustom ? "flower" : isStudio ? "studio" : ""}`}><img src={edition.icon} alt={`${edition.name}圆形图标`} /></div>
+                <div className={`download-edition-mark ${isCustom ? "flower" : isStudio ? "studio" : isCoach ? "coach" : ""}`}><img src={edition.icon} alt={`${edition.name}圆形图标`} /></div>
                 <div><span>{edition.eyebrow}</span><h2>{edition.name}</h2><strong>{edition.tagline}</strong></div>
               </header>
               <p className="edition-description">{edition.description}</p>
               <div className="edition-suitable"><span>更适合</span><p>{edition.suitable}</p></div>
               <ul>{edition.features.map((feature) => <li key={feature}><CheckCircle size={20} weight="fill" /> {feature}</li>)}</ul>
               <div className="edition-release">
-                <div><span>Windows 10 / 11 · x64</span><strong>{release?.version ? `v${release.version.replace(/^v/i, "")}` : loading ? "正在读取版本" : "版本准备中"}</strong><small>{release?.filename || "完整离线安装包"}</small></div>
-                <button className={`button full ${isCustom || isStudio ? "secondary" : "primary"}`} type="button" disabled={!release || downloading === edition.key} onClick={() => downloadRelease(edition.key)}><DownloadSimple size={19} /> {downloading === edition.key ? "正在获取安全链接" : release ? `下载${edition.name}` : "安装包准备中"}</button>
+                <div><span>{isCoach ? "Windows · 绿色 ZIP 压缩包" : "Windows 10 / 11 · x64"}</span><strong>{release?.version ? `v${release.version.replace(/^v/i, "")}` : loading ? "正在读取版本" : "版本准备中"}</strong><small>{release?.filename || (isCoach ? "等待上传绿色软件压缩包" : "完整离线安装包")}</small></div>
+                <button className={`button full ${isCustom || isStudio || isCoach ? "secondary" : "primary"}`} type="button" disabled={!release || downloading === edition.key} onClick={() => downloadRelease(edition.key)}><DownloadSimple size={19} /> {downloading === edition.key ? "正在获取安全链接" : release ? `下载${edition.name}` : isCoach ? "绿色版准备中" : "安装包准备中"}</button>
               </div>
               {release && <div className="edition-integrity"><span>SHA-256</span><code title={release.sha256}>{release.sha256 || "发布后公布"}</code><small>{release.bytes ? `${(release.bytes / 1024 / 1024).toFixed(1)} MB` : ""} · {release.signatureStatus || "签名状态待确认"}</small></div>}
             </article>;
           })}
         </div>
-        <div className="edition-decision-guide"><div><span>01</span><p><strong>日常智能体工作</strong>选择古龙基础版，配置直接，标准能力完整。</p></div><div><span>02</span><p><strong>本地视频与节点收益</strong>选择 MiniMax H3 极速视频版，本地生成视频，也可将闲置算力接入共享任务。</p></div><div><span>03</span><p><strong>团队化短剧生产</strong>选择短剧工作台，用一张画布管理故事、视觉资产、分镜、生成状态与批量成片。</p></div></div>
+        <div className="edition-decision-guide"><div><span>01</span><p><strong>日常智能体工作</strong>选择古龙基础版，配置直接，标准能力完整。</p></div><div><span>02</span><p><strong>本地视频与节点收益</strong>选择 MiniMax H3 极速视频版，本地生成视频，也可将闲置算力接入共享任务。</p></div><div><span>03</span><p><strong>团队化短剧生产</strong>选择短剧工作台，用一张画布管理故事、视觉资产、分镜、生成状态与批量成片。</p></div><div><span>04</span><p><strong>专注英语学习</strong>选择英语教练，下载绿色 ZIP，解压后登录练习。</p></div></div>
         {downloadError && <div className="form-error">{downloadError}</div>}
-        <div className="download-note"><ShieldCheck size={22} /><div><strong>安装包安全说明</strong><p>三个版本分别读取所属发行渠道的唯一最新版。直接下载链接为腾讯云 COS 的 15 分钟限时签名地址；下载后可核对页面公布的版本号、文件大小与 SHA-256。</p></div></div>
+        <div className="download-note"><ShieldCheck size={22} /><div><strong>下载文件安全说明</strong><p>各产品分别读取所属发行渠道的唯一最新版。英语教练提供绿色 ZIP，其余产品按各自发布格式提供；下载链接为腾讯云 COS 的 15 分钟限时签名地址。</p></div></div>
       </section>
     </main>
   );
@@ -364,10 +375,11 @@ export function PricingPage({ user, openAuth, navigate }) {
     trackAnalyticsEvent("CHECKOUT_START", { path: "/pricing" });
     const shortVideoPlan = plan.id === "short_video_monthly";
     const englishPlan = plan.id === "english_coach_monthly";
-    if (paymentMode === "offline" || shortVideoPlan || englishPlan) {
+    const gulongEnginePlan = plan.id === "gulong_engine_monthly";
+    if (paymentMode === "offline" || shortVideoPlan || englishPlan || gulongEnginePlan) {
       const amountFen = planAmountFen(plan);
       const bonusFen = shortVideoPlan ? 0 : plan.id === "member" ? memberBonusFen : 0;
-      setPayment({ mode: "offline-cashier", cycle:subscriptionCycle(plan,cycle), planType:plan.id, amountFen, bonusFen, creditedFen:englishPlan?0:amountFen + bonusFen, upgradeCreditFen:shortVideoPlan||englishPlan?0:upgradeCreditFen, planName:plan.name });
+      setPayment({ mode: "offline-cashier", cycle:subscriptionCycle(plan,cycle), planType:plan.id, amountFen, bonusFen, creditedFen:englishPlan||gulongEnginePlan?0:amountFen + bonusFen, upgradeCreditFen:shortVideoPlan||englishPlan||gulongEnginePlan?0:upgradeCreditFen, planName:plan.name });
       return;
     }
     setBusy(true);
@@ -407,9 +419,10 @@ export function PricingPage({ user, openAuth, navigate }) {
               {plan.id === "member" && <div className="wallet-promotion-note"><Coins size={20} weight="duotone" /><span><strong>订阅即送 10% 创作余额</strong><small>本次实付 {formatMoney(memberPayableFen)}，到账余额 {formatMoney(memberPayableFen + memberBonusFen)}，其中赠送 {formatMoney(memberBonusFen)}。</small></span></div>}
               {plan.id === "short_video_monthly" && <div className="wallet-promotion-note short-video"><Coins size={20} weight="duotone" /><span><strong>实付多少，余额到账多少</strong><small>本次实付 {formatMoney(planAmountFen(plan))}，到账余额 {formatMoney(planAmountFen(plan))}；余额用完后 H3 继续无限免费生成，不再扣费或分佣。</small></span></div>}
               {plan.id === "english_coach_monthly" && <div className="manual-renew-note"><BookOpen size={20}/><span><strong>仅月度 · 使用现有线下支付</strong><small>不提供年包，不抵扣或替换其他产品订阅。审核通过后在英语教练登录并刷新权益。</small></span></div>}{plan.subpricing && <p className="plan-subprice">{plan.subpricing}</p>}
+              {plan.id === "gulong_engine_monthly" && <div className="manual-renew-note"><BookOpen size={20}/><span><strong>仅月度 · 线下支付审核</strong><small>绿色版独立授权，不替换已有会员；共享视频能力尚待节点适配验收。</small></span></div>}
               <ul>{plan.features.map((feature) => <li key={feature}><Check size={17} weight="bold" /> {feature}</li>)}</ul>
-              {(plan.id === "member" && paymentMode === "offline" || plan.id === "short_video_monthly" || plan.id === "english_coach_monthly") && <div className="manual-renew-note"><Clock size={20} /><span><strong>人工审核到账</strong><small>付款后提交审核，确认到账后同步官网与桌面端。</small></span></div>}
-              {plan.id === "custom" ? <div className="custom-plan-actions"><button className="button secondary full" disabled={busy} onClick={() => setCustomContactOpen(true)}>联系定制</button><button className="button primary full" disabled={busy} onClick={() => user ? setCustomOrderOpen(true) : openAuth("login")}><Plus size={18} />新建订单</button></div> : <button className={`button full ${plan.featured ? "primary" : "secondary"}`} disabled={busy} onClick={() => startPayment(plan)}>{plan.id === "free" ? "免费下载" : busy ? "正在创建订单" : (plan.id === "short_video_monthly" || plan.id === "english_coach_monthly") ? "线下申请开通" : monthlyUpgrade ? "补差价升级年度会员" : paymentMode === "online" ? "微信支付开通" : "线下申请开通"}</button>}
+              {(plan.id === "member" && paymentMode === "offline" || plan.id === "short_video_monthly" || plan.id === "english_coach_monthly" || plan.id === "gulong_engine_monthly") && <div className="manual-renew-note"><Clock size={20} /><span><strong>人工审核到账</strong><small>付款后提交审核，确认到账后同步官网与桌面端。</small></span></div>}
+              {plan.id === "custom" ? <div className="custom-plan-actions"><button className="button secondary full" disabled={busy} onClick={() => setCustomContactOpen(true)}>联系定制</button><button className="button primary full" disabled={busy} onClick={() => user ? setCustomOrderOpen(true) : openAuth("login")}><Plus size={18} />新建订单</button></div> : <button className={`button full ${plan.featured ? "primary" : "secondary"}`} disabled={busy} onClick={() => startPayment(plan)}>{plan.id === "free" ? "免费下载" : busy ? "正在创建订单" : (["short_video_monthly", "english_coach_monthly", "gulong_engine_monthly"].includes(plan.id)) ? "线下申请开通" : monthlyUpgrade ? "补差价升级年度会员" : paymentMode === "online" ? "微信支付开通" : "线下申请开通"}</button>}
             </article>
           ))}
         </section>
@@ -478,7 +491,8 @@ function PaymentDialog({ payment, provider, availability, onPayment, onClose }) 
   if (payment.mode === "offline") {
     const shortVideoPlan = payment.planType === "short_video_monthly";
     const englishPlan = payment.planType === "english_coach_monthly";
-    return <div className="modal-backdrop"><section className="payment-modal offline-payment-modal" role="dialog" aria-modal="true"><button className="modal-close" onClick={onClose}><X size={19} /></button><div className="payment-logo"><ShieldCheck size={28} /></div><span className="payment-eyebrow">PAYMENT SUBMITTED</span><h2>{englishPlan ? "英语教练包月申请已提交" : shortVideoPlan ? "短视频包月申请已提交" : "已提交，等待管理员审核"}</h2><p>订单 <strong>{payment.orderNo}</strong> 已进入审核队列。到账确认后，{englishPlan ? "英语教练独立月度权益" : shortVideoPlan ? "短视频包月权益与实付等额余额" : "会员权益"}会同步到古龙官网与桌面端。</p><div className="form-success">待审核 · {formatMoney(payment.amountFen)}{shortVideoPlan ? ` · 审核后余额 ${formatMoney(payment.creditedFen || payment.amountFen)}` : ""}</div><p className="offline-payment-urgent">请尽快添加客服微信，发送支付截图，以加速审核进度。</p><img className="payment-qr service-qr" src="/assets/customer-service-wechat-20260823.jpg" alt="古龙客服微信二维码" /><small>扫码添加古龙客服，并发送本订单的支付截图。</small><button className="button primary full" onClick={onClose}>我知道了</button></section></div>;
+    const gulongEnginePlan = payment.planType === "gulong_engine_monthly";
+    return <div className="modal-backdrop"><section className="payment-modal offline-payment-modal" role="dialog" aria-modal="true"><button className="modal-close" onClick={onClose}><X size={19} /></button><div className="payment-logo"><ShieldCheck size={28} /></div><span className="payment-eyebrow">PAYMENT SUBMITTED</span><h2>{englishPlan ? "英语教练包月申请已提交" : gulongEnginePlan ? "古龙引擎包月申请已提交" : shortVideoPlan ? "短视频包月申请已提交" : "已提交，等待管理员审核"}</h2><p>订单 <strong>{payment.orderNo}</strong> 已进入审核队列。到账确认后，{englishPlan ? "英语教练独立月度权益" : gulongEnginePlan ? "古龙绿色版独立月度权益" : shortVideoPlan ? "短视频包月权益与实付等额余额" : "会员权益"}会同步到古龙官网与桌面端。</p><div className="form-success">待审核 · {formatMoney(payment.amountFen)}{shortVideoPlan ? ` · 审核后余额 ${formatMoney(payment.creditedFen || payment.amountFen)}` : ""}</div><p className="offline-payment-urgent">请尽快添加客服微信，发送支付截图，以加速审核进度。</p><img className="payment-qr service-qr" src="/assets/customer-service-wechat-20260823.jpg" alt="古龙客服微信二维码" /><small>扫码添加古龙客服，并发送本订单的支付截图。</small><button className="button primary full" onClick={onClose}>我知道了</button></section></div>;
   }
   if (status === "paid") {
     return <div className="modal-backdrop"><section className="payment-modal payment-success-modal" role="dialog" aria-modal="true"><button className="modal-close" onClick={onClose}><X size={19} /></button><div className="payment-logo"><CheckCircle size={30} weight="fill" /></div><span className="payment-eyebrow">PAYMENT SUCCEEDED</span><h2>微信支付成功</h2><p>订单 <strong>{payment.orderNo}</strong> 已到账。会员权益、充值余额或定制订单状态已经写入官网，并同步提供给桌面端。</p><div className="form-success">已支付 · {formatMoney(payment.amountFen)}{payment.bonusFen > 0 ? ` · 赠送 ${formatMoney(payment.bonusFen)}` : ""}</div><button className="button primary full" onClick={onClose}>完成</button></section></div>;
