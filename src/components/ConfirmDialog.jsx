@@ -1,5 +1,6 @@
 import { CheckCircle, ShieldWarning, Trash, WarningCircle, X } from "@phosphor-icons/react";
 import { createContext, useCallback, useContext, useEffect, useId, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 const ConfirmDialogContext = createContext(null);
 
@@ -83,4 +84,25 @@ export function useConfirmDialog() {
   const confirm = useContext(ConfirmDialogContext);
   if (!confirm) throw new Error("useConfirmDialog 必须在 ConfirmDialogProvider 内使用");
   return confirm;
+}
+
+export function ApplicationDialog({title,eyebrow="ACCOUNT SETTINGS",description,children,onClose,busy=false,className=""}) {
+  const titleId=useId(),panel=useRef(null),close=useRef(onClose),locked=useRef(busy);
+  close.current=onClose;locked.current=busy;
+  useEffect(()=>{
+    const previous=document.activeElement,overflow=document.body.style.overflow;
+    document.body.style.overflow="hidden";
+    panel.current?.querySelector("button")?.focus();
+    function keydown(event) {
+      if(event.key==="Escape"){event.preventDefault();event.stopPropagation();if(!locked.current)close.current();}
+      if(event.key!=="Tab")return;
+      const elements=[...panel.current.querySelectorAll('button,input,select,textarea,a[href],[tabindex="0"]')].filter(item=>!item.disabled&&!item.closest('[hidden]'));
+      const first=elements[0],last=elements.at(-1);
+      if(event.shiftKey&&(document.activeElement===first||!elements.includes(document.activeElement))){event.preventDefault();last?.focus();}
+      else if(!event.shiftKey&&(document.activeElement===last||!elements.includes(document.activeElement))){event.preventDefault();first?.focus();}
+    }
+    document.addEventListener("keydown",keydown);
+    return()=>{document.removeEventListener("keydown",keydown);document.body.style.overflow=overflow;if(previous?.isConnected)previous.focus();};
+  },[]);
+  return createPortal(<div className="modal-backdrop subscription-dialog-backdrop"><section ref={panel} className={`app-confirm-dialog subscription-dialog ${className}`} role="dialog" aria-modal="true" aria-labelledby={titleId}><header className="subscription-dialog-header"><div><span>{eyebrow}</span><h2 id={titleId}>{title}</h2>{description&&<p>{description}</p>}</div><button type="button" className="button secondary" disabled={busy} aria-label={`关闭${title}`} onClick={onClose}><X size={19}/>关闭</button></header><div className="subscription-dialog-body">{children}</div></section></div>,document.body);
 }

@@ -66,7 +66,7 @@ test("each callable capability publishes a strict versioned parameter, asset and
     assert.equal(capability.parametersSchema.type, "object", capability.capabilityId);
     assert.equal(capability.parametersSchema.additionalProperties, false, capability.capabilityId);
     assert.ok(Array.isArray(capability.assetRules), capability.capabilityId);
-    assert.ok(Array.isArray(capability.outputRules) && capability.outputRules.length, capability.capabilityId);
+    assert.ok(Array.isArray(capability.outputRules) && (capability.outputRules.length || capability.inlineResult), capability.capabilityId);
     for (const rule of [...capability.assetRules, ...capability.outputRules]) {
       assert.match(rule.role, /^[a-z][a-z0-9_]*$/);
       assert.ok(rule.max >= rule.min);

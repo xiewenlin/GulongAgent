@@ -170,7 +170,7 @@ test("定价与管理员界面公开短视频包月类型，桌面接口同步�
   assert.match(site, /yearlyFen:\s*5999900/);
   assert.match(pricing, /线下申请开通/);
   assert.match(admin, /短视频包月用户/);
-  assert.match(server, /shortVideoPackage:\s*shortVideoPackageView\(subscription, wallet, now\)/);
+  assert.match(server, /shortVideoPackage:\s*shortVideoPackageView\((?:rawSubscription|subscription), wallet(?:, now)?\)/);
   assert.match(pear, /expireShortVideoPackageAllowance\(\{ getCollection, ownerId, subscription, now \}\)/);
   assert.match(css, /\.pricing-grid\s*\{[^}]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\)/s);
   assert.match(db, /subscriptions_short_video_expiry/);

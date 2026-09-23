@@ -34,10 +34,12 @@ import {
   VideoCamera,
   X,
 } from "@phosphor-icons/react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, formatMoney, localizedFetch, localizeErrorMessage } from "../api.js";
 import { AdminDashboard } from "./AdminDashboard.jsx";
 import { useConfirmDialog } from "./ConfirmDialog.jsx";
+import { UserSubscriptionDialog } from "./UserSubscriptionDialog.jsx";
+import { subscriptionOrderName } from "../subscriptions.js";
 
 const menu = [
   { id: "dashboard", label: "数据看板", icon: ChartLineUp },
@@ -154,7 +156,10 @@ function ChandlerUserManager() {
   const [subscriptions, setSubscriptions] = useState([]);
   const [subscriptionMeta, setSubscriptionMeta] = useState({});
   const [grant, setGrant] = useState(null);
-  const [periodEditor, setPeriodEditor] = useState(null);
+  const [subscriptionProducts, setSubscriptionProducts] = useState([]);
+  const [subscriptionLoading, setSubscriptionLoading] = useState(false);
+  const [subscriptionError, setSubscriptionError] = useState("");
+  const subscriptionRequest = useRef(0);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState("");
 
@@ -175,13 +180,16 @@ function ChandlerUserManager() {
   }, []);
 
   async function inspect(user) {
-    setSelected(user); setSubscriptions([]); setSubscriptionMeta({}); setMessage("");
+    const request = ++subscriptionRequest.current;
+    setSelected(user); setSubscriptions([]); setSubscriptionProducts([]); setSubscriptionMeta({}); setSubscriptionError(""); setSubscriptionLoading(true);
     try {
       const result = await apiFetch(`/api/admin/chandler/users/${encodeURIComponent(user.id)}/subscriptions`);
-      setSubscriptions(result.subscriptions || []); setSubscriptionMeta(result.meta || {});
-    } catch (error) { setMessage(error.message); }
+      if(request !== subscriptionRequest.current) return;
+      setSubscriptions(result.subscriptions || []); setSubscriptionProducts(result.products || result.subscriptionProducts || user.products || user.subscriptionProducts || []); setSubscriptionMeta(result.meta || {});
+    } catch (error) { if(request === subscriptionRequest.current) setSubscriptionError(error.message); }
+    finally { if(request === subscriptionRequest.current) setSubscriptionLoading(false); }
   }
-
+  function closeSubscriptions() { subscriptionRequest.current++; setSelected(null); }
   async function changeStatus(user) {
     const status = user.status === "disabled" ? "active" : "disabled";
     const disabling = status === "disabled";
@@ -240,42 +248,14 @@ function ChandlerUserManager() {
     finally { setBusy(""); }
   }
 
-  function openPeriodEditor() {
-    const subscription = subscriptions.find((item) => item.authoritative)
-      || subscriptions.find((item) => item.source === "website" && item.current_period_end)
-      || subscriptions.find((item) => item.current_period_end || item.valid_until);
-    const start = subscription?.current_period_start || subscription?.valid_from || new Date();
-    const end = subscription?.current_period_end || subscription?.valid_until || new Date(Date.now() + 365 * 86_400_000);
-    setPeriodEditor({
-      user: selected,
-      plan: subscription?.plan === "short_video_monthly" || selected?.subscription_plan === "short_video_monthly" ? "short_video_monthly" : "member",
-      currentPeriodStart: localDateTimeValue(start),
-      currentPeriodEnd: localDateTimeValue(end),
+  async function saveSubscriptionProducts(products) {
+    const user = selected;
+    const result = await apiFetch(`/api/admin/users/${encodeURIComponent(user.website_user_id || user.id)}/subscription-period`, {
+      method: "PUT", body: JSON.stringify({products}),
     });
+    await load();
+    setMessage(result.message || "独立产品订阅已保存，未修改的产品保持不变。");
   }
-
-  async function saveSubscriptionPeriod(event) {
-    event.preventDefault();
-    const start = new Date(periodEditor.currentPeriodStart);
-    const end = new Date(periodEditor.currentPeriodEnd);
-    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) {
-      setMessage("到期时间必须晚于生效时间。");
-      return;
-    }
-    setBusy("period"); setMessage("");
-    try {
-      const user = periodEditor.user;
-      const result = await apiFetch(`/api/admin/users/${encodeURIComponent(user.website_user_id || user.id)}/subscription-period`, {
-        method: "PUT",
-        body: JSON.stringify({ plan: periodEditor.plan, currentPeriodStart: start.toISOString(), currentPeriodEnd: end.toISOString() }),
-      });
-      setPeriodEditor(null);
-      await Promise.all([inspect(user), load()]);
-      setMessage(result.message || "会员有效期已保存并同步到用户端。");
-    } catch (error) { setMessage(error.message); }
-    finally { setBusy(""); }
-  }
-
   return <section className="admin-module">
     <header className="admin-module-head"><div><span>UNIFIED SUBSCRIPTION DIRECTORY</span><h2>订阅用户</h2><p>统一查看官网用户、古龙版与永生花版 Chandler 应用授权用户，以及实时会员有效期和线下审核记录。</p></div><div className="storage-badge"><ShieldCheck size={18} /><span>数据来源</span><strong>{busy === "search" && !users.length ? "同步中" : meta.synchronized ? "官网 + Chandler 应用" : "官网同步快照"}</strong></div></header>
     <form className="admin-filterbar" onSubmit={load}><label><MagnifyingGlass size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索邮箱、昵称或用户 ID" /></label><select aria-label="选择用户分组或发行渠道" value={channelId} onChange={(event) => setChannelId(event.target.value)}><ReleaseChannelOptions channels={channels} /></select><button className="button secondary" disabled={busy === "search"}><MagnifyingGlass size={16} /> {busy === "search" ? "搜索中" : "搜索"}</button><span>共 {meta.total ?? users.length} 个结果</span></form>
@@ -283,8 +263,7 @@ function ChandlerUserManager() {
     {meta.permissionLimited && <AdminNotice>Chandler 应用用户同步暂不可用，当前显示最近一次官网同步快照；请重新登录，或确认当前 Chandler 账号已加入古龙应用团队。</AdminNotice>}
     {!meta.permissionLimited && meta.partial && <AdminNotice>古龙版与永生花版中有一个应用暂未完成同步；当前已合并展示成功同步的应用与官网用户。</AdminNotice>}
     {users.length ? <div className="chandler-user-list">{users.map((user) => <article key={user.id}><div className="chandler-user-avatar">{(user.display_name || user.email || "U").slice(0, 1).toUpperCase()}</div><div><strong>{user.display_name || "未设置昵称"}</strong><span>{user.email || user.phone || user.id}</span><small>{user.edition_name ? `${user.edition_name} · ` : ""}{user.role === "admin" ? "管理员" : user.is_member && user.subscription_plan === "short_video_monthly" ? "短视频包月用户" : user.is_member ? "订阅会员" : "普通用户"}{user.is_member && user.membership_valid_until ? ` · 有效至 ${new Date(user.membership_valid_until).toLocaleDateString("zh-CN")}` : ""}</small></div><span className={`status-pill ${user.status || "active"}`}>{user.status === "disabled" ? "已冻结" : user.status === "deleted" ? "已删除" : "正常"}</span><div className="admin-row-actions"><button className="button small ghost" onClick={() => inspect(user)}>订阅详情</button>{user.role !== "admin" && <button className="button small primary" disabled={busy === `role-${user.id}`} onClick={() => promoteToAdmin(user)}><ShieldCheck size={16} />{busy === `role-${user.id}` ? "设置中" : "设为管理员"}</button>}{meta.capabilities?.globalUserStatus === true && user.status !== "deleted" && <button className="button small secondary" disabled={busy === user.id} onClick={() => changeStatus(user)}>{user.status === "disabled" ? "恢复" : "冻结"}</button>}{meta.capabilities?.globalEntitlementApproval === true && <button className="button small primary" onClick={() => setGrant({ user, entitlementCode: "gulong.member", validUntil: new Date(Date.now() + 365 * 86400_000).toISOString().slice(0, 16), reason: "管理员根据线下合同申请开通古龙会员权益" })}>申请权益</button>}</div></article>)}</div> : <EmptyState icon={UsersThree} title="没有匹配用户" text="尝试使用邮箱、昵称或用户 ID 的一部分重新搜索。" />}
-    {selected && <div className="admin-detail-panel"><header><div><span>SUBSCRIPTIONS</span><h3>{selected.display_name || selected.email || selected.id} 的订阅</h3></div><div className="admin-row-actions"><button className="button small primary" type="button" onClick={openPeriodEditor}><CalendarBlank size={17} />修改类型与有效期</button><button className="icon-danger" type="button" onClick={() => setSelected(null)}><X size={17} /></button></div></header>{subscriptionMeta.permissionLimited && <AdminNotice>Chandler 应用订阅属性暂未同步，当前显示官网权威有效期与线下支付审核记录；管理员保存的有效期仍会立即同步到官网和桌面端。</AdminNotice>}{!subscriptionMeta.permissionLimited && subscriptionMeta.partial && <AdminNotice>该用户已有部分 Chandler 应用订阅属性完成同步，官网有效期与线下记录均已合并展示。</AdminNotice>}{subscriptions.length ? subscriptions.map((subscription, index) => { const start = subscription.current_period_start || subscription.valid_from; const end = subscription.current_period_end || subscription.valid_until; return <article key={subscription.id || index}><strong className={`subscription-state ${subscription.status || "unknown"}`}>{subscriptionStatusLabels[subscription.status] || subscription.status || "未知状态"}</strong><span>{subscription.sku_name || subscription.sku_id || subscription.product_name || "订阅套餐"}{subscription.authoritative ? " · 官网权威有效期" : ""}</span><time>{start ? `生效 ${new Date(start).toLocaleString("zh-CN")}` : "生效时间未返回"} · {end ? `到期 ${new Date(end).toLocaleString("zh-CN")}` : subscription.status === "pending_review" ? "等待审核" : "到期时间未返回"}</time></article>; }) : <p>该用户当前没有订阅记录。可点击“修改类型与有效期”直接开通并设置时间。</p>}</div>}
-    {periodEditor && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setPeriodEditor(null)}><form className="admin-form-modal subscription-period-modal" onSubmit={saveSubscriptionPeriod}><button className="modal-close" type="button" onClick={() => setPeriodEditor(null)}><X size={18} /></button><span>MEMBERSHIP PERIOD</span><h2>修改订阅类型与有效期</h2><p>目标用户：{periodEditor.user.display_name || periodEditor.user.email || periodEditor.user.id}</p><div className="admin-form-grid"><label className="span-2"><span>用户类型</span><select value={periodEditor.plan} onChange={(event) => setPeriodEditor({ ...periodEditor, plan: event.target.value })}><option value="member">会员用户</option><option value="short_video_monthly">短视频包月用户</option></select></label><label><span>生效时间</span><input required type="datetime-local" value={periodEditor.currentPeriodStart} onChange={(event) => setPeriodEditor({ ...periodEditor, currentPeriodStart: event.target.value })} /></label><label><span>到期时间</span><input required type="datetime-local" value={periodEditor.currentPeriodEnd} onChange={(event) => setPeriodEditor({ ...periodEditor, currentPeriodEnd: event.target.value })} /></label></div><AdminNotice>短视频包月用户在有效期内可无限使用 MiniMaxH3共享节点；管理员手动设置类型不会凭空增加付费额度。超过到期时间后，剩余套餐额度自动清除。</AdminNotice><button className="button primary full" disabled={busy === "period"}><CalendarBlank size={18} />{busy === "period" ? "保存中" : "保存订阅类型与有效期"}</button></form></div>}
+    {selected && <UserSubscriptionDialog user={selected} products={subscriptionProducts} subscriptions={subscriptions} meta={subscriptionMeta} loading={subscriptionLoading} error={subscriptionError} onRetry={() => inspect(selected)} onSave={saveSubscriptionProducts} onClose={closeSubscriptions}/>}
     {grant && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setGrant(null)}><form className="admin-form-modal" onSubmit={requestGrant}><button className="modal-close" type="button" onClick={() => setGrant(null)}><X size={18} /></button><span>DUAL APPROVAL</span><h2>申请订阅权益</h2><p>目标用户：{grant.user.email || grant.user.id}</p><div className="admin-form-grid"><label><span>权益代码</span><input required value={grant.entitlementCode} onChange={(event) => setGrant({ ...grant, entitlementCode: event.target.value })} /></label><label><span>有效期至</span><input required type="datetime-local" value={grant.validUntil} onChange={(event) => setGrant({ ...grant, validUntil: event.target.value })} /></label><label className="span-2"><span>申请原因</span><textarea required minLength={2} maxLength={1024} value={grant.reason} onChange={(event) => setGrant({ ...grant, reason: event.target.value })} /></label></div><AdminNotice>申请将进入 Chandler 双人审批，申请人不能审批自己的请求。</AdminNotice><button className="button primary full" disabled={busy === "grant"}>{busy === "grant" ? "提交中" : "提交审批"}</button></form></div>}
   </section>;
 }
@@ -884,7 +863,7 @@ function PaymentManager() {
     <form className="order-filter-panel" onSubmit={load}><label className="order-keyword"><span>关键词模糊搜索</span><div><MagnifyingGlass size={18} /><input value={filters.q} onChange={(event) => setFilters({ ...filters, q: event.target.value })} placeholder="订单号、邮箱、昵称、支付渠道或状态" /></div></label><label><span>开始日期</span><input type="date" value={filters.from} onChange={(event) => setFilters({ ...filters, from: event.target.value })} /></label><label><span>结束日期</span><input type="date" value={filters.to} onChange={(event) => setFilters({ ...filters, to: event.target.value })} /></label><label className="order-channel"><span>用户分组 / 发行渠道</span><select value={filters.channelId} onChange={(event) => setFilters({ ...filters, channelId: event.target.value })}><ReleaseChannelOptions channels={channels} /></select></label><div className="order-filter-actions"><button type="button" className="button ghost" onClick={resetFilters}>清空</button><button className="button secondary" disabled={busy === "orders"}><MagnifyingGlass size={17} />查询订单</button></div></form>
     {message && <AdminNotice tone={message.startsWith("已") ? "success" : "error"}>{message}</AdminNotice>}
     {mode === "offline" && <div className="offline-review-tabs" role="tablist" aria-label="线下支付审核状态"><button type="button" role="tab" aria-selected={reviewTab === "pending"} className={reviewTab === "pending" ? "active" : ""} onClick={() => setReviewTab("pending")}><span>待审核</span><strong>{summary.pending || 0}</strong></button><button type="button" role="tab" aria-selected={reviewTab === "reviewed"} className={reviewTab === "reviewed" ? "active" : ""} onClick={() => setReviewTab("reviewed")}><span>已审核</span><strong>{summary.reviewed || 0}</strong></button></div>}
-    {orders.length ? <div className="offline-order-grid">{orders.map((order) => <article key={order.id}><header><div><span>{order.kind === "recharge" ? `${mode === "online" ? "线上" : "线下"}账户充值` : order.subscriptionPlan === "short_video_monthly" || order.partnerData?.subscription_plan === "short_video_monthly" ? `线下短视频包月 · ${order.cycle === "year" ? "年度" : "月度"}` : mode === "online" ? order.cycle === "year" ? "线上年度会员" : "线上月度会员" : order.cycle === "year" ? "线下年度会员" : "线下月度会员"}</span><strong>{formatMoney(order.amountFen)}</strong></div><span className={`status-pill ${order.status}`}>{mode === "offline" && order.status === "pending" ? "待审核" : paymentStatusText[order.status] || order.status || "未知"}</span></header><dl><div><dt>订单号</dt><dd>{order.orderNo}</dd></div><div><dt>用户</dt><dd>{order.user?.displayName || order.user?.email || order.userEmail || order.ownerId}</dd></div><div><dt>{mode === "offline" && reviewTab === "reviewed" ? "审核时间" : "下单时间"}</dt><dd>{new Date(mode === "offline" && reviewTab === "reviewed" ? order.reviewedAt || order.updatedAt || order.createdAt : order.createdAt).toLocaleString("zh-CN")}</dd></div><div><dt>发行渠道</dt><dd>{order.releaseChannel?.isDefault ? "古龙版（默认）" : order.releaseChannel?.name || "古龙版（默认）"}</dd></div><div><dt>{mode === "online" ? "支付渠道" : "Chandler"}</dt><dd>{mode === "online" ? order.provider === "wechat" ? "微信支付" : order.provider === "alipay" ? "支付宝" : order.provider || "未返回" : order.chandlerOrderNo || "等待镜像"}</dd></div>{mode === "online" && <div><dt>交易号</dt><dd>{order.providerTransactionId || "尚未完成支付"}</dd></div>}</dl>{mode === "offline" && order.previousReviewReason && <div className="offline-review-history"><strong>上次拒绝：</strong>{order.previousReviewReason}<br /><strong>用户调整：</strong>{order.resubmissionNote || "未填写"}</div>}{mode === "offline" && order.reviewReason && <div className="offline-review-history rejected"><strong>拒绝原因：</strong>{order.reviewReason}</div>}{mode === "offline" && order.status === "pending" && <div className="offline-review-actions"><button className="button primary" disabled={busy === order.id} onClick={() => approve(order)}><CheckCircle size={17} /> 确认到账并通过</button><button className="button danger" disabled={busy === order.id} onClick={() => setRejecting({ order, reason: "" })}><X size={17} /> 拒绝通过</button></div>}</article>)}</div> : <EmptyState icon={mode === "online" ? CurrencyCny : ShieldCheck} title={busy === "orders" ? "正在读取订单" : mode === "online" ? "没有匹配的线上订单" : reviewTab === "pending" ? "当前没有待审核申请" : "没有匹配的已审核记录"} text={mode === "online" ? "可调整关键词、日期或发行渠道后重新查询。" : reviewTab === "pending" ? "新的线下支付申请会优先显示在这里。" : "已通过和已拒绝的申请会统一保留在这里。"} />}
+    {orders.length ? <div className="offline-order-grid">{orders.map((order) => <article key={order.id}><header><div><span>{order.kind === "recharge" ? `${mode === "online" ? "线上" : "线下"}账户充值` : `${mode === "online" ? "线上" : "线下"}${subscriptionOrderName(order)}`}</span><strong>{formatMoney(order.amountFen)}</strong></div><span className={`status-pill ${order.status}`}>{mode === "offline" && order.status === "pending" ? "待审核" : paymentStatusText[order.status] || order.status || "未知"}</span></header><dl><div><dt>订单号</dt><dd>{order.orderNo}</dd></div><div><dt>用户</dt><dd>{order.user?.displayName || order.user?.email || order.userEmail || order.ownerId}</dd></div><div><dt>{mode === "offline" && reviewTab === "reviewed" ? "审核时间" : "下单时间"}</dt><dd>{new Date(mode === "offline" && reviewTab === "reviewed" ? order.reviewedAt || order.updatedAt || order.createdAt : order.createdAt).toLocaleString("zh-CN")}</dd></div><div><dt>发行渠道</dt><dd>{order.releaseChannel?.isDefault ? "古龙版（默认）" : order.releaseChannel?.name || "古龙版（默认）"}</dd></div><div><dt>{mode === "online" ? "支付渠道" : "Chandler"}</dt><dd>{mode === "online" ? order.provider === "wechat" ? "微信支付" : order.provider === "alipay" ? "支付宝" : order.provider || "未返回" : order.chandlerOrderNo || "等待镜像"}</dd></div>{mode === "online" && <div><dt>交易号</dt><dd>{order.providerTransactionId || "尚未完成支付"}</dd></div>}</dl>{mode === "offline" && order.previousReviewReason && <div className="offline-review-history"><strong>上次拒绝：</strong>{order.previousReviewReason}<br /><strong>用户调整：</strong>{order.resubmissionNote || "未填写"}</div>}{mode === "offline" && order.reviewReason && <div className="offline-review-history rejected"><strong>拒绝原因：</strong>{order.reviewReason}</div>}{mode === "offline" && order.status === "pending" && <div className="offline-review-actions"><button className="button primary" disabled={busy === order.id} onClick={() => approve(order)}><CheckCircle size={17} /> 确认到账并通过</button><button className="button danger" disabled={busy === order.id} onClick={() => setRejecting({ order, reason: "" })}><X size={17} /> 拒绝通过</button></div>}</article>)}</div> : <EmptyState icon={mode === "online" ? CurrencyCny : ShieldCheck} title={busy === "orders" ? "正在读取订单" : mode === "online" ? "没有匹配的线上订单" : reviewTab === "pending" ? "当前没有待审核申请" : "没有匹配的已审核记录"} text={mode === "online" ? "可调整关键词、日期或发行渠道后重新查询。" : reviewTab === "pending" ? "新的线下支付申请会优先显示在这里。" : "已通过和已拒绝的申请会统一保留在这里。"} />}
     {rejecting && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && setRejecting(null)}><form className="admin-form-modal offline-reject-modal" onSubmit={reject}><button className="modal-close" type="button" disabled={Boolean(busy)} onClick={() => setRejecting(null)}><X size={18} /></button><span>REJECT OFFLINE PAYMENT</span><h2>拒绝通过</h2><p>订单：<strong>{rejecting.order.orderNo}</strong></p><label><span>拒绝原因</span><textarea required minLength={2} maxLength={500} autoFocus value={rejecting.reason} onChange={(event) => setRejecting({ ...rejecting, reason: event.target.value })} placeholder="请清楚说明金额、付款截图或订单信息中需要用户调整的内容。" /></label><div className="offline-reject-actions"><button type="button" className="button secondary" disabled={Boolean(busy)} onClick={() => setRejecting(null)}>取消</button><button className="button danger" disabled={Boolean(busy)}><FloppyDisk size={17} /> {busy ? "正在保存" : "保存拒绝原因"}</button></div></form></div>}
   </section>;
 }
@@ -1148,3 +1127,4 @@ export function AdminPage({ user, openAuth }) {
   if (user.role !== "admin") return <main id="main-content" className="admin-gate section-shell"><ShieldCheck size={38} /><h1>当前账号没有后台权限</h1><p>请让 Chandler 平台管理员授予此账号管理员角色后重新登录。</p></main>;
   return <main id="main-content" className="admin-page"><aside className="admin-sidebar"><div><span>GULONG CONSOLE</span><h1>管理员后台</h1><p>{user.displayName || user.username || user.email}</p></div><nav>{menu.map((item) => { const Icon = item.icon; return <button key={item.id} className={active === item.id ? "active" : ""} onClick={() => selectSection(item.id)}><Icon size={19} weight={active === item.id ? "fill" : "regular"} /> {item.label}</button>; })}</nav><footer><UsersThree size={18} /><span>Chandler 统一账号</span></footer></aside><div className="admin-content">{active === "dashboard" && <AdminDashboard />}{active === "users" && <ChandlerUserManager />}{active === "prices" && <ChandlerPriceManager />}{active === "tokens" && <PearTokenManager />}{active === "activations" && <ActivationCodeManager />}{active === "partners" && <PartnerManager />}{active === "workflows" && <WorkflowManager />}{active === "brain" && <BrainAttachmentManager />}{active === "versions" && <VersionManager />}{active === "payments" && <PaymentManager />}{active === "h3tasks" && <H3TaskManager />}{active === "worker" && <WorkerReviewManager />}{active === "feedback" && <FeedbackManager />}</div></main>;
 }
+

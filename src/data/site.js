@@ -46,6 +46,16 @@ export const plans = [
     features: ["无限使用 MiniMaxH3共享节点", "实付多少，余额到账多少", "余额内照常扣费并给节点分佣", "余额用完后无限免费且不再分佣"],
   },
   {
+    id: "english_coach_monthly",
+    name: "英语教练包月",
+    eyebrow: "让英语每天进步",
+    monthlyFen: 19800,
+    yearlyFen: null,
+    paymentProviders: ["offline"],
+    subpricing: "独立月度订阅 · ¥198 / 月",
+    features: ["四六级、考研、雅思、托福与专四专八", "写作、阅读、口语与发音教练", "本地优先远程兜底 / 远程模式", "古龙官网账号登录，有效期独立管理"],
+  },
+  {
     id: "custom",
     name: "深度定制",
     eyebrow: "共同增长",

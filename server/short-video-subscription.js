@@ -3,6 +3,13 @@ export const SHORT_VIDEO_PLAN_NAME = "短视频包月";
 export const SHORT_VIDEO_MONTHLY_PRICE_FEN = 599_900;
 export const SHORT_VIDEO_YEARLY_PRICE_FEN = 5_999_900;
 
+export function shortVideoProduct(subscription) {
+  const product = subscription?.products?.[SHORT_VIDEO_PLAN_ID];
+  return product && typeof product === "object" && !Array.isArray(product)
+    ? { ...product, plan: SHORT_VIDEO_PLAN_ID, ownerId: subscription.ownerId, _id: subscription._id }
+    : subscription;
+}
+
 function safeFen(value) {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
@@ -21,7 +28,9 @@ export function shortVideoSubscriptionCreditFen(amountFen) {
 }
 
 export function isActiveShortVideoSubscription(subscription, now = new Date()) {
+  subscription = shortVideoProduct(subscription);
   if (subscription?.plan !== SHORT_VIDEO_PLAN_ID) return false;
+  if (subscription.enabled === false) return false;
   if (["cancelled", "canceled", "expired"].includes(String(subscription.status || "").toLowerCase())) return false;
   const start = subscription.currentPeriodStart ? new Date(subscription.currentPeriodStart) : null;
   const end = subscription.currentPeriodEnd ? new Date(subscription.currentPeriodEnd) : null;
@@ -34,6 +43,7 @@ export function isActiveShortVideoSubscription(subscription, now = new Date()) {
 }
 
 export function shortVideoPackageView(subscription, wallet, now = new Date()) {
+  subscription = shortVideoProduct(subscription);
   const active = isActiveShortVideoSubscription(subscription, now);
   return {
     active,
@@ -119,7 +129,8 @@ export async function creditShortVideoSubscriptionBalance({
 
 export async function expireShortVideoPackageAllowance({ getCollection, ownerId, subscription = null, now = new Date(), force = false }) {
   const subscriptions = await getCollection("subscriptions");
-  const currentSubscription = subscription || await subscriptions.findOne({ ownerId });
+  const sourceSubscription = subscription || await subscriptions.findOne({ ownerId });
+  const currentSubscription = shortVideoProduct(sourceSubscription);
   if (!currentSubscription || currentSubscription.plan !== SHORT_VIDEO_PLAN_ID) return { expired: false, clearedFen: 0 };
   if (!force && currentSubscription.allowanceExpiredAt) return { expired: true, clearedFen: safeFen(currentSubscription.allowanceClearedFen) };
   const expiresAt = currentSubscription.currentPeriodEnd ? new Date(currentSubscription.currentPeriodEnd) : null;
@@ -144,17 +155,19 @@ export async function expireShortVideoPackageAllowance({ getCollection, ownerId,
     { $setOnInsert: { creditKey: expiryKey, ownerId, source: "short_video_expiry", sourceId: currentSubscription._id?.toString?.() || "subscription", kind: "short_video_package_expiry", amountFen: -clearedFen, expiresAt, status: "settled", createdAt: now }, $set: { clearedFen, settledAt: now, updatedAt: now } },
     { upsert: true },
   );
+  const prefix = sourceSubscription?.products?.[SHORT_VIDEO_PLAN_ID] ? `products.${SHORT_VIDEO_PLAN_ID}.` : "";
   await subscriptions.updateOne(
     { _id: currentSubscription._id },
-    { $set: { allowanceExpiredAt: now, allowanceClearedFen: clearedFen, ...(force ? {} : { status: "expired", autoRenew: false, statusEvaluatedAt: now }), updatedAt: now } },
+    { $set: { [`${prefix}allowanceExpiredAt`]: now, [`${prefix}allowanceClearedFen`]: clearedFen, ...(force ? {} : { [`${prefix}status`]: "expired", [`${prefix}autoRenew`]: false, [`${prefix}statusEvaluatedAt`]: now }), updatedAt: now } },
   );
   return { expired: true, clearedFen };
 }
 
 export async function reserveShortVideoPackageAllowance({ getCollection, ownerId, amountFen, ledgerKey, orderNo, taskId, now = new Date() }) {
-  const subscription = await (await getCollection("subscriptions")).findOne({ ownerId });
+  const sourceSubscription = await (await getCollection("subscriptions")).findOne({ ownerId });
+  const subscription = shortVideoProduct(sourceSubscription);
   if (!isActiveShortVideoSubscription(subscription, now)) {
-    if (subscription?.plan === SHORT_VIDEO_PLAN_ID) await expireShortVideoPackageAllowance({ getCollection, ownerId, subscription, now });
+    if (subscription?.plan === SHORT_VIDEO_PLAN_ID) await expireShortVideoPackageAllowance({ getCollection, ownerId, subscription: sourceSubscription, now });
     return { matched: false };
   }
   const wallets = await getCollection("wallets");
@@ -198,7 +211,7 @@ export async function refundShortVideoPackageAllowance({ getCollection, task, am
   const refundFen = safeFen(amountFen);
   if (!refundFen) return { applied: false, amountFen: 0 };
   const subscriptions = await getCollection("subscriptions");
-  const subscription = await subscriptions.findOne({ ownerId: task.requesterUserId });
+  const subscription = shortVideoProduct(await subscriptions.findOne({ ownerId: task.requesterUserId }));
   if (!isActiveShortVideoSubscription(subscription, now)) return { applied: false, amountFen: 0, reason: "expired" };
   const wallets = await getCollection("wallets");
   const entry = { key: ledgerKey, kind: "h3_short_video_package_refund", amountFen: refundFen, orderNo: task.orderNo, taskId: task._id, createdAt: now };

@@ -1162,18 +1162,34 @@ test("short drama release channel is website managed and manual-upload only", as
   assert.match(serverSource, /source: "desktop-theme-access", groupId: \{ \$nin: seen \}/);
 });
 
-test("admin subscriptions localize review state and keep the three-column detail layout readable", async () => {
-  const [adminSource, css] = await Promise.all([
+test("English Coach desktop authentication and subscription are documented in OpenAPI", async () => {
+  const response = await app.request("https://example.test/api/openapi.json");
+  assert.equal(response.status, 200);
+  const document = await response.json();
+  for (const path of [
+    "/api/v1/desktop/english-coach/auth/login",
+    "/api/v1/desktop/english-coach/auth/refresh",
+    "/api/v1/desktop/english-coach/auth/logout",
+    "/api/v1/desktop/english-coach/account",
+    "/api/v1/capability-orders/by-request/{key}",
+  ]) assert.ok(document.paths[path], `${path} must be documented`);
+  assert.equal(document.info.version, "2.9.0");
+  assert.ok(document.components.securitySchemes.englishCoachDesktopBearer);
+});
+
+test("admin subscriptions use a full-screen multi-product editor", async () => {
+  const [adminSource, dialogSource, css] = await Promise.all([
     readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
+    readFile(new URL("../../src/components/UserSubscriptionDialog.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../src/styles.css", import.meta.url), "utf8"),
   ]);
   assert.match(adminSource, /label:\s*"订阅用户"/);
   assert.match(adminSource, /pending_review:\s*"待人工审核"/);
   assert.match(adminSource, /<h2>订阅用户<\/h2>/);
-  assert.match(adminSource, /修改类型与有效期/);
-  assert.match(adminSource, /<option value="short_video_monthly">短视频包月用户<\/option>/);
-  assert.match(adminSource, /<span>生效时间<\/span>/);
-  assert.match(adminSource, /<span>到期时间<\/span>/);
+  assert.match(adminSource, /<UserSubscriptionDialog/);
+  assert.match(dialogSource, /type="checkbox"/);
+  assert.match(dialogSource, /<span>生效时间<\/span>/);
+  assert.match(dialogSource, /<span>到期时间<\/span>/);
   assert.match(css, /\.admin-detail-panel\s*>\s*article\s*\{[^}]*grid-template-columns:\s*minmax\(132px,[^;]+minmax\(180px,[^;]+minmax\(230px,\s*auto\)/s);
   assert.match(css, /\.subscription-state\s*\{[^}]*white-space:\s*nowrap/s);
 });
@@ -1225,7 +1241,7 @@ test("administrator subscription periods are authoritative across website and de
   assert.match(serverSource, /account_type: user\.role === "admin" \? "administrator" : isMember && subscription\?\.plan === SHORT_VIDEO_PLAN_ID \? "short_video_member" : isMember \? "subscription_member" : "standard_user"/);
   assert.match(serverSource, /membership_status: membershipStatus/);
   assert.match(adminSource, /user\.is_member && user\.subscription_plan === "short_video_monthly" \? "短视频包月用户" : user\.is_member \? "订阅会员" : "普通用户"/);
-  assert.match(adminSource, /Promise\.all\(\[inspect\(user\), load\(\)\]\)/);
+  assert.match(adminSource, /await load\(\);\s*setMessage\(result\.message \|\| "独立产品订阅已保存/);
   assert.match(accountSource, /isShortVideoMember \? "短视频包月用户" : isMember \? "订阅会员" : "普通用户"/);
 });
 

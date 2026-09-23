@@ -580,6 +580,10 @@ export async function ensureIndexes() {
           { status: 1, claimLeaseUntil: 1 },
           { name: "capability_orders_expired_claims" },
         ),
+        db.collection("capabilityOrders").createIndex(
+          { sharingScope: 1, capabilityId: 1, status: 1, nextEligibleAt: 1, createdAt: 1 },
+          { name: "capability_orders_english_shared_queue" },
+        ),
         db.collection("capabilityOrderCallbacks").createIndex(
           { orderId: 1, eventId: 1 },
           { unique: true, name: "uniq_capability_order_callback_event" },
