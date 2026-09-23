@@ -242,6 +242,22 @@
       "destination": "/api/platform?_platform_path=v1/desktop/:path*"
     },
     {
+      "source": "/api/v1/capability-orders",
+      "destination": "/api/platform?_platform_path=v1/capability-orders"
+    },
+    {
+      "source": "/api/v1/capability-orders/:path*",
+      "destination": "/api/platform?_platform_path=v1/capability-orders/:path*"
+    },
+    {
+      "source": "/api/v1/capability-assets",
+      "destination": "/api/platform?_platform_path=v1/capability-assets"
+    },
+    {
+      "source": "/api/v1/capability-assets/:path*",
+      "destination": "/api/platform?_platform_path=v1/capability-assets/:path*"
+    },
+    {
       "source": "/((?!api/).*)",
       "destination": "/index.html"
     }

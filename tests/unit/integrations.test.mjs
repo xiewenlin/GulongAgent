@@ -1022,6 +1022,10 @@ test("Vercel consolidates nested account and configuration routes", async () => 
   assert.ok(sources.includes("/api/v1/pricing/:path*"));
   assert.ok(sources.includes("/api/v1/admin/:path*"));
   assert.ok(sources.includes("/api/v1/desktop/:path*"));
+  assert.ok(sources.includes("/api/v1/capability-orders"));
+  assert.ok(sources.includes("/api/v1/capability-orders/:path*"));
+  assert.ok(sources.includes("/api/v1/capability-assets"));
+  assert.ok(sources.includes("/api/v1/capability-assets/:path*"));
   assert.ok(sources.includes("/api/billing/:path*"));
   assert.ok(sources.includes("/api/codex-market/:path*"));
   assert.ok(sources.includes("/api/users/:id/avatar"));
