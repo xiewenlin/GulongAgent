@@ -7,7 +7,7 @@ import { fingerprintIp, hashOpaqueToken } from "./security.js";
 import { createPresignedDownloadUrl, createPresignedPutUrl, deleteObject, ensureBrowserUploadCors, headObject, sanitizeFilename } from "./cos.js";
 import { localizeErrorMessage } from "../shared/error-messages.js";
 import { readEnglishEntitlement, readGulongEngineEntitlement } from "./english-coach-products.js";
-import { ENGLISH_AUDIO_MAX_BYTES, ENGLISH_AUDIO_MIME, ENGLISH_CAPABILITY_DEFINITIONS, englishNodeSharesCapability, englishWorkerOwnsClaim, isEnglishCapability, validateEnglishInlineResult } from "./english-coach-capabilities.js";
+import { ENGLISH_CAPABILITY_DEFINITIONS, englishNodeSharesCapability, englishWorkerOwnsClaim, isEnglishCapability, validateEnglishInlineResult } from "./english-coach-capabilities.js";
 import { GULONG_ENGINE_CAPABILITY_DEFINITIONS, gulongEngineNodeSharesCapability, gulongEngineUploadAllowed, isGulongEngineCapability, validateGulongEngineInlineResult } from "./gulong-engine-capabilities.js";
 
 export const CAPABILITY_ORDER_PROTOCOL = "gulong-capability-orders-v1";
@@ -356,11 +356,18 @@ export function validateCapabilityInput(capability, parameters, assets) {
   }
 }
 
-export function normalizeCapabilityReport(value = {}, now = new Date()) {
+export function normalizeCapabilityReport(value = {}, now = new Date(), { allowLegacyEnglishOrders = false } = {}) {
   const capabilityId = String(value.capability_id || value.capabilityId || "").trim().toLowerCase();
   const definition = CAPABILITY_MAP.get(capabilityId);
   if (!definition || definition.legacyRoute) throw Object.assign(new Error("节点上报了未注册或需走旧版接口的能力"), { code: "UNKNOWN_CAPABILITY", status: 400 });
-  if (!definition.dispatchable) throw Object.assign(new Error("该能力尚未完成独立订单适配与真实推理验收，暂不可上报接单"), { code: "CAPABILITY_ADAPTER_REQUIRED", status: 409 });
+  // Existing English orders can finish their original lifecycle after the desktop
+  // product moves to local inference. New orders remain blocked by the catalog.
+  if (!definition.dispatchable && !(allowLegacyEnglishOrders && isEnglishCapability(capabilityId))) {
+    throw Object.assign(new Error(isEnglishCapability(capabilityId)
+      ? "该能力已改为本地处理，不能接收新的派单"
+      : "该能力尚未完成独立订单适配与真实推理验收，暂不可上报接单"),
+    { code: isEnglishCapability(capabilityId) ? "CAPABILITY_LOCAL_ONLY" : "CAPABILITY_ADAPTER_REQUIRED", status: 409 });
+  }
   const protocolVersion = String(value.protocol_version || value.protocolVersion || "").trim();
   if (protocolVersion !== CAPABILITY_ORDER_PROTOCOL) throw Object.assign(new Error(`能力上报必须使用 ${CAPABILITY_ORDER_PROTOCOL}`), { code: "PROTOCOL_VERSION_UNSUPPORTED", status: 400 });
   const testedAt = new Date(value.validation?.tested_at || value.validation?.testedAt || value.validated_at || 0);
@@ -646,7 +653,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const sha256 = String(body.sha256 || "").trim().toUpperCase();
     if (auth.kind === "desktop-english") {
       const rejected = await requireEnglish(c, auth.user.id); if (rejected) return rejected;
-      if (bytes > ENGLISH_AUDIO_MAX_BYTES || !ENGLISH_AUDIO_MIME.includes(contentType)) return c.json({ code: "CAPABILITY_INPUT_LIMIT_EXCEEDED", message: "英语录音仅支持不超过 20 MiB 的 WAV、MP3、FLAC 或 WebM 音频" }, 400);
+      return c.json({ code: "CAPABILITY_LOCAL_ONLY", message: "英语教练录音已在桌面端本地处理，不再上传新素材" }, 409);
     }
     if (auth.kind === "desktop-gulong-engine") {
       const rejected = await requireGulong(c, auth.user.id); if (rejected) return rejected;
@@ -706,7 +713,9 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const capability = CAPABILITY_MAP.get(capabilityId);
     if (!capability) return c.json({ code: "UNKNOWN_CAPABILITY", message: "该能力未注册到官网统一订单目录" }, 400);
     if (capability.legacyRoute) return c.json({ code: "USE_LEGACY_H3_API", message: "MiniMax H3 视频任务继续使用现有 /api/h3/tasks 合同", legacy_route: capability.legacyRoute }, 409);
-    if (!capability.dispatchable) return c.json({ code: "CAPABILITY_ADAPTER_REQUIRED", message: "该能力尚未完成独立订单适配与真实推理验收，暂不可创建订单" }, 409);
+    if (!capability.dispatchable) return c.json(isEnglishCapability(capabilityId)
+      ? { code: "CAPABILITY_LOCAL_ONLY", message: "英语教练新学习任务已改为桌面端本地处理，不再创建派单订单" }
+      : { code: "CAPABILITY_ADAPTER_REQUIRED", message: "该能力尚未完成独立订单适配与真实推理验收，暂不可创建订单" }, 409);
     let parameters;
     try { parameters = normalizeCapabilityParameters(body.parameters || {}, capability); }
     catch (error) { return c.json({ code: error.code || "INVALID_CAPABILITY_PARAMETERS", message: error.message }, error.status || 400); }
@@ -867,7 +876,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     if (body.protocol_version !== CAPABILITY_ORDER_PROTOCOL) return c.json({ code: "PROTOCOL_VERSION_UNSUPPORTED", message: `必须使用 ${CAPABILITY_ORDER_PROTOCOL}` }, 400);
     const now = new Date();
     let ownCapabilities;
-    try { ownCapabilities = (Array.isArray(body.capabilities) ? body.capabilities : []).map((item) => normalizeCapabilityReport(item, now)); }
+    try { ownCapabilities = (Array.isArray(body.capabilities) ? body.capabilities : []).map((item) => normalizeCapabilityReport(item, now, { allowLegacyEnglishOrders: true })); }
     catch (error) { return c.json({ code: error.code || "INVALID_CAPABILITY_REPORT", message: error.message }, error.status || 400); }
     if (!ownCapabilities.length) return c.json({ code: "CAPABILITY_REPORT_REQUIRED", message: "节点必须上报至少一个已安装、已验证、已启用能力" }, 400);
     const resources = body.resources && typeof body.resources === "object" ? body.resources : {};
@@ -881,7 +890,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       const binding = await (await getCollection("nodeAccountBindings")).findOne({ userId: auth.user._id, nodeId: reportNodeId, status: "active", revokedAt: null });
       if (!binding) return c.json({ code: "LAN_NODE_NOT_OWNED", message: "局域网报告包含未绑定到当前账户的节点" }, 403);
       let capabilities;
-      try { capabilities = (Array.isArray(report.capabilities) ? report.capabilities : []).map((item) => normalizeCapabilityReport(item, now)); }
+      try { capabilities = (Array.isArray(report.capabilities) ? report.capabilities : []).map((item) => normalizeCapabilityReport(item, now, { allowLegacyEnglishOrders: true })); }
       catch (error) { return c.json({ code: error.code || "INVALID_CAPABILITY_REPORT", message: error.message }, error.status || 400); }
       const reportResources = report.resources && typeof report.resources === "object" ? report.resources : {};
       const maxConcurrent = Math.min(16, Math.max(1, integer(reportResources.max_concurrent_tasks, Math.max(1, ...capabilities.map((item) => item.maxConcurrent)))));
@@ -1062,10 +1071,10 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/by-request/{key}", tags: ["Unified Capability Orders"], summary: "按同账户稳定请求编号恢复订单", responses: { 200: { description: "自己的原订单；套餐到期仍可查询" }, 404: { description: "尚无该请求" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders/by-request/{key}/cancel", tags: ["Unified Capability Orders"], summary: "按请求编号幂等取消并阻止迟到创建", responses: { 200: { description: "原订单或原子cancelled tombstone；不会产生新执行任务" } } });
   const reportSchema = z.object({ capability_id: z.string(), capability_version: z.string(), protocol_version: z.literal(CAPABILITY_ORDER_PROTOCOL), installed: z.literal(true), validated: z.literal(true), enabled: z.literal(true), max_concurrent: z.number().int().min(1).max(16), sharing_opt_in: z.boolean().optional(), validation: z.object({ tested_at: z.iso.datetime(), artifact_sha256: z.string().regex(/^[A-Fa-f0-9]{64}$/), runtime_version: z.string().optional(), test_id: z.string().optional() }) });
-  app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/catalog", tags: ["Unified Capability Orders"], summary: "读取官网统一能力目录", description: "gulong_engine.video 独立零价合同提供网页 H3 对齐的视频参数、9 图/3 视频/3 音频素材规则及 availability（verified_node_count、free_slot_count、status）。真实节点完成消费适配验收前 dispatchable=false，不能创建订单；收费 /api/h3/tasks 始终独立。", responses: { 200: { description: "能力 ID、版本化 parameters JSON Schema、素材/输出 role 与 MIME/数量/大小、真实节点可用性、租约和旧接口路由" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-assets/presign", tags: ["Unified Capability Orders"], summary: "签发能力订单输入素材 COS 直传票据", responses: { 201: { description: "账号专属短时 PUT 票据" } } });
+  app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/catalog", tags: ["Unified Capability Orders"], summary: "读取官网统一能力目录", description: "english_coach.* 已全部转为 local_only，不再接受新派单；历史合法订单仍可查询、取消或沿原生命周期完成。gulong_engine.video 独立零价合同提供网页 H3 对齐的视频参数、9 图/3 视频/3 音频素材规则及 availability（verified_node_count、free_slot_count、status）。真实节点完成消费适配验收前 dispatchable=false，不能创建订单；收费 /api/h3/tasks 始终独立。", responses: { 200: { description: "能力 ID、版本化 parameters JSON Schema、素材/输出 role 与 MIME/数量/大小、真实节点可用性、租约和旧接口路由" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-assets/presign", tags: ["Unified Capability Orders"], summary: "签发能力订单输入素材 COS 直传票据", description: "英语教练新录音已在桌面端本地处理，英语桌面凭据调用返回 409 CAPABILITY_LOCAL_ONLY；已签发旧票据可按原合同完成校验。其他产品能力不变。", responses: { 201: { description: "账号专属短时 PUT 票据" }, 409: { description: "英语教练新录音已改为本地处理" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-assets/{id}/complete", tags: ["Unified Capability Orders"], summary: "校验能力订单输入素材大小、摘要与归属", responses: { 200: { description: "返回安全 asset_id" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders", tags: ["Unified Capability Orders"], summary: "幂等创建同账户本地能力订单", description: "BIN、模型配件和 runtime 不是独立能力。收费 minimax_h3.video_generation 继续使用 /api/h3/tasks；零价 gulong_engine.video 保持独立能力 ID，并在消费者完成真实验收前返回 409 CAPABILITY_ADAPTER_REQUIRED。v1 本地能力订单价格为 0 分，不扣钱包且无分佣。", responses: { 201: { description: "订单已进入同账户节点队列，包含 queue_position 和 ETA" }, 409: { description: "幂等冲突、能力适配未验收或应使用旧 H3 接口" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders", tags: ["Unified Capability Orders"], summary: "幂等创建同账户本地能力订单", description: "english_coach.* 新任务已改为本地处理，返回 409 CAPABILITY_LOCAL_ONLY；旧订单仍可读取或取消。BIN、模型配件和 runtime 不是独立能力。收费 minimax_h3.video_generation 继续使用 /api/h3/tasks；零价 gulong_engine.video 保持独立能力 ID，并在消费者完成真实验收前返回 409 CAPABILITY_ADAPTER_REQUIRED。v1 本地能力订单价格为 0 分，不扣钱包且无分佣。", responses: { 201: { description: "订单已进入同账户节点队列，包含 queue_position 和 ETA" }, 409: { description: "英语能力改为本地处理、幂等冲突、能力适配未验收或应使用旧 H3 接口" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/{id}", tags: ["Unified Capability Orders"], summary: "查询订单进度、排队位置、ETA 与短时结果下载票据", responses: { 200: { description: "仅返回本人订单；排队时含 queue_position、estimated_wait_seconds，执行时含 progress、eta_seconds" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders/{id}/cancel", tags: ["Unified Capability Orders"], summary: "幂等取消能力订单", responses: { 200: { description: "取消状态与零费用退款边界" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/{id}/worker-state", tags: ["Unified Capability Orders"], summary: "执行节点轮询取消与租约状态", description: "执行节点每 15 秒轮询；claim_id 必须匹配且只能由 assigned_node 自己的绑定令牌读取。started/progress 回调会把 5 分钟租约重新续满。", security: [{ accountBinding: [] }], request: { query: z.object({ claim_id: z.string().min(8) }) }, responses: { 200: { description: "cancellation_requested、should_stop 与 lease_expires_at" }, 409: { description: "订单未分配或 claim 不匹配" } } });

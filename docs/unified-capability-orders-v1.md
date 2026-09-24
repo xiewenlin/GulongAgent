@@ -38,6 +38,8 @@ MiniMax H3 视频继续使用 `/api/h3/tasks`、`/api/h3/tasks/claim` 与 `/api/
 
 `orientation-detector` 只属于视频方向 QC 内部依赖，不是独立订单能力，禁止上报。YuE2 与 Breeze TTS2 当前标记为 `commercial_use=license_review_required`；在双方确认许可证允许商业使用前，价格固定为 0，不能进入商业收费订单。目录中的 `dispatchable=false / adapter_status=adapter_required` 项只能用于能力发现；节点上报会收到 `CAPABILITY_ADAPTER_REQUIRED`，官网也拒绝创建该类订单。
 
+`english_coach.*` 四项能力现统一为 `dispatchable=false / adapter_status=local_only`：新建订单及新录音素材上传返回 `409 CAPABILITY_LOCAL_ONLY`。已存在的合法旧订单可按原鉴权、租约与幂等合同继续完成、查询和取消；此兼容路径不会产生新英语订单，也不影响其他产品的共享 ASR/TTS 能力。
+
 ## 机器可读能力合同
 
 目录中每个可调用能力都返回以下机器可读字段：

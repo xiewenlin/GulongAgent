@@ -43,38 +43,27 @@ PearAPI 平台凭据以共享的 `API_KEY_PEPPER` 派生独立 AES-GCM 密钥加
 
 ## 英语任务
 
-所有用户端英语订单接口接受 `Authorization: Bearer gec_at_...`。`GET /api/v1/capability-orders/catalog` 返回四项能力的目录和 `dispatchable` 状态；当前仅 `english_coach.transcribe` 与 `english_coach.speech` 接受新订单。`english_coach.text` 改由上面的即时文字接口执行，`english_coach.assess` 改由桌面包内 CPU 模型执行；二者 `dispatchable:false`、`adapter_status:local_only`，不能上传录音来创建新派单。历史订单仍可查询或由本人取消。创建可派单订单示例：
-
-```http
-POST /api/v1/capability-orders
-Authorization: Bearer gec_at_...
-Idempotency-Key: stable-job-uuid
-Content-Type: application/json
-
-{"capability_id":"english_coach.speech","parameters":{"text":"Hello world","locale":"en-US"},"assets":[],"source_channel":"desktop_agent"}
-```
+所有用户端英语订单接口接受 `Authorization: Bearer gec_at_...`。`GET /api/v1/capability-orders/catalog` 仍返回四项能力供兼容历史订单，但现在全部为 `dispatchable:false`、`adapter_status:local_only`。新建任意 `english_coach.*` 派单订单和申请新录音上传票据均返回 `409 CAPABILITY_LOCAL_ONLY`。转录改由桌面端内置 Whisper base.en CPU 执行，朗读改用 Windows 本地能力；文字继续调用上面的免费同步接口，发音评估由桌面端本地执行。官网不再为新的英语学习任务派单，也不影响其他产品能力。已创建的合法旧订单仍可由原节点完成原生命周期、由本人查询或取消。
 
 | `capability_id` | `parameters` | 输入素材 | 结果 |
 |---|---|---|---|
 | `english_coach.text` | 仅保留历史订单合同；新文字请调用 `/api/v1/desktop/english-coach/llm/chat` | 无 | 历史结果可查询 |
-| `english_coach.transcribe` | 可选 `language: en` | `media` 1 个音频 | `inline_result.text` |
-| `english_coach.speech` | `text`，可选 `locale: en-US|en-GB`、`output_format: wav` | 无 | `results[]` 中 `role: primary_audio` 的短时签名下载链接 |
+| `english_coach.transcribe` | 仅供历史订单解析；新转录使用桌面内置 Whisper base.en CPU | 历史订单含 `media` 1 个音频 | 历史 `inline_result.text` 可查询 |
+| `english_coach.speech` | 仅供历史订单解析；新朗读使用 Windows 本地能力 | 无 | 历史 `primary_audio` 结果可查询 |
 | `english_coach.assess` | 仅保留历史订单合同；新评估在桌面端本地 CPU 执行 | 不再上传评估录音 | 历史结果可查询 |
 
-派单音频限 20 MiB，接受 WAV、MP3、FLAC、WebM；以目录实时返回的 MIME 合同为准。现有英语订单的 `billing.price_fen=0`、`charge_status=exempt`，不扣钱包且不分佣。无已安装、验证并启用的节点时订单保持排队；超时或节点失败会返回明确状态，不生成模拟结果。套餐到期后拒绝新建并在领取前取消尚未处理的英语订单；本人仍可查询历史结果。
+历史派单音频限 20 MiB，接受 WAV、MP3、FLAC、WebM；不再签发新录音票据。现有英语订单的 `billing.price_fen=0`、`charge_status=exempt`，不扣钱包且不分佣。无已安装、验证并启用的节点时旧订单保持排队；超时或节点失败会返回明确状态，不生成模拟结果。套餐到期后在领取前取消尚未处理的英语订单；本人仍可查询历史结果。
 
-稳定请求编号是恢复入口：`GET /api/v1/capability-orders/by-request/{key}`。在原始 POST 响应丢失时，先以同一 `Idempotency-Key` 查询，存在则继续轮询原订单；不存在才重新提交。`POST /api/v1/capability-orders/by-request/{key}/cancel` 可取消或原子创建取消标记，阻止迟到的创建请求进入队列。不要对同一请求编号重新上传后改变 `asset_id` 再重复创建，否则会得到 `IDEMPOTENCY_KEY_CONFLICT`。返回的 `order` 含 `id`、`status`、`stage`、`progress`、`eta_seconds`、`inline_result`、`results` 和 `billing`。也可按订单 ID 调用 `GET /api/v1/capability-orders/{id}` 与 `POST /api/v1/capability-orders/{id}/cancel`。
+稳定请求编号仍是历史订单恢复入口：`GET /api/v1/capability-orders/by-request/{key}`。在原始 POST 响应丢失时，以同一 `Idempotency-Key` 查询；若不存在，不要重新提交英语派单，改走客户端本地能力。`POST /api/v1/capability-orders/by-request/{key}/cancel` 可取消或原子创建取消标记，阻止迟到的创建请求进入队列。返回的历史 `order` 含 `id`、`status`、`stage`、`progress`、`eta_seconds`、`inline_result`、`results` 和 `billing`。也可按订单 ID 调用 `GET /api/v1/capability-orders/{id}` 与 `POST /api/v1/capability-orders/{id}/cancel`。
 
-### 录音直传
+### 历史录音直传
 
-1. 计算文件字节数及 SHA-256 大写十六进制，调用 `POST /api/v1/capability-assets/presign`，提交 `{ "filename", "content_type", "bytes", "sha256" }`。
-2. 使用响应 `upload_url`、`method: PUT` 及原样 `headers` 上传二进制，不经过官网请求体。
-3. `POST /api/v1/capability-assets/{asset_id}/complete` 完成 COS 大小、摘要和归属核验；在订单 `assets` 中引用 `{ "asset_id": "...", "role": "media" }`。已完成素材的重复 complete 安全返回原素材。
+新英语录音不再上传官网 COS；`POST /api/v1/capability-assets/presign` 对英语教练客户端返回 `409 CAPABILITY_LOCAL_ONLY`。已取得票据的旧素材仍可通过 `POST /api/v1/capability-assets/{asset_id}/complete` 完成大小、摘要和归属核验；已完成素材的重复 complete 安全返回原素材。
 
 签名 URL 只在需要时使用，不能永久保存或共享。查询结果仅限订单本人；上传素材与输出均按用户、任务和执行节点校验。
 
 ## 执行节点
 
-执行节点沿用 `X-Gulong-Account-Binding: gab_...`，不接收用户的桌面访问令牌。`POST /api/v1/capability-orders/claim` 上报已安装、30 天内真实验证、启用的能力；英语共享节点还需为每项能力声明 `sharing_opt_in: true`。`dry_run: true` 仅检查连通性，不领取任务。跨账户英语任务仅能分配给主动共享的轮询节点；回调、COS 输出票据和 worker 状态接口只接受该任务指定执行节点的绑定。领取任务 DTO 不含需求用户邮箱、用户 ID、钱包或内部绑定 ID。
+历史执行节点仍沿用 `X-Gulong-Account-Binding: gab_...`，不接收用户的桌面访问令牌。`POST /api/v1/capability-orders/claim` 仅为已存在且仍在队列的合法英语订单保留原领取流程，不可能领取关闭后新建的英语订单；节点上报仍须已安装、30 天内真实验证、启用，共享旧订单仍须 `sharing_opt_in: true`。`dry_run: true` 仅检查连通性，不领取任务。跨账户英语旧任务仅能分配给主动共享的轮询节点；回调、COS 输出票据和 worker 状态接口只接受该任务指定执行节点的绑定。领取任务 DTO 不含需求用户邮箱、用户 ID、钱包或内部绑定 ID。
 
 节点的 `started/progress` 回调续租五分钟；`completed` 可传文字内联结果，或先通过 `/api/v1/capability-orders/{id}/outputs/presign` 获得 `primary_audio` 的 COS PUT 票据，再提交 `output_id`。回调按任务和 `event_id` 幂等。精确领取、进度、回调 JSON 及通用私有素材合同见 [统一能力订单 v1](./unified-capability-orders-v1.md)。

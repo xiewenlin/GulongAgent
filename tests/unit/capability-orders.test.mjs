@@ -218,6 +218,51 @@ test("claim dry-run validates a real capability report without touching the orde
   assert.equal(queueReads, 0);
 });
 
+test("local-only English capability can finish an existing queued order without reopening creation", async () => {
+  const userId = new ObjectId();
+  const binding = { _id: new ObjectId(), userId, nodeId: "english-legacy-node-0001", nodeName: "旧任务执行节点", status: "active", revokedAt: null };
+  const order = {
+    _id: new ObjectId(), requesterUserId: userId, orderNo: "CAP-ENGLISH-LEGACY-1", capabilityId: "english_coach.speech",
+    protocolVersion: CAPABILITY_ORDER_PROTOCOL, parameters: { text: "Hello", locale: "en-US", output_format: "wav" }, assets: [],
+    status: "queued", stage: "queued", createdAt: new Date(Date.now() - 60_000), nextEligibleAt: new Date(Date.now() - 60_000),
+    autoCancelAt: new Date(Date.now() + 60_000), attempt: 0, maxAttempts: 2,
+  };
+  let claimCount = 0;
+  const orders = {
+    find: (filter) => ({ sort() { return this; }, limit() { return this; }, toArray: async () => filter.status?.$in ? [] : [order] }),
+    updateMany: async () => ({ modifiedCount: 0 }),
+    findOneAndUpdate: async (_filter, update) => {
+      claimCount += 1;
+      return { ...order, ...update.$set, attempt: 1 };
+    },
+  };
+  const app = new OpenAPIHono();
+  registerCapabilityOrderRoutes(app, {
+    getCollection: async (name) => ({
+      nodeAccountBindings: { findOne: async () => binding },
+      users: { findOne: async () => ({ _id: userId, status: "active" }) },
+      capabilityNodeReports: { updateOne: async () => ({ modifiedCount: 1 }) },
+      capabilityOrders: orders,
+    })[name],
+    enforceRateLimit: async () => ({ allowed: true }),
+    readEnglishEntitlement: async () => ({ active: true }),
+    authenticate: async () => ({ error: new Response("unused", { status: 401 }) }),
+    requireTrustedMutation: () => null,
+  });
+  const response = await app.request("http://localhost/api/v1/capability-orders/claim", {
+    method: "POST", headers: { "Content-Type": "application/json", "X-Gulong-Account-Binding": `gab_${"E".repeat(48)}` },
+    body: JSON.stringify({
+      protocol_version: CAPABILITY_ORDER_PROTOCOL, node_id: binding.nodeId, node_name: binding.nodeName,
+      capabilities: [{ capability_id: "english_coach.speech", protocol_version: CAPABILITY_ORDER_PROTOCOL,
+        installed: true, validated: true, enabled: true, validation: { tested_at: new Date().toISOString(), artifact_sha256: "A".repeat(64) } }],
+      resources: { running_task_count: 0, estimated_total_seconds: 0, max_concurrent_tasks: 1 },
+    }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).task.capability_id, "english_coach.speech");
+  assert.equal(claimCount, 1);
+});
+
 test("worker state exposes cancellation and output presign returns the complete PUT contract", async () => {
   const userId = new ObjectId();
   const orderId = new ObjectId();

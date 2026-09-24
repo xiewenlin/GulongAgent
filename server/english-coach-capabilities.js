@@ -17,9 +17,9 @@ function definition(suffix, parametersSchema, { assets = [], outputs = [], inlin
 }
 export const ENGLISH_CAPABILITY_DEFINITIONS = Object.freeze([
   definition("text", schema({ task: choice(["coach", "writing", "explain"]), input: text(1, 24000), context: text(0, 24000, { default: "" }), exam: text(1, 32, { default: "general" }) }, ["task", "input"]), { dispatchable: false }),
-  definition("transcribe", schema({ language: choice(["en"], "en") }, []), { assets: [media] }),
+  definition("transcribe", schema({ language: choice(["en"], "en") }, []), { assets: [media], dispatchable: false }),
   definition("speech", schema({ text: text(1, 12000), locale: choice(["en-US", "en-GB"], "en-US"), output_format: choice(["wav"], "wav") }, ["text"]), {
-    inlineResult: false, outputs: [{ role: "primary_audio", min: 1, max: 1, mimeTypes: ["audio/wav", "audio/x-wav"], maxBytes: ENGLISH_AUDIO_MAX_BYTES }], eta: 30,
+    inlineResult: false, outputs: [{ role: "primary_audio", min: 1, max: 1, mimeTypes: ["audio/wav", "audio/x-wav"], maxBytes: ENGLISH_AUDIO_MAX_BYTES }], eta: 30, dispatchable: false,
   }),
   definition("assess", schema({ reference_text: text(1, 24000), language: choice(["en-US"], "en-US") }, ["reference_text"]), { assets: [media], dispatchable: false }),
 ]);
