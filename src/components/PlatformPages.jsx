@@ -104,7 +104,7 @@ export function DownloadPage() {
       description: "为 AI 视频创作者与算力节点打造的高性能桌面版，整合 MiniMax H3 本地视频链路、PromptEngine、Z-Image 与 ComfyUI，一套安装包即可进入创作。",
       suitable: "适合配备 NVIDIA 显卡、重视本地隐私和视频生成效率，并希望参与 H3 共享节点接单收益的个人与团队。",
       features: ["MiniMax H3 本地视频创作链路", "针对 16GB 显存场景持续优化", "PromptEngine、Z-Image 与 ComfyUI 一体化", "可作为共享节点接单并查看真实收益"],
-      icon: "/assets/gulong-agent-icon.png",
+      icon: "/assets/minimax-h3-desktop-icon.ico",
     },
     {
       key: "short_drama",
@@ -114,7 +114,7 @@ export function DownloadPage() {
       description: "面向短剧创作者与内容团队的可视化生产工作台。从小说原文、剧本拆解到角色、场景、道具、分镜与批量视频生成，把分散环节收进同一张流程画布。",
       suitable: "适合需要管理连续剧集、统一视觉资产、追踪生成进度，并希望把重复制作流程沉淀为团队生产线的用户。",
       features: ["小说、剧本与分镜逐层拆解", "角色、场景、道具视觉资产统一管理", "节点状态、生成进度与结果集中查看", "支持批量视频生成与流程复用"],
-      icon: "/assets/gulong-agent-icon.png",
+      icon: "/assets/drama-flow-desktop-icon.png",
     },
     {
       key: "english_coach",
@@ -124,7 +124,7 @@ export function DownloadPage() {
       description: "面向日常英语学习与表达练习的独立桌面产品。绿色软件以 ZIP 压缩包提供，下载后解压使用，无需运行安装程序。",
       suitable: "适合希望练习英语对话、写作、听力与发音，并使用独立英语教练月度权益的学习者。",
       features: ["英语对话与写作辅助", "听力转写与发音评估", "独立账号登录与月度权益", "绿色 ZIP 下载，解压后使用"],
-      icon: "/assets/gulong-agent-icon.png",
+      icon: "/assets/english-coach-desktop-icon.png",
     },
   ];
 
@@ -163,7 +163,7 @@ export function DownloadPage() {
             const isCoach = edition.key === "english_coach";
             return <article key={edition.key} className={`download-edition-card ${isCustom ? "custom" : isStudio ? "studio" : isCoach ? "coach" : "essential"}`}>
               <header>
-                <div className={`download-edition-mark ${isCustom ? "flower" : isStudio ? "studio" : isCoach ? "coach" : ""}`}><img src={edition.icon} alt={`${edition.name}圆形图标`} /></div>
+                <div className={`download-edition-mark ${isCustom ? "flower" : isStudio ? "studio" : isCoach ? "coach" : ""}`}><img src={edition.icon} alt={`${edition.name}软件图标`} /></div>
                 <div><span>{edition.eyebrow}</span><h2>{edition.name}</h2><strong>{edition.tagline}</strong></div>
               </header>
               <p className="edition-description">{edition.description}</p>

@@ -1142,7 +1142,16 @@ test("download page explains all four desktop editions including English Coach p
   assert.match(source, /小说、剧本与分镜逐层拆解/);
   assert.match(source, /PromptEngine、Z-Image 与 ComfyUI/);
   assert.doesNotMatch(source, /永生花定制版/);
-  assert.equal((source.match(/gulong-agent-icon\.png/g) || []).length, 4);
+  const downloadIcons = Object.fromEntries([...source.matchAll(/key: "(gulong|yongshenghua|short_drama|english_coach)"[\s\S]*?icon: "(\/assets\/[^\"]+)"/g)].map((match) => [match[1], match[2]]));
+  assert.deepEqual(downloadIcons, {
+    gulong: "/assets/gulong-agent-icon.png",
+    yongshenghua: "/assets/minimax-h3-desktop-icon.ico",
+    short_drama: "/assets/drama-flow-desktop-icon.png",
+    english_coach: "/assets/english-coach-desktop-icon.png",
+  });
+  for (const asset of Object.values(downloadIcons)) {
+    assert.ok((await readFile(new URL(`../../public${asset}`, import.meta.url))).length > 100, asset);
+  }
   assert.match(adminSource, /return "MiniMax H3 极速视频版"/);
   assert.match(adminSource, /return "短剧工作台"/);
   assert.match(adminSource, /return "英语教练"/);
