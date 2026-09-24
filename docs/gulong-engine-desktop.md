@@ -1,6 +1,6 @@
 # 古龙引擎包月桌面端合同
 
-生产基址：`https://www.sologle.com`。机器可读 OpenAPI：`/api/openapi.json`（v2.10.0）。这是独立产品月套餐，不自动获得普通会员、英语教练或短视频包月权益，也不向钱包充值。
+生产基址：`https://www.sologle.com`。机器可读 OpenAPI：`/api/openapi.json`（v2.10.1）。这是独立产品月套餐，不自动获得普通会员、英语教练或短视频包月权益，也不向钱包充值。
 
 ## 登录与权益
 
@@ -33,6 +33,24 @@
 
 `GET /api/v1/capability-orders/catalog` 返回 `gulong_engine.text`、`gulong_engine.image`、`gulong_engine.video`，均为 `priceFen=0`，不扣钱包、不分佣。客户端用 `POST /api/v1/capability-orders`、`Idempotency-Key` 和 `Authorization: Bearer gge_at_...` 创建。`text` 可提交 `prompt` 与可选 `model`；`image` 支持 `zimage` 或 `qwen_image_2_1`，最多 9 张 PNG/JPEG/WebP 参考图，单张最多 40 MiB；所有素材先走 `/api/v1/capability-assets/presign` 直传与 `/{asset_id}/complete` 回执核验。创建响应的 `order.id` 可用 `GET /api/v1/capability-orders/{id}` 查询；原请求丢失可走 `/api/v1/capability-orders/by-request/{key}` 恢复。
 
-视频能力当前只公开独立的版本化参数和输出合同，`dispatchable=false`，尚未有真实节点适配器时 `POST` 明确返回 `409 CAPABILITY_ADAPTER_REQUIRED`；不能用已有收费的 `/api/h3/tasks` 偷换成零价路径。只有真实推理验收和节点适配完成后才可开放。
+`gulong_engine.video` 是与收费 `/api/h3/tasks` 完全隔离的零单次价能力。目录中的 `parameters_schema` 当前接受：
+
+```json
+{
+  "model": "minimax_h3",
+  "prompt": "雨夜街头，人物走向镜头，@图片1 作为人物参考",
+  "duration_seconds": 5,
+  "video_mode": "all_reference",
+  "aspect_ratio": "16:9",
+  "profile": "official_max",
+  "sampling_steps": 4,
+  "seed": -1,
+  "prompt_optimization_enabled": false
+}
+```
+
+`duration_seconds` 为 1–15；`video_mode` 为 `all_reference|first_last|smart_multiframe`；画幅为 `21:9|16:9|4:3|1:1|3:4|9:16`；`profile` 为 `official_max|ultra1080|fast2k`；采样步数为 4、8 或 20。`extended` 仅在消费节点真的支持且完成独立验收后才会开放，当前提交会被拒绝。素材经 `/api/v1/capability-assets/presign` 和 `/{asset_id}/complete` 直传、HEAD 验证后，以 `assets:[{"asset_id":"...","role":"reference_image"}]` 的形式引用；角色 `reference_image` 最多 9 张（PNG/JPEG/WebP、单张 40 MiB），`reference_video` 最多 3 段（MP4/WebM/MOV、单段 2 GiB），`reference_audio` 最多 3 段（MP3/MP4/WAV/OGG/WebM、单段 512 MiB），全部素材合计不超过 2 GiB。输出是 `primary_video`，MP4，最多 2 GiB。`@图片1` 等引用仍由消费端按传入素材顺序解释。
+
+目录为该能力额外返回 `availability:{"verified_node_count":0,"free_slot_count":0,"status":"adapter_required"}`。只有真实消费适配、节点已绑定且近期上报经验证的模型能力后，才可变为 `ready`。目前 `dispatchable=false`，`POST /api/v1/capability-orders` 返回 `409 CAPABILITY_ADAPTER_REQUIRED`，节点也不能上报它接单；为避免无效大文件占用 COS，绿色版视频/音频参考素材的预签名上传同样暂返回该错误码。不能用已有收费的 `/api/h3/tasks` 偷换成零价路径。将来开放后，创建和 `GET /api/v1/capability-orders/{id}` 返回 `queue_position`、`estimated_wait_seconds`（无空闲已验收节点时为 `null`）、`progress`、`eta_seconds`，供桌面端轮询展示。节点 `started/progress` 回调继续更新 ETA。
 
 节点沿用 `X-Gulong-Account-Binding: gab_...`，必须上报已安装、已验证、已启用、30 天内的验证摘要；服务其他账户时还必须明确 `sharing_opt_in=true`。订单领取、素材/输出签名地址、回调和幂等规则见 [统一能力订单合同](./unified-capability-orders-v1.md)。用户钱包、邮箱等敏感字段不会下发给执行节点。

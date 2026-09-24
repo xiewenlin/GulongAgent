@@ -144,7 +144,7 @@ v1 本地能力订单价格固定为 0 分，`charge_status=exempt`、`refund_st
 
 ### 查询与取消
 
-- `GET /api/v1/capability-orders/{id}`：返回进度、阶段、已用时间、ETA、重试次数、指定节点与结果。结果下载地址每次查询重新签发，15 分钟有效。
+- `GET /api/v1/capability-orders/{id}`：返回进度、阶段、已用时间、ETA、重试次数、指定节点与结果；排队时另有 `queue_position` 和 `estimated_wait_seconds`，后者在无空闲已验收节点时为 `null`。结果下载地址每次查询重新签发，15 分钟有效。
 - `POST /api/v1/capability-orders/{id}/cancel`：幂等取消；未完成的输出票据立即过期。v1 零费用订单无退款流水。
 - 执行节点通过 `GET /api/v1/capability-orders/{id}/worker-state?claim_id=...` 每 15 秒检查取消与租约；只能使用 `assigned_node` 自己的绑定令牌。`cancellation_requested=true` 或 `should_stop=true` 时立即停止本地任务。
 

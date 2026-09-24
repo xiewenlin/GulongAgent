@@ -12,9 +12,10 @@ import {
 import {
   GULONG_ENGINE_CAPABILITY_DEFINITIONS,
   gulongEngineNodeSharesCapability,
+  gulongEngineUploadAllowed,
   validateGulongEngineInlineResult,
 } from "../../server/gulong-engine-capabilities.js";
-import { normalizeCapabilityParameters, normalizeCapabilityReport } from "../../server/capability-orders.js";
+import { normalizeCapabilityParameters, normalizeCapabilityReport, validateCapabilityInput } from "../../server/capability-orders.js";
 
 const now = new Date("2026-09-24T08:00:00.000Z");
 const period = { currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"), enabled: true, status: "active" };
@@ -50,6 +51,31 @@ test("绿色版能力价格固定 0 分，视频在真实适配器上线前不�
   const video = GULONG_ENGINE_CAPABILITY_DEFINITIONS.find((item) => item.capabilityId === "gulong_engine.video");
   assert.equal(video.dispatchable, false);
   assert.equal(video.adapterStatus, "adapter_required");
+  assert.equal(video.maxAssets, 15);
+  assert.deepEqual(video.assetRules.map(({ role, max }) => [role, max]), [["reference_image", 9], ["reference_video", 3], ["reference_audio", 3]]);
+  assert.deepEqual(video.parametersSchema.properties.video_mode.enum, ["all_reference", "first_last", "smart_multiframe"]);
+  assert.deepEqual(video.parametersSchema.properties.aspect_ratio.enum, ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]);
+  assert.deepEqual(video.parametersSchema.properties.profile.enum, ["official_max", "ultra1080", "fast2k"]);
+  assert.deepEqual(video.parametersSchema.properties.sampling_steps.enum, [4, 8, 20]);
+  const videoParameters = normalizeCapabilityParameters({ model: "minimax_h3", prompt: "雨夜追逐", duration_seconds: 5, aspect_ratio: "16:9" }, video);
+  assert.equal(videoParameters.video_mode, "all_reference");
+  assert.equal(videoParameters.prompt_optimization_enabled, false);
+  assert.equal(videoParameters.seed, -1);
+  const assets = [
+    ...Array.from({ length: 9 }, (_, i) => ({ assetId: `image-${i}`, role: "reference_image", contentType: "image/png", bytes: 1024 })),
+    ...Array.from({ length: 3 }, (_, i) => ({ assetId: `video-${i}`, role: "reference_video", contentType: "video/mp4", bytes: 1024 })),
+    ...Array.from({ length: 3 }, (_, i) => ({ assetId: `audio-${i}`, role: "reference_audio", contentType: "audio/mpeg", bytes: 1024 })),
+  ];
+  assert.doesNotThrow(() => validateCapabilityInput(video, videoParameters, assets));
+  assert.throws(() => validateCapabilityInput(video, videoParameters, [...assets, { ...assets[0], assetId: "extra-image" }]), (error) => error.code === "CAPABILITY_INPUT_LIMIT_EXCEEDED");
+  assert.throws(() => normalizeCapabilityParameters({ ...videoParameters, video_mode: "extended" }, video), (error) => error.code === "INVALID_CAPABILITY_PARAMETERS");
+  assert.equal(gulongEngineUploadAllowed("image/png", 40 * 1024 * 1024), true);
+  assert.equal(gulongEngineUploadAllowed("video/mp4", 100 * 1024 * 1024), true);
+  assert.equal(gulongEngineUploadAllowed("audio/wav", 100 * 1024 * 1024), true);
+  assert.equal(gulongEngineUploadAllowed("application/zip", 1024), false);
+  assert.equal(gulongEngineUploadAllowed("image/png", 41 * 1024 * 1024), false);
+  const blockedReport = { capability_id: video.capabilityId, protocol_version: "gulong-capability-orders-v1", installed: true, validated: true, enabled: true, validation: { tested_at: new Date().toISOString(), artifact_sha256: "A".repeat(64) } };
+  assert.throws(() => normalizeCapabilityReport(blockedReport), (error) => error.code === "CAPABILITY_ADAPTER_REQUIRED");
   const image = GULONG_ENGINE_CAPABILITY_DEFINITIONS.find((item) => item.capabilityId === "gulong_engine.image");
   assert.deepEqual(image.parametersSchema.properties.model.enum, ["zimage", "qwen_image_2_1"]);
   const parameters = normalizeCapabilityParameters({ model: "zimage", prompt: "真实测试" }, image);

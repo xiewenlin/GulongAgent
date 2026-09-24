@@ -150,6 +150,45 @@ test("OpenAPI publishes the versioned create, claim, output and callback contrac
   assert.match(document.paths["/api/v1/capability-orders/{id}/outputs/presign"].post.description, /required_headers/);
 });
 
+test("Gulong video catalog exposes the full zero-price contract but no unverified node", async () => {
+  const app = new OpenAPIHono();
+  registerCapabilityOrderRoutes(app, {
+    authenticate: async () => ({ user: { id: new ObjectId().toString() }, kind: "desktop-gulong-engine" }),
+    requireTrustedMutation: () => null,
+  });
+  const response = await app.request("http://localhost/api/v1/capability-orders/catalog");
+  assert.equal(response.status, 200);
+  const video = (await response.json()).capabilities.find((item) => item.capability_id === "gulong_engine.video");
+  assert.equal(video.price_fen, 0);
+  assert.equal(video.dispatchable, false);
+  assert.deepEqual(video.availability, { verified_node_count: 0, free_slot_count: 0, status: "adapter_required" });
+  assert.equal(video.max_assets, 15);
+  assert.deepEqual(video.input_assets.map((item) => item.max_count), [9, 3, 3]);
+});
+
+test("queued orders expose FIFO position without inventing an ETA while no verified video node is ready", async () => {
+  const userId = new ObjectId();
+  const order = { _id: new ObjectId(), requesterUserId: userId, orderNo: "CAP-QUEUE-1", capabilityId: "gulong_engine.video", status: "queued", stage: "queued", createdAt: new Date(), priceFen: 0, chargeStatus: "exempt", refundStatus: "not_applicable" };
+  const orders = {
+    find: () => ({ limit: () => ({ toArray: async () => [] }) }),
+    updateMany: async () => ({ modifiedCount: 0 }),
+    findOne: async () => order,
+    countDocuments: async () => 3,
+  };
+  const app = new OpenAPIHono();
+  registerCapabilityOrderRoutes(app, {
+    getCollection: async () => orders,
+    authenticate: async () => ({ user: { id: userId.toString() }, kind: "desktop-gulong-engine" }),
+    requireTrustedMutation: () => null,
+  });
+  const response = await app.request(`http://localhost/api/v1/capability-orders/${order._id}`);
+  assert.equal(response.status, 200);
+  const result = (await response.json()).order;
+  assert.equal(result.queue_position, 3);
+  assert.equal(result.estimated_wait_seconds, null);
+  assert.equal(result.billing.price_fen, 0);
+});
+
 test("claim dry-run validates a real capability report without touching the order queue", async () => {
   const userId = new ObjectId();
   const binding = { _id: new ObjectId(), userId, nodeId: "stable-capability-node-0001", nodeName: "本机创作节点", status: "active", revokedAt: null };

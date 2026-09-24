@@ -8,7 +8,7 @@ import { createPresignedDownloadUrl, createPresignedPutUrl, deleteObject, ensure
 import { localizeErrorMessage } from "../shared/error-messages.js";
 import { readEnglishEntitlement, readGulongEngineEntitlement } from "./english-coach-products.js";
 import { ENGLISH_AUDIO_MAX_BYTES, ENGLISH_AUDIO_MIME, ENGLISH_CAPABILITY_DEFINITIONS, englishNodeSharesCapability, englishWorkerOwnsClaim, isEnglishCapability, validateEnglishInlineResult } from "./english-coach-capabilities.js";
-import { GULONG_ENGINE_CAPABILITY_DEFINITIONS, gulongEngineNodeSharesCapability, isGulongEngineCapability, validateGulongEngineInlineResult } from "./gulong-engine-capabilities.js";
+import { GULONG_ENGINE_CAPABILITY_DEFINITIONS, gulongEngineNodeSharesCapability, gulongEngineUploadAllowed, isGulongEngineCapability, validateGulongEngineInlineResult } from "./gulong-engine-capabilities.js";
 
 export const CAPABILITY_ORDER_PROTOCOL = "gulong-capability-orders-v1";
 export const CAPABILITY_BINDING_HEADER = "X-Gulong-Account-Binding";
@@ -442,7 +442,7 @@ function publicDefinition(item) {
   };
 }
 
-function publicOrder(order, issueDownloadUrl) {
+function publicOrder(order, issueDownloadUrl, queue = null) {
   const results = (order.outputs || []).map((item) => ({
     output_id: item.outputId,
     role: item.role,
@@ -464,6 +464,8 @@ function publicOrder(order, issueDownloadUrl) {
     stage: order.stage || null,
     elapsed_seconds: integer(order.elapsedSeconds),
     eta_seconds: order.etaSeconds == null ? null : integer(order.etaSeconds),
+    queue_position: order.status === "queued" ? queue?.position ?? null : null,
+    estimated_wait_seconds: order.status === "queued" ? queue?.estimatedWaitSeconds ?? null : null,
     attempt: integer(order.attempt),
     max_attempts: integer(order.maxAttempts),
     preferred_node_id: order.preferredNodeId || null,
@@ -514,6 +516,43 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
   const englishEntitlement = dependencies.readEnglishEntitlement || ((ownerId, now) => readEnglishEntitlement(ownerId, now, getCollection));
   const gulongEntitlement = dependencies.readGulongEngineEntitlement || ((ownerId, now) => readGulongEngineEntitlement(ownerId, now, getCollection));
   const requestKey = (ownerId, key) => createHash("sha256").update(`${ownerId}:${key}`).digest("hex");
+
+  async function videoAvailability(ownerId, now = new Date()) {
+    const video = CAPABILITY_MAP.get("gulong_engine.video");
+    if (!video?.dispatchable) return { verified_node_count: 0, free_slot_count: 0, status: "adapter_required" };
+    const reports = await (await getCollection("capabilityNodeReports"))
+      .find({ "capabilities.capabilityId": video.capabilityId, reportedAt: { $gte: new Date(now.getTime() - 3 * 60_000) } })
+      .limit(100).toArray();
+    if (!reports.length) return { verified_node_count: 0, free_slot_count: 0, status: "offline" };
+    const bindings = await (await getCollection("nodeAccountBindings"))
+      .find({ _id: { $in: reports.map((report) => report.bindingId) }, status: "active", revokedAt: null }).toArray();
+    const activeBindings = new Set(bindings.map((binding) => String(binding._id)));
+    let nodeCount = 0;
+    let freeSlots = 0;
+    for (const report of reports) {
+      if (!activeBindings.has(String(report.bindingId))) continue;
+      const capability = report.capabilities?.find((item) => item.capabilityId === video.capabilityId
+        && item.installed && item.validated && item.enabled
+        && (item.supportedModels || []).includes("minimax_h3")
+        && new Date(item.validation?.testedAt || 0) >= new Date(now.getTime() - CAPABILITY_REPORT_MAX_AGE_MS)
+        && (String(report.userId) === String(ownerId) || item.sharingOptIn));
+      if (!capability) continue;
+      nodeCount += 1;
+      freeSlots += Math.max(0, Math.min(integer(capability.maxConcurrent, 1), integer(report.resources?.max_concurrent_tasks, 1)) - integer(report.resources?.running_task_count));
+    }
+    return { verified_node_count: nodeCount, free_slot_count: freeSlots, status: nodeCount ? "ready" : "offline" };
+  }
+
+  async function queueSnapshot(order) {
+    if (order.status !== "queued" || !order.capabilityId) return null;
+    const position = await (await getCollection("capabilityOrders")).countDocuments({
+      capabilityId: order.capabilityId, status: "queued",
+      $or: [{ createdAt: { $lt: order.createdAt } }, { createdAt: order.createdAt, _id: { $lte: order._id } }],
+    });
+    const availability = order.capabilityId === "gulong_engine.video" ? await videoAvailability(order.requesterUserId) : null;
+    return { position, estimatedWaitSeconds: availability?.free_slot_count
+      ? Math.ceil(Math.max(0, position - 1) * CAPABILITY_MAP.get(order.capabilityId).defaultEtaSeconds / availability.free_slot_count) : null };
+  }
 
   async function requireEnglish(c, ownerId) {
     const entitlement = await englishEntitlement(ownerId, new Date());
@@ -589,7 +628,10 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const definitions = auth.kind === "desktop-english" ? CAPABILITY_ORDER_DEFINITIONS.filter((item) => isEnglishCapability(item.capabilityId))
       : auth.kind === "desktop-gulong-engine" ? CAPABILITY_ORDER_DEFINITIONS.filter((item) => isGulongEngineCapability(item.capabilityId)) : CAPABILITY_ORDER_DEFINITIONS;
     c.header("Cache-Control", "private, no-store, max-age=0");
-    return c.json({ protocol_version: CAPABILITY_ORDER_PROTOCOL, capabilities: definitions.map(publicDefinition) });
+    const capabilities = definitions.map(publicDefinition);
+    const video = capabilities.find((item) => item.capability_id === "gulong_engine.video");
+    if (video) video.availability = await videoAvailability(auth.user.id);
+    return c.json({ protocol_version: CAPABILITY_ORDER_PROTOCOL, capabilities });
   });
 
   app.post("/api/v1/capability-assets/presign", async (c) => {
@@ -608,7 +650,10 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     }
     if (auth.kind === "desktop-gulong-engine") {
       const rejected = await requireGulong(c, auth.user.id); if (rejected) return rejected;
-      if (bytes > 40 * 1024 * 1024 || !IMAGE_MIME.includes(contentType)) return c.json({ code: "CAPABILITY_INPUT_LIMIT_EXCEEDED", message: "古龙绿色版共享素材仅支持不超过 40 MiB 的 PNG、JPEG 或 WebP 图片" }, 400);
+      if (!gulongEngineUploadAllowed(contentType, bytes)) return c.json({ code: "CAPABILITY_INPUT_LIMIT_EXCEEDED", message: "古龙共享素材仅支持目录内的图片、视频或音频格式及相应大小上限" }, 400);
+      if (!IMAGE_MIME.includes(contentType) && !CAPABILITY_MAP.get("gulong_engine.video")?.dispatchable) {
+        return c.json({ code: "CAPABILITY_ADAPTER_REQUIRED", message: "视频能力尚未完成真实节点适配，暂不开放视频或音频参考素材上传" }, 409);
+      }
     }
     if (bytes < 1 || bytes > CAPABILITY_MAX_ASSET_BYTES || !/^[A-F0-9]{64}$/.test(sha256) || !/^(image|audio|video)\/[a-z0-9.+-]+$/i.test(contentType)) return c.json({ code: "VALIDATION_ERROR", message: "素材类型、大小或 SHA-256 不正确" }, 400);
     await ensureUploadCors();
@@ -684,7 +729,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     if (existing) {
       if (existing.cancellationTombstone) return c.json({ order: publicOrder(existing, issueDownloadUrl), idempotent: true }, 201);
       if (existing.requestFingerprint !== fingerprint) return c.json({ code: "IDEMPOTENCY_KEY_CONFLICT", message: "同一幂等键不能用于不同能力订单" }, 409);
-      return c.json({ order: publicOrder(existing, issueDownloadUrl), idempotent: true }, 201);
+      return c.json({ order: publicOrder(existing, issueDownloadUrl, await queueSnapshot(existing)), idempotent: true }, 201);
     }
     if (isEnglishCapability(capabilityId)) { const rejected = await requireEnglish(c, ownerId); if (rejected) return rejected; }
     if (isGulongEngineCapability(capabilityId)) { const rejected = await requireGulong(c, ownerId); if (rejected) return rejected; }
@@ -727,9 +772,9 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       const replay = await orders.findOne({ idempotencyKey });
       if (replay?.cancellationTombstone) return c.json({ order: publicOrder(replay, issueDownloadUrl), idempotent: true }, 201);
       if (!replay || replay.requestFingerprint !== fingerprint) return c.json({ code: "IDEMPOTENCY_KEY_CONFLICT", message: "同一幂等键不能用于不同能力订单" }, 409);
-      return c.json({ order: publicOrder(replay, issueDownloadUrl), idempotent: true }, 201);
+      return c.json({ order: publicOrder(replay, issueDownloadUrl, await queueSnapshot(replay)), idempotent: true }, 201);
     }
-    return c.json({ order: publicOrder(record, issueDownloadUrl), idempotent: false }, 201);
+    return c.json({ order: publicOrder(record, issueDownloadUrl, await queueSnapshot(record)), idempotent: false }, 201);
   });
 
   app.get("/api/v1/capability-orders/by-request/:key", async (c) => {
@@ -741,7 +786,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const order = await (await getCollection("capabilityOrders")).findOne({ idempotencyKey: requestKey(ownerId, key), requesterUserId: ownerId });
     if (!order || !scopedMayReadOrder(auth, order)) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
     c.header("Cache-Control", "private, no-store, max-age=0");
-    return c.json({ order: publicOrder(order, issueDownloadUrl) });
+    return c.json({ order: publicOrder(order, issueDownloadUrl, await queueSnapshot(order)) });
   });
 
   app.post("/api/v1/capability-orders/by-request/:key/cancel", async (c) => {
@@ -774,7 +819,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const order = await (await getCollection("capabilityOrders")).findOne({ _id: new ObjectId(c.req.param("id")), requesterUserId: new ObjectId(auth.user.id) });
     if (!order || !scopedMayReadOrder(auth, order)) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
     c.header("Cache-Control", "private, no-store, max-age=0");
-    return c.json({ order: publicOrder(order, issueDownloadUrl) });
+    return c.json({ order: publicOrder(order, issueDownloadUrl, await queueSnapshot(order)) });
   });
 
   app.post("/api/v1/capability-orders/:id/cancel", async (c) => {
@@ -1017,11 +1062,11 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/by-request/{key}", tags: ["Unified Capability Orders"], summary: "按同账户稳定请求编号恢复订单", responses: { 200: { description: "自己的原订单；套餐到期仍可查询" }, 404: { description: "尚无该请求" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders/by-request/{key}/cancel", tags: ["Unified Capability Orders"], summary: "按请求编号幂等取消并阻止迟到创建", responses: { 200: { description: "原订单或原子cancelled tombstone；不会产生新执行任务" } } });
   const reportSchema = z.object({ capability_id: z.string(), capability_version: z.string(), protocol_version: z.literal(CAPABILITY_ORDER_PROTOCOL), installed: z.literal(true), validated: z.literal(true), enabled: z.literal(true), max_concurrent: z.number().int().min(1).max(16), sharing_opt_in: z.boolean().optional(), validation: z.object({ tested_at: z.iso.datetime(), artifact_sha256: z.string().regex(/^[A-Fa-f0-9]{64}$/), runtime_version: z.string().optional(), test_id: z.string().optional() }) });
-  app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/catalog", tags: ["Unified Capability Orders"], summary: "读取官网统一能力目录", responses: { 200: { description: "能力 ID、版本化 parameters JSON Schema、素材/输出 role 与 MIME/数量/大小、租约和旧接口路由" } } });
+  app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/catalog", tags: ["Unified Capability Orders"], summary: "读取官网统一能力目录", description: "gulong_engine.video 独立零价合同提供网页 H3 对齐的视频参数、9 图/3 视频/3 音频素材规则及 availability（verified_node_count、free_slot_count、status）。真实节点完成消费适配验收前 dispatchable=false，不能创建订单；收费 /api/h3/tasks 始终独立。", responses: { 200: { description: "能力 ID、版本化 parameters JSON Schema、素材/输出 role 与 MIME/数量/大小、真实节点可用性、租约和旧接口路由" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-assets/presign", tags: ["Unified Capability Orders"], summary: "签发能力订单输入素材 COS 直传票据", responses: { 201: { description: "账号专属短时 PUT 票据" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-assets/{id}/complete", tags: ["Unified Capability Orders"], summary: "校验能力订单输入素材大小、摘要与归属", responses: { 200: { description: "返回安全 asset_id" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders", tags: ["Unified Capability Orders"], summary: "幂等创建同账户本地能力订单", description: "BIN、模型配件和 runtime 不是独立能力。MiniMax H3 视频继续使用 /api/h3/tasks；本接口只接受目录中可独立推理的能力。v1 本地能力订单价格为 0 分，不扣钱包且无分佣。", responses: { 201: { description: "订单已进入同账户节点队列" }, 409: { description: "幂等冲突或应使用旧 H3 接口" } } });
-  app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/{id}", tags: ["Unified Capability Orders"], summary: "查询订单进度、ETA 与短时结果下载票据", responses: { 200: { description: "只返回当前用户自己的订单" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders", tags: ["Unified Capability Orders"], summary: "幂等创建同账户本地能力订单", description: "BIN、模型配件和 runtime 不是独立能力。收费 minimax_h3.video_generation 继续使用 /api/h3/tasks；零价 gulong_engine.video 保持独立能力 ID，并在消费者完成真实验收前返回 409 CAPABILITY_ADAPTER_REQUIRED。v1 本地能力订单价格为 0 分，不扣钱包且无分佣。", responses: { 201: { description: "订单已进入同账户节点队列，包含 queue_position 和 ETA" }, 409: { description: "幂等冲突、能力适配未验收或应使用旧 H3 接口" } } });
+  app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/{id}", tags: ["Unified Capability Orders"], summary: "查询订单进度、排队位置、ETA 与短时结果下载票据", responses: { 200: { description: "仅返回本人订单；排队时含 queue_position、estimated_wait_seconds，执行时含 progress、eta_seconds" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders/{id}/cancel", tags: ["Unified Capability Orders"], summary: "幂等取消能力订单", responses: { 200: { description: "取消状态与零费用退款边界" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/{id}/worker-state", tags: ["Unified Capability Orders"], summary: "执行节点轮询取消与租约状态", description: "执行节点每 15 秒轮询；claim_id 必须匹配且只能由 assigned_node 自己的绑定令牌读取。started/progress 回调会把 5 分钟租约重新续满。", security: [{ accountBinding: [] }], request: { query: z.object({ claim_id: z.string().min(8) }) }, responses: { 200: { description: "cancellation_requested、should_stop 与 lease_expires_at" }, 409: { description: "订单未分配或 claim 不匹配" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders/claim", tags: ["Unified Capability Orders"], summary: "按同账户、FIFO 与最短预计负载领取能力订单", description: "节点只能上报 installed=true、validated=true、enabled=true 且 30 天内完成真实推理验证的能力。局域网中所有候选节点都必须绑定同一账户；可指定执行节点，只有指定节点自己的 X-Gulong-Account-Binding 可回调。dry_run=true 不领取。", security: [{ accountBinding: [] }], request: { body: { content: { "application/json": { schema: z.object({ protocol_version: z.literal(CAPABILITY_ORDER_PROTOCOL), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: z.array(reportSchema).min(1), resources: z.object({ running_task_count: z.number().int().min(0), estimated_total_seconds: z.number().int().min(0), max_concurrent_tasks: z.number().int().min(1).max(16) }), lan_cluster: z.object({ cluster_id: z.string(), nodes: z.array(z.object({ node_id: z.string(), node_name: z.string(), capabilities: z.array(reportSchema), resources: z.object({ running_task_count: z.number().int().min(0), estimated_total_seconds: z.number().int().min(0), max_concurrent_tasks: z.number().int().min(1).max(16) }) })) }).optional() }) } } } }, responses: { 200: { description: "最小权限 worker task、素材短时下载票据与输出上传入口" } } });

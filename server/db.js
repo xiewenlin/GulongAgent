@@ -609,6 +609,10 @@ export async function ensureIndexes() {
           { unique: true, name: "uniq_capability_node_report_binding" },
         ),
         db.collection("capabilityNodeReports").createIndex(
+          { "capabilities.capabilityId": 1, reportedAt: -1 },
+          { name: "capability_verified_nodes_recent" },
+        ),
+        db.collection("capabilityNodeReports").createIndex(
           { updatedAt: 1 },
           { expireAfterSeconds: 30 * 24 * 60 * 60, name: "ttl_capability_node_reports" },
         ),
