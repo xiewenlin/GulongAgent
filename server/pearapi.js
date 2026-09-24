@@ -7,7 +7,8 @@ import { readUserSecret, sealUserSecret } from "./security.js";
 import { localizeErrorMessage } from "../shared/error-messages.js";
 import { createPresignedDownloadUrl } from "./cos.js";
 import { readMarketWalletAmount } from "./codex-market-pricing.js";
-import { legacyAccessSubscription, readGulongEngineEntitlement } from "./english-coach-products.js";
+import { legacyAccessSubscription, readEnglishEntitlement, readGulongEngineEntitlement } from "./english-coach-products.js";
+import { authenticateEnglishDesktop } from "./desktop-english-auth.js";
 import {
   SHORT_VIDEO_PLAN_ID,
   expireShortVideoPackageAllowance,
@@ -705,6 +706,27 @@ const ReferenceImageSchema = z.string().max(900_000).refine((value) => /^data:im
 const ReferenceAssetSchema = z.object({ asset_id: z.string().trim().min(1).max(80), object_key: z.string().trim().max(1_000).optional() });
 
 export function registerPearApiRoutes(app, { authenticate, requireAdmin, requireTrustedMutation }) {
+  const englishLlmConfigRoute = createRoute({
+    method: "get", path: "/api/v1/desktop/english-coach/llm/config", tags: ["English Coach Desktop"],
+    summary: "读取英语教练独享免费文字模型状态",
+    description: "Bearer gec_at_ 短期访问令牌且英语教练包月权益有效。仅返回模型 ID 和就绪状态，不返回 PearAPI Key 或渠道令牌。",
+    responses: { 200: { description: "MiniMax-M3 免费模型状态" }, 401: { description: "未登录" }, 403: { description: "英语教练套餐未生效" } },
+  });
+  const englishLlmChatRoute = createRoute({
+    method: "post", path: "/api/v1/desktop/english-coach/llm/chat", tags: ["English Coach Desktop"],
+    summary: "通过官网安全代理即时调用 MiniMax-M3 免费模型",
+    description: "Bearer gec_at_ 短期访问令牌，英语教练包月权益有效；仅接受 model=minimax-m3 和纯文本消息。服务端使用加密保存的免费渠道令牌直接调用 PearAPI，不下发共享凭据、不进入能力订单队列、不收费、不回退其他模型。",
+    request: { body: { required: true, content: { "application/json": { schema: z.object({ model: z.literal("minimax-m3"), messages: z.array(MessageSchema).min(1).max(24) }).strict() } } } },
+    responses: { 200: { description: "模型文字回复与零费用结算" }, 400: { description: "模型或消息无效" }, 401: { description: "未登录" }, 403: { description: "英语教练套餐未生效" }, 429: { description: "调用过于频繁" }, 503: { description: "免费渠道未配置或模型暂不可用" } },
+  });
+  async function requireEnglishLlm(c) {
+    const auth = await authenticateEnglishDesktop(c);
+    if (!auth) return { error: c.json({ code: "AUTH_REQUIRED", message: "请先登录英语教练桌面客户端" }, 401) };
+    if (auth.error) return auth;
+    const entitlement = await readEnglishEntitlement(auth.user.id);
+    if (!entitlement.active) return { error: c.json({ code: "ENGLISH_SUBSCRIPTION_REQUIRED", message: "请先开通有效的英语教练包月套餐" }, 403) };
+    return auth;
+  }
   const modelsRoute = createRoute({
     method: "get", path: "/api/agent/models", tags: ["Web Agent"], summary: "列出网页版允许使用的 PearAPI 免费模型",
     responses: { 200: { description: "免费模型白名单", content: { "application/json": { schema: z.object({ models: z.array(ModelSchema), defaultModel: z.string() }) } } } },
@@ -800,6 +822,33 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
   });
 
   app.openapi(modelsRoute, (c) => c.json({ models: PEAR_API_FREE_MODELS.map((model) => ({ ...model, free: true })), defaultModel: PEAR_API_DEFAULT_TEXT_MODEL_ID }));
+
+  app.openapi(englishLlmConfigRoute, async (c) => {
+    const auth = await requireEnglishLlm(c); if (auth.error) return auth.error;
+    const record = await credentialRecord();
+    c.header("Cache-Control", "private, no-store, max-age=0");
+    return c.json({ ok: true, provider: "pearapi", model: "minimax-m3", display_name: "MiniMax-M3 · 免费", ready: Boolean(credentialSecrets(record).token) });
+  });
+
+  app.openapi(englishLlmChatRoute, async (c) => {
+    const rejected = requireTrustedMutation(c); if (rejected) return rejected;
+    const auth = await requireEnglishLlm(c); if (auth.error) return auth.error;
+    const rate = await enforceRateLimit(`english-llm:${auth.user.id}`, { limit: 30, windowMs: 5 * 60_000 });
+    if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "文字模型调用过于频繁，请稍后重试" }, 429);
+    const input = c.req.valid("json");
+    if (input.messages.reduce((size, item) => size + item.content.length, 0) > 48_000) return c.json({ code: "VALIDATION_ERROR", message: "对话内容过长，请精简后重试" }, 400);
+    const record = await credentialRecord();
+    const token = credentialSecrets(record).token;
+    if (!token) return c.json({ code: "PEAR_API_NOT_CONFIGURED", message: "管理员尚未配置免费模型渠道" }, 503);
+    try {
+      const result = await callPearApiChat({ token, tokenChannel: record?.tokenChannel || "免费", model: "minimax-m3", messages: input.messages, allowFallback: false });
+      c.header("Cache-Control", "private, no-store, max-age=0");
+      return c.json({ ok: true, model: "minimax-m3", text: result.text, billing: { charged_fen: 0, free: true } });
+    } catch (error) {
+      const timeout = error?.code === "PEAR_API_TIMEOUT";
+      return c.json({ code: timeout ? "MODEL_TIMEOUT" : "MODEL_UNAVAILABLE", message: timeout ? "免费模型响应超时，请稍后重试" : "免费模型暂不可用，请稍后重试" }, timeout ? 504 : 503);
+    }
+  });
 
   app.openapi(bootstrapRoute, async (c) => {
     const auth = await authenticate(c); if (auth.error) return auth.error;

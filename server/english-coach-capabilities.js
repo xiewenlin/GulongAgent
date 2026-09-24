@@ -4,24 +4,24 @@ const schema = (properties, required) => ({ type: "object", additionalProperties
 export const ENGLISH_AUDIO_MAX_BYTES = 20 * 1024 * 1024;
 export const ENGLISH_AUDIO_MIME = Object.freeze(["audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3", "audio/flac", "audio/webm"]);
 const media = { role: "media", min: 1, max: 1, mimeTypes: ENGLISH_AUDIO_MIME, maxBytes: ENGLISH_AUDIO_MAX_BYTES };
-function definition(suffix, parametersSchema, { assets = [], outputs = [], inlineResult = true, eta = 60 } = {}) {
+function definition(suffix, parametersSchema, { assets = [], outputs = [], inlineResult = true, eta = 60, dispatchable = true } = {}) {
   return Object.freeze({
     capabilityId: `english_coach.${suffix}`, protocolVersion: "gulong-capability-orders-v1",
     inputMime: assets.length ? ENGLISH_AUDIO_MIME : [], outputMime: outputs.flatMap((rule) => rule.mimeTypes),
     maxAssets: assets.length, maxTotalInputBytes: assets.length ? ENGLISH_AUDIO_MAX_BYTES : 0,
     defaultEtaSeconds: eta, maxRuntimeSeconds: 900, priceFen: 0, inlineResult,
     parametersSchemaVersion: "1.0.0", parametersSchema, assetRules: assets, outputRules: outputs,
-    commercialUse: "node_operator_responsibility", dispatchable: true, adapterStatus: "ready", legacyRoute: null,
+    commercialUse: "node_operator_responsibility", dispatchable, adapterStatus: dispatchable ? "ready" : "local_only", legacyRoute: null,
     entitlement: "english_coach_monthly", sharingScope: "english_shared",
   });
 }
 export const ENGLISH_CAPABILITY_DEFINITIONS = Object.freeze([
-  definition("text", schema({ task: choice(["coach", "writing", "explain"]), input: text(1, 24000), context: text(0, 24000, { default: "" }), exam: text(1, 32, { default: "general" }) }, ["task", "input"])),
+  definition("text", schema({ task: choice(["coach", "writing", "explain"]), input: text(1, 24000), context: text(0, 24000, { default: "" }), exam: text(1, 32, { default: "general" }) }, ["task", "input"]), { dispatchable: false }),
   definition("transcribe", schema({ language: choice(["en"], "en") }, []), { assets: [media] }),
   definition("speech", schema({ text: text(1, 12000), locale: choice(["en-US", "en-GB"], "en-US"), output_format: choice(["wav"], "wav") }, ["text"]), {
     inlineResult: false, outputs: [{ role: "primary_audio", min: 1, max: 1, mimeTypes: ["audio/wav", "audio/x-wav"], maxBytes: ENGLISH_AUDIO_MAX_BYTES }], eta: 30,
   }),
-  definition("assess", schema({ reference_text: text(1, 24000), language: choice(["en-US"], "en-US") }, ["reference_text"]), { assets: [media] }),
+  definition("assess", schema({ reference_text: text(1, 24000), language: choice(["en-US"], "en-US") }, ["reference_text"]), { assets: [media], dispatchable: false }),
 ]);
 const IDS = new Set(ENGLISH_CAPABILITY_DEFINITIONS.map((item) => item.capabilityId));
 export function isEnglishCapability(id) { return IDS.has(id); }

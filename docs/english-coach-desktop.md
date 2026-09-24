@@ -28,9 +28,20 @@
 - 当前用户可通过 `GET /api/billing/subscription` 读取 `products[]`；管理员可通过 `PUT /api/admin/users/{id}/subscription-period` 提交所改产品的 `products[]`，每项为 `{ "id", "enabled", "currentPeriodStart", "currentPeriodEnd" }`。时间采用 ISO 8601；取消勾选只提交 `{ "id", "enabled": false }`。未提交的产品有效期保持不变。
 - 公开价格 `GET /api/v1/pricing/subscriptions` 中的 `englishCoach` 含 `monthlyFen: 19800` 和 `paymentProviders: ["offline"]`。
 
+## 免费文字模型
+
+英语教练桌面端只持有上节的 15 分钟 `gec_at_` 访问令牌，不获取 PearAPI Key 或渠道令牌。官网后端代为调用免费模型，不进入共享节点订单队列；管理员需在“令牌配置”保存可用的 PearAPI 免费渠道令牌。
+
+| 操作 | 路径 | 请求 | 返回 |
+|---|---|---|---|
+| 模型状态 | `GET /api/v1/desktop/english-coach/llm/config` | `Authorization: Bearer gec_at_...` | `{ "ok":true, "provider":"pearapi", "model":"minimax-m3", "display_name":"MiniMax-M3 · 免费", "ready":true }`；缺少渠道令牌时 `ready:false` |
+| 即时对话 | `POST /api/v1/desktop/english-coach/llm/chat` | Bearer、JSON `{ "model":"minimax-m3", "messages":[{"role":"user","content":"请解释这个英语句子"}] }` | `{ "ok":true, "model":"minimax-m3", "text":"...", "billing":{"charged_fen":0,"free":true} }` |
+
+两接口均要求英语教练包月权益有效；未登录为 401，权益失效为 `403 ENGLISH_SUBSCRIPTION_REQUIRED`。`chat` 仅允许纯文本 `minimax-m3`，每条消息最多 12000 字符，最多 24 条、总计最多 48000 字符；每 5 分钟最多 30 次。模型不可用时不自动切换其他模型，也不自动重试。该同步免费接口当前不使用 `Idempotency-Key`，客户端超时后不要盲目重发。
+
 ## 英语任务
 
-所有用户端英语订单接口接受 `Authorization: Bearer gec_at_...`。`GET /api/v1/capability-orders/catalog` 返回四项能力、精确参数 JSON Schema、素材和输出限制。创建订单：
+所有用户端英语订单接口接受 `Authorization: Bearer gec_at_...`。`GET /api/v1/capability-orders/catalog` 返回四项能力的目录和 `dispatchable` 状态；当前仅 `english_coach.transcribe` 与 `english_coach.speech` 接受新订单。`english_coach.text` 改由上面的即时文字接口执行，`english_coach.assess` 改由桌面包内 CPU 模型执行；二者 `dispatchable:false`、`adapter_status:local_only`，不能上传录音来创建新派单。历史订单仍可查询或由本人取消。创建可派单订单示例：
 
 ```http
 POST /api/v1/capability-orders
@@ -38,17 +49,17 @@ Authorization: Bearer gec_at_...
 Idempotency-Key: stable-job-uuid
 Content-Type: application/json
 
-{"capability_id":"english_coach.text","parameters":{"task":"coach","input":"Explain this sentence"},"assets":[],"source_channel":"desktop_agent"}
+{"capability_id":"english_coach.speech","parameters":{"text":"Hello world","locale":"en-US"},"assets":[],"source_channel":"desktop_agent"}
 ```
 
 | `capability_id` | `parameters` | 输入素材 | 结果 |
 |---|---|---|---|
-| `english_coach.text` | `task: coach|writing|explain`、`input`，可选 `context`、`exam` | 无 | `inline_result.text` |
+| `english_coach.text` | 仅保留历史订单合同；新文字请调用 `/api/v1/desktop/english-coach/llm/chat` | 无 | 历史结果可查询 |
 | `english_coach.transcribe` | 可选 `language: en` | `media` 1 个音频 | `inline_result.text` |
 | `english_coach.speech` | `text`，可选 `locale: en-US|en-GB`、`output_format: wav` | 无 | `results[]` 中 `role: primary_audio` 的短时签名下载链接 |
-| `english_coach.assess` | `reference_text`，可选 `language: en-US` | `media` 1 个音频 | `inline_result`，`provider: local-phoneme`、逐词和音素证据及评分 |
+| `english_coach.assess` | 仅保留历史订单合同；新评估在桌面端本地 CPU 执行 | 不再上传评估录音 | 历史结果可查询 |
 
-音频限 20 MiB，接受 WAV、MP3、FLAC、WebM；以目录实时返回的 MIME 合同为准。四项订单的 `billing.price_fen=0`、`charge_status=exempt`，不扣钱包且不分佣。无已安装、验证并启用的节点时订单保持排队；超时或节点失败会返回明确状态，不生成模拟结果。套餐到期后拒绝新建并在领取前取消尚未处理的英语订单；本人仍可查询历史结果。
+派单音频限 20 MiB，接受 WAV、MP3、FLAC、WebM；以目录实时返回的 MIME 合同为准。现有英语订单的 `billing.price_fen=0`、`charge_status=exempt`，不扣钱包且不分佣。无已安装、验证并启用的节点时订单保持排队；超时或节点失败会返回明确状态，不生成模拟结果。套餐到期后拒绝新建并在领取前取消尚未处理的英语订单；本人仍可查询历史结果。
 
 稳定请求编号是恢复入口：`GET /api/v1/capability-orders/by-request/{key}`。在原始 POST 响应丢失时，先以同一 `Idempotency-Key` 查询，存在则继续轮询原订单；不存在才重新提交。`POST /api/v1/capability-orders/by-request/{key}/cancel` 可取消或原子创建取消标记，阻止迟到的创建请求进入队列。不要对同一请求编号重新上传后改变 `asset_id` 再重复创建，否则会得到 `IDEMPOTENCY_KEY_CONFLICT`。返回的 `order` 含 `id`、`status`、`stage`、`progress`、`eta_seconds`、`inline_result`、`results` 和 `billing`。也可按订单 ID 调用 `GET /api/v1/capability-orders/{id}` 与 `POST /api/v1/capability-orders/{id}/cancel`。
 
