@@ -44,7 +44,7 @@
 ```json
 {
   "type": "text",
-  "model": "ox-alpha",
+  "model": "glm-4-flash-250414",
   "messages": [{ "role": "user", "content": "你好" }],
   "conversation_id": "可选会话ID",
   "assets": [],

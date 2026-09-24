@@ -17,17 +17,17 @@
 
 官网 `/pricing?tab=subscription` 支持 `planType=gulong_engine_monthly`、`cycle=month`、`provider=offline` 的 198 元线下审核订单。管理员可在“订阅用户”中独立设置该产品的生效和到期时间。审核通过只延长独立权益，不增加钱包余额。
 
-## 9 个免费文本模型
+## 8 个免费文本模型
 
 `Authorization: Bearer gge_at_...` 可调用：
 
-- `GET /api/v1/desktop/pearapi/models`：返回九个免费文本模型，默认 `ox-alpha`；`image_models=[]`、`video_models=[]`。
+- `GET /api/v1/desktop/pearapi/models`：返回八个免费文本模型，默认 `glm-4-flash-250414`；`image_models=[]`、`video_models=[]`。
 - `POST /api/v1/desktop/pearapi/generations`：提交 `type=text`、目录内模型、文本消息和 8–160 字符 `Idempotency-Key`；图片/视频在此路由返回 `403 FREE_TEXT_ONLY`，不能意外进入付费媒体计费。
 - `GET /api/v1/desktop/pearapi/generations/{id}`：本人轮询状态和结果。
 - `GET /api/v1/desktop/pearapi/generations/by-request/{key}`：按原始幂等键找回已提交文本，不重复调用模型。
 - `POST /api/v1/desktop/pearapi/generations/{id}/cancel`：取消本人的生成。
 
-免费模型目录：`ox-alpha`、`minimax-m3`、`glm-4-flash-250414`、`GPT-OSS-120B`、`hunyuan-mt-7b`、`hy-mt2-1.8b`、`mistral-7b-instruct-v0.2`、`spark-lite`、`step-3.5-flash`。结果由官网管理员的服务端 PearAPI 凭据调用，客户端不得获取该凭据。古龙绿色版令牌对 PearAPI 图片、视频模型没有钱包扣费入口。
+免费模型目录：`glm-4-flash-250414`、`GPT-OSS-120B`、`hunyuan-mt-7b`、`hy-mt2-1.8b`、`ling-3.0-flash-fin`、`mistral-7b-instruct-v0.2`、`spark-lite`、`step-3.5-flash`。结果由官网管理员的服务端 PearAPI 凭据调用，客户端不得获取该凭据。古龙绿色版令牌对 PearAPI 图片、视频模型没有钱包扣费入口。
 
 ## 独立的零单次价格共享能力
 

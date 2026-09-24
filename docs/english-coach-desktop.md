@@ -36,10 +36,10 @@ PearAPI 平台凭据以共享的 `API_KEY_PEPPER` 派生独立 AES-GCM 密钥加
 
 | 操作 | 路径 | 请求 | 返回 |
 |---|---|---|---|
-| 模型状态 | `GET /api/v1/desktop/english-coach/llm/config` | `Authorization: Bearer gec_at_...` | `{ "ok":true, "provider":"pearapi", "model":"minimax-m3", "display_name":"MiniMax-M3 · 免费", "ready":true }`；缺少渠道令牌时 `ready:false` |
-| 即时对话 | `POST /api/v1/desktop/english-coach/llm/chat` | Bearer、JSON `{ "model":"minimax-m3", "messages":[{"role":"user","content":"请解释这个英语句子"}] }` | `{ "ok":true, "model":"minimax-m3", "text":"...", "billing":{"charged_fen":0,"free":true} }` |
+| 模型状态 | `GET /api/v1/desktop/english-coach/llm/config` | `Authorization: Bearer gec_at_...` | `{ "ok":true, "provider":"pearapi", "model":"glm-4-flash-250414", "display_name":"GLM-4-Flash-250414 · 免费", "ready":true }`；缺少渠道令牌时 `ready:false` |
+| 即时对话 | `POST /api/v1/desktop/english-coach/llm/chat` | Bearer、JSON `{ "model":"glm-4-flash-250414", "messages":[{"role":"user","content":"请解释这个英语句子"}] }` | `{ "ok":true, "model":"glm-4-flash-250414", "text":"...", "billing":{"charged_fen":0,"free":true} }` |
 
-两接口均要求英语教练包月权益有效；未登录为 401，权益失效为 `403 ENGLISH_SUBSCRIPTION_REQUIRED`。`chat` 仅允许纯文本 `minimax-m3`，每条消息最多 12000 字符，最多 24 条、总计最多 48000 字符；每 5 分钟最多 30 次。模型不可用时不自动切换其他模型，也不自动重试。该同步免费接口当前不使用 `Idempotency-Key`，客户端超时后不要盲目重发。
+两接口均要求英语教练包月权益有效；未登录为 401，权益失效为 `403 ENGLISH_SUBSCRIPTION_REQUIRED`。`chat` 仅允许纯文本 `glm-4-flash-250414`，每条消息最多 12000 字符，最多 24 条、总计最多 48000 字符；每 5 分钟最多 30 次。模型不可用时不自动切换其他模型，也不自动重试。该同步免费接口当前不使用 `Idempotency-Key`，客户端超时后不要盲目重发。
 
 ## 英语任务
 

@@ -33,18 +33,17 @@ export const WALLET_PROMOTION_BONUS_RATE = 0.1;
 export const WALLET_RECHARGE_BONUS_THRESHOLD_FEN = 50_000;
 
 export const PEAR_API_FREE_MODELS = Object.freeze([
-  { id: "ox-alpha", name: "OX-Alpha", vendor: "Open", description: "面向通用对话与创作的免费模型，适合日常问答、内容整理和多步骤任务。" },
-  { id: "minimax-m3", name: "MiniMax-M3", vendor: "MiniMax", description: "面向真实生产环境的高吞吐、低延迟模型，适合代码、推理与代理任务。" },
   { id: "glm-4-flash-250414", name: "GLM-4-Flash-250414", vendor: "GLM", description: "轻量通用模型，适合日常问答、多任务处理与长上下文。" },
   { id: "GPT-OSS-120B", name: "GPT-OSS-120B", vendor: "OpenAI", upstreamIds: ["GPT-OSS-120B", "gpt-oss-120b"], description: "大参数开放模型，适合综合分析、写作与复杂指令。" },
   { id: "hunyuan-mt-7b", name: "Hunyuan-MT-7B", vendor: "Tencent", description: "面向多语言互译的轻量模型，覆盖多种语言。" },
   { id: "hy-mt2-1.8b", name: "HY-MT2-1.8B", vendor: "Tencent", description: "快速多语言翻译模型，适合短文本与高频翻译。" },
+  { id: "ling-3.0-flash-fin", name: "Ling-3.0-Flash-Fin", vendor: "Open", description: "面向金融与复杂推理场景的轻量模型，适合结构化分析与快速问答。" },
   { id: "mistral-7b-instruct-v0.2", name: "Mistral-7B-Instruct-v0.2", vendor: "Mistral", description: "经典指令模型，适合清晰、直接的文本任务。" },
   { id: "spark-lite", name: "Spark-Lite", vendor: "Spark", description: "轻量文本生成与问答模型，适合响应敏感场景。" },
   { id: "step-3.5-flash", name: "Step-3.5-Flash", vendor: "Stepfun", description: "低延迟通用模型，适合快速推理与实时交互。" },
 ]);
 
-export const PEAR_API_DEFAULT_TEXT_MODEL_ID = "ox-alpha";
+export const PEAR_API_DEFAULT_TEXT_MODEL_ID = "glm-4-flash-250414";
 
 const FREE_MODEL_IDS = new Set(PEAR_API_FREE_MODELS.map((model) => model.id));
 const FREE_MODEL_MAP = new Map(PEAR_API_FREE_MODELS.map((model) => [model.id, model]));
@@ -715,8 +714,8 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
   const englishLlmChatRoute = createRoute({
     method: "post", path: "/api/v1/desktop/english-coach/llm/chat", tags: ["English Coach Desktop"],
     summary: "通过官网安全代理即时调用 MiniMax-M3 免费模型",
-    description: "Bearer gec_at_ 短期访问令牌，英语教练包月权益有效；仅接受 model=minimax-m3 和纯文本消息。服务端使用加密保存的免费渠道令牌直接调用 PearAPI，不下发共享凭据、不进入能力订单队列、不收费、不回退其他模型。",
-    request: { body: { required: true, content: { "application/json": { schema: z.object({ model: z.literal("minimax-m3"), messages: z.array(MessageSchema).min(1).max(24) }).strict() } } } },
+    description: "Bearer gec_at_ 短期访问令牌，英语教练包月权益有效；仅接受 model=glm-4-flash-250414 和纯文本消息。服务端使用加密保存的免费渠道令牌直接调用 PearAPI，不下发共享凭据、不进入能力订单队列、不收费、不回退其他模型。",
+    request: { body: { required: true, content: { "application/json": { schema: z.object({ model: z.literal("glm-4-flash-250414"), messages: z.array(MessageSchema).min(1).max(24) }).strict() } } } },
     responses: { 200: { description: "模型文字回复与零费用结算" }, 400: { description: "模型或消息无效" }, 401: { description: "未登录" }, 403: { description: "英语教练套餐未生效" }, 429: { description: "调用过于频繁" }, 503: { description: "免费渠道未配置或模型暂不可用" } },
   });
   async function requireEnglishLlm(c) {
@@ -787,7 +786,7 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
   });
   const desktopGenerationCreateRoute = createRoute({
     method: "post", path: "/api/v1/desktop/pearapi/generations", tags: ["Desktop PearAPI Proxy"], summary: "幂等提交文本、图片或视频生成",
-    description: "使用桌面 Chandler Bearer 或古龙引擎包月专用 gge_at_ 令牌，以及 8–160 字符 Idempotency-Key。gge_at_ 只允许目录内的九个免费文本模型；付费媒体不接受绿色版令牌。其他桌面媒体仅接受已完成 COS 回执校验的 asset_id。",
+    description: "使用桌面 Chandler Bearer 或古龙引擎包月专用 gge_at_ 令牌，以及 8–160 字符 Idempotency-Key。gge_at_ 只允许目录内的八个免费文本模型；付费媒体不接受绿色版令牌。其他桌面媒体仅接受已完成 COS 回执校验的 asset_id。",
     request: { body: { required: true, content: { "application/json": { schema: DesktopGenerationRequestSchema } } } },
     responses: { 201: { description: "已提交或已完成" }, 400: { description: "请求无效", content: { "application/json": { schema: ErrorSchema } } }, 401: { description: "桌面登录令牌无效", content: { "application/json": { schema: ErrorSchema } } }, 402: { description: "余额不足或订阅无效", content: { "application/json": { schema: ErrorSchema } } }, 409: { description: "幂等键冲突", content: { "application/json": { schema: ErrorSchema } } }, 503: { description: "官网管理员尚未配置 PearAPI", content: { "application/json": { schema: ErrorSchema } } } },
   });
@@ -827,7 +826,7 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     const auth = await requireEnglishLlm(c); if (auth.error) return auth.error;
     const record = await credentialRecord();
     c.header("Cache-Control", "private, no-store, max-age=0");
-    return c.json({ ok: true, provider: "pearapi", model: "minimax-m3", display_name: "MiniMax-M3 · 免费", ready: Boolean(credentialSecrets(record).token) });
+    return c.json({ ok: true, provider: "pearapi", model: "glm-4-flash-250414", display_name: "GLM-4-Flash-250414 · 免费", ready: Boolean(credentialSecrets(record).token) });
   });
 
   app.openapi(englishLlmChatRoute, async (c) => {
@@ -841,9 +840,9 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     const token = credentialSecrets(record).token;
     if (!token) return c.json({ code: "PEAR_API_NOT_CONFIGURED", message: "管理员尚未配置免费模型渠道" }, 503);
     try {
-      const result = await callPearApiChat({ token, tokenChannel: record?.tokenChannel || "免费", model: "minimax-m3", messages: input.messages, allowFallback: false });
+      const result = await callPearApiChat({ token, tokenChannel: record?.tokenChannel || "免费", model: "glm-4-flash-250414", messages: input.messages, allowFallback: false });
       c.header("Cache-Control", "private, no-store, max-age=0");
-      return c.json({ ok: true, model: "minimax-m3", text: result.text, billing: { charged_fen: 0, free: true } });
+      return c.json({ ok: true, model: "glm-4-flash-250414", text: result.text, billing: { charged_fen: 0, free: true } });
     } catch (error) {
       const timeout = error?.code === "PEAR_API_TIMEOUT";
       return c.json({ code: timeout ? "MODEL_TIMEOUT" : "MODEL_UNAVAILABLE", message: timeout ? "免费模型响应超时，请稍后重试" : "免费模型暂不可用，请稍后重试" }, timeout ? 504 : 503);
@@ -1239,7 +1238,7 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
     const idempotency = normalizedIdempotencyKey(c, { required: true });
     if (idempotency.error) return idempotency.error;
     const input = c.req.valid("json");
-    if (auth.kind === "desktop-gulong-engine" && input.type !== "text") return c.json({ code: "FREE_TEXT_ONLY", message: "古龙绿色版仅可通过此接口调用九个免费文本模型；图片与视频请走明确的共享节点能力合同" }, 403);
+    if (auth.kind === "desktop-gulong-engine" && input.type !== "text") return c.json({ code: "FREE_TEXT_ONLY", message: "古龙绿色版仅可通过此接口调用八个免费文本模型；图片与视频请走明确的共享节点能力合同" }, 403);
     const ownerId = new ObjectId(auth.user.id);
     const prompt = String(input.prompt || "").trim();
     if (input.type === "text") {

@@ -45,7 +45,7 @@ test("英语能力必须零单次价格且真实发音评估有逐词声学证�
   assert.equal(validateEnglishInlineResult("english_coach.assess", { provider: "local-phoneme", referenceText: "hello", transcript: "hello", pronunciationScore: 88, words: [{ word: "hello", accuracyScore: 88, phonemes: [{ phoneme: "h", accuracyScore: 87 }] }] }, { reference_text: "hello" }), true);
 });
 
-test("英语教练免费模型接口只公布 MiniMax-M3 且未登录不能调用", async () => {
+test("英语教练免费模型接口只公布 GLM-4-Flash 且未登录不能调用", async () => {
   const app = new OpenAPIHono();
   registerPearApiRoutes(app, { authenticate: async () => null, requireAdmin: async () => null, requireTrustedMutation: () => null });
   const document = app.getOpenAPIDocument({ openapi: "3.1.0", info: { title: "test", version: "1" } });
@@ -55,8 +55,8 @@ test("英语教练免费模型接口只公布 MiniMax-M3 且未登录不能调�
   assert.match(document.paths[`${base}/chat`].post.description, /不下发共享凭据/);
   assert.equal((await app.request(`http://localhost${base}/config`)).status, 401);
   const headers = { "content-type": "application/json", authorization: "Bearer wrong_token" };
-  const blockedModel = await app.request(`http://localhost${base}/chat`, { method: "POST", headers, body: JSON.stringify({ model: "ox-alpha", messages: [{ role: "user", content: "hello" }] }) });
+  const blockedModel = await app.request(`http://localhost${base}/chat`, { method: "POST", headers, body: JSON.stringify({ model: "minimax-m3", messages: [{ role: "user", content: "hello" }] }) });
   assert.equal(blockedModel.status, 400);
-  const unauthenticated = await app.request(`http://localhost${base}/chat`, { method: "POST", headers, body: JSON.stringify({ model: "minimax-m3", messages: [{ role: "user", content: "hello" }] }) });
+  const unauthenticated = await app.request(`http://localhost${base}/chat`, { method: "POST", headers, body: JSON.stringify({ model: "glm-4-flash-250414", messages: [{ role: "user", content: "hello" }] }) });
   assert.equal(unauthenticated.status, 401);
 });
