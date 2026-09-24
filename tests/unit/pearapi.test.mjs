@@ -372,6 +372,7 @@ test("website exposes the simplified agent while user settings no longer expose 
   assert.match(agentSource, /MEMBERSHIP REQUIRED/);
   assert.match(agentSource, /USAGE EXHAUSTED/);
   assert.match(agentSource, /creationType !== "text" && user\.role !== "admin"/);
+  assert.match(agentSource, /currentBootstrap = await apiFetch\("\/api\/agent\/bootstrap"\);[\s\S]*?const balanceFen = Number\(currentBootstrap\?\.quota\?\.balanceFen \|\| 0\)/);
   assert.match(agentSource, /creationType === "text" && !bootstrap\?\.subscription\?\.active/);
   assert.doesNotMatch(agentSource, /已包含 30% 平台服务费/);
   assert.doesNotMatch(agentSource, /结算加收 30% 服务费/);

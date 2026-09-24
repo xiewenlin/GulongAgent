@@ -571,15 +571,23 @@ export function WebAgentPage({ user, openAuth, navigate, themeIcon }) {
       setMessage("网页版古龙 Agent 需要生效中的会员订阅。");
       return;
     }
+    let currentBootstrap = bootstrap;
     if (creationType !== "text" && user.role !== "admin") {
-      const balanceFen = Number(bootstrap?.quota?.balanceFen || 0);
+      try {
+        currentBootstrap = await apiFetch("/api/agent/bootstrap");
+        setBootstrap(currentBootstrap);
+      } catch (error) {
+        setMessage(error.message || "暂时无法核对最新余额，请稍后重试。");
+        return;
+      }
+      const balanceFen = Number(currentBootstrap?.quota?.balanceFen || 0);
       const durationFactor = creationType === "video" ? Math.max(1, Number(duration || 5) / 5) : 1;
       const expectedFen = isH3Video ? calculateH3ClientPriceFen(h3EffectiveDuration || h3SegmentDuration, attachments) : selectedModel?.chargedFen == null ? 0 : Math.ceil(Number(selectedModel.chargedFen) * durationFactor);
-      const shortVideoUnlimited = isH3Video && bootstrap?.shortVideoPackage?.active && bootstrap?.shortVideoPackage?.unlimitedH3;
-      if (!shortVideoUnlimited && (balanceFen <= 0 || (expectedFen > 0 && balanceFen < expectedFen))) { setQuotaPrompt(bootstrap?.subscription?.active ? "recharge" : "subscription"); return; }
+      const shortVideoUnlimited = isH3Video && currentBootstrap?.shortVideoPackage?.active && currentBootstrap?.shortVideoPackage?.unlimitedH3;
+      if (!shortVideoUnlimited && (balanceFen <= 0 || (expectedFen > 0 && balanceFen < expectedFen))) { setQuotaPrompt(currentBootstrap?.subscription?.active ? "recharge" : "subscription"); return; }
     }
     if (creationType === "text" && !bootstrap?.configured) { setMessage("管理员尚未完成 PearAPI 免费渠道令牌配置，请稍后再试。"); return; }
-    if (creationType !== "text" && !isH3Video && !bootstrap?.mediaConfigured) { setMessage("管理员尚未完成 PearAPI Key 配置，请稍后再试。"); return; }
+    if (creationType !== "text" && !isH3Video && !currentBootstrap?.mediaConfigured) { setMessage("管理员尚未完成 PearAPI Key 配置，请稍后再试。"); return; }
     setSending(true); setMessage("");
     const operationId = creationType === "text" ? `pearop_${Date.now().toString(36)}_${crypto.getRandomValues(new Uint32Array(2)).join("_")}` : null;
     const workflowNodes = [
