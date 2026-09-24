@@ -370,7 +370,8 @@ test("website exposes the simplified agent while user settings no longer expose 
   assert.match(agentSource, /拓展技能/);
   assert.match(agentSource, /剩余用量/);
   assert.match(agentSource, /MEMBERSHIP REQUIRED/);
-  assert.match(agentSource, /USAGE EXHAUSTED/);
+  assert.match(agentSource, /VIDEO BALANCE NEEDED/);
+  assert.match(agentSource, /已审核的包月实付金额会等额计入视频余额/);
   assert.match(agentSource, /creationType !== "text" && user\.role !== "admin"/);
   assert.match(agentSource, /currentBootstrap = await apiFetch\("\/api\/agent\/bootstrap"\);[\s\S]*?const balanceFen = Number\(currentBootstrap\?\.quota\?\.balanceFen \|\| 0\)/);
   assert.match(agentSource, /creationType === "text" && !bootstrap\?\.subscription\?\.active/);
