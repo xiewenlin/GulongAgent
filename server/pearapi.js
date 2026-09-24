@@ -1378,14 +1378,17 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
 
   function adminView(record) {
     const pricing = normalizedPricing(record?.pricing || DEFAULT_PRICING);
+    const secrets = credentialSecrets(record);
     return {
       provider: "pearapi",
       baseUrl: PEAR_API_BASE_URL,
       acquisitionUrl: PEAR_API_ACQUISITION_URL,
       docsUrl: PEAR_API_DOCS_URL,
-      keyConfigured: Boolean(record?.keyEncrypted),
+      keyConfigured: Boolean(secrets.key),
+      keyNeedsReentry: Boolean(record?.keyEncrypted && !secrets.key),
       keyMasked: record?.keyLast4 ? `••••••••${record.keyLast4}` : null,
-      tokenConfigured: Boolean(record?.tokenEncrypted),
+      tokenConfigured: Boolean(secrets.token),
+      tokenNeedsReentry: Boolean(record?.tokenEncrypted && !secrets.token),
       tokenMasked: record?.tokenLast4 ? `••••••••${record.tokenLast4}` : null,
       tokenChannel: record?.tokenChannel || "免费",
       tokenChannels: PEAR_API_TOKEN_CHANNELS,

@@ -923,6 +923,7 @@ function PearTokenManager() {
   return <section className="admin-module pear-token-manager">
     <header className="admin-module-head"><div><span>GLOBAL MODEL CREDENTIAL</span><h2>令牌配置</h2><p>由管理员统一管理 PearAPI，普通用户与浏览器永远无法读取明文 Key 或令牌。</p></div><button className="button secondary" type="button" disabled={Boolean(busy)} onClick={load}><ArrowClockwise size={17} />刷新状态</button></header>
     {message && <AdminNotice tone={message.includes("成功") || message.includes("已") ? "success" : "error"}>{message}</AdminNotice>}
+    {(config?.tokenNeedsReentry || config?.keyNeedsReentry) && <AdminNotice tone="error">历史加密凭据在当前服务器无法读取。请从您自己的 PearAPI 控制台重新填写{config.tokenNeedsReentry ? "免费渠道令牌" : ""}{config.tokenNeedsReentry && config.keyNeedsReentry ? "和" : ""}{config.keyNeedsReentry ? "媒体 API Key" : ""}，保存后再测试连接；不要更换网站登录密钥。</AdminNotice>}
     <div className="pear-token-layout">
       <form className="pear-token-form" onSubmit={save}>
         <div className="pear-token-form-head"><div><LockKey size={29} weight="duotone" /><span><strong>PearAPI Key 与渠道令牌</strong><small>AES-256-GCM 加密保存，保存后只显示末 4 位</small></span></div><em className={config?.keyConfigured && config?.tokenConfigured ? "ready" : ""}>{config?.keyConfigured && config?.tokenConfigured ? "文字与媒体模型已连接" : "等待完整配置"}</em></div>
