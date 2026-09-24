@@ -424,7 +424,7 @@ test("monthly subscription payments credit the wallet once and PearAPI routes ar
   assert.match(pearSource, /"credits\.key": \{ \$ne: key \}/);
   assert.match(pearSource, /subscription_bonus/);
   assert.match(pearSource, /recharge_bonus/);
-  assert.match(pricingSource, /订阅即送 10% 创作余额/);
+  assert.match(pricingSource, /useState\(sitePlans\)/);
   assert.match(pricingSource, /满 500 元赠送 10%/);
   assert.match(accountSource, /单次充值满 500 元额外赠送 10% 余额/);
   assert.match(pearSource, /limit: 30, windowMs: 5 \* 60_000/);

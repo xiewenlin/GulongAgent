@@ -25,7 +25,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { apiFetch, formatMoney, trackAnalyticsEvent } from "../api.js";
 import { plans as sitePlans } from "../data/site.js";
-import { subscriptionCycle, subscriptionOrderName } from "../subscriptions.js";
+import { subscriptionOrderName } from "../subscriptions.js";
 
 function PageIntro({ eyebrow, title, description, actions }) {
   return (
@@ -284,12 +284,7 @@ export function PricingPage({ user, openAuth, navigate }) {
   const query = new URLSearchParams(window.location.search);
   const activeTab = query.get("tab") === "recharge" ? "recharge" : "subscription";
   const desktopSource = query.get("source") === "desktop";
-  const [cycle, setCycle] = useState("month");
-  const [paymentMode, setPaymentMode] = useState("online");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
   const [payment, setPayment] = useState(null);
-  const [membership, setMembership] = useState(null);
   const [pricingPlans, setPricingPlans] = useState(sitePlans);
   const [customContactOpen, setCustomContactOpen] = useState(false);
   const [customOrderOpen, setCustomOrderOpen] = useState(false);
@@ -317,13 +312,6 @@ export function PricingPage({ user, openAuth, navigate }) {
   }, []);
 
   useEffect(() => {
-    if (!user) { setMembership(null); return; }
-    apiFetch("/api/billing/subscription")
-      .then((result) => setMembership(result.subscription || null))
-      .catch(() => setMembership(null));
-  }, [user?.id]);
-
-  useEffect(() => {
     if (!user || activeTab !== "recharge") { setRechargeOrders([]); return; }
     let cancelled = false;
     setRechargeOrdersBusy(true);
@@ -334,18 +322,7 @@ export function PricingPage({ user, openAuth, navigate }) {
     return () => { cancelled = true; };
   }, [user?.id, activeTab, rechargeOrdersRefresh]);
 
-  const memberPlan = pricingPlans.find((item) => item.id === "member");
-  const monthlyUpgrade = cycle === "year"
-    && membership?.status === "active"
-    && membership?.cycle === "month"
-    && new Date(membership.currentPeriodEnd).getTime() > Date.now();
-  const upgradeCreditFen = monthlyUpgrade ? memberPlan.monthlyFen : 0;
-  const memberPayableFen = cycle === "year" ? Math.max(monthlyUpgrade ? 100 : 0, memberPlan.yearlyFen - upgradeCreditFen) : memberPlan.monthlyFen;
-  const yearlySavingsFen = Math.max(0, memberPlan.monthlyFen * 12 - memberPlan.yearlyFen);
-  const memberBonusFen = Math.floor(memberPayableFen * walletPromotion.subscriptionBonusRate);
-  const planAmountFen = (plan) => plan.id === "member"
-    ? memberPayableFen
-    : subscriptionCycle(plan,cycle) === "year" ? plan.yearlyFen : plan.monthlyFen;
+  const planAmountFen = (plan) => plan.monthlyFen;
   const rechargeAmountFen = Math.round(Number(rechargeAmount || 0) * 100);
   const rechargeAmountValid = Number.isSafeInteger(rechargeAmountFen) && rechargeAmountFen >= 100 && rechargeAmountFen <= 10_000_000;
   const rechargeBonusFen = rechargeAmountValid && rechargeAmountFen >= walletPromotion.rechargeThresholdFen
@@ -370,59 +347,30 @@ export function PricingPage({ user, openAuth, navigate }) {
 
   async function startPayment(plan) {
     if (!user) return openAuth("login");
-    if (plan.id === "free") return navigate("/download");
     if (plan.id === "custom") { setCustomContactOpen(true); return; }
     trackAnalyticsEvent("CHECKOUT_START", { path: "/pricing" });
-    const shortVideoPlan = plan.id === "short_video_monthly";
-    const englishPlan = plan.id === "english_coach_monthly";
-    const gulongEnginePlan = plan.id === "gulong_engine_monthly";
-    if (paymentMode === "offline" || shortVideoPlan || englishPlan || gulongEnginePlan) {
-      const amountFen = planAmountFen(plan);
-      const bonusFen = shortVideoPlan ? 0 : plan.id === "member" ? memberBonusFen : 0;
-      setPayment({ mode: "offline-cashier", cycle:subscriptionCycle(plan,cycle), planType:plan.id, amountFen, bonusFen, creditedFen:englishPlan||gulongEnginePlan?0:amountFen + bonusFen, upgradeCreditFen:shortVideoPlan||englishPlan||gulongEnginePlan?0:upgradeCreditFen, planName:plan.name });
-      return;
-    }
-    setBusy(true);
-    setError("");
-    try {
-      const result = await apiFetch("/api/billing/orders", {
-        method: "POST",
-        body: JSON.stringify({ kind: "subscription", cycle, provider: "wechat", autoRenew: false }),
-      });
-      setPayment(result);
-    } catch (reason) {
-      setError(reason.message);
-    } finally {
-      setBusy(false);
-    }
+    setPayment({ mode: "offline-cashier", cycle: "month", planType: plan.id, amountFen: planAmountFen(plan), bonusFen: 0, creditedFen: 0, planName: plan.name });
   }
 
   return (
     <main id="main-content">
-      <PageIntro eyebrow={activeTab === "recharge" ? "WALLET RECHARGE" : "SIMPLE PRICING"} title={activeTab === "recharge" ? "为下一次创作补充余额" : "把成本花在真正困难的任务上"} description={activeTab === "recharge" ? "自定义人民币金额，使用线下支付提交审核；到账后官网与桌面端读取同一份权威余额。" : "普通能力永久免费；会员解锁第二大脑、多端消息、本地模型与完整创作流水线。"} />
+      <PageIntro eyebrow={activeTab === "recharge" ? "WALLET RECHARGE" : "SIMPLE PRICING"} title={activeTab === "recharge" ? "为下一次创作补充余额" : "选择适合你的产品"} description={activeTab === "recharge" ? "自定义人民币金额，使用线下支付提交审核；到账后官网与桌面端读取同一份权威余额。" : "英语教练与古龙引擎均提供独立月度订阅；需要专属方案，也可以联系我们深度定制。"} />
       <section className="pricing-mode-tabs section-shell" aria-label="定价业务类型">
-        <button type="button" className={activeTab === "subscription" ? "active" : ""} aria-pressed={activeTab === "subscription"} onClick={() => selectTab("subscription")}><ShieldCheck size={21} weight="duotone" /><span><strong>会员订阅</strong><small>按月或按年开通会员权益</small></span></button>
+        <button type="button" className={activeTab === "subscription" ? "active" : ""} aria-pressed={activeTab === "subscription"} onClick={() => selectTab("subscription")}><ShieldCheck size={21} weight="duotone" /><span><strong>产品订阅</strong><small>查看可开通的月度方案</small></span></button>
         <button type="button" className={activeTab === "recharge" ? "active" : ""} aria-pressed={activeTab === "recharge"} onClick={() => selectTab("recharge")}><Wallet size={21} weight="duotone" /><span><strong>充值</strong><small>自定义金额，线下支付审核入账</small></span></button>
       </section>
       {activeTab === "subscription" ? <>
-        <section className="pricing-controls section-shell">
-          <div className="cycle-switch"><button className={cycle === "month" ? "active" : ""} onClick={() => setCycle("month")}>按月订阅</button><button className={cycle === "year" ? "active" : ""} onClick={() => setCycle("year")}>按年订阅 {yearlySavingsFen > 0 && <span>省 {formatMoney(yearlySavingsFen)}</span>}</button></div>
-          <div className="payment-method-control"><div className="provider-switch"><button className={paymentMode === "online" ? "active" : ""} onClick={() => setPaymentMode("online")}>线上支付</button><button className={paymentMode === "offline" ? "active" : ""} onClick={() => setPaymentMode("offline")}>线下支付</button></div></div>
-        </section>
         <section className="pricing-grid section-shell">
           {pricingPlans.map((plan) => (
             <article key={plan.id} className={plan.featured ? "featured" : ""}>
               {plan.featured && <span className="plan-ribbon">推荐</span>}
               <small>{plan.eyebrow}</small><h2>{plan.name}</h2>
-              <div className="plan-price">{plan.pricing || formatMoney(planAmountFen(plan))}{!plan.pricing && <em>/{subscriptionCycle(plan,cycle) === "year" ? "年" : "月"}</em>}</div>
-              {plan.id === "member" && monthlyUpgrade && <div className="upgrade-credit"><CheckCircle size={19} weight="fill" /><div><strong>月度会员升级抵扣 {formatMoney(upgradeCreditFen)}</strong><span>年度原价 {formatMoney(plan.yearlyFen)}，本次只需补足剩余费用。</span></div></div>}
-              {plan.id === "member" && <div className="wallet-promotion-note"><Coins size={20} weight="duotone" /><span><strong>订阅即送 10% 创作余额</strong><small>本次实付 {formatMoney(memberPayableFen)}，到账余额 {formatMoney(memberPayableFen + memberBonusFen)}，其中赠送 {formatMoney(memberBonusFen)}。</small></span></div>}
-              {plan.id === "short_video_monthly" && <div className="wallet-promotion-note short-video"><Coins size={20} weight="duotone" /><span><strong>实付多少，余额到账多少</strong><small>本次实付 {formatMoney(planAmountFen(plan))}，到账余额 {formatMoney(planAmountFen(plan))}；余额用完后 H3 继续无限免费生成，不再扣费或分佣。</small></span></div>}
+              <div className="plan-price">{plan.pricing || formatMoney(planAmountFen(plan))}{!plan.pricing && <em>/月</em>}</div>
               {plan.id === "english_coach_monthly" && <div className="manual-renew-note"><BookOpen size={20}/><span><strong>仅月度 · 使用现有线下支付</strong><small>不提供年包，不抵扣或替换其他产品订阅。审核通过后在英语教练登录并刷新权益。</small></span></div>}{plan.subpricing && <p className="plan-subprice">{plan.subpricing}</p>}
               {plan.id === "gulong_engine_monthly" && <div className="manual-renew-note"><BookOpen size={20}/><span><strong>仅月度 · 线下支付审核</strong><small>绿色版独立授权，不替换已有会员；共享视频能力尚待节点适配验收。</small></span></div>}
               <ul>{plan.features.map((feature) => <li key={feature}><Check size={17} weight="bold" /> {feature}</li>)}</ul>
-              {(plan.id === "member" && paymentMode === "offline" || plan.id === "short_video_monthly" || plan.id === "english_coach_monthly" || plan.id === "gulong_engine_monthly") && <div className="manual-renew-note"><Clock size={20} /><span><strong>人工审核到账</strong><small>付款后提交审核，确认到账后同步官网与桌面端。</small></span></div>}
-              {plan.id === "custom" ? <div className="custom-plan-actions"><button className="button secondary full" disabled={busy} onClick={() => setCustomContactOpen(true)}>联系定制</button><button className="button primary full" disabled={busy} onClick={() => user ? setCustomOrderOpen(true) : openAuth("login")}><Plus size={18} />新建订单</button></div> : <button className={`button full ${plan.featured ? "primary" : "secondary"}`} disabled={busy} onClick={() => startPayment(plan)}>{plan.id === "free" ? "免费下载" : busy ? "正在创建订单" : (["short_video_monthly", "english_coach_monthly", "gulong_engine_monthly"].includes(plan.id)) ? "线下申请开通" : monthlyUpgrade ? "补差价升级年度会员" : paymentMode === "online" ? "微信支付开通" : "线下申请开通"}</button>}
+              {plan.id !== "custom" && <div className="manual-renew-note"><Clock size={20} /><span><strong>人工审核到账</strong><small>付款后提交审核，确认到账后同步官网与桌面端。</small></span></div>}
+              {plan.id === "custom" ? <div className="custom-plan-actions"><button className="button secondary full" onClick={() => setCustomContactOpen(true)}>联系定制</button><button className="button primary full" onClick={() => user ? setCustomOrderOpen(true) : openAuth("login")}><Plus size={18} />新建订单</button></div> : <button className="button secondary full" onClick={() => startPayment(plan)}>线下申请开通</button>}
             </article>
           ))}
         </section>
@@ -450,7 +398,6 @@ export function PricingPage({ user, openAuth, navigate }) {
                 : <div className="recharge-order-list">{rechargeOrders.map((order) => <article key={order.id}><div><strong>{order.orderNo}</strong><small>{new Date(order.createdAt).toLocaleString("zh-CN", { hour12: false })}</small></div><span className={`recharge-order-status ${order.status}`}>{order.status === "approved" ? "已到账" : order.status === "rejected" ? "已拒绝" : "待审核"}</span><dl><div><dt>应付</dt><dd>{formatMoney(order.amountFen)}</dd></div><div><dt>到账</dt><dd>{formatMoney(order.creditedFen)}</dd></div></dl>{order.reviewReason && <p>审核说明：{order.reviewReason}</p>}</article>)}</div>}
         </aside>
       </section>}
-      {error && <div className="page-error section-shell">{error}</div>}
       {customContactOpen && <CustomizationContactDialog onClose={() => setCustomContactOpen(false)} />}
       {customOrderOpen && <CustomOrderDialog onClose={() => setCustomOrderOpen(false)} onCreated={(result) => { setCustomOrderOpen(false); setPayment(result); }} />}
       {payment && !payment.recharge && <PaymentDialog payment={payment} provider="wechat" availability={paymentAvailability} onPayment={setPayment} onClose={() => setPayment(null)} />}

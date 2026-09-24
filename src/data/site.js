@@ -21,31 +21,6 @@ export const workflowSteps = [
 
 export const plans = [
   {
-    id: "free",
-    name: "普通用户",
-    eyebrow: "开始使用",
-    monthlyFen: 0,
-    yearlyFen: 0,
-    features: ["智能助手与日常办公", "免费插件、技能与工作流", "自动模型路由", "本地离线运行"],
-  },
-  {
-    id: "member",
-    name: "会员用户",
-    eyebrow: "完整生产力",
-    monthlyFen: 29800,
-    yearlyFen: 298000,
-    featured: true,
-    features: ["第二大脑与长期记忆", "微信接 Codex", "图文与短视频自动化", "本地模型与会员能力包"],
-  },
-  {
-    id: "short_video_monthly",
-    name: "短视频包月",
-    eyebrow: "H3 无限创作",
-    monthlyFen: 599900,
-    yearlyFen: 5999900,
-    features: ["无限使用 MiniMaxH3共享节点", "实付多少，余额到账多少", "余额内照常扣费并给节点分佣", "余额用完后无限免费且不再分佣"],
-  },
-  {
     id: "english_coach_monthly",
     name: "英语教练包月",
     eyebrow: "让英语每天进步",

@@ -155,7 +155,7 @@ test("到期只清除套餐额度，保留用户另行充值的余额", async ()
   assert.equal(subscription.status, "expired");
 });
 
-test("定价与管理员界面公开短视频包月类型，桌面接口同步套餐状态", async () => {
+test("定价页隐藏短视频包月但保留管理员与桌面端既有套餐状态", async () => {
   const [site, pricing, admin, server, pear, css, db] = await Promise.all([
     readFile(new URL("../../src/data/site.js", import.meta.url), "utf8"),
     readFile(new URL("../../src/components/PlatformPages.jsx", import.meta.url), "utf8"),
@@ -165,13 +165,14 @@ test("定价与管理员界面公开短视频包月类型，桌面接口同步�
     readFile(new URL("../../src/styles.css", import.meta.url), "utf8"),
     readFile(new URL("../../server/db.js", import.meta.url), "utf8"),
   ]);
-  assert.match(site, /id:\s*"short_video_monthly"/);
-  assert.match(site, /monthlyFen:\s*599900/);
-  assert.match(site, /yearlyFen:\s*5999900/);
+  assert.doesNotMatch(site, /id:\s*"(?:free|member|short_video_monthly)"/);
+  assert.match(site, /id:\s*"english_coach_monthly"/);
+  assert.match(site, /id:\s*"gulong_engine_monthly"/);
+  assert.match(pricing, /pricingPlans\.map\(\(plan\)/);
   assert.match(pricing, /线下申请开通/);
   assert.match(admin, /短视频包月用户/);
   assert.match(server, /shortVideoPackage:\s*shortVideoPackageView\((?:rawSubscription|subscription), wallet(?:, now)?\)/);
   assert.match(pear, /expireShortVideoPackageAllowance\(\{ getCollection, ownerId, subscription, now \}\)/);
-  assert.match(css, /\.pricing-grid\s*\{[^}]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\)/s);
+  assert.match(css, /\.pricing-grid\s*\{[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/s);
   assert.match(db, /subscriptions_short_video_expiry/);
 });

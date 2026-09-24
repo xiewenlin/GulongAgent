@@ -1330,7 +1330,7 @@ test("pricing exposes stable subscription and recharge deep links with authorita
   assert.match(css, /\.recharge-workspace\s*\{/);
 });
 
-test("online payment exposes WeChat only and uses manual renewal lifecycle controls", async () => {
+test("existing WeChat billing remains available while visible product subscriptions use offline review", async () => {
   const [serverSource, pricingPage, accountPage] = await Promise.all([
     readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
     readFile(new URL("../../src/components/PlatformPages.jsx", import.meta.url), "utf8"),
@@ -1344,7 +1344,8 @@ test("online payment exposes WeChat only and uses manual renewal lifecycle contr
   assert.doesNotMatch(pricingPage, /online-payment-status-card/);
   assert.doesNotMatch(pricingPage, /微信手动续费/);
   assert.doesNotMatch(pricingPage, /当前不自动扣款/);
-  assert.match(pricingPage, /paymentMode === "offline"/);
+  assert.match(pricingPage, /mode: "offline-cashier", cycle: "month"/);
+  assert.doesNotMatch(pricingPage, /按年订阅/);
   assert.match(pricingPage, /人工审核到账/);
   assert.doesNotMatch(pricingPage, /支付宝/);
   assert.match(serverSource, /RENEWAL_REMINDER_DAYS = 7/);
