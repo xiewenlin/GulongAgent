@@ -7,6 +7,9 @@ import {
   issueShortDramaSsoToken,
   normalizeEmail,
   normalizeUsername,
+  readPlatformPearSecret,
+  sealPlatformPearSecret,
+  sealUserSecret,
   shouldUseSecureSessionCookie,
   verifyPassword,
 } from "../../server/security.js";
@@ -30,6 +33,26 @@ test("opaque tokens and IPs are one-way deterministic fingerprints", () => {
   assert.notEqual(hashOpaqueToken("token-a"), hashOpaqueToken("token-b"));
   assert.equal(fingerprintIp("203.0.113.9"), fingerprintIp("203.0.113.9"));
   assert.equal(fingerprintIp("203.0.113.9").length, 24);
+});
+
+test("PearAPI credentials survive differing session secrets while legacy ciphertext remains readable", () => {
+  const previousSession = process.env.SESSION_SECRET;
+  const previousPepper = process.env.API_KEY_PEPPER;
+  try {
+    process.env.SESSION_SECRET = "session-secret-one-for-test";
+    process.env.API_KEY_PEPPER = "shared-api-pepper-for-test";
+    const legacy = sealUserSecret("free-channel-token", "platform-pearapi-token");
+    assert.equal(readPlatformPearSecret(legacy, "token"), "free-channel-token");
+    const portable = sealPlatformPearSecret("free-channel-token", "token");
+    process.env.SESSION_SECRET = "session-secret-two-for-test";
+    assert.equal(readPlatformPearSecret(portable, "token"), "free-channel-token");
+    assert.equal(readPlatformPearSecret(legacy, "token"), null);
+    process.env.API_KEY_PEPPER = "different-api-pepper-for-test";
+    assert.equal(readPlatformPearSecret(portable, "token"), null);
+  } finally {
+    if (previousSession === undefined) delete process.env.SESSION_SECRET; else process.env.SESSION_SECRET = previousSession;
+    if (previousPepper === undefined) delete process.env.API_KEY_PEPPER; else process.env.API_KEY_PEPPER = previousPepper;
+  }
 });
 
 test("session cookies follow the externally visible protocol with an explicit override", () => {

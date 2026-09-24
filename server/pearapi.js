@@ -3,7 +3,7 @@ import { ObjectId } from "mongodb";
 import { createRoute, z } from "@hono/zod-openapi";
 import { getCollection } from "./db.js";
 import { enforceRateLimit } from "./rate-limit.js";
-import { readUserSecret, sealUserSecret } from "./security.js";
+import { readPlatformPearSecret, sealPlatformPearSecret } from "./security.js";
 import { localizeErrorMessage } from "../shared/error-messages.js";
 import { createPresignedDownloadUrl } from "./cos.js";
 import { readMarketWalletAmount } from "./codex-market-pricing.js";
@@ -211,8 +211,8 @@ async function credentialRecord() {
 
 function credentialSecrets(record) {
   return {
-    key: readUserSecret(record?.keyEncrypted, "platform-pearapi-key"),
-    token: readUserSecret(record?.tokenEncrypted, "platform-pearapi-token"),
+    key: readPlatformPearSecret(record?.keyEncrypted, "key"),
+    token: readPlatformPearSecret(record?.tokenEncrypted, "token"),
   };
 }
 
@@ -1422,8 +1422,8 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
       return c.json({ code: "PEAR_API_TOKEN_REQUIRED", message: "切换令牌渠道时，请同时粘贴该渠道的新令牌，避免渠道与令牌不一致" }, 400);
     }
     set.tokenChannel = nextTokenChannel;
-    if (String(input.key || "").trim()) { const key = normalizedSecret(input.key); set.keyEncrypted = sealUserSecret(key, "platform-pearapi-key"); set.keyLast4 = key.slice(-4); }
-    if (String(input.token || "").trim()) { const token = normalizedSecret(input.token); set.tokenEncrypted = sealUserSecret(token, "platform-pearapi-token"); set.tokenLast4 = token.slice(-4); }
+    if (String(input.key || "").trim()) { const key = normalizedSecret(input.key); set.keyEncrypted = sealPlatformPearSecret(key, "key"); set.keyLast4 = key.slice(-4); }
+    if (String(input.token || "").trim()) { const token = normalizedSecret(input.token); set.tokenEncrypted = sealPlatformPearSecret(token, "token"); set.tokenLast4 = token.slice(-4); }
     if (input.clearKey) { unset.keyEncrypted = ""; unset.keyLast4 = ""; }
     if (input.clearToken) { unset.tokenEncrypted = ""; unset.tokenLast4 = ""; }
     await collection.updateOne(

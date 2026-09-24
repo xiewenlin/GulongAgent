@@ -32,6 +32,8 @@
 
 英语教练桌面端只持有上节的 15 分钟 `gec_at_` 访问令牌，不获取 PearAPI Key 或渠道令牌。官网后端代为调用免费模型，不进入共享节点订单队列；管理员需在“令牌配置”保存可用的 PearAPI 免费渠道令牌。
 
+PearAPI 平台凭据以共享的 `API_KEY_PEPPER` 派生独立 AES-GCM 密钥加密，两部署目标必须沿用同一高熵值；旧版 `SESSION_SECRET` 密文仍可在原环境读取。若历史凭据在新服务器解不开，管理员须在官网“令牌配置”重新填写免费渠道令牌并保存一次，不能通过更换会话密钥或复制别人的密钥恢复。
+
 | 操作 | 路径 | 请求 | 返回 |
 |---|---|---|---|
 | 模型状态 | `GET /api/v1/desktop/english-coach/llm/config` | `Authorization: Bearer gec_at_...` | `{ "ok":true, "provider":"pearapi", "model":"minimax-m3", "display_name":"MiniMax-M3 · 免费", "ready":true }`；缺少渠道令牌时 `ready:false` |

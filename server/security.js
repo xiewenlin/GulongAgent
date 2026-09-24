@@ -226,6 +226,20 @@ export function readUserSecret(sealed, purpose) {
   return readEncryptedValue(sealed, `user-secret:${purpose}`);
 }
 
+// PearAPI credentials must remain decryptable across both deployment targets
+// even when their session-cookie signing secrets differ. Domain separation in
+// encryptedValueKey keeps this use independent of API-key hashing.
+export function sealPlatformPearSecret(value, purpose) {
+  const stableRoot = process.env.API_KEY_PEPPER?.trim();
+  return sealEncryptedValue(value, `platform-pearapi:${purpose}`, stableRoot || secret("SESSION_SECRET"));
+}
+
+export function readPlatformPearSecret(sealed, purpose) {
+  const stableRoot = process.env.API_KEY_PEPPER?.trim();
+  return (stableRoot ? readEncryptedValue(sealed, `platform-pearapi:${purpose}`, stableRoot) : null)
+    || readUserSecret(sealed, `platform-pearapi-${purpose}`);
+}
+
 export function sealActivationCodeSecret(value) {
   return sealEncryptedValue(value, "user-secret:activation-code", secret("ACTIVATION_CODE_ENCRYPTION_KEY"));
 }
