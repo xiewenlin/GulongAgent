@@ -101,6 +101,7 @@ import {
 import { buildAdminAnalyticsDashboard, recordAnalyticsEvent } from "./analytics.js";
 import { recoverExpiredDirectReleaseLock } from "./release-lock.js";
 import { buildPearAccountUsageSnapshot, creditPaymentBalanceWithPromotion, paymentPromotionBonusFen, registerPearApiRoutes } from "./pearapi.js";
+import { creditGulongEngineSubscriptionBalance } from "./gulong-engine-billing.js";
 import { registerH3SharedRoutes } from "./h3-shared.js";
 import { registerCodexMarketRoutes } from "./codex-market.js";
 import { registerCapabilityOrderRoutes } from "./capability-orders.js";
@@ -1814,12 +1815,14 @@ async function approveOfflinePayment({ orderId, actorUserId, actorChandlerUserId
     )] : []),
     (await getCollection("notifications")).updateOne(
       { ownerId: order.ownerId, type: "offline_payment_approved", orderId: order._id },
-      { $set: { title: "线下支付审核已通过", message: isRecharge ? `订单 ${order.orderNo} 已确认到账，实付余额${promotionBonusFen ? `及赠送的 ${(promotionBonusFen / 100).toFixed(2)} 元` : ""}已经入账。` : isEnglishSubscription ? `订单 ${order.orderNo} 已确认到账，英语教练包月权益已生效；英语任务费用包含在套餐内。` : isGulongSubscription ? `订单 ${order.orderNo} 已确认到账，古龙引擎包月权益已生效。` : isShortVideoSubscription ? `订单 ${order.orderNo} 已确认到账，短视频包月权益已生效，实付金额已按 1:1 计入可用余额。` : `订单 ${order.orderNo} 已确认到账，会员权益与赠送的 ${(promotionBonusFen / 100).toFixed(2)} 元余额已经生效。`, orderNo: order.orderNo, readAt: null, updatedAt: now }, $setOnInsert: { createdAt: now } },
+      { $set: { title: "线下支付审核已通过", message: isRecharge ? `订单 ${order.orderNo} 已确认到账，实付余额${promotionBonusFen ? `及赠送的 ${(promotionBonusFen / 100).toFixed(2)} 元` : ""}已经入账。` : isEnglishSubscription ? `订单 ${order.orderNo} 已确认到账，英语教练包月权益已生效；英语任务费用包含在套餐内。` : isGulongSubscription ? `订单 ${order.orderNo} 已确认到账，古龙引擎包月权益已生效，实付 ${(order.amountFen / 100).toFixed(2)} 元已等额计入视频余额。` : isShortVideoSubscription ? `订单 ${order.orderNo} 已确认到账，短视频包月权益已生效，实付金额已按 1:1 计入可用余额。` : `订单 ${order.orderNo} 已确认到账，会员权益与赠送的 ${(promotionBonusFen / 100).toFixed(2)} 元余额已经生效。`, orderNo: order.orderNo, readAt: null, updatedAt: now }, $setOnInsert: { createdAt: now } },
       { upsert: true },
     ),
     ...(isRecharge
       ? [creditPaymentBalanceWithPromotion({ ownerId: order.ownerId, amountFen: order.amountFen, source: "offline_recharge", sourceId: order.orderNo, kind: "recharge" })]
-      : isIndependentSubscription ? [] : isShortVideoSubscription
+      : isGulongSubscription
+        ? [creditGulongEngineSubscriptionBalance({ ownerId: order.ownerId, orderNo: order.orderNo, amountFen: order.amountFen })]
+        : isEnglishSubscription ? [] : isShortVideoSubscription
         ? [creditShortVideoSubscriptionBalance({ getCollection, ownerId: order.ownerId, amountFen: order.amountFen, source: "offline_short_video_subscription", sourceId: order.orderNo, expiresAt: end })]
         : [creditPaymentBalanceWithPromotion({ ownerId: order.ownerId, amountFen: order.amountFen, source: "offline_subscription", sourceId: order.orderNo, kind: "subscription_payment" })]),
   ]);
@@ -1836,7 +1839,7 @@ async function approveOfflinePayment({ orderId, actorUserId, actorChandlerUserId
       await chandlerRequest(path, { method: "PUT", accessToken, body: { attributes: { ...attributes, subscription_status: "active", subscription_plan: isShortVideoSubscription ? SHORT_VIDEO_PLAN_ID : "member", plan_kind: isShortVideoSubscription ? SHORT_VIDEO_PLAN_ID : order.cycle === "year" ? "yearly" : "monthly", subscription_source: "offline_review", subscription_order_no: order.orderNo, subscription_valid_from: start.toISOString(), subscription_valid_until: end.toISOString(), subscription_valid_from_unix_ms: start.getTime(), subscription_valid_until_unix_ms: end.getTime(), subscription_reviewed_at_unix_ms: now.getTime() } } });
     } catch { /* Website MongoDB remains authoritative and desktop reads it directly. */ }
   }
-  return { ok: true, orderNo: order.orderNo, status: "approved", planType: isRecharge ? null : appliedPlan, creditedFen: isIndependentSubscription ? 0 : order.amountFen + promotionBonusFen, bonusFen: promotionBonusFen, ...(isRecharge ? {} : { validFrom: start, validUntil: end }), message: isEnglishSubscription ? "审核已通过，英语教练包月权益已生效，有效期内英语能力订单包含在套餐内。" : isGulongSubscription ? "审核已通过，古龙引擎包月权益已生效。" : isRecharge ? "审核已通过，充值余额与符合条件的赠送金额已经入账并可由桌面端立即同步" : isShortVideoSubscription ? "审核已通过，短视频包月权益与实付等额余额已经生效并可由桌面端立即同步" : "审核已通过，会员权益与 10% 赠送余额已经生效并可由桌面端立即同步" };
+  return { ok: true, orderNo: order.orderNo, status: "approved", planType: isRecharge ? null : appliedPlan, creditedFen: isEnglishSubscription ? 0 : order.amountFen + promotionBonusFen, bonusFen: promotionBonusFen, ...(isRecharge ? {} : { validFrom: start, validUntil: end }), message: isEnglishSubscription ? "审核已通过，英语教练包月权益已生效，有效期内英语能力订单包含在套餐内。" : isGulongSubscription ? "审核已通过，古龙引擎包月权益与实付等额视频余额已经生效。" : isRecharge ? "审核已通过，充值余额与符合条件的赠送金额已经入账并可由桌面端立即同步" : isShortVideoSubscription ? "审核已通过，短视频包月权益与实付等额余额已经生效并可由桌面端立即同步" : "审核已通过，会员权益与 10% 赠送余额已经生效并可由桌面端立即同步" };
 }
 
 async function rejectOfflinePayment({ orderId, actorUserId, actorChandlerUserId, accessToken, reason }) {
@@ -7370,7 +7373,7 @@ app.post("/api/billing/orders", async (c) => {
       billing_interval: kind === "subscription" ? cycle : "one_time",
       amount_fen: amountFen,
       promotion_bonus_fen: promotionBonusFen,
-      wallet_credit_fen: [ENGLISH_COACH_PLAN_ID, GULONG_ENGINE_PLAN_ID].includes(subscriptionPlan) ? 0 : amountFen + promotionBonusFen,
+      wallet_credit_fen: subscriptionPlan === ENGLISH_COACH_PLAN_ID ? 0 : amountFen + promotionBonusFen,
       payment_method: "offline",
       platform_service_fee: false,
       review_status: "pending",
@@ -7381,7 +7384,7 @@ app.post("/api/billing/orders", async (c) => {
     };
     const offlineDocument = {
       orderNo, chandlerOrderNo: null, ownerId, chandlerUserId: partnerData.chandler_user_id, userEmail: auth.user.email,
-      kind, cycle, subscriptionPlan, amountFen, promotionBonusFen, creditedFen: [ENGLISH_COACH_PLAN_ID, GULONG_ENGINE_PLAN_ID].includes(subscriptionPlan) ? 0 : amountFen + promotionBonusFen,
+      kind, cycle, subscriptionPlan, amountFen, promotionBonusFen, creditedFen: subscriptionPlan === ENGLISH_COACH_PLAN_ID ? 0 : amountFen + promotionBonusFen,
       plan, partnerData, status: "pending",
       ...(requestKey ? { billingRequestKey: requestKey, requestFingerprint } : {}),
       ...(isMonthlyUpgrade ? { upgradeFrom: "month", upgradeCreditFen, upgradeBaseStart } : {}),
@@ -7416,7 +7419,7 @@ app.post("/api/billing/orders", async (c) => {
     // write must never turn a durably created payment order into a client-side
     // failure that the user may submit twice.
     await enqueueOfflineReviewEvent({ _id: result.insertedId, orderNo }, "new-order").catch(() => null);
-    const response = { id: result.insertedId.toString(), orderNo, status: "pending_review", mode: "offline", planType: subscriptionPlan, amountFen, bonusFen: promotionBonusFen, creditedFen: [ENGLISH_COACH_PLAN_ID, GULONG_ENGINE_PLAN_ID].includes(subscriptionPlan) ? 0 : amountFen + promotionBonusFen, upgradeCreditFen };
+    const response = { id: result.insertedId.toString(), orderNo, status: "pending_review", mode: "offline", planType: subscriptionPlan, amountFen, bonusFen: promotionBonusFen, creditedFen: subscriptionPlan === ENGLISH_COACH_PLAN_ID ? 0 : amountFen + promotionBonusFen, upgradeCreditFen };
     if (billingJournal) await (await getCollection("billingOrderRequests")).updateOne({ _id: billingJournal._id }, { $set: { status: "final", response, finalizedAt: new Date(), updatedAt: new Date() } });
     return c.json(response, 201);
   }
@@ -8768,7 +8771,7 @@ app.openAPIRegistry.registerPath({
   path: "/api/billing/orders",
   tags: ["Billing"],
   summary: "创建微信支付或线下审核订单",
-  description: "线上仅支持微信。subscription 默认创建普通会员月/年订单；planType=short_video_monthly 创建短视频包月订单且仅允许 provider=offline，月费 599900 分、年费 5999900 分；planType=english_coach_monthly 或 gulong_engine_monthly、cycle=month、provider=offline 分别创建 19800 分的独立产品月度订单，不向钱包充值。普通会员实付金额额外赠送 10%；recharge 单次实付满 500 元额外赠送 10%。金额单位均为整数分。",
+  description: "线上仅支持微信。subscription 默认创建普通会员月/年订单；planType=short_video_monthly 创建短视频包月订单且仅允许 provider=offline，月费 599900 分、年费 5999900 分；planType=english_coach_monthly 或 gulong_engine_monthly、cycle=month、provider=offline 分别创建 19800 分的独立产品月度订单。古龙引擎包月审核通过后将实付金额等额计入视频余额，不额外赠送；英语教练包月不计入余额。普通会员实付金额额外赠送 10%；recharge 单次实付满 500 元额外赠送 10%。金额单位均为整数分。",
   request: { body: { content: { "application/json": { schema: z.object({ kind: z.enum(["subscription", "recharge", "custom", "worker_task"]), planType: z.enum(["member", "short_video_monthly", "english_coach_monthly", "gulong_engine_monthly"]).optional(), provider: z.enum(["wechat", "offline"]), cycle: z.enum(["month", "year"]).optional(), amountFen: z.number().int().min(100).optional(), subject: z.string().max(80).optional(), taskId: z.string().optional() }) } } } },
   responses: { 201: { description: "Chandler 微信预支付信息，或线下待审核订单" }, 400: { description: "参数或渠道不受支持" }, 401: { description: "未登录" } },
 });

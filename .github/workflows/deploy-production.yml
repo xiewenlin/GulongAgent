@@ -54,6 +54,8 @@ jobs:
           cp -a server "$bundle/server"
           cp -a shared "$bundle/shared"
           cp -a dist "$bundle/dist"
+          mkdir -p "$bundle/scripts"
+          cp scripts/backfill-gulong-engine-credits.mjs "$bundle/scripts/"
           printf '%s\n' "$GITHUB_SHA" > "$bundle/.deploy-commit"
           tar -czf "$archive" -C "$bundle" .
 

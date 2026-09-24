@@ -1,6 +1,6 @@
 # 古龙引擎包月桌面端合同
 
-生产基址：`https://www.sologle.com`。机器可读 OpenAPI：`/api/openapi.json`（v2.10.1）。这是独立产品月套餐，不自动获得普通会员、英语教练或短视频包月权益，也不向钱包充值。
+生产基址：`https://www.sologle.com`。机器可读 OpenAPI：`/api/openapi.json`（v2.10.1）。这是独立产品月套餐，不自动获得普通会员、英语教练或短视频包月权益；线下付款审核通过后，实付金额等额计入当前账户视频余额，不叠加普通会员 10% 赠送。
 
 ## 登录与权益
 
@@ -15,7 +15,7 @@
 
 登录 JSON 为 `{ "identifier":"用户名或邮箱", "password":"密码" }`；刷新 JSON 为 `{ "refresh_token":"gge_rt_..." }`；注销携带访问令牌和可选刷新令牌。权益 `product="gulong_engine"`、`plan_id="gulong_engine_monthly"`、`monthly_price_fen=19800`，`status` 为 `inactive|scheduled|active|expired`，并返回 `starts_at`、`expires_at`、`capabilities`。访问令牌 15 分钟，刷新会话最长 30 天；仅服务端保存令牌哈希。英语教练的 `gec_`、古龙的 `gge_` 令牌互不通用。到期拒绝新的模型或能力订单，历史结果仍允许本人查询。错误使用中文 `{ "code", "message" }`。
 
-官网 `/pricing?tab=subscription` 支持 `planType=gulong_engine_monthly`、`cycle=month`、`provider=offline` 的 198 元线下审核订单。管理员可在“订阅用户”中独立设置该产品的生效和到期时间。审核通过只延长独立权益，不增加钱包余额。
+官网 `/pricing?tab=subscription` 支持 `planType=gulong_engine_monthly`、`cycle=month`、`provider=offline` 的 198 元线下审核订单。管理员可在“订阅用户”中独立设置该产品的生效和到期时间；手动设置有效期不等于收款，不触发余额入账。真实订单审核通过时才开通独立权益并按实付金额 1:1 入账，同一订单号重复审核不会重复入账。
 
 ## 8 个免费文本模型
 

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { ObjectId } from "mongodb";
 import {
   GULONG_ENGINE_MONTHLY_PRICE_FEN,
   GULONG_ENGINE_PLAN_ID,
@@ -18,11 +20,12 @@ import {
 } from "../../server/gulong-engine-capabilities.js";
 import { normalizeCapabilityParameters, normalizeCapabilityReport, validateCapabilityInput } from "../../server/capability-orders.js";
 import { editorProducts, SUBSCRIPTION_PRODUCTS } from "../../src/subscriptions.js";
+import { GULONG_ENGINE_WALLET_SOURCE, creditGulongEngineSubscriptionBalance, reconcileApprovedGulongEngineOrders } from "../../server/gulong-engine-billing.js";
 
 const now = new Date("2026-09-24T08:00:00.000Z");
 const period = { currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"), enabled: true, status: "active" };
 
-test("古龙引擎包月有独立 198 元权益，不伪装普通会员或为钱包充值", () => {
+test("古龙引擎包月有独立 198 元权益，不伪装普通会员", () => {
   assert.equal(GULONG_ENGINE_PLAN_ID, "gulong_engine_monthly");
   assert.equal(GULONG_ENGINE_MONTHLY_PRICE_FEN, 19_800);
   assert.equal(GULONG_ENGINE_PRODUCT.name, "古龙引擎包月");
@@ -37,6 +40,57 @@ test("古龙引擎包月有独立 198 元权益，不伪装普通会员或为钱
   const expired = gulongEngineEntitlement(subscription, new Date("2026-10-02T00:00:00.000Z"));
   assert.equal(expired.active, false);
   assert.deepEqual(expired.capabilities, []);
+});
+
+test("已审核古龙引擎订单按实付金额等额入账，补偿和重复审核均不重复入账", async () => {
+  const ownerId = new ObjectId();
+  const order = { _id: new ObjectId(), ownerId, orderNo: "GULONG-ENGINE-ORDER-1", amountFen: 19_800, status: "approved", subscriptionPlan: GULONG_ENGINE_PLAN_ID, partnerData: { wallet_credit_fen: 0 }, creditedFen: 0 };
+  let wallet = null;
+  const ledgers = new Map();
+  const provider = async (name) => ({
+    offlinePayments: {
+      find: () => (async function* () { yield order; })(),
+      updateOne: async (_, update) => { order.creditedFen = update.$set.creditedFen; order.partnerData.wallet_credit_fen = update.$set["partnerData.wallet_credit_fen"]; return { modifiedCount: 1 }; },
+    },
+    wallets: {
+      findOne: async (filter) => wallet && String(filter.ownerId) === String(ownerId) && (!filter["credits.key"] || wallet.credits.some((credit) => credit.key === filter["credits.key"])) ? wallet : null,
+      insertOne: async (document) => { wallet = { _id: new ObjectId(), ...document }; return { insertedId: wallet._id }; },
+      updateOne: async (filter, update) => {
+        if (wallet?.credits.some((credit) => credit.key === filter["credits.key"].$ne)) return { modifiedCount: 0 };
+        wallet.balanceFen += update.$inc.balanceFen;
+        wallet.credits.push(update.$push.credits);
+        return { modifiedCount: 1 };
+      },
+    },
+    walletCreditLedger: {
+      findOne: async (filter) => ledgers.get(filter.creditKey) || null,
+      updateOne: async (filter, update) => {
+        const ledger = ledgers.get(filter.creditKey) || { ...update.$setOnInsert };
+        Object.assign(ledger, update.$set);
+        ledgers.set(filter.creditKey, ledger);
+        return { modifiedCount: 1 };
+      },
+    },
+  })[name];
+  assert.deepEqual(await reconcileApprovedGulongEngineOrders({ collectionProvider: provider }), { eligible: 1, missing: 1, applied: 0, alreadyApplied: 0, invalid: 0 });
+  assert.equal(wallet, null, "dry-run must not change wallet");
+  assert.deepEqual(await reconcileApprovedGulongEngineOrders({ collectionProvider: provider, apply: true }), { eligible: 1, missing: 1, applied: 1, alreadyApplied: 0, invalid: 0 });
+  assert.equal(wallet.balanceFen, 19_800);
+  assert.deepEqual(wallet.credits.map((credit) => [credit.kind, credit.amountFen]), [["gulong_engine_subscription", 19_800]]);
+  assert.equal(ledgers.get(`${GULONG_ENGINE_WALLET_SOURCE}:${order.orderNo}`).status, "settled");
+  assert.equal(order.creditedFen, 19_800);
+  assert.equal(order.partnerData.wallet_credit_fen, 19_800);
+  assert.deepEqual(await reconcileApprovedGulongEngineOrders({ collectionProvider: provider, apply: true }), { eligible: 1, missing: 0, applied: 0, alreadyApplied: 1, invalid: 0 });
+  assert.equal((await creditGulongEngineSubscriptionBalance({ ownerId, orderNo: order.orderNo, amountFen: 19_800, collectionProvider: provider })).applied, false);
+  assert.equal(wallet.balanceFen, 19_800);
+  assert.equal(wallet.credits.length, 1);
+});
+
+test("古龙引擎审核走独立等额入账，英语教练仍不入账", async () => {
+  const source = await readFile(new URL("../../server/app.js", import.meta.url), "utf8");
+  assert.match(source, /isGulongSubscription\s*\? \[creditGulongEngineSubscriptionBalance\(/);
+  assert.match(source, /isEnglishSubscription \? \[\]/);
+  assert.match(source, /wallet_credit_fen: subscriptionPlan === ENGLISH_COACH_PLAN_ID \? 0 : amountFen \+ promotionBonusFen/);
 });
 
 test("管理员订阅设置只展示英语教练和古龙引擎，历史会员仍留在服务端记录", () => {

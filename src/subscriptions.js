@@ -1,6 +1,6 @@
 export const SUBSCRIPTION_PRODUCTS = [
   {id:"english_coach_monthly",name:"英语教练包月",monthlyFen:19800,description:"¥198 / 月 · 英语教练桌面端与订阅内共享能力，独立于其他会员。"},
-  {id:"gulong_engine_monthly",name:"古龙引擎包月",monthlyFen:19800,description:"¥198 / 月 · 古龙 Agent、第二大脑与视频创作权限；付费视频仍按实际费用从余额扣除。"},
+  {id:"gulong_engine_monthly",name:"古龙引擎包月",monthlyFen:19800,description:"¥198 / 月 · 古龙 Agent、第二大脑与视频创作权限；实付 198 元等额计入视频余额，付费视频按实际费用扣除。"},
 ];
 export function localSubscriptionDate(value) {
   if(!value)return "";
