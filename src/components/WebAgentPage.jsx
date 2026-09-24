@@ -298,8 +298,8 @@ function QuotaPrompt({ kind, onClose, navigate }) {
       <div className="agent-quota-icon">{subscription ? <Coins size={34} weight="duotone" /> : <Wallet size={34} weight="duotone" />}</div>
       <span>{subscription ? "MEMBERSHIP REQUIRED" : "USAGE EXHAUSTED"}</span>
       <h2 id="agent-quota-title">{subscription ? "开通会员后开始创作" : "当前可用额度已用完"}</h2>
-      <p>{subscription ? "当前没有生效会员或可用余额。开通月度或年度会员后，实付金额会成为创作余额，并额外赠送 10%；已有充值余额的普通用户也可以按次调用付费图片和视频模型。" : "你的会员权益仍然有效，但创作额度已经用完。单次充值满 500 元会额外赠送 10% 余额。"}</p>
-      <div className="agent-quota-summary"><ShieldCheck size={21} weight="duotone" /><span><strong>{subscription ? "开通会员获得余额" : "会员无需重复开通"}</strong><small>{subscription ? "普通用户与订阅用户都按实际调用扣减余额" : "只需补充余额，原会员有效期保持不变"}</small></span></div>
+      <p>{subscription ? "免费文字对话需开通古龙引擎包月；付费图片和视频可使用已有余额按次创作。" : "古龙引擎包月权益仍然有效，付费创作余额已用完。单次充值满 500 元会额外赠送 10% 余额。"}</p>
+      <div className="agent-quota-summary"><ShieldCheck size={21} weight="duotone" /><span><strong>{subscription ? "开通古龙引擎包月" : "会员无需重复开通"}</strong><small>{subscription ? "第二大脑与视频创作权限随套餐生效，付费视频按余额结算" : "只需补充余额，原会员有效期保持不变"}</small></span></div>
       <div className="agent-quota-actions"><button className="button secondary" type="button" onClick={onClose}>暂不处理</button><button className="button primary" type="button" onClick={() => { onClose(); navigate(subscription ? "/pricing?tab=subscription" : "/pricing?tab=recharge"); }}>{subscription ? "查看会员套餐" : "立即充值"}<ArrowRight size={17} /></button></div>
     </section>
   </div>;

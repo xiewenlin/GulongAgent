@@ -2154,7 +2154,7 @@ const adminUpdateSubscriptionPeriodRoute = createRoute({
   path: "/api/admin/users/{id}/subscription-period",
   tags: ["Admin · Users"],
   summary: "修改用户订阅类型与会员有效期",
-  description: "由管理员设置会员用户或短视频包月用户，并精确配置生效与到期时间；官网与桌面端均以该时间段为准，并尽力同步 Chandler 用户属性。",
+  description: "管理员界面仅新授予英语教练包月或古龙引擎包月；古龙引擎包月包含第二大脑和视频创作权限，付费视频仍由余额按单结算。历史普通会员和短视频包月数据与旧接口保持兼容，不再作为界面新授权选项。",
   request: {
     params: z.object({ id: z.string().min(1).max(100) }),
     body: { content: { "application/json": { schema: z.object({

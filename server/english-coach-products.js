@@ -19,7 +19,8 @@ export function productSubscription(subscription, id) {
   if (independent && typeof independent === "object" && !Array.isArray(independent)) {
     return { ...independent, plan: id, ownerId: subscription.ownerId, _id: subscription._id };
   }
-  return subscription && (subscription.plan || "member") === id ? subscription : null;
+  const legacyPlan = subscription?.plan || (subscription?.products ? null : "member");
+  return subscription && legacyPlan === id ? subscription : null;
 }
 
 export function productPeriodStatus(product, now = new Date()) {
@@ -64,7 +65,7 @@ export function gulongEngineEntitlement(subscription, now = new Date()) {
   return {
     product: "gulong_engine", plan_id: GULONG_ENGINE_PLAN_ID, active: status === "active", status,
     starts_at: product?.currentPeriodStart || null, expires_at: product?.currentPeriodEnd || null,
-    capabilities: status === "active" ? ["pearapi.free_text", "gulong_engine.text", "gulong_engine.image", "gulong_engine.video"] : [],
+    capabilities: status === "active" ? ["pearapi.free_text", "brain.read", "brain.write", "gulong_engine.text", "gulong_engine.image", "gulong_engine.video", "minimax_h3_shared.video"] : [],
     monthly_price_fen: GULONG_ENGINE_MONTHLY_PRICE_FEN,
   };
 }
@@ -72,7 +73,7 @@ export function gulongEngineEntitlement(subscription, now = new Date()) {
 export function legacyAccessSubscription(subscription, now = new Date()) {
   if (!subscription) return null;
   if (!subscription.products && ![ENGLISH_COACH_PLAN_ID, GULONG_ENGINE_PLAN_ID].includes(subscription.plan)) return subscription;
-  const candidates = ["member", "short_video_monthly"].map((id) => productSubscription(subscription, id)).filter(Boolean);
+  const candidates = ["member", "short_video_monthly", GULONG_ENGINE_PLAN_ID].map((id) => productSubscription(subscription, id)).filter(Boolean);
   const selected = candidates.find((product) => productPeriodStatus(product, now) === "active")
     || candidates.find((product) => product.plan === subscription.plan)
     || candidates.sort((a, b) => new Date(b.currentPeriodEnd || 0) - new Date(a.currentPeriodEnd || 0))[0];

@@ -1074,6 +1074,58 @@ export function h3NodeCanRunTask(node, task) {
   return !optimizationRequired || capabilities.localPromptOptimizationV1;
 }
 
+// A node id can survive a reinstall or be reused by two independently licensed
+// editions. The polling token is authoritative for its own node; an ambiguous
+// remote node must never receive work because its callback token is unknown.
+export function resolveH3LanBindings(records, nodeIds, callerBinding) {
+  const byId = new Map();
+  for (const nodeId of nodeIds) {
+    const matches = records.filter((record) => record.nodeId === nodeId);
+    if (!matches.length) return { error: "LAN_NODE_NOT_BOUND" };
+    if (nodeId === callerBinding.nodeId) {
+      const caller = matches.find((record) => idText(record._id) === idText(callerBinding._id));
+      if (!caller) return { error: "LAN_NODE_NOT_BOUND" };
+      byId.set(nodeId, caller);
+    } else if (matches.length === 1) {
+      byId.set(nodeId, matches[0]);
+    } else {
+      return { error: "AMBIGUOUS_LAN_NODE_BINDING" };
+    }
+  }
+  return { bindings: byId };
+}
+
+export async function recoverH3MisboundClaims({ tasks, uploads, records, callerBinding, now = new Date() }) {
+  const staleBefore = new Date(now.getTime() - 5 * 60_000);
+  const staleIds = records.filter((record) => record.nodeId === callerBinding.nodeId
+    && idText(record._id) !== idText(callerBinding._id)
+    && (!record.lastSeenAt || new Date(record.lastSeenAt) <= staleBefore)).map((record) => record._id);
+  if (!staleIds.length) return 0;
+  const guard = {
+    status: "claimed",
+    "claimRequestedByNode.bindingId": callerBinding._id,
+    "claimedByNode.nodeId": callerBinding.nodeId,
+    "claimedByNode.bindingId": { $in: staleIds },
+    claimedAt: { $lte: staleBefore },
+    executedByNode: { $exists: false },
+    progressUpdatedAt: { $exists: false },
+  };
+  const candidates = await tasks.find(guard, { projection: { _id: 1 } }).limit(20).toArray();
+  const recoveredIds = [];
+  for (const candidate of candidates) {
+    const recovered = await tasks.findOneAndUpdate({ _id: candidate._id, ...guard }, {
+      $set: { status: "queued", queuedAt: now, updatedAt: now, error: { code: "STALE_NODE_BINDING", message: "旧设备绑定未开始执行，任务已安全重新排队" } },
+      $unset: { claimedByNode: "", claimRequestedByNode: "", claimedAt: "", claimLeaseUntil: "" },
+    }, { returnDocument: "after" });
+    if (recovered) recoveredIds.push(candidate._id);
+  }
+  if (recoveredIds.length) await uploads.updateMany(
+    { taskId: { $in: recoveredIds }, status: "issued" },
+    { $set: { status: "expired", expiredAt: now, updatedAt: now }, $unset: { expiresAt: "" } },
+  );
+  return recoveredIds.length;
+}
+
 function routeError(c, error) {
   return c.json({ code: error.code || "H3_SHARED_ERROR", message: localizeErrorMessage(error, "共享节点服务暂时不可用") }, error.status || 500);
 }
@@ -1532,11 +1584,17 @@ export function registerH3SharedRoutes(app, dependencies) {
       } catch (error) { return routeError(c, error); }
       if (!seenNodeIds.has(auth.binding.nodeId)) return c.json({ code: "CALLER_MISSING_FROM_LAN_REPORT", message: "局域网负载报告必须包含当前轮询节点" }, 400);
       const bindingRecords = await (await getCollection("nodeAccountBindings")).find({ userId: auth.user._id, nodeId: { $in: [...seenNodeIds] }, status: "active", revokedAt: null }).toArray();
-      const bindingByNodeId = new Map(bindingRecords.map((binding) => [binding.nodeId, binding]));
-      if (bindingByNodeId.size !== seenNodeIds.size) return c.json({ code: "LAN_NODE_NOT_BOUND", message: "局域网负载报告包含未绑定到当前账号的节点" }, 403);
+      const resolved = resolveH3LanBindings(bindingRecords, seenNodeIds, auth.binding);
+      if (resolved.error === "LAN_NODE_NOT_BOUND") return c.json({ code: "LAN_NODE_NOT_BOUND", message: "局域网负载报告包含未绑定到当前账号的节点" }, 403);
+      if (resolved.error) return c.json({ code: resolved.error, message: "局域网中有重名节点且绑定令牌不唯一，请在对应设备重新绑定官网账号后重试" }, 409);
+      const recovered = await recoverH3MisboundClaims({ tasks, uploads: await getCollection("h3OutputUploads"), records: bindingRecords, callerBinding: auth.binding, now });
+      if (recovered) {
+        await queueCoordinator.invalidate();
+        queueSnapshot = await queueCoordinator.snapshot(now);
+      }
       clusterNodes = normalizedReports.map((report) => ({
         ...report,
-        binding: bindingByNodeId.get(report.nodeId),
+        binding: resolved.bindings.get(report.nodeId),
         runningTaskCount: report.available ? report.runningTaskCount : report.capabilities.maxConcurrentTasks,
       }));
     } else {

@@ -7,6 +7,7 @@ import {
   buildProductPeriodPatch,
   gulongEngineEntitlement,
   legacyAccessSubscription,
+  productSubscription,
   subscriptionProducts,
 } from "../../server/english-coach-products.js";
 import {
@@ -16,6 +17,7 @@ import {
   validateGulongEngineInlineResult,
 } from "../../server/gulong-engine-capabilities.js";
 import { normalizeCapabilityParameters, normalizeCapabilityReport, validateCapabilityInput } from "../../server/capability-orders.js";
+import { editorProducts, SUBSCRIPTION_PRODUCTS } from "../../src/subscriptions.js";
 
 const now = new Date("2026-09-24T08:00:00.000Z");
 const period = { currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"), enabled: true, status: "active" };
@@ -28,12 +30,23 @@ test("古龙引擎包月有独立 198 元权益，不伪装普通会员或为钱
   const subscription = { plan: GULONG_ENGINE_PLAN_ID, products: { [GULONG_ENGINE_PLAN_ID]: period } };
   const entitlement = gulongEngineEntitlement(subscription, now);
   assert.equal(entitlement.active, true);
-  assert.deepEqual(entitlement.capabilities, ["pearapi.free_text", "gulong_engine.text", "gulong_engine.image", "gulong_engine.video"]);
-  assert.equal(legacyAccessSubscription(subscription, now).status, "inactive");
+  assert.deepEqual(entitlement.capabilities, ["pearapi.free_text", "brain.read", "brain.write", "gulong_engine.text", "gulong_engine.image", "gulong_engine.video", "minimax_h3_shared.video"]);
+  assert.equal(legacyAccessSubscription(subscription, now).status, "active");
+  assert.equal(legacyAccessSubscription(subscription, now).plan, GULONG_ENGINE_PLAN_ID);
   assert.equal(subscriptionProducts(subscription, now).find((item) => item.id === GULONG_ENGINE_PLAN_ID).status, "active");
   const expired = gulongEngineEntitlement(subscription, new Date("2026-10-02T00:00:00.000Z"));
   assert.equal(expired.active, false);
   assert.deepEqual(expired.capabilities, []);
+});
+
+test("管理员订阅设置只展示英语教练和古龙引擎，历史会员仍留在服务端记录", () => {
+  assert.deepEqual(SUBSCRIPTION_PRODUCTS.map((item) => item.id), ["english_coach_monthly", GULONG_ENGINE_PLAN_ID]);
+  const rows = editorProducts({ products: subscriptionProducts({ products: { member: period, short_video_monthly: period, [GULONG_ENGINE_PLAN_ID]: period } }, now) }, now);
+  assert.deepEqual(rows.map((item) => item.id), ["english_coach_monthly", GULONG_ENGINE_PLAN_ID]);
+  assert.equal(rows[1].enabled, true);
+  const expiredEngine = { products: { [GULONG_ENGINE_PLAN_ID]: { ...period, currentPeriodEnd: new Date("2026-09-10T00:00:00.000Z") } } };
+  assert.equal(productSubscription(expiredEngine, "member"), null);
+  assert.equal(legacyAccessSubscription(expiredEngine, now).status, "expired");
 });
 
 test("管理员单独调整古龙引擎有效期不会覆盖英语教练或普通会员", () => {

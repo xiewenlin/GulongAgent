@@ -1,8 +1,6 @@
 export const SUBSCRIPTION_PRODUCTS = [
-  {id:"member",name:"古龙会员",description:"第二大脑与官网会员能力，按此产品的独立有效期生效。"},
-  {id:"short_video_monthly",name:"短视频包月",description:"MiniMaxH3共享节点订阅；手动修改有效期不会增加付费额度。"},
   {id:"english_coach_monthly",name:"英语教练包月",monthlyFen:19800,description:"¥198 / 月 · 英语教练桌面端与订阅内共享能力，独立于其他会员。"},
-  {id:"gulong_engine_monthly",name:"古龙引擎包月",monthlyFen:19800,description:"¥198 / 月 · 绿色版 Agent、免费文本模型与已验证共享节点，独立于其他会员。"},
+  {id:"gulong_engine_monthly",name:"古龙引擎包月",monthlyFen:19800,description:"¥198 / 月 · 古龙 Agent、第二大脑与视频创作权限；付费视频仍按实际费用从余额扣除。"},
 ];
 export function localSubscriptionDate(value) {
   if(!value)return "";
@@ -11,7 +9,7 @@ export function localSubscriptionDate(value) {
 }
 export function editorProducts({products=[],subscriptions=[],user={}}={},now=new Date()) {
   const catalog=new Map(SUBSCRIPTION_PRODUCTS.map(product=>[product.id,{...product}]));
-  for(const item of products)if(item?.id)catalog.set(item.id,{...catalog.get(item.id),...item});
+  for(const item of products)if(catalog.has(item?.id))catalog.set(item.id,{...catalog.get(item.id),...item});
   return [...catalog.values()].map(product=>{
     const explicit=products.find(item=>item.id===product.id);
     const legacy=subscriptions.find(item=>item.authoritative&&item.plan===product.id)

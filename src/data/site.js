@@ -38,7 +38,7 @@ export const plans = [
     yearlyFen: null,
     paymentProviders: ["offline"],
     subpricing: "独立月度订阅 · ¥198 / 月",
-    features: ["九个免费文字模型，由官网安全代理", "本地 Agent 与第二大脑", "已验证且自愿共享的文字与图片节点", "视频共享节点待适配验收后开放"],
+    features: ["九个免费文字模型，由官网安全代理", "本地 Agent 与第二大脑", "已验证且自愿共享的文字与图片节点", "MiniMaxH3共享节点视频创作，按余额计费"],
   },
   {
     id: "custom",

@@ -367,7 +367,7 @@ export function PricingPage({ user, openAuth, navigate }) {
               <small>{plan.eyebrow}</small><h2>{plan.name}</h2>
               <div className="plan-price">{plan.pricing || formatMoney(planAmountFen(plan))}{!plan.pricing && <em>/月</em>}</div>
               {plan.id === "english_coach_monthly" && <div className="manual-renew-note"><BookOpen size={20}/><span><strong>仅月度 · 使用现有线下支付</strong><small>不提供年包，不抵扣或替换其他产品订阅。审核通过后在英语教练登录并刷新权益。</small></span></div>}{plan.subpricing && <p className="plan-subprice">{plan.subpricing}</p>}
-              {plan.id === "gulong_engine_monthly" && <div className="manual-renew-note"><BookOpen size={20}/><span><strong>仅月度 · 线下支付审核</strong><small>绿色版独立授权，不替换已有会员；共享视频能力尚待节点适配验收。</small></span></div>}
+              {plan.id === "gulong_engine_monthly" && <div className="manual-renew-note"><BookOpen size={20}/><span><strong>仅月度 · 线下支付审核</strong><small>包含第二大脑与视频创作权限；MiniMaxH3共享节点视频按实际费用从余额扣除。绿色版本地免费视频适配仍待验收。</small></span></div>}
               <ul>{plan.features.map((feature) => <li key={feature}><Check size={17} weight="bold" /> {feature}</li>)}</ul>
               {plan.id !== "custom" && <div className="manual-renew-note"><Clock size={20} /><span><strong>人工审核到账</strong><small>付款后提交审核，确认到账后同步官网与桌面端。</small></span></div>}
               {plan.id === "custom" ? <div className="custom-plan-actions"><button className="button secondary full" onClick={() => setCustomContactOpen(true)}>联系定制</button><button className="button primary full" onClick={() => user ? setCustomOrderOpen(true) : openAuth("login")}><Plus size={18} />新建订单</button></div> : <button className="button secondary full" onClick={() => startPayment(plan)}>线下申请开通</button>}

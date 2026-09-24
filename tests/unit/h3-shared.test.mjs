@@ -24,11 +24,51 @@ import {
   normalizeH3ProgressCallback,
   maskH3NodeId,
   registerH3SharedRoutes,
+  recoverH3MisboundClaims,
   reserveH3Wallet,
+  resolveH3LanBindings,
   settleH3Revenue,
   toH3WorkerTask,
 } from "../../server/h3-shared.js";
 import { rankH3LanNodes } from "../../server/h3-queue.js";
+
+test("同名节点的轮询令牌优先于旧绑定，其他同名节点不允许含糊派单", () => {
+  const userId = new ObjectId();
+  const caller = { _id: new ObjectId(), userId, nodeId: "stable-node-0001" };
+  const oldBinding = { _id: new ObjectId(), userId, nodeId: caller.nodeId };
+  const target = { _id: new ObjectId(), userId, nodeId: "stable-node-0002" };
+  const self = resolveH3LanBindings([caller, oldBinding], [caller.nodeId], caller);
+  assert.equal(self.bindings.get(caller.nodeId)._id.toString(), caller._id.toString());
+  assert.equal(resolveH3LanBindings([caller, oldBinding, target, { ...target, _id: new ObjectId() }], [caller.nodeId, target.nodeId], caller).error, "AMBIGUOUS_LAN_NODE_BINDING");
+  assert.equal(resolveH3LanBindings([oldBinding], [caller.nodeId], caller).error, "LAN_NODE_NOT_BOUND");
+});
+
+test("旧绑定超过五分钟没有开始回调才重新排队，不重复扣费", async () => {
+  const now = new Date("2026-09-24T09:00:00Z");
+  const caller = { _id: new ObjectId(), nodeId: "stable-node-0001" };
+  const stale = { _id: new ObjectId(), nodeId: caller.nodeId, lastSeenAt: new Date("2026-09-24T08:30:00Z") };
+  const id = new ObjectId();
+  const task = { _id: id, status: "claimed", claimRequestedByNode: { bindingId: caller._id }, claimedByNode: { bindingId: stale._id, nodeId: caller.nodeId }, claimedAt: new Date("2026-09-24T08:30:00Z"), chargedFen: 500 };
+  let expiredTickets = 0;
+  const tasks = {
+    find: () => ({ limit: () => ({ toArray: async () => [{ _id: id }] }) }),
+    findOneAndUpdate: async () => {
+      if (task.status !== "claimed" || task.progressUpdatedAt || task.executedByNode) return null;
+      task.status = "queued";
+      delete task.claimedByNode;
+      return task;
+    },
+  };
+  const uploads = { updateMany: async () => { expiredTickets += 1; } };
+  assert.equal(await recoverH3MisboundClaims({ tasks, uploads, records: [caller, stale], callerBinding: caller, now }), 1);
+  assert.equal(task.status, "queued");
+  assert.equal(task.chargedFen, 500);
+  assert.equal(expiredTickets, 1);
+  assert.equal(await recoverH3MisboundClaims({ tasks, uploads, records: [caller, stale], callerBinding: caller, now }), 0);
+  assert.equal(expiredTickets, 1);
+  const active = { ...stale, lastSeenAt: now };
+  assert.equal(await recoverH3MisboundClaims({ tasks, uploads, records: [caller, active], callerBinding: caller, now }), 0);
+});
 
 test("H3 shared pricing uses integer fen and keeps audio free", () => {
   assert.equal(calculateH3SharedPrice({ durationSeconds: 15, imageCount: 2, videoCount: 1 }), 330);

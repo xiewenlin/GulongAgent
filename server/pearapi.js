@@ -7,7 +7,7 @@ import { readUserSecret, sealUserSecret } from "./security.js";
 import { localizeErrorMessage } from "../shared/error-messages.js";
 import { createPresignedDownloadUrl } from "./cos.js";
 import { readMarketWalletAmount } from "./codex-market-pricing.js";
-import { readGulongEngineEntitlement } from "./english-coach-products.js";
+import { legacyAccessSubscription, readGulongEngineEntitlement } from "./english-coach-products.js";
 import {
   SHORT_VIDEO_PLAN_ID,
   expireShortVideoPackageAllowance,
@@ -187,19 +187,16 @@ export async function buildPearAccountUsageSnapshot({ ownerId, unlimited = false
     await expireShortVideoPackageAllowance({ getCollection, ownerId, subscription, now });
     wallet = await (await getCollection("wallets")).findOne({ ownerId });
   }
-  const active = unlimited || Boolean(
-    subscription?.currentPeriodStart <= now
-    && subscription?.currentPeriodEnd > now
-    && !["cancelled", "canceled", "expired"].includes(String(subscription?.status || "").toLowerCase()),
-  );
+  const accessSubscription = legacyAccessSubscription(subscription, now);
+  const active = unlimited || accessSubscription?.status === "active";
   const pricing = normalizedPricing(credential?.pricing || DEFAULT_PRICING);
   const quota = await usageSnapshot(ownerId, wallet, pricing, now);
   return {
     subscription: {
       active,
       restricted: !active,
-      plan: subscription?.plan || null,
-      currentPeriodEnd: subscription?.currentPeriodEnd || null,
+      plan: accessSubscription?.plan || null,
+      currentPeriodEnd: accessSubscription?.currentPeriodEnd || null,
     },
     shortVideoPackage: shortVideoPackageView(subscription, wallet, now),
     pricing: { ...pricing, markupRate: PEAR_API_MARKUP_RATE },
@@ -857,7 +854,8 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
       if (!entitlement.active) return c.json({ code: "GULONG_ENGINE_SUBSCRIPTION_REQUIRED", message: "请先开通有效的古龙引擎包月套餐", entitlement }, 403);
     } else if (auth.user.role !== "admin" && auth.kind !== "desktop-chandler") {
       const subscription = await (await getCollection("subscriptions")).findOne({ ownerId });
-      if (!subscription || subscription.currentPeriodStart > now || subscription.currentPeriodEnd <= now || ["cancelled", "canceled", "expired"].includes(subscription.status)) {
+      const accessSubscription = legacyAccessSubscription(subscription, now);
+      if (!accessSubscription || accessSubscription.status !== "active") {
         return c.json({ code: "SUBSCRIPTION_REQUIRED", message: "网页版古龙 Agent 需要生效中的会员订阅，请先续费后使用" }, 402);
       }
     }
