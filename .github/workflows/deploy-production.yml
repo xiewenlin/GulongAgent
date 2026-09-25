@@ -56,6 +56,7 @@ jobs:
           cp -a dist "$bundle/dist"
           mkdir -p "$bundle/scripts"
           cp scripts/backfill-gulong-engine-credits.mjs "$bundle/scripts/"
+          cp scripts/purge-super-video-activation-codes.mjs "$bundle/scripts/"
           printf '%s\n' "$GITHUB_SHA" > "$bundle/.deploy-commit"
           tar -czf "$archive" -C "$bundle" .
 

@@ -942,7 +942,6 @@ function PearTokenManager() {
 
 const ACTIVATION_PRODUCT_OPTIONS = [
   { id: "minimax-h3-ultra-video", name: "MiniMax H3 超清视频" },
-  { id: "minimax-h3-super-video", name: "MiniMaxH3超能视频" },
 ];
 
 function activationProductName(product) {
@@ -1106,7 +1105,7 @@ function ActivationCodeManager() {
   }
 
   return <section className="admin-module activation-manager">
-    <header className="admin-module-head"><div><span>DEVICE-BOUND OFFLINE LICENSES</span><h2>授权管理</h2><p>批量生成独立产品激活码。MiniMax H3 超清视频与越狱视频-MiniMax H3 超能视频需分别购买、分别激活，激活码不能混用。</p></div><div className="admin-head-actions"><button className="button secondary" type="button" disabled={Boolean(busy) || !(counts.unused > 0)} onClick={exportUnusedCodes}><DownloadSimple size={17} />{busy === "export" ? "正在导出" : `导出未使用激活码${counts.unused ? `（${counts.unused}）` : ""}`}</button><button className="button secondary" type="button" disabled={Boolean(busy)} onClick={() => load()}><ArrowClockwise size={17} />刷新</button></div></header>
+    <header className="admin-module-head"><div><span>DEVICE-BOUND OFFLINE LICENSES</span><h2>授权管理</h2><p>仅管理 MiniMax H3 超清视频激活码；超能视频已停止发码和兑换。</p></div><div className="admin-head-actions"><button className="button secondary" type="button" disabled={Boolean(busy) || !(counts.unused > 0)} onClick={exportUnusedCodes}><DownloadSimple size={17} />{busy === "export" ? "正在导出" : `导出未使用激活码${counts.unused ? `（${counts.unused}）` : ""}`}</button><button className="button secondary" type="button" disabled={Boolean(busy)} onClick={() => load()}><ArrowClockwise size={17} />刷新</button></div></header>
     {message && <AdminNotice tone={message.includes("已") ? "success" : "error"}>{message}</AdminNotice>}
     <div className="activation-summary"><button className={!status ? "active" : ""} onClick={() => { setStatus(""); load("", keyword); }}><strong>{(counts.unused || 0) + (counts.used || 0) + (counts.revoked || 0)}</strong><span>全部</span></button><button className={status === "unused" ? "active" : ""} onClick={() => { setStatus("unused"); load("unused", keyword); }}><strong>{counts.unused || 0}</strong><span>未使用</span></button><button className={status === "used" ? "active" : ""} onClick={() => { setStatus("used"); load("used", keyword); }}><strong>{counts.used || 0}</strong><span>已使用</span></button><button className={status === "revoked" ? "active" : ""} onClick={() => { setStatus("revoked"); load("revoked", keyword); }}><strong>{counts.revoked || 0}</strong><span>已停用</span></button></div>
     <form className="activation-search" onSubmit={(event) => { event.preventDefault(); load(status, keyword); }}><label><span>搜索绑定设备与节点</span><div><MagnifyingGlass size={20} /><input maxLength="120" value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="输入设备名、MAC 尾号后 6 位或节点名称" /></div><small>支持不区分大小写的关键词模糊搜索；MAC 可直接输入连续的后六位。</small></label><div><span>当前显示 {items.length} 条</span>{(keyword || appliedKeyword) && <button className="button secondary" type="button" disabled={Boolean(busy)} onClick={() => { setKeyword(""); load(status, ""); }}>清除</button>}<button className="button primary" disabled={Boolean(busy)}><MagnifyingGlass size={18} />{busy === "load" ? "正在搜索" : "搜索"}</button></div></form>

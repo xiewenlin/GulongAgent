@@ -297,6 +297,7 @@ test("public redeem validation is uncached and documented without bearer authent
   assert.deepEqual(route.security, []);
   assert.ok(route.responses[200]);
   assert.ok(route.responses[409]);
+  assert.ok(route.responses[410]);
   assert.ok(route.responses[503]);
   const contract = JSON.stringify(route);
   assert.match(contract, /fingerprintVersion/);
@@ -309,6 +310,23 @@ test("public redeem validation is uncached and documented without bearer authent
   assert.match(contract, /os_reinstall/);
   assert.match(contract, /LEGACY_LICENSE_RECOVERED/);
   assert.match(contract, /LEGACY_RECOVERY_REQUIRED/);
+});
+
+test("超能视频停止兑换，管理员发码合同只允许超清视频", async () => {
+  const response = await app.request("http://localhost/api/licenses/redeem", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ code: "H3-ABCDE-FGHJK-MNPQR-STUVW", product: ACTIVATION_PRODUCT_SUPER_VIDEO, deviceId: "a".repeat(64) }),
+  });
+  assert.equal(response.status, 410);
+  assert.equal((await response.json()).code, "ACTIVATION_PRODUCT_RETIRED");
+  const document = app.getOpenAPIDocument({ openapi: "3.1.0", info: { title: "test", version: "1" } });
+  const createRoute = JSON.stringify(document.paths["/api/admin/activation-codes"].post);
+  assert.match(createRoute, /minimax-h3-ultra-video/);
+  assert.doesNotMatch(createRoute, /minimax-h3-super-video/);
+  const source = await readFile(new URL("../../server/app.js", import.meta.url), "utf8");
+  const verifySource = source.slice(source.indexOf("async function verifyActivationReceipt"), source.indexOf("const ErrorSchema"));
+  assert.match(verifySource, /payload\.product === ACTIVATION_PRODUCT_SUPER_VIDEO/);
 });
 
 test("independent video products reject cross-product activation before hardware validation", async () => {
@@ -371,7 +389,8 @@ test("activation management keeps full codes and copy actions on one line", asyn
   ]);
   assert.match(adminSource, /ACTIVATION_PRODUCT_OPTIONS/);
   assert.match(adminSource, /MiniMax H3 超清视频/);
-  assert.match(adminSource, /minimax-h3-super-video", name: "MiniMaxH3超能视频"/);
+  const options = adminSource.slice(adminSource.indexOf("const ACTIVATION_PRODUCT_OPTIONS"), adminSource.indexOf("function activationProductName"));
+  assert.doesNotMatch(options, /minimax-h3-super-video/);
   assert.match(cssSource, /grid-template-columns: minmax\(350px, 1\.5fr\)/);
   assert.match(cssSource, /\.activation-row-actions \{[^}]+flex-wrap: nowrap/);
   assert.match(cssSource, /\.activation-row-actions \.button \{[^}]+white-space: nowrap/);

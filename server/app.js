@@ -186,7 +186,7 @@ const ACTIVATION_PRODUCT_SUPER_VIDEO = "minimax-h3-super-video";
 const ACTIVATION_PRODUCT_LABELS = Object.freeze({
   [ACTIVATION_PRODUCT_LEGACY_H3]: "MiniMax H3 超清视频（旧版授权）",
   [ACTIVATION_PRODUCT_DEFAULT]: "MiniMax H3 超清视频",
-  [ACTIVATION_PRODUCT_SUPER_VIDEO]: "越狱视频-MiniMax H3 超能视频",
+  [ACTIVATION_PRODUCT_SUPER_VIDEO]: "MiniMaxH3超能视频",
 });
 const RENEWAL_REMINDER_DAYS = 7;
 let authCapabilitiesCache = { expiresAt: 0, value: null };
@@ -610,6 +610,9 @@ async function verifyActivationReceipt(receiptValue) {
     activatedAt: String(receipt.activatedAt || ""),
     perpetual: receipt.perpetual === true,
   };
+  if (payload.product === ACTIVATION_PRODUCT_SUPER_VIDEO) {
+    throw Object.assign(new Error("MiniMaxH3超能视频激活授权已停用"), { code: "INVALID_ACTIVATION_PROOF", status: 403 });
+  }
   let signatureValid = false;
   try {
     signatureValid = verifyBytes("RSA-SHA256", Buffer.from(JSON.stringify(payload)), createPublicKey(activationSigningPrivateKey()), Buffer.from(receipt.signature, "base64"));
@@ -3957,8 +3960,11 @@ app.post("/api/licenses/redeem", async (c) => {
   if (![ACTIVATION_PRODUCT_DEFAULT, ACTIVATION_PRODUCT_SUPER_VIDEO].includes(requestedProduct)) {
     return c.json({
       code: "ACTIVATION_PRODUCT_REQUIRED",
-      message: "请选择当前安装的产品并使用该产品专属激活码；MiniMax H3 超清视频与越狱视频-MiniMax H3 超能视频需要分别购买激活码",
+      message: "当前仅支持 MiniMax H3 超清视频激活码；MiniMaxH3超能视频已停止激活",
     }, 400);
+  }
+  if (requestedProduct === ACTIVATION_PRODUCT_SUPER_VIDEO) {
+    return c.json({ code: "ACTIVATION_PRODUCT_RETIRED", message: "MiniMaxH3超能视频激活码已停止发放和兑换，请联系管理员了解后续授权方式" }, 410);
   }
 
   const codes = await getCollection("activationCodes");
@@ -4211,8 +4217,8 @@ app.post("/api/admin/activation-codes", async (c) => {
   if (!Number.isInteger(count) || count < 1 || count > ACTIVATION_CODE_MAX_BATCH) {
     return c.json({ code: "INVALID_COUNT", message: `一次可生成 1-${ACTIVATION_CODE_MAX_BATCH} 个激活码` }, 400);
   }
-  if (![ACTIVATION_PRODUCT_DEFAULT, ACTIVATION_PRODUCT_SUPER_VIDEO].includes(product)) {
-    return c.json({ code: "INVALID_PRODUCT", message: "请选择 MiniMax H3 超清视频或越狱视频-MiniMax H3 超能视频" }, 400);
+  if (product !== ACTIVATION_PRODUCT_DEFAULT) {
+    return c.json({ code: "ACTIVATION_PRODUCT_RETIRED", message: "当前仅支持生成 MiniMax H3 超清视频激活码；MiniMaxH3超能视频已停止发码" }, 410);
   }
 
   const now = new Date();
@@ -8720,12 +8726,13 @@ app.openAPIRegistry.registerPath({
   path: "/api/admin/activation-codes",
   tags: ["Administration"],
   summary: "管理员按产品批量生成激活码",
-  description: "MiniMax H3 超清视频与越狱视频-MiniMax H3 超能视频使用不同的产品标识和独立激活码，不能跨产品兑换。",
-  request: { body: { required: true, content: { "application/json": { schema: z.object({ count: z.number().int().min(1).max(ACTIVATION_CODE_MAX_BATCH), product: z.enum([ACTIVATION_PRODUCT_DEFAULT, ACTIVATION_PRODUCT_SUPER_VIDEO]), note: z.string().max(200).optional() }) } } } },
+  description: "仅可生成 MiniMax H3 超清视频激活码；MiniMaxH3超能视频已停止发码。",
+  request: { body: { required: true, content: { "application/json": { schema: z.object({ count: z.number().int().min(1).max(ACTIVATION_CODE_MAX_BATCH), product: z.literal(ACTIVATION_PRODUCT_DEFAULT), note: z.string().max(200).optional() }) } } } },
   responses: {
     201: { description: "仅在本次响应中返回完整激活码" },
     400: { description: "数量或产品无效", content: { "application/json": { schema: ErrorSchema } } },
     403: { description: "需要管理员角色", content: { "application/json": { schema: ErrorSchema } } },
+    410: { description: "该授权产品已停止发码", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
@@ -8860,7 +8867,7 @@ app.openAPIRegistry.registerPath({
   path: "/api/licenses/redeem",
   tags: ["Licensing"],
   summary: "兑换设备永久离线授权",
-  description: "安装器首次联网时必须提交当前产品标识、一次性激活码与旧版 deviceId。MiniMax H3 超清视频和越狱视频-MiniMax H3 超能视频使用独立激活码，跨产品兑换会在硬件摘要校验前返回易懂的产品不匹配提示。同一台电脑可分别持有两款产品授权。同一旧版 deviceId 可幂等恢复原 RS256 回执。新客户端可同时提交 h3-hw-v2 加权硬件分类摘要，服务端只保存 SHA-256 摘要和分类名，不接收原始主板、SMBIOS、TPM、MAC 或序列号值。v2 上线前已经使用、但重装后 legacy deviceId 因网卡变化而改变的授权，第一次不带 legacyRecovery 的正常兑换会且只会在授权已用、无 v2、deviceId 变化且本次 v2 摘要格式有效时返回 409 LEGACY_RECOVERY_REQUIRED；客户端只能在收到该精确 code 后追加 legacyRecovery.mode=os_reinstall。恢复仅在硬件置信度为 high、系统 UUID 与强主板锚点达到安全阈值，且历史 macHint 存在时尾号一致的情况下，原子更新 deviceId 并补录 v2。此恢复只允许一次，不改变 activatedAt，也不增加激活次数。已有 v2 绑定或不同主板一律拒绝。回执 canonical 字段与签名顺序保持兼容。所有错误响应固定为 JSON {code,message}，客户端应按 code 分支处理，不能把全部 HTTP 400 或 409 映射为格式错误或自动恢复。",
+  description: "当前仅为 MiniMax H3 超清视频签发授权；MiniMaxH3超能视频已停止发码和兑换，提交该产品标识返回 410 ACTIVATION_PRODUCT_RETIRED。安装器首次联网时必须提交当前产品标识、一次性激活码与旧版 deviceId。同一旧版 deviceId 可幂等恢复原 RS256 回执。新客户端可同时提交 h3-hw-v2 加权硬件分类摘要，服务端只保存 SHA-256 摘要和分类名，不接收原始主板、SMBIOS、TPM、MAC 或序列号值。v2 上线前已经使用、但重装后 legacy deviceId 因网卡变化而改变的授权，第一次不带 legacyRecovery 的正常兑换会且只会在授权已用、无 v2、deviceId 变化且本次 v2 摘要格式有效时返回 409 LEGACY_RECOVERY_REQUIRED；客户端只能在收到该精确 code 后追加 legacyRecovery.mode=os_reinstall。恢复仅在硬件置信度为 high、系统 UUID 与强主板锚点达到安全阈值，且历史 macHint 存在时尾号一致的情况下，原子更新 deviceId 并补录 v2。此恢复只允许一次，不改变 activatedAt，也不增加激活次数。已有 v2 绑定或不同主板一律拒绝。回执 canonical 字段与签名顺序保持兼容。所有错误响应固定为 JSON {code,message}。",
   security: [],
   request: { body: { required: true, content: { "application/json": { schema: ActivationRedeemRequestSchema } } } },
   responses: {
@@ -8868,6 +8875,7 @@ app.openAPIRegistry.registerPath({
     400: { description: "激活码、设备指纹、legacyRecovery 或硬件分类摘要格式不正确；原始硬件值会被拒绝。响应为 {code,message}", content: { "application/json": { schema: ErrorSchema } } },
     403: { description: "激活码已停用", content: { "application/json": { schema: ErrorSchema } } },
     404: { description: "激活码不存在", content: { "application/json": { schema: ErrorSchema } } },
+    410: { description: "该授权产品已停止激活", content: { "application/json": { schema: ErrorSchema } } },
     409: { description: "LEGACY_RECOVERY_REQUIRED 是客户端唯一可进入第二阶段恢复的触发码；其余 409 表示激活码属于另一产品、已绑定其他设备、设备已有同产品授权、恢复证据不足、历史 MAC 尾号不一致，或 hardwareHash 与既有 v2 绑定不一致，客户端不得自动重试恢复", content: { "application/json": { schema: ErrorSchema } } },
     429: { description: "激活尝试过于频繁", content: { "application/json": { schema: ErrorSchema } } },
     503: { description: "生产签名密钥尚未正确配置", content: { "application/json": { schema: ErrorSchema } } },
