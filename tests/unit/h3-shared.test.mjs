@@ -17,6 +17,8 @@ import {
   h3CallbackEventKey,
   h3OutputExpiresAt,
   h3NodeCanRunTask,
+  isH3GpuStartupFailure,
+  publicH3WorkerFailureMessage,
   h3TaskAutoCancelAt,
   cleanupExpiredH3Output,
   ensureH3ConversationMessages,
@@ -206,6 +208,120 @@ test("H3 LAN scheduler ranks the shortest projected node and preserves capabilit
   assert.equal(ranked[0].nodeId, "stable-node-idle-0003");
   assert.equal(h3NodeCanRunTask(ranked[0], { profile: "balanced", samplingSteps: 4, durationSeconds: 15, imageCount: 9, videoCount: 3, audioCount: 3, promptOptimizationEnabled: true }), true);
   assert.equal(h3NodeCanRunTask(ranked[0], { profile: "ultra1080", samplingSteps: 4, durationSeconds: 15, imageCount: 0, videoCount: 0, audioCount: 0 }), false);
+  assert.equal(h3NodeCanRunTask(ranked[0], { profile: "balanced", samplingSteps: 4, durationSeconds: 5, failedGpuNodeIds: [ranked[0].nodeId] }), false);
+  assert.equal(h3NodeCanRunTask(ranked[1], { profile: "balanced", samplingSteps: 4, durationSeconds: 5, failedGpuNodeIds: [ranked[0].nodeId] }), true);
+});
+
+test("GPU startup stack traces are recognized but never shown to website users", () => {
+  const stack = "RuntimeError('GPU inference engine recovery failed: GPU 推理内核进程在网关就绪前退出 ... comfy-kitchen version: 0.2.31')";
+  assert.equal(isH3GpuStartupFailure("NODE_EXECUTION_FAILED", stack), true);
+  const message = publicH3WorkerFailureMessage("NODE_EXECUTION_FAILED", stack);
+  assert.match(message, /GPU 推理内核启动失败/);
+  assert.doesNotMatch(message, /RuntimeError|comfy-kitchen|网关就绪/);
+});
+
+test("unclaimed H3 tasks cannot be failed by a bound node", async () => {
+  const isolated = new OpenAPIHono();
+  const ownerId = new ObjectId();
+  const binding = { _id: new ObjectId(), userId: ownerId, nodeId: "stable-node-unclaimed-0001", nodeName: "测试节点", status: "active" };
+  const task = { _id: new ObjectId(), orderNo: "H3-UNCLAIMED-1", status: "queued", requesterUserId: ownerId };
+  let callbackWrites = 0;
+  registerH3SharedRoutes(isolated, {
+    getCollection: async (name) => ({
+      nodeAccountBindings: { findOne: async () => binding, updateOne: async () => ({}) },
+      users: { findOne: async () => ({ _id: ownerId, status: "active" }) },
+      h3SharedTasks: { findOne: async () => task },
+      h3TaskCallbacks: { updateOne: async () => { callbackWrites++; } },
+    })[name],
+    enforceRateLimit: async () => ({ allowed: true }),
+    queueCoordinator: { invalidate: async () => {} },
+  });
+  const body = new FormData();
+  body.set("metadata", JSON.stringify({ task_id: task._id.toString(), node_id: binding.nodeId, status: "failed", error_message: "GPU inference engine recovery failed" }));
+  const response = await isolated.request("http://localhost/api/h3/tasks/callback", { method: "POST", headers: { [H3_ACCOUNT_BINDING_HEADER]: `gab_${"q".repeat(48)}` }, body });
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).code, "TASK_NOT_CLAIMED");
+  assert.equal(task.status, "queued");
+  assert.equal(callbackWrites, 0);
+});
+
+test("GPU startup failure requeues without a second charge and excludes its failed node", async () => {
+  const isolated = new OpenAPIHono();
+  const ownerId = new ObjectId();
+  const binding = { _id: new ObjectId(), userId: ownerId, nodeId: "stable-node-failed-gpu-0001", nodeName: "故障节点", status: "active" };
+  const task = { _id: new ObjectId(), orderNo: "H3-GPU-REQUEUE-1", status: "processing", requesterUserId: ownerId, claimedByNode: { bindingId: binding._id, nodeId: binding.nodeId }, chargeStatus: "reserved", chargedFen: 210, activeChargeKey: "h3:charge:test", autoCancelAt: new Date(Date.now() + 600_000), progress: 12 };
+  let callbackWrites = 0;
+  let expiredGrants = 0;
+  let queueInvalidations = 0;
+  let walletWrites = 0;
+  registerH3SharedRoutes(isolated, {
+    getCollection: async (name) => ({
+      nodeAccountBindings: { findOne: async () => binding, updateOne: async (_filter, update) => { setDocumentFields(binding, update.$set); return {}; } },
+      users: { findOne: async () => ({ _id: ownerId, status: "active" }) },
+      h3SharedTasks: {
+        findOne: async () => task,
+        findOneAndUpdate: async (_filter, update) => { setDocumentFields(task, update.$set); for (const key of Object.keys(update.$unset || {})) delete task[key]; return task; },
+      },
+      h3TaskCallbacks: { updateOne: async () => { callbackWrites++; } },
+      h3OutputUploads: { updateMany: async () => { expiredGrants++; return {}; } },
+      h3TaskAudits: { insertOne: async () => ({}) },
+      h3WalletLedger: { updateOne: async () => { walletWrites++; } },
+    })[name],
+    enforceRateLimit: async () => ({ allowed: true }),
+    queueCoordinator: { invalidate: async () => { queueInvalidations++; } },
+  });
+  const body = new FormData();
+  body.set("metadata", JSON.stringify({ task_id: task._id.toString(), node_id: binding.nodeId, status: "failed", event: "render-failed", local_job_id: "local-1", error_message: "RuntimeError('GPU inference engine recovery failed: GPU 推理内核进程在网关就绪前退出')" }));
+  const response = await isolated.request("http://localhost/api/h3/tasks/callback", { method: "POST", headers: { [H3_ACCOUNT_BINDING_HEADER]: `gab_${"r".repeat(48)}` }, body });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).requeued, true);
+  assert.equal(task.status, "queued");
+  assert.equal(task.chargeStatus, "reserved");
+  assert.equal(task.chargedFen, 210);
+  assert.equal(task.activeChargeKey, "h3:charge:test");
+  assert.deepEqual(task.failedGpuNodeIds, [binding.nodeId]);
+  assert.equal(task.gpuStartupRedispatches, 1);
+  assert.equal(task.claimedByNode, undefined);
+  assert.equal(expiredGrants, 1);
+  assert.equal(queueInvalidations, 1);
+  assert.equal(walletWrites, 0);
+  assert.equal(callbackWrites, 1);
+  assert.equal(binding.queueStatus, "degraded");
+  const repeated = await isolated.request("http://localhost/api/h3/tasks/callback", { method: "POST", headers: { [H3_ACCOUNT_BINDING_HEADER]: `gab_${"r".repeat(48)}` }, body });
+  assert.equal(repeated.status, 409);
+  assert.equal((await repeated.json()).code, "TASK_NOT_CLAIMED");
+  assert.equal(callbackWrites, 1);
+  assert.equal(walletWrites, 0);
+});
+
+test("exhausted GPU startup redispatches end with a safe idempotent failure", async () => {
+  const isolated = new OpenAPIHono();
+  const ownerId = new ObjectId();
+  const binding = { _id: new ObjectId(), userId: ownerId, nodeId: "stable-node-failed-gpu-0003", status: "active" };
+  const task = { _id: new ObjectId(), orderNo: "H3-GPU-EXHAUSTED-1", status: "processing", requesterUserId: ownerId, claimedByNode: { bindingId: binding._id, nodeId: binding.nodeId }, chargeStatus: "exempt", chargedFen: 0, gpuStartupRedispatches: 2 };
+  let audits = 0;
+  registerH3SharedRoutes(isolated, {
+    getCollection: async (name) => ({
+      nodeAccountBindings: { findOne: async () => binding, updateOne: async () => ({}) },
+      users: { findOne: async () => ({ _id: ownerId, status: "active" }) },
+      h3SharedTasks: { findOne: async () => task, findOneAndUpdate: async (_filter, update) => { if (!["claimed", "processing"].includes(task.status)) return null; setDocumentFields(task, update.$set); return task; } },
+      h3TaskCallbacks: { updateOne: async () => ({}) },
+      h3TaskAudits: { insertOne: async () => { audits++; return {}; } },
+    })[name],
+    enforceRateLimit: async () => ({ allowed: true }),
+  });
+  const body = new FormData();
+  body.set("metadata", JSON.stringify({ task_id: task._id.toString(), node_id: binding.nodeId, status: "failed", event: "render-failed", error_message: "RuntimeError('GPU inference engine recovery failed')" }));
+  const response = await isolated.request("http://localhost/api/h3/tasks/callback", { method: "POST", headers: { [H3_ACCOUNT_BINDING_HEADER]: `gab_${"s".repeat(48)}` }, body });
+  assert.equal(response.status, 200);
+  assert.equal(task.status, "failed");
+  assert.equal(task.error.code, "GPU_ENGINE_STARTUP_FAILED");
+  assert.doesNotMatch(task.error.message, /RuntimeError/);
+  assert.equal(audits, 1);
+  const repeated = await isolated.request("http://localhost/api/h3/tasks/callback", { method: "POST", headers: { [H3_ACCOUNT_BINDING_HEADER]: `gab_${"s".repeat(48)}` }, body });
+  assert.equal(repeated.status, 200);
+  assert.equal((await repeated.json()).idempotent, true);
+  assert.equal(audits, 2);
 });
 
 test("H3 timeout deadline is exactly ten times the server estimate", () => {

@@ -27,6 +27,9 @@ const H3_VIDEO_PROFILES = new Set(["official_max", "ultra1080", "fast2k", "fast"
 const H3_SAMPLING_STEPS = new Set([4, 8, 20]);
 const H3_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 const H3_NO_CHARGE_STATUSES = new Set(["exempt", "package_no_charge", "member_no_charge"]);
+const H3_GPU_STARTUP_MAX_REDISPATCHES = 2;
+const H3_GPU_STARTUP_REDISPATCH_MESSAGE = "共享节点的 GPU 推理内核启动失败，正在避开该节点并等待其他可用节点接单。";
+const H3_GPU_STARTUP_TERMINAL_MESSAGE = "共享节点的 GPU 推理内核启动失败，视频未生成。请稍后重试或更换视频模型；如有预扣费用，将自动退回。";
 const DEFAULT_PLATFORM_ADMIN_EMAIL = "1186664388@qq.com";
 const H3_NODE_ONLINE_WINDOW_MS = 3 * 60_000;
 const CHINA_UTC_OFFSET_MS = 8 * 60 * 60_000;
@@ -40,6 +43,19 @@ const H3_TIMEOUT_ERROR = Object.freeze({
 function integer(value, fallback = 0) {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) ? parsed : fallback;
+}
+
+export function isH3GpuStartupFailure(code, message) {
+  return String(code || "").toUpperCase() === "GPU_ENGINE_STARTUP_FAILED"
+    || /GPU inference engine recovery failed|GPU 推理内核进程在网关就绪前退出/i.test(String(message || ""));
+}
+
+export function publicH3WorkerFailureMessage(code, message) {
+  if (String(code || "") === "GPU_NODE_REDISPATCHING") return H3_GPU_STARTUP_REDISPATCH_MESSAGE;
+  if (isH3GpuStartupFailure(code, message)) return H3_GPU_STARTUP_TERMINAL_MESSAGE;
+  const raw = String(message || "");
+  if (/RuntimeError\(|Traceback|Stack trace|\|\s*\+|\\temp\\|\x1b\[/.test(raw)) return "共享节点执行失败，视频未生成。请稍后重试或联系管理员。";
+  return localizeErrorMessage(raw, "共享节点任务处理失败").slice(0, 220);
 }
 
 export function calculateH3SharedPrice({ durationSeconds, imageCount, videoCount }) {
@@ -390,7 +406,7 @@ function publicTask(task, { includePrompt = true } = {}) {
     requestMessageId: task.requestMessageId?.toString?.() || task.requestMessageId || null,
     resultMessageId: task.resultMessageId?.toString?.() || task.resultMessageId || null,
     output: publicH3Output(task),
-    error: task.error ? { ...task.error, message: localizeErrorMessage(task.error.message, "共享节点任务处理失败") } : null,
+    error: task.error ? { ...task.error, message: publicH3WorkerFailureMessage(task.error.code, task.error.message) } : null,
     dispatchEstimatedTotalSeconds: Math.max(0, integer(task.dispatchEstimatedTotalSeconds)),
     autoCancelAt: task.autoCancelAt || null,
     createdAt: task.createdAt,
@@ -1073,6 +1089,7 @@ function normalizeH3NodeCapabilities(capabilities = {}) {
 
 export function h3NodeCanRunTask(node, task) {
   const capabilities = node?.capabilities || {};
+  if (task?.failedGpuNodeIds?.includes(node?.nodeId)) return false;
   if (!node || node.availableSlots < 1 || !capabilities.profiles?.includes?.(String(task.profile || "").toLowerCase())) return false;
   if (!capabilities.samplingSteps?.includes?.(integer(task.samplingSteps, 4))) return false;
   if (integer(task.imageCount) > capabilities.maxImageCount || integer(task.videoCount) > capabilities.maxVideoCount || integer(task.audioCount) > capabilities.maxAudioCount) return false;
@@ -1706,7 +1723,7 @@ export function registerH3SharedRoutes(app, dependencies) {
             const assignedNode = { nodeId: candidateNode.nodeId, nodeName: candidateNode.nodeName || candidateNode.binding.nodeName || null, bindingId: candidateNode.binding._id, userId: candidateNode.binding.userId, at: now, capabilities: candidateNode.capabilities };
             const claimedTask = await tasks.findOneAndUpdate(
               { _id: candidate._id, status: "queued", model: H3_SHARED_MODEL },
-              { $set: { status: "claimed", claimedByNode: assignedNode, claimRequestedByNode: dispatcherNode, claimedAt: now, claimLeaseUntil: new Date(now.getTime() + H3_CLAIM_LEASE_MS), updatedAt: now } },
+              { $set: { status: "claimed", progressStage: "claimed", progressUpdatedAt: now, claimedByNode: assignedNode, claimRequestedByNode: dispatcherNode, claimedAt: now, claimLeaseUntil: new Date(now.getTime() + H3_CLAIM_LEASE_MS), updatedAt: now }, $unset: { error: "" } },
               { returnDocument: "after" },
             );
             if (!claimedTask) continue;
@@ -1808,7 +1825,10 @@ export function registerH3SharedRoutes(app, dependencies) {
         return c.json({ code: H3_TIMEOUT_ERROR.code, message: H3_TIMEOUT_ERROR.message }, 409);
       }
     }
-    if (task.claimedByNode?.bindingId && idText(task.claimedByNode.bindingId) !== idText(auth.binding._id)) {
+    if (!task.claimedByNode?.bindingId || task.status === "queued") {
+      return c.json({ code: "TASK_NOT_CLAIMED", message: "任务尚未分配给执行节点，不能提交结果或失败回调" }, 409);
+    }
+    if (idText(task.claimedByNode.bindingId) !== idText(auth.binding._id)) {
       return c.json({ code: "TASK_ASSIGNED_TO_ANOTHER_NODE", message: "该任务已由调度器分配给其他局域网节点，请由响应 assigned_node 指定的节点执行和回调" }, 409);
     }
     const status = String(metadata.status || "").trim().toLowerCase();
@@ -1914,9 +1934,38 @@ export function registerH3SharedRoutes(app, dependencies) {
       await audit(await getCollection("h3TaskAudits"), completed ? "completed" : "callback_replayed", { taskId: task._id, orderNo: task.orderNo, actorUserId: auth.user._id, bindingId: auth.binding._id, nodeId: auth.binding.nodeId, eventKey });
       return c.json({ ok: true, idempotent: !completed, task: workerCallbackTask(task) });
     }
+    const rawFailure = String(metadata.error_message || "");
+    const failureCode = String(metadata.error_code || "NODE_EXECUTION_FAILED").slice(0, 80);
+    if (status === "failed" && isH3GpuStartupFailure(failureCode, rawFailure)
+      && integer(task.gpuStartupRedispatches) < H3_GPU_STARTUP_MAX_REDISPATCHES
+      && (!task.autoCancelAt || new Date(task.autoCancelAt) > now)) {
+      const failedGpuNodeIds = [...new Set([...(Array.isArray(task.failedGpuNodeIds) ? task.failedGpuNodeIds : []), auth.binding.nodeId])].slice(-H3_GPU_STARTUP_MAX_REDISPATCHES);
+      const requeued = await tasks.findOneAndUpdate(
+        { _id: task._id, status: { $in: ["claimed", "processing"] }, "claimedByNode.bindingId": auth.binding._id },
+        { $set: { status: "queued", queuedAt: now, progress: 0, progressStage: "gpu_redispatch", progressUpdatedAt: now, failedGpuNodeIds, gpuStartupRedispatches: integer(task.gpuStartupRedispatches) + 1, error: { code: "GPU_NODE_REDISPATCHING", message: H3_GPU_STARTUP_REDISPATCH_MESSAGE }, updatedAt: now }, $unset: { claimedByNode: "", claimRequestedByNode: "", claimedAt: "", claimLeaseUntil: "", executedByNode: "", estimatedTotalSeconds: "", remainingSeconds: "", expectedCompletedAt: "", compiledPrompt: "", promptCompilation: "" } },
+        { returnDocument: "after" },
+      );
+      if (requeued) {
+        await Promise.allSettled([
+          (await getCollection("h3OutputUploads")).updateMany(
+            { taskId: task._id, issuedToBindingId: auth.binding._id, status: "issued" },
+            { $set: { status: "expired", expiredAt: now, updatedAt: now }, $unset: { expiresAt: "" } },
+          ),
+          (await getCollection("nodeAccountBindings")).updateOne(
+            { _id: auth.binding._id, userId: auth.user._id, status: "active" },
+            { $set: { queueStatus: "degraded", nextClaimAt: new Date(now.getTime() + 5 * 60_000), updatedAt: now } },
+          ),
+        ]);
+        await queueCoordinator.invalidate().catch(() => {});
+        await audit(await getCollection("h3TaskAudits"), "gpu_startup_redispatched", { taskId: task._id, orderNo: task.orderNo, actorUserId: auth.user._id, bindingId: auth.binding._id, nodeId: auth.binding.nodeId, retryCount: requeued.gpuStartupRedispatches, eventKey });
+        return c.json({ ok: true, requeued: true, task: workerCallbackTask(requeued) });
+      }
+      task = await tasks.findOne({ _id: task._id });
+      return c.json({ ok: true, idempotent: true, task: workerCallbackTask(task) });
+    }
     const failed = await tasks.findOneAndUpdate(
-      { _id: task._id, status: { $in: ["claimed", "processing", "queued"] } },
-      { $set: { status: status === "cancelled" ? "cancelled" : "failed", progressStage: status === "cancelled" ? "cancelled" : "failed", revenueStatus: "not_earned", executedByNode: executionNode, error: { code: String(metadata.error_code || "NODE_EXECUTION_FAILED").slice(0, 80), message: localizeErrorMessage(metadata.error_message, "共享节点执行失败").slice(0, 500) }, ...(status === "cancelled" ? { cancelledAt: now } : { failedAt: now }), updatedAt: now } },
+      { _id: task._id, status: { $in: ["claimed", "processing"] }, "claimedByNode.bindingId": auth.binding._id },
+      { $set: { status: status === "cancelled" ? "cancelled" : "failed", progressStage: status === "cancelled" ? "cancelled" : "failed", revenueStatus: "not_earned", executedByNode: executionNode, error: { code: isH3GpuStartupFailure(failureCode, rawFailure) ? "GPU_ENGINE_STARTUP_FAILED" : failureCode, message: publicH3WorkerFailureMessage(failureCode, rawFailure) }, ...(status === "cancelled" ? { cancelledAt: now } : { failedAt: now }), updatedAt: now } },
       { returnDocument: "after" },
     );
     task = failed || await tasks.findOne({ _id: task._id });
@@ -2000,7 +2049,7 @@ export function registerH3SharedRoutes(app, dependencies) {
     }
     const queued = await tasks.findOneAndUpdate(
       { _id: task._id, status: task.status, ...(previouslyFree ? {} : { refundStatus: "refunded" }) },
-      { $set: { status: "queued", ...retryBilling, refundStatus: null, ...(exempt ? { administratorExemptedAt: new Date() } : memberFree ? {} : { activeChargeKey: chargeKey, walletLedgerId: chargeKey }), retryCount, autoCancelAt: h3TaskAutoCancelAt(new Date(), integer(task.dispatchEstimatedTotalSeconds || task.estimatedTotalSeconds, estimateH3TaskTotalSeconds(task))), queuedAt: new Date(), updatedAt: new Date() }, $unset: { ...(memberFree ? { activeChargeKey: "", walletLedgerId: "" } : {}), claimedByNode: "", claimRequestedByNode: "", executedByNode: "", assigneeUserId: "", assigneeEmailSnapshot: "", assigneeDisplayNameSnapshot: "", output: "", error: "", settlement: "", claimedAt: "", claimLeaseUntil: "", completedAt: "", failedAt: "", cancelledAt: "", timedOutAt: "", refundedAt: "", refundReason: "" } },
+      { $set: { status: "queued", ...retryBilling, refundStatus: null, gpuStartupRedispatches: 0, failedGpuNodeIds: isH3GpuStartupFailure(task.error?.code, task.error?.message) && task.executedByNode?.nodeId ? [task.executedByNode.nodeId] : [], ...(exempt ? { administratorExemptedAt: new Date() } : memberFree ? {} : { activeChargeKey: chargeKey, walletLedgerId: chargeKey }), retryCount, autoCancelAt: h3TaskAutoCancelAt(new Date(), integer(task.dispatchEstimatedTotalSeconds || task.estimatedTotalSeconds, estimateH3TaskTotalSeconds(task))), queuedAt: new Date(), updatedAt: new Date() }, $unset: { ...(memberFree ? { activeChargeKey: "", walletLedgerId: "" } : {}), claimedByNode: "", claimRequestedByNode: "", executedByNode: "", assigneeUserId: "", assigneeEmailSnapshot: "", assigneeDisplayNameSnapshot: "", output: "", error: "", settlement: "", claimedAt: "", claimLeaseUntil: "", completedAt: "", failedAt: "", cancelledAt: "", timedOutAt: "", refundedAt: "", refundReason: "" } },
       { returnDocument: "after" },
     );
     await queueCoordinator.invalidate().catch(() => {});
@@ -2041,7 +2090,7 @@ export function registerH3SharedRoutes(app, dependencies) {
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}/output", tags: ["MiniMax H3 Shared Nodes"], summary: "鉴权预览或下载 H3 输出视频", description: "仅任务请求用户或管理员可访问。服务端按次签发不超过 5 分钟且不越过 24 小时保留截止时间的 COS GET 地址；disposition=attachment 用于下载。过期返回 410 并触发幂等删除。", request: { params: z.object({ id: z.string() }), query: z.object({ disposition: z.enum(["inline", "attachment"]).optional() }) }, responses: { 302: { description: "跳转到短时 COS 签名地址" }, 404: { description: "视频不存在或无权访问" }, 410: { description: "视频已过期并删除" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/desktop/agent/tools/minimax-h3-shared", tags: ["Desktop Agent Tools"], summary: "读取桌面古龙智能体的 H3 共享节点工具合同", description: "使用现有古龙会话或具有 tasks:read 的 API Key。返回 createTask、素材上传 URL、本地提示词处理合同、9图3视频3音频限制、整数分价格与当前余额；不再返回网页 optimizePrompt。管理员响应 wallet.unlimited=true，桌面端不得按余额拦截。桌面创建任务时 source_channel 必须为 desktop_agent。", responses: { 200: { description: "工具合同、本地提示词处理要求、钱包余额与管理员不限额标记" }, 401: { description: "未认证" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/claim", tags: ["MiniMax H3 Shared Nodes"], summary: "按局域网集群负载原子调度最早等待任务", description: "轮询节点通过 lan_cluster.nodes 上报同一局域网内全部已绑定节点的 running_task_count、estimated_total_seconds 与能力。服务端先验证所有节点均属于当前 binding token 对应账号，再按预计剩余总耗时、运行任务数、node_id 排序，把按 createdAt、_id 最早且能力匹配的任务分配给耗时最少的节点；响应 workerTask.assigned_node 是唯一允许回调的执行节点。老客户端缺少 lan_cluster 时暂按单节点兼容。capabilities 必须上报 max_duration_seconds、profiles、sampling_steps 与素材上限；只有 longform_v1=true 的节点可领取 video_mode=extended。local_prompt_optimization_v1=true 表示节点能够处理用户开启魔法优化的任务。DTO 包含 assigned_node、dispatch_estimated_total_seconds、auto_cancel_at、素材短期下载票据与 output_upload，但不含 requester、价格、钱包流水或内部绑定信息。任务自创建起超过服务端预计总耗时 10 倍仍未完成会自动取消、幂等退款并提醒用户更换视频模型。dry_run=true 绝不领取任务。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "application/json": { schema: z.object({ bound_account_email: z.string().optional(), bound_account_id: z.string().optional(), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: h3NodeCapabilitiesSchema, lan_cluster: z.object({ cluster_id: z.string().min(12).max(160), observed_at: z.iso.datetime(), nodes: z.array(h3LanNodeSchema).min(1).max(H3_LAN_REPORT_MAX_NODES) }).optional() }) } } } }, responses: { 200: { description: "dry_run 返回可达状态；正式领取返回指定执行节点、素材票据、输出票据和动态 claim_plan" }, 400: { description: "节点能力或局域网报告无效/过期" }, 401: { description: "绑定无效" }, 403: { description: "局域网报告包含其他账号或未绑定节点" }, 409: { description: "回调节点不是 assigned_node" }, 429: { description: "未遵循轮询退避或请求频率过高" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/callback", tags: ["MiniMax H3 Shared Nodes"], summary: "执行节点回调可选本地优化、生成进度或结果", description: "multipart/form-data 仅发送 metadata 字段，不得上传 video 文件。prompt_optimization_enabled=true 的任务先发送 status=optimizing，成功后以 status=started、compiled_prompt、estimated_total_seconds 上报；false 的任务不得发送 optimizing 或 compiled_prompt，直接以原始 prompt 执行并在 started 中提交 estimated_total_seconds。后续 progress 回调发送 progress（0–99）与可选 remaining_seconds。成功状态还需 video.sha256/bytes/filename/object_key，服务端 HEAD 校验对象归属。失败任务按既有幂等规则退款。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "multipart/form-data": { schema: z.object({ metadata: z.string() }) } } } }, responses: { 200: { description: "可选本地优化阶段、生成进度或最终结果已幂等处理" }, 400: { description: "回执不完整、缺少必需 compiled_prompt 或在关闭优化时非法提交 compiled_prompt" }, 401: { description: "绑定无效" }, 409: { description: "用户优化选择、本地优化、COS 回执、上传票据或结算状态不匹配" }, 413: { description: "禁止把视频文件经 Vercel 中转" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/callback", tags: ["MiniMax H3 Shared Nodes"], summary: "执行节点回调可选本地优化、生成进度或结果", description: "multipart/form-data 仅发送 metadata 字段，不得上传 video 文件。仅已领取任务的指定绑定节点可回调；未接单任务返回 409 TASK_NOT_CLAIMED。prompt_optimization_enabled=true 的任务先发送 status=optimizing，成功后以 status=started、compiled_prompt、estimated_total_seconds 上报；false 的任务不得发送 optimizing 或 compiled_prompt，直接以原始 prompt 执行并在 started 中提交 estimated_total_seconds。后续 progress 回调发送 progress（0–99）与可选 remaining_seconds。成功状态还需 video.sha256/bytes/filename/object_key，服务端 HEAD 校验对象归属。GPU 推理内核启动失败时，同一订单最多重派两次，排除已故障节点，原预扣和流水不变；最终失败才幂等退款，且用户不接收原始堆栈。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "multipart/form-data": { schema: z.object({ metadata: z.string() }) } } } }, responses: { 200: { description: "可选本地优化阶段、生成进度、故障重派或最终结果已幂等处理" }, 400: { description: "回执不完整、缺少必需 compiled_prompt 或在关闭优化时非法提交 compiled_prompt" }, 401: { description: "绑定无效" }, 409: { description: "任务未接单、回调节点不匹配、本地优化、COS 回执、上传票据或结算状态不匹配" }, 413: { description: "禁止把视频文件经 Vercel 中转" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/admin/h3/tasks", tags: ["Administration"], summary: "管理员筛选共享节点任务派单", responses: { 200: { description: "任务列表" }, 403: { description: "需要管理员角色" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/admin/h3/tasks/{id}", tags: ["Administration"], summary: "管理员查看共享节点任务、回调和审计详情", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "任务详情、回调和审计时间线" }, 404: { description: "任务不存在" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/admin/h3/tasks/{id}/cancel", tags: ["Administration"], summary: "管理员幂等取消任务并退款", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "取消状态和退款结果" }, 409: { description: "已完成任务不能取消" } } });

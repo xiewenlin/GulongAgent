@@ -244,9 +244,12 @@ function MediaResult({ item }) {
     const failed = ["failed", "cancelled", "rejected"].includes(item.h3Task.status);
     const progress = Math.min(99, Math.max(0, Number(item.h3Task.progress || 0)));
     const optimizingPrompt = item.h3Task.progressStage === "prompt_optimization";
+    const redispatching = item.h3Task.status === "queued" && item.h3Task.progressStage === "gpu_redispatch";
+    const queued = item.h3Task.status === "queued" && !redispatching;
+    const claimed = item.h3Task.status === "claimed";
     return <section className={`agent-h3-progress ${failed ? "failed" : "running"}`}>
-      <header><span><SpinnerGap size={20} className={failed ? "" : "agent-spin"} />{failed ? "视频任务未完成" : optimizingPrompt ? "本地节点正在优化中文提示词" : "共享节点正在制作视频"}</span><strong>{failed ? "已结束" : optimizingPrompt ? "准备中" : `${progress}%`}</strong></header>
-      {!failed && <><div className="agent-h3-progress-track"><i style={{ width: `${Math.max(2, progress)}%` }} /></div><div className="agent-h3-progress-meta"><span>{optimizingPrompt ? "你已开启魔法优化，桌面节点正在处理提示词" : item.h3Task.estimatedTotalSeconds ? `预计总耗时 ${Math.ceil(item.h3Task.estimatedTotalSeconds / 60)} 分钟` : "节点正在估算制作时间"}</span><span>{optimizingPrompt ? "优化完成后自动开始视频生成" : item.h3Task.expectedCompletedAt ? `预计完成：${new Date(item.h3Task.expectedCompletedAt).toLocaleString("zh-CN")}` : "等待节点首次耗时回调"}</span></div></>}
+      <header><span><SpinnerGap size={20} className={failed ? "" : "agent-spin"} />{failed ? "视频任务未完成" : redispatching ? "节点启动失败，正在重新派单" : queued ? "等待共享节点接单" : claimed ? "节点已接单，正在准备" : optimizingPrompt ? "本地节点正在优化中文提示词" : "共享节点正在制作视频"}</span><strong>{failed ? "已结束" : redispatching || queued ? "排队中" : optimizingPrompt || claimed ? "准备中" : `${progress}%`}</strong></header>
+      {!failed && <><div className="agent-h3-progress-track"><i style={{ width: `${Math.max(2, progress)}%` }} /></div><div className="agent-h3-progress-meta"><span>{redispatching ? "正在避开故障节点，等待其他可用节点" : queued ? "任务已入队，尚未被节点领取" : claimed ? "节点已领取任务，等待启动回调" : optimizingPrompt ? "你已开启魔法优化，桌面节点正在处理提示词" : item.h3Task.estimatedTotalSeconds ? `预计总耗时 ${Math.ceil(item.h3Task.estimatedTotalSeconds / 60)} 分钟` : "节点正在估算制作时间"}</span><span>{redispatching ? "重派不会重复扣费" : optimizingPrompt ? "优化完成后自动开始视频生成" : item.h3Task.expectedCompletedAt ? `预计完成：${new Date(item.h3Task.expectedCompletedAt).toLocaleString("zh-CN")}` : "等待节点首次耗时回调"}</span></div></>}
       {failed && item.h3Task.error?.message && <div className="agent-media-error">{item.h3Task.error.message}</div>}
       <small>订单号：{item.h3Task.orderNo}{item.h3Task.progressUpdatedAt ? ` · 更新于 ${new Date(item.h3Task.progressUpdatedAt).toLocaleTimeString("zh-CN")}` : ""}</small>
     </section>;
