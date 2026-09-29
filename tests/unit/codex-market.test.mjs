@@ -395,6 +395,55 @@ test("administrator exemption creates no reservation or commission", async () =>
   assert.equal(f.rows.wallets.length, 1);
 });
 
+test("active Gulong Engine member can dispatch shared Longtu at zero balance without debit or commission", async () => {
+  const f = fixture({ balance: 0 });
+  f.rows.subscriptions = [{ ownerId: f.accounts.requester, products: { gulong_engine_monthly: { enabled: true, status: "active", currentPeriodStart: new Date("2026-09-01T00:00:00Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00Z") } } }];
+  const quote = await f.quote("member-request");
+  assert.equal(quote.status, 201);
+  assert.equal(quote.body.officialAmountMilliYuan, 182);
+  assert.equal(quote.body.requiredMilliYuan, 0);
+  assert.equal(quote.body.affordable, true);
+  assert.equal(quote.body.billingMode, "gulong_engine_membership");
+  const order = await f.call("/tasks", { quoteId: quote.body.quoteId, requestId: "member-request" });
+  assert.equal(order.status, 201);
+  assert.equal(order.body.task.billingMode, "gulong_engine_membership");
+  assert.equal(order.body.billing.chargedMilliYuan, 0);
+  const node = await f.register();
+  const claimed = await f.claim(node);
+  assert.equal(claimed.status, 200);
+  assert.equal((await f.callback(node, claimed.body.task)).status, 200);
+  assert.equal(f.rows.wallets[0].balanceFen, 0);
+  assert.equal(f.rows.wallets.length, 1);
+  assert.equal(f.rows.codexMarketLedger?.length || 0, 0);
+});
+
+test("active Gulong Engine member can dispatch shared Longyan at zero balance", async () => {
+  const f = fixture({ balance: 0 });
+  f.rows.subscriptions = [{ ownerId: f.accounts.requester, plan: "gulong_engine_monthly", enabled: true, status: "active", currentPeriodStart: new Date("2026-09-01T00:00:00Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00Z") }];
+  const usageLimit = { inputTokens: 1_000, outputTokens: 1_000, cacheWriteTokens: 0, cacheReadTokens: 0 };
+  const quote = await f.quote("member-longyan", "requester", "longyan", usageLimit);
+  assert.equal(quote.status, 201);
+  assert.equal(quote.body.requiredMilliYuan, 0);
+  const order = await f.call("/tasks", { quoteId: quote.body.quoteId, requestId: "member-longyan" });
+  assert.equal(order.status, 201);
+  assert.equal(order.body.task.status, "queued");
+  assert.equal(order.body.billing.chargedMilliYuan, 0);
+  assert.equal(f.rows.wallets[0].balanceFen, 0);
+  assert.equal(f.rows.codexMarketLedger?.length || 0, 0);
+});
+
+test("Gulong Engine free quote expires with membership and cannot be spent after expiry", async () => {
+  const f = fixture({ balance: 0 });
+  f.rows.subscriptions = [{ ownerId: f.accounts.requester, products: { gulong_engine_monthly: { enabled: true, status: "active", currentPeriodStart: new Date("2026-09-01T00:00:00Z"), currentPeriodEnd: new Date("2026-09-10T00:01:00Z") } } }];
+  const quote = await f.quote("expiry-request");
+  assert.equal(quote.status, 201);
+  f.advance(90_000);
+  const order = await f.call("/tasks", { quoteId: quote.body.quoteId, requestId: "expiry-request" });
+  assert.equal(order.status, 409);
+  assert.equal(order.body.code, "QUOTE_AUTHORIZATION_CHANGED");
+  assert.equal(f.rows.wallets[0].balanceFen, 0);
+});
+
 test("Longyan reserves a billing ceiling and settles authenticated actual usage with one refund and a 50/50 split", async () => {
   const f = fixture({ balance: 200 });
   const usageLimit = { inputTokens: 271_999, outputTokens: 1_000, cacheWriteTokens: 0, cacheReadTokens: 1 };

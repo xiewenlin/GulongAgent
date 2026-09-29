@@ -579,6 +579,19 @@ test("H3 套餐额度归零后的免费任务不产生节点或平台分佣", as
   assert.equal(financialCollectionReads, 0);
 });
 
+test("H3 古龙引擎包月免费任务完成后不打开节点或平台钱包", async () => {
+  const task = { _id: new ObjectId(), orderNo: "H3MEMBERFREE", status: "completed", chargeStatus: "member_no_charge", revenueStatus: "pending", billingMode: "gulong_engine_membership", chargedFen: 0, priceFen: 300 };
+  let financialCollectionReads = 0;
+  const getCollection = async (name) => {
+    if (name !== "h3SharedTasks") { financialCollectionReads++; throw new Error(`unexpected financial collection: ${name}`); }
+    return { findOne: async () => task, updateOne: async (_filter, update) => { Object.assign(task, update.$set); return { modifiedCount: 1 }; } };
+  };
+  const settled = await settleH3Revenue({ getCollection, task, executorUserId: new ObjectId() });
+  assert.deepEqual(settled.settlement, { grossFen: 0, nodeShareFen: 0, platformShareFen: 0, reason: "gulong_engine_membership" });
+  assert.equal(settled.revenueStatus, "not_earned");
+  assert.equal(financialCollectionReads, 0);
+});
+
 test("H3 administrator exemption never opens a commission wallet ledger", async () => {
   const taskId = new ObjectId();
   let task = { _id: taskId, orderNo: "H3EXEMPT001", status: "completed", chargeStatus: "exempt", revenueStatus: "pending", priceFen: 500 };

@@ -99,6 +99,44 @@ test("H3 create replays the original success and rejects a changed payload for t
   assert.equal(taskInsertions, 1);
 });
 
+test("active Gulong Engine member queues H3 at zero balance without a wallet ledger or node commission", async () => {
+  const app = new OpenAPIHono();
+  const userId = new ObjectId();
+  let storedTask;
+  let walletReservations = 0;
+  const collections = {
+    h3SharedTasks: {
+      findOne: async (filter) => filter.idempotencyKey === storedTask?.idempotencyKey ? storedTask : null,
+      insertOne: async (task) => { storedTask = task; },
+    },
+    subscriptions: { findOne: async () => ({ ownerId: userId, products: { gulong_engine_monthly: { enabled: true, status: "active", currentPeriodStart: new Date(Date.now() - 60_000), currentPeriodEnd: new Date(Date.now() + 3_600_000) } } }) },
+    wallets: { findOne: async () => ({ ownerId: userId, balanceFen: 0 }), findOneAndUpdate: async () => { walletReservations++; return null; } },
+  };
+  registerH3SharedRoutes(app, {
+    getCollection: async (name) => collections[name] || { findOne: async () => null, insertOne: async () => ({}), updateOne: async () => ({ matchedCount: 0 }) },
+    enforceRateLimit: async () => ({ allowed: true }),
+    authenticate: async () => ({ user: { id: userId.toString(), email: "member@example.com", role: "user" } }),
+    requireAdmin: async () => ({ user: { id: userId.toString(), role: "admin" } }),
+    requireTrustedMutation: () => null,
+    queueCoordinator: { invalidate: async () => {} },
+  });
+  const submit = () => app.request("http://localhost/api/h3/tasks", { method: "POST", headers: { "content-type": "application/json", "Idempotency-Key": "member-h3-0001" }, body: JSON.stringify(requestBody()) });
+  const first = await submit();
+  assert.equal(first.status, 201);
+  const payload = await first.json();
+  assert.equal(payload.task.status, "queued");
+  assert.equal(payload.task.priceFen, 100);
+  assert.equal(payload.billing.chargedFen, 0);
+  assert.equal(payload.billing.remainingBalanceFen, 0);
+  assert.equal(payload.billing.billingMode, "gulong_engine_membership");
+  assert.equal(storedTask.chargeStatus, "member_no_charge");
+  assert.equal(storedTask.revenueStatus, "not_earned");
+  assert.equal(storedTask.walletLedgerId, undefined);
+  assert.equal(walletReservations, 0);
+  assert.equal((await submit()).status, 200);
+  assert.equal(walletReservations, 0);
+});
+
 test("H3 create replays insufficient balance as 402 and rejects a changed payload for the same key", async () => {
   const app = new OpenAPIHono();
   const userId = new ObjectId();

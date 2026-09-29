@@ -5,6 +5,7 @@ import { bodyLimit } from "hono/body-limit";
 import { hashOpaqueToken } from "./security.js";
 import { enforceRateLimit as databaseRateLimit } from "./rate-limit.js";
 import { codexMarketStorage } from "./codex-market-store.js";
+import { gulongEngineEntitlement } from "./english-coach-products.js";
 import {
   CODEX_MARKET_MODELS, CODEX_MARKET_PRICING_REVISION, CODEX_MARKET_MAX_JSON_BYTES,
   CODEX_MARKET_WALLET_REMAINDER_FIELD,
@@ -72,7 +73,7 @@ function publicTask(task) {
     result: task.status === "completed" ? task.result : null, error: task.error || null,
     createdAt: task.createdAt, completedAt: task.completedAt || null,
     deadlineAt: task.deadlineAt, refundedMilliYuan: exactAmount(task, "refunded"), refundedFen: task.refundedFen || 0,
-    settlementStatus: task.settlementStatus,
+    settlementStatus: task.settlementStatus, billingMode: task.billingMode || (exactAmount(task, "charged") === 0 ? "administrator_exempt" : "wallet"),
     ...(task.model === "longyan" ? { usageLimit: task.usageLimit, usage: task.status === "completed" ? task.usage : null, usagePricing: task.status === "completed" ? task.usagePricing : null } : {}),
   };
 }
@@ -91,7 +92,7 @@ function publicQuote(quote, wallet = null) {
     nodeShareFen, platformShareFen,
     availableBalanceMilliYuan: available.balanceMilliYuan, availableBalanceFen: available.balanceFen,
     affordable: requiredMilliYuan === 0 || available.balanceMilliYuan >= requiredMilliYuan,
-    billingExempt: requiredMilliYuan === 0, pricingRevision, currency, officialSourceUrl, expiresAt,
+    billingExempt: requiredMilliYuan === 0, billingMode: quote.billingMode || (requiredMilliYuan === 0 ? "administrator_exempt" : "wallet"), pricingRevision, currency, officialSourceUrl, expiresAt,
     ...(usageLimit ? { usageLimit, usagePricing } : {}),
   };
 }
@@ -110,6 +111,10 @@ export function registerCodexMarketRoutes(app, dependencies) {
   const clock = dependencies.now || (() => new Date());
   const hash = dependencies.hashToken || hashOpaqueToken;
   const collection = (name) => getCollection(`codexMarket${name}`);
+  async function membershipActive(ownerId, session) {
+    const subscription = await (await getCollection("subscriptions")).findOne({ ownerId }, { session });
+    return gulongEngineEntitlement(subscription, clock()).active;
+  }
 
   async function atomic(operation) {
     await ensureStore();
@@ -242,7 +247,6 @@ export function registerCodexMarketRoutes(app, dependencies) {
     const input = await body(c);
     const request = normalizeMarketRequest(input.model, input.request);
     const usageLimit = input.model === "longyan" ? normalizeLongyanUsage(input.usageLimit) : null;
-    const price = marketQuotePrice(getPricing(), input.model, { administrator: auth.user.role === "admin", usageLimit });
     const key = requestId(input.requestId);
     const ownerId = id(auth.user.id);
     await limit(`quotes:${ownerId}`, 30);
@@ -255,7 +259,10 @@ export function registerCodexMarketRoutes(app, dependencies) {
         return { quote: previous, wallet: await (await getCollection("wallets")).findOne({ ownerId }, { session }) };
       }
       const now = clock();
-      const quote = { _id: new ObjectId(), ownerId, requestId: key, model: input.model, request, usageLimit, fingerprint, ...price, expiresAt: new Date(+now + 5 * 60_000), createdAt: now };
+      const administrator = auth.user.role === "admin";
+      const memberFree = !administrator && await membershipActive(ownerId, session);
+      const price = marketQuotePrice(getPricing(), input.model, { administrator: administrator || memberFree, usageLimit });
+      const quote = { _id: new ObjectId(), ownerId, requestId: key, model: input.model, request, usageLimit, fingerprint, ...price, billingMode: administrator ? "administrator_exempt" : memberFree ? "gulong_engine_membership" : "wallet", expiresAt: new Date(+now + 5 * 60_000), createdAt: now };
       await quotes.insertOne(quote, { session });
       return { quote, wallet: await (await getCollection("wallets")).findOne({ ownerId }, { session }) };
     });
@@ -282,7 +289,10 @@ export function registerCodexMarketRoutes(app, dependencies) {
       if (quote.expiresAt <= clock()) throw marketError("QUOTE_EXPIRED", "报价已过期，请重新获取报价", 409);
       marketQuotePrice(getPricing(), quote.model, { usageLimit: quote.usageLimit });
       const quotedChargeMilliYuan = exactAmount(quote, "charged");
-      if ((quotedChargeMilliYuan === 0) !== (auth.user.role === "admin")) throw marketError("QUOTE_AUTHORIZATION_CHANGED", "账号计费权限已变化，请重新获取报价", 409);
+      const administrator = auth.user.role === "admin";
+      const memberFree = !administrator && await membershipActive(ownerId, session);
+      const billingMode = administrator ? "administrator_exempt" : memberFree ? "gulong_engine_membership" : "wallet";
+      if (quote.billingMode !== billingMode || (quotedChargeMilliYuan === 0) !== (administrator || memberFree)) throw marketError("QUOTE_AUTHORIZATION_CHANGED", "账号计费权限已变化，请重新获取报价", 409);
       const now = clock();
       const task = {
         _id: new ObjectId(), ownerId, requestId: key, quoteId, model: quote.model, request: quote.request,
@@ -294,7 +304,7 @@ export function registerCodexMarketRoutes(app, dependencies) {
         nodeShareMilliYuan: exactAmount(quote, "nodeShare"), platformShareMilliYuan: exactAmount(quote, "platformShare"),
         nodeShareFen: quote.nodeShareFen, platformShareFen: quote.platformShareFen,
         usageLimit: quote.usageLimit || null, pricingSnapshot: quote.pricingSnapshot || null, pricingRevision: quote.pricingRevision,
-        status: "queued", settlementStatus: "reserved", createdAt: now, updatedAt: now, deadlineAt: new Date(+now + 60 * 60_000), attempt: 0,
+        status: "queued", settlementStatus: "reserved", billingMode, createdAt: now, updatedAt: now, deadlineAt: new Date(+now + 60 * 60_000), attempt: 0,
       };
       task.orderNo = `CM-${task._id}`;
       let wallet = await walletCollection.findOne({ ownerId }, { session });
@@ -525,11 +535,11 @@ export function registerCodexMarketRoutes(app, dependencies) {
       nodeShareMilliYuan: z.number().int().min(0), platformShareMilliYuan: z.number().int().min(0),
       nodeShareFen: z.number().int().min(0), platformShareFen: z.number().int().min(0),
       availableBalanceMilliYuan: z.number().int().min(0), availableBalanceFen: z.number().int().min(0),
-      affordable: z.boolean(), billingExempt: z.boolean(), pricingRevision: z.string(), currency: z.literal("CNY"), expiresAt: z.string(),
+      affordable: z.boolean(), billingExempt: z.boolean(), billingMode: z.enum(["wallet", "administrator_exempt", "gulong_engine_membership"]), pricingRevision: z.string(), currency: z.literal("CNY"), expiresAt: z.string(),
       usageLimit: usageLimit.optional(), usagePricing: z.record(z.string(), z.unknown()).optional(),
     });
     const taskCreateResponse = z.object({
-      task: z.object({ id: z.string(), status: z.string(), requiredMilliYuan: z.number().int().min(0), reservedMilliYuan: z.number().int().min(0), chargedMilliYuan: z.number().int().min(0) }).passthrough(),
+      task: z.object({ id: z.string(), status: z.string(), requiredMilliYuan: z.number().int().min(0), reservedMilliYuan: z.number().int().min(0), chargedMilliYuan: z.number().int().min(0), billingMode: z.enum(["wallet", "administrator_exempt", "gulong_engine_membership"]) }).passthrough(),
       billing: preciseBilling, idempotent: z.boolean(), code: z.string().optional(), message: z.string().optional(),
     });
     app.openAPIRegistry.registerComponent("schemas", "CodexMarketPreciseBilling", preciseBilling);
@@ -537,8 +547,8 @@ export function registerCodexMarketRoutes(app, dependencies) {
     app.openAPIRegistry.registerComponent("schemas", "CodexMarketTaskCreateResponse", taskCreateResponse);
     const schemas = [
       ["get", "/models", "查看龙言分档 Token 费率和龙图每次 182 毫元精确报价", null, false, null],
-      ["post", "/quotes", "获取五分钟有效报价；返回 requiredMilliYuan、availableBalanceMilliYuan 与 affordable；龙言按 usageLimit 预留，龙图固定 182 毫元", z.object({ model: z.enum(["longyan", "longtu"]), requestId: z.string().min(8).max(160), usageLimit: usageLimit.optional(), request: z.object({ prompt: z.string().min(1).max(32_000), images: z.array(z.union([z.string(), z.object({ dataUrl: z.string() })])).optional(), size: z.string().optional(), messages: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string() })).optional() }) }), false, preciseQuote],
-      ["post", "/tasks", "按 quoteId 和持久 requestId 幂等下单，事务预扣精确毫元报价；余额不足不入队，管理员免扣费", z.object({ quoteId: z.string(), requestId: z.string().min(8).max(160) }), false, taskCreateResponse],
+      ["post", "/quotes", "获取五分钟有效报价；返回 requiredMilliYuan、availableBalanceMilliYuan 与 affordable；古龙引擎包月有效期内共享算力免扣费，龙言按 usageLimit 报价，龙图固定 182 毫元", z.object({ model: z.enum(["longyan", "longtu"]), requestId: z.string().min(8).max(160), usageLimit: usageLimit.optional(), request: z.object({ prompt: z.string().min(1).max(32_000), images: z.array(z.union([z.string(), z.object({ dataUrl: z.string() })])).optional(), size: z.string().optional(), messages: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string() })).optional() }) }), false, preciseQuote],
+      ["post", "/tasks", "按 quoteId 和持久 requestId 幂等下单；有效期内古龙引擎包月会员与管理员免扣费且不分佣，其他用户事务预扣精确毫元报价", z.object({ quoteId: z.string(), requestId: z.string().min(8).max(160) }), false, taskCreateResponse],
       ["get", "/tasks/{id}", "请求者或管理员查询任务；超时原子退款", null, false],
       ["post", "/tasks/{id}/cancel", "请求者或管理员按单个任务幂等取消并退款，不影响同节点其他活动租约", null, false],
       ["post", "/nodes/register", "使用登录账号绑定 Codex 节点；cooperative-host-slots-v2 必须声明 10 个协同执行槽，旧客户端保持单槽", nodeRequest.extend({ nodeName: z.string(), appVersion: z.string().optional(), capabilities: nodeCapabilities }), false],

@@ -7,7 +7,7 @@ import { readPlatformPearSecret, sealPlatformPearSecret } from "./security.js";
 import { localizeErrorMessage } from "../shared/error-messages.js";
 import { createPresignedDownloadUrl } from "./cos.js";
 import { readMarketWalletAmount } from "./codex-market-pricing.js";
-import { legacyAccessSubscription, readEnglishEntitlement, readGulongEngineEntitlement } from "./english-coach-products.js";
+import { gulongEngineEntitlement, legacyAccessSubscription, readEnglishEntitlement, readGulongEngineEntitlement } from "./english-coach-products.js";
 import { authenticateEnglishDesktop } from "./desktop-english-auth.js";
 import {
   SHORT_VIDEO_PLAN_ID,
@@ -199,6 +199,7 @@ export async function buildPearAccountUsageSnapshot({ ownerId, unlimited = false
       currentPeriodEnd: accessSubscription?.currentPeriodEnd || null,
     },
     shortVideoPackage: shortVideoPackageView(subscription, wallet, now),
+    gulongEngine: { active: gulongEngineEntitlement(subscription, now).active },
     pricing: { ...pricing, markupRate: PEAR_API_MARKUP_RATE },
     quota: { ...quota, unlimited },
   };
@@ -864,6 +865,7 @@ export function registerPearApiRoutes(app, { authenticate, requireAdmin, require
       mediaConfigured: Boolean(credentialSecrets(credential).key),
       subscription: accountUsage.subscription,
       shortVideoPackage: accountUsage.shortVideoPackage,
+      gulongEngine: accountUsage.gulongEngine,
       models: PEAR_API_FREE_MODELS.map((model) => ({ ...model, free: true })),
       defaultModel: PEAR_API_DEFAULT_TEXT_MODEL_ID,
       mediaModels: {

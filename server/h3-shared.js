@@ -7,6 +7,7 @@ import { fingerprintIp, hashOpaqueToken, normalizeEmail } from "./security.js";
 import { createPresignedDownloadUrl, createPresignedPutUrl, deleteObject, ensureBrowserUploadCors, headObject, sanitizeFilename } from "./cos.js";
 import { calculateH3ClaimPlan, createH3QueueCoordinator, H3_CLAIM_LEASE_MS, H3_LAN_REPORT_MAX_NODES, rankH3LanNodes } from "./h3-queue.js";
 import { localizeErrorMessage } from "../shared/error-messages.js";
+import { readGulongEngineEntitlement } from "./english-coach-products.js";
 import { acceptH3OptimizedPrompt, buildH3AuthoringPrompt, compileH3Prompt, containsCjkText, h3PromptOptimizerMessages, hardenH3CompiledPrompt, parseH3AuthoringPrompt } from "./h3-prompt.js";
 import {
   SHORT_VIDEO_PLAN_ID,
@@ -25,6 +26,7 @@ const H3_VIDEO_ASPECTS = new Set(["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]);
 const H3_VIDEO_PROFILES = new Set(["official_max", "ultra1080", "fast2k", "fast", "balanced", "turbo544", "quality", "preview"]);
 const H3_SAMPLING_STEPS = new Set([4, 8, 20]);
 const H3_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
+const H3_NO_CHARGE_STATUSES = new Set(["exempt", "package_no_charge", "member_no_charge"]);
 const DEFAULT_PLATFORM_ADMIN_EMAIL = "1186664388@qq.com";
 const H3_NODE_ONLINE_WINDOW_MS = 3 * 60_000;
 const CHINA_UTC_OFFSET_MS = 8 * 60 * 60_000;
@@ -371,7 +373,7 @@ function publicTask(task, { includePrompt = true } = {}) {
     audioCount: task.audioCount,
     assets: task.assets,
     priceFen: task.priceFen,
-    chargedFen: integer(task.chargedFen, task.chargeStatus === "exempt" || task.chargeStatus === "package_no_charge" ? 0 : task.priceFen),
+    chargedFen: integer(task.chargedFen, H3_NO_CHARGE_STATUSES.has(task.chargeStatus) ? 0 : task.priceFen),
     billingMode: task.billingMode || (task.chargeStatus === "exempt" ? "administrator_exempt" : "wallet"),
     status: task.status,
     progress: Math.min(100, Math.max(0, integer(task.progress, task.status === "completed" ? 100 : 0))),
@@ -916,6 +918,13 @@ export async function settleH3Revenue({ getCollection, task, executorUserId, pla
     );
     return await tasks.findOne({ _id: current._id }) || current;
   }
+  if (current.chargeStatus === "member_no_charge") {
+    await tasks.updateOne(
+      { _id: current._id, revenueStatus: { $ne: "not_earned" } },
+      { $set: { revenueStatus: "not_earned", settlement: { grossFen: 0, nodeShareFen: 0, platformShareFen: 0, reason: "gulong_engine_membership" }, updatedAt: new Date() } },
+    );
+    return await tasks.findOne({ _id: current._id }) || current;
+  }
   if (current.revenueStatus === "settled") return current;
   if (current.chargeStatus !== "settled") throw Object.assign(new Error("MiniMax H3 扣款尚未结算，不能分账"), { code: "H3_CHARGE_NOT_SETTLED", status: 409 });
   const executorId = executorUserId instanceof ObjectId ? executorUserId : ObjectId.isValid(executorUserId) ? new ObjectId(executorUserId) : null;
@@ -945,7 +954,7 @@ export async function settleH3Revenue({ getCollection, task, executorUserId, pla
 }
 
 async function refundTask({ getCollection, task, reason, actor = "system" }) {
-  if (!task || task.chargeStatus === "exempt" || task.chargeStatus === "package_no_charge" || task.refundStatus === "refunded") return task;
+  if (!task || H3_NO_CHARGE_STATUSES.has(task.chargeStatus) || task.refundStatus === "refunded") return task;
   const tasks = await getCollection("h3SharedTasks");
   const now = new Date();
   const claimed = await tasks.findOneAndUpdate(
@@ -1366,16 +1375,18 @@ export function registerH3SharedRoutes(app, dependencies) {
       } : {};
       const chargeKey = `h3:charge:${orderNo}:0`;
       const exempt = auth.user.role === "admin";
+      const memberFree = !exempt && (await readGulongEngineEntitlement(ownerId, now, getCollection)).active;
+      const noCharge = exempt || memberFree;
       const dispatchEstimatedTotalSeconds = estimateH3TaskTotalSeconds(input);
       const autoCancelAt = h3TaskAutoCancelAt(now, dispatchEstimatedTotalSeconds);
       const task = {
         _id: taskId, orderNo, idempotencyKey, requestFingerprint, requesterUserId: ownerId, requesterEmailSnapshot: auth.user.email || null, requesterRoleSnapshot: auth.user.role || "user", ...input, ...conversation,
-        ...(exempt ? {} : { walletLedgerId: chargeKey, activeChargeKey: chargeKey }),
-        chargedFen: exempt ? 0 : input.priceFen,
-        billingMode: exempt ? "administrator_exempt" : "wallet",
+        ...(noCharge ? {} : { walletLedgerId: chargeKey, activeChargeKey: chargeKey }),
+        chargedFen: noCharge ? 0 : input.priceFen,
+        billingMode: exempt ? "administrator_exempt" : memberFree ? "gulong_engine_membership" : "wallet",
         dispatchEstimatedTotalSeconds, autoCancelAt,
-        status: exempt ? "queued" : "reserving", chargeStatus: exempt ? "exempt" : "reserving", revenueStatus: exempt ? "exempt" : "pending",
-        ...(exempt ? { queuedAt: now } : {}), retryCount: 0, createdAt: now, updatedAt: now,
+        status: noCharge ? "queued" : "reserving", chargeStatus: exempt ? "exempt" : memberFree ? "member_no_charge" : "reserving", revenueStatus: exempt ? "exempt" : memberFree ? "not_earned" : "pending",
+        ...(noCharge ? { queuedAt: now } : {}), retryCount: 0, createdAt: now, updatedAt: now,
       };
       try { await tasks.insertOne(task); }
       catch (error) {
@@ -1385,9 +1396,9 @@ export function registerH3SharedRoutes(app, dependencies) {
         return replayExisting(duplicate);
       }
       await ensureH3ConversationMessages({ getCollection, task });
-      if (exempt) {
+      if (noCharge) {
         const wallet = await (await getCollection("wallets")).findOne({ ownerId });
-        await audit(await getCollection("h3TaskAudits"), "created", { taskId, orderNo, actorUserId: ownerId, sourceChannel: input.sourceChannel, priceFen: input.priceFen, billingExempt: true });
+        await audit(await getCollection("h3TaskAudits"), "created", { taskId, orderNo, actorUserId: ownerId, sourceChannel: input.sourceChannel, priceFen: input.priceFen, billingMode: task.billingMode, chargedFen: 0 });
         await queueCoordinator.invalidate().catch(() => {});
         return c.json({ task: publicTask(task), billing: taskBilling(task, wallet), idempotent: false }, 201);
       }
@@ -1892,11 +1903,11 @@ export function registerH3SharedRoutes(app, dependencies) {
       await uploads.updateOne({ _id: grant._id, status: "issued" }, { $set: { status: "completed", sha256, bytes, filename, completedByBindingId: auth.binding._id, completedByNodeId: auth.binding.nodeId, completedAt: now, updatedAt: now }, $unset: { expiresAt: "" } });
       const completed = await tasks.findOneAndUpdate(
         { _id: task._id, status: { $in: ["claimed", "processing"] } },
-        { $set: { status: "completed", progress: 100, progressStage: "completed", remainingSeconds: 0, progressUpdatedAt: now, chargeStatus: ["exempt", "package_no_charge"].includes(task.chargeStatus) ? task.chargeStatus : "settled", executedByNode: executionNode, assigneeUserId: auth.user._id, assigneeEmailSnapshot: auth.user.email || auth.binding.emailSnapshot, assigneeDisplayNameSnapshot: auth.user.displayName || auth.user.username || null, output: { sha256, bytes, filename, objectKey, uploadGrantId: grant.grantId, expiresAt: h3OutputExpiresAt(now), status: "available", cleanupStatus: "pending", cleanupAttempts: 0 }, elapsedSeconds: Math.max(0, Number(metadata.elapsed_seconds || 0)), completedAt: now, updatedAt: now } },
+        { $set: { status: "completed", progress: 100, progressStage: "completed", remainingSeconds: 0, progressUpdatedAt: now, chargeStatus: H3_NO_CHARGE_STATUSES.has(task.chargeStatus) ? task.chargeStatus : "settled", executedByNode: executionNode, assigneeUserId: auth.user._id, assigneeEmailSnapshot: auth.user.email || auth.binding.emailSnapshot, assigneeDisplayNameSnapshot: auth.user.displayName || auth.user.username || null, output: { sha256, bytes, filename, objectKey, uploadGrantId: grant.grantId, expiresAt: h3OutputExpiresAt(now), status: "available", cleanupStatus: "pending", cleanupAttempts: 0 }, elapsedSeconds: Math.max(0, Number(metadata.elapsed_seconds || 0)), completedAt: now, updatedAt: now } },
         { returnDocument: "after" },
       );
       task = completed || await tasks.findOne({ _id: task._id });
-      if (task.status === "completed" && !["exempt", "package_no_charge"].includes(task.chargeStatus)) await (await getCollection("h3WalletLedger")).updateOne({ ledgerKey: task.activeChargeKey }, { $set: { status: "settled", settledAt: task.completedAt || now, updatedAt: now } });
+      if (task.status === "completed" && !H3_NO_CHARGE_STATUSES.has(task.chargeStatus)) await (await getCollection("h3WalletLedger")).updateOne({ ledgerKey: task.activeChargeKey }, { $set: { status: "settled", settledAt: task.completedAt || now, updatedAt: now } });
       if (task.status === "completed") task = await settleH3Revenue({ getCollection, task, executorUserId: task.assigneeUserId || auth.user._id });
       if (task.status === "completed") await ensureH3ConversationMessages({ getCollection, task, now });
       await (await getCollection("nodeAccountBindings")).updateOne({ _id: auth.binding._id }, { $unset: { nextClaimAt: "" }, $set: { queueStatus: "idle", updatedAt: new Date() } });
@@ -1970,12 +1981,13 @@ export function registerH3SharedRoutes(app, dependencies) {
     const task = await tasks.findOne(filter);
     if (!task) return c.json({ code: "TASK_NOT_FOUND", message: "共享节点任务不存在" }, 404);
     const exempt = task.chargeStatus === "exempt" || await h3RequesterIsAdministrator(getCollection, task);
-    const packageNoCharge = task.billingMode === "short_video_package" && task.chargeStatus === "package_no_charge";
-    if (!["failed", "cancelled"].includes(task.status) || (!exempt && !packageNoCharge && task.refundStatus !== "refunded")) return c.json({ code: "TASK_NOT_RETRYABLE", message: "只有免扣费任务、套餐零扣费任务或已经退款的失败、取消任务可以重试" }, 409);
+    const memberFree = !exempt && (await readGulongEngineEntitlement(task.requesterUserId, new Date(), getCollection)).active;
+    const previouslyFree = H3_NO_CHARGE_STATUSES.has(task.chargeStatus);
+    if (!["failed", "cancelled"].includes(task.status) || (!previouslyFree && task.refundStatus !== "refunded")) return c.json({ code: "TASK_NOT_RETRYABLE", message: "只有免扣费任务或已经退款的失败、取消任务可以重试" }, 409);
     const retryCount = integer(task.retryCount) + 1;
     const chargeKey = `h3:charge:${task.orderNo}:${retryCount}`;
-    let retryBilling = { chargeStatus: "exempt", revenueStatus: "exempt", chargedFen: 0, billingMode: "administrator_exempt" };
-    if (!exempt) {
+    let retryBilling = { chargeStatus: exempt ? "exempt" : "member_no_charge", revenueStatus: exempt ? "exempt" : "not_earned", chargedFen: 0, billingMode: exempt ? "administrator_exempt" : "gulong_engine_membership" };
+    if (!exempt && !memberFree) {
       const packageReservation = await reserveShortVideoPackageAllowance({ getCollection, ownerId: task.requesterUserId, amountFen: task.priceFen, ledgerKey: chargeKey, orderNo: task.orderNo, taskId: task._id });
       if (packageReservation.matched) {
         const chargedFen = integer(packageReservation.chargedFen);
@@ -1987,8 +1999,8 @@ export function registerH3SharedRoutes(app, dependencies) {
       }
     }
     const queued = await tasks.findOneAndUpdate(
-      { _id: task._id, status: task.status, ...(exempt || packageNoCharge ? {} : { refundStatus: "refunded" }) },
-      { $set: { status: "queued", ...retryBilling, refundStatus: null, ...(exempt ? { administratorExemptedAt: new Date() } : { activeChargeKey: chargeKey, walletLedgerId: chargeKey }), retryCount, autoCancelAt: h3TaskAutoCancelAt(new Date(), integer(task.dispatchEstimatedTotalSeconds || task.estimatedTotalSeconds, estimateH3TaskTotalSeconds(task))), queuedAt: new Date(), updatedAt: new Date() }, $unset: { claimedByNode: "", claimRequestedByNode: "", executedByNode: "", assigneeUserId: "", assigneeEmailSnapshot: "", assigneeDisplayNameSnapshot: "", output: "", error: "", settlement: "", claimedAt: "", claimLeaseUntil: "", completedAt: "", failedAt: "", cancelledAt: "", timedOutAt: "", refundedAt: "", refundReason: "" } },
+      { _id: task._id, status: task.status, ...(previouslyFree ? {} : { refundStatus: "refunded" }) },
+      { $set: { status: "queued", ...retryBilling, refundStatus: null, ...(exempt ? { administratorExemptedAt: new Date() } : memberFree ? {} : { activeChargeKey: chargeKey, walletLedgerId: chargeKey }), retryCount, autoCancelAt: h3TaskAutoCancelAt(new Date(), integer(task.dispatchEstimatedTotalSeconds || task.estimatedTotalSeconds, estimateH3TaskTotalSeconds(task))), queuedAt: new Date(), updatedAt: new Date() }, $unset: { ...(memberFree ? { activeChargeKey: "", walletLedgerId: "" } : {}), claimedByNode: "", claimRequestedByNode: "", executedByNode: "", assigneeUserId: "", assigneeEmailSnapshot: "", assigneeDisplayNameSnapshot: "", output: "", error: "", settlement: "", claimedAt: "", claimLeaseUntil: "", completedAt: "", failedAt: "", cancelledAt: "", timedOutAt: "", refundedAt: "", refundReason: "" } },
       { returnDocument: "after" },
     );
     await queueCoordinator.invalidate().catch(() => {});
@@ -2022,7 +2034,7 @@ export function registerH3SharedRoutes(app, dependencies) {
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/prompts/optimize", tags: ["MiniMax H3 Shared Nodes"], summary: "已停用：服务端提示词优化", description: "官网服务端不执行提示词优化。网页版通过 prompt_optimization_enabled 让用户选择是否由 MiniMax H3 极速视频桌面端执行本地魔法优化。", deprecated: true, responses: { 410: { description: "PROMPT_OPTIMIZATION_MOVED_TO_DESKTOP" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/assets/presign", tags: ["MiniMax H3 Shared Nodes"], summary: "为输入素材签发账号专属 COS 直传票据", description: "签发前会幂等校验并补齐官网当前 HTTPS 来源的腾讯云 COS 浏览器跨域规则；大文件直接上传 COS，不经过官网请求体。", request: { body: { required: true, content: { "application/json": { schema: z.object({ kind: z.enum(["image", "video", "audio"]), filename: z.string(), content_type: z.string(), bytes: z.number().int().positive(), sha256: z.string().regex(/^[A-Fa-f0-9]{64}$/) }) } } } }, responses: { 201: { description: "返回 PUT URL、固定 headers、asset_id 与 object_key" }, 409: { description: "COS 回执不匹配" }, 503: { description: "COS 浏览器跨域规则暂时无法校验或配置" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/assets/{id}/complete", tags: ["MiniMax H3 Shared Nodes"], summary: "校验并完成 H3 输入素材上传", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "返回可用于任务 assets manifest 的素材记录" }, 409: { description: "对象大小、摘要或归属不匹配" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "使用原始中文提示词创建共享节点任务并原子预扣余额", description: "实际价格（分）= 时长秒数×20 + 图片数×5 + 视频数×20；音频免费。普通用户与会员用户原子预扣钱包余额；有效期内的短视频包月用户优先扣套餐额度并按实际扣款 50/50 分账，套餐额度归零后仍可无限创建 H3 任务且本次扣款、节点分佣和平台分佣均为 0。管理员始终免扣费且不参与分佣。服务端始终原样保存 prompt，不翻译；prompt_optimization_enabled=true 时由桌面节点执行本地魔法优化并回调 compiled_prompt，false 时必须直接使用原始提示词且禁止回传 compiled_prompt。video_mode、longform_mode、segment_duration_seconds、profile、sampling_steps 与 seed 会进入受信任节点任务合同；超长模式的 duration_seconds 由服务端按空行分段数乘单段时长重新计算。旧客户端省略字段时按全能参考、720P、4 步和随机种子兼容。必须提供 Idempotency-Key；同一键只允许重放同一规范化请求。", request: { body: { required: true, content: { "application/json": { schema: z.object({ source_channel: z.enum(["website", "desktop_agent"]), model: z.literal(H3_SHARED_MODEL), prompt: z.string().min(1).max(20_000), prompt_optimization_enabled: z.boolean().optional(), conversation_id: z.string().optional(), video_mode: z.enum(["all_reference", "first_last", "smart_multiframe", "extended"]).optional(), longform_mode: z.enum(["continuous", "independent"]).optional(), segment_duration_seconds: z.number().int().min(5).max(15).optional(), aspect_ratio: z.enum(["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]), duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profile: z.enum(["official_max", "ultra1080", "fast2k", "fast", "balanced", "turbo544", "quality", "preview"]), sampling_steps: z.union([z.literal(4), z.literal(8), z.literal(20)]).optional(), seed: z.number().int().min(-1).max(2_147_483_647).optional(), assets: z.object({ images: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(9), videos: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3), audio: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3) }), idempotency_key: z.string().min(8).max(160).optional() }) } } } }, responses: { 201: { description: "原始提示词、完整视频参数与用户优化选择已保存，并按账号类型完成扣费或零扣费排队" }, 402: { description: "非套餐用户余额不足（同键同请求重放仍保持 402）" }, 409: { description: "Idempotency-Key 已绑定到不同的规范化请求" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "使用原始中文提示词创建共享节点任务，按会员权益免扣费或预扣余额", description: "实际价格（分）= 时长秒数×20 + 图片数×5 + 视频数×20；音频免费。普通用户原子预扣钱包余额；有效期内的古龙引擎包月会员可在余额为零时无限创建任务，不扣余额、不产生节点或平台分佣；有效期内的短视频包月用户优先扣套餐额度并按实际扣款 50/50 分账，套餐额度归零后仍可无限创建 H3 任务且本次扣款、节点分佣和平台分佣均为 0。管理员始终免扣费且不参与分佣。服务端始终原样保存 prompt，不翻译；prompt_optimization_enabled=true 时由桌面节点执行本地魔法优化并回调 compiled_prompt，false 时必须直接使用原始提示词且禁止回传 compiled_prompt。video_mode、longform_mode、segment_duration_seconds、profile、sampling_steps 与 seed 会进入受信任节点任务合同；超长模式的 duration_seconds 由服务端按空行分段数乘单段时长重新计算。旧客户端省略字段时按全能参考、720P、4 步和随机种子兼容。必须提供 Idempotency-Key；同一键只允许重放同一规范化请求。", request: { body: { required: true, content: { "application/json": { schema: z.object({ source_channel: z.enum(["website", "desktop_agent"]), model: z.literal(H3_SHARED_MODEL), prompt: z.string().min(1).max(20_000), prompt_optimization_enabled: z.boolean().optional(), conversation_id: z.string().optional(), video_mode: z.enum(["all_reference", "first_last", "smart_multiframe", "extended"]).optional(), longform_mode: z.enum(["continuous", "independent"]).optional(), segment_duration_seconds: z.number().int().min(5).max(15).optional(), aspect_ratio: z.enum(["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]), duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profile: z.enum(["official_max", "ultra1080", "fast2k", "fast", "balanced", "turbo544", "quality", "preview"]), sampling_steps: z.union([z.literal(4), z.literal(8), z.literal(20)]).optional(), seed: z.number().int().min(-1).max(2_147_483_647).optional(), assets: z.object({ images: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(9), videos: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3), audio: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3) }), idempotency_key: z.string().min(8).max(160).optional() }) } } } }, responses: { 201: { description: "原始提示词、完整视频参数与用户优化选择已保存，并按账号类型完成扣费或零扣费排队" }, 402: { description: "非免扣费用户余额不足（同键同请求重放仍保持 402）" }, 409: { description: "Idempotency-Key 已绑定到不同的规范化请求" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "查看当前账号的共享节点订单", responses: { 200: { description: "最多返回最近 50 个订单" }, 401: { description: "未认证" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/conversations/recent", tags: ["MiniMax H3 Shared Nodes"], summary: "读取当前用户会话中的 H3 视频结果", description: "仅返回当前登录用户的 H3 assistant 结果消息；历史已完成任务会先进行同用户安全幂等回填。消息不包含 COS 永久地址。", request: { query: z.object({ conversation_id: z.string().optional() }) }, responses: { 200: { description: "当前会话及其 H3 视频结果" }, 401: { description: "未认证" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}", tags: ["MiniMax H3 Shared Nodes"], summary: "查看共享节点订单详情", description: "输出只包含受控 previewPath/downloadPath 和 24 小时到期状态，不返回 COS objectKey 或永久 URL。", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "订单详情" }, 404: { description: "订单不存在或无权查看" } } });
