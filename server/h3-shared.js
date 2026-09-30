@@ -1796,7 +1796,9 @@ export function registerH3SharedRoutes(app, dependencies) {
       );
     }
     c.header("Retry-After", String(Math.max(1, Math.ceil(pollAfterMs / 1_000))));
-    await audit(await getCollection("h3TaskAudits"), assignedCount ? "claimed" : "claim_empty", { taskId: claimed[0]?.task?._id || null, taskIds: claimed.map((entry) => entry.task._id), assignedNodeIds: claimed.map((entry) => entry.selectedNode.nodeId), lanLoad: clusterNodes.map((entry) => ({ nodeId: entry.nodeId, runningTaskCount: entry.runningTaskCount, estimatedTotalSeconds: entry.estimatedTotalSeconds })), actorUserId: auth.user._id, bindingId: auth.binding._id, nodeId: auth.binding.nodeId, capabilities: reportedCapabilities, claimPlan: publicPlan, reportedEmail: String(body.bound_account_email || "").slice(0, 254), reportedUserId: String(body.bound_account_id || "").slice(0, 80) });
+    // Empty polls are routine health traffic, not task events. Persisting one
+    // audit per poll exhausted the shared MongoDB quota and blocked login writes.
+    if (assignedCount) await audit(await getCollection("h3TaskAudits"), "claimed", { taskId: claimed[0].task._id, taskIds: claimed.map((entry) => entry.task._id), assignedNodeIds: claimed.map((entry) => entry.selectedNode.nodeId), lanLoad: clusterNodes.map((entry) => ({ nodeId: entry.nodeId, runningTaskCount: entry.runningTaskCount, estimatedTotalSeconds: entry.estimatedTotalSeconds })), actorUserId: auth.user._id, bindingId: auth.binding._id, nodeId: auth.binding.nodeId, capabilities: reportedCapabilities, claimPlan: publicPlan, reportedEmail: String(body.bound_account_email || "").slice(0, 254), reportedUserId: String(body.bound_account_id || "").slice(0, 80) });
     const workerTasks = claimed.map(({ task, outputUpload }) => toH3WorkerTask(task, { assets: claimAssets(task.assets), outputUpload }));
     return c.json({ task: workerTasks[0] || null, additional_tasks: workerTasks.slice(1), claim_plan: publicPlan });
   });

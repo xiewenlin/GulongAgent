@@ -835,6 +835,33 @@ test("H3 claim enforces the server poll window before queue and rate-limit datab
   assert.equal(queueSnapshots, 0);
 });
 
+test("H3 empty claim returns a plan without writing an unbounded task audit", async () => {
+  const isolated = new OpenAPIHono();
+  const userId = new ObjectId();
+  const binding = { _id: new ObjectId(), userId, nodeId: "stable-node-empty-0001", nodeName: "空闲节点", status: "active", revokedAt: null };
+  let auditWrites = 0;
+  registerH3SharedRoutes(isolated, {
+    getCollection: async (name) => ({
+      nodeAccountBindings: { findOne: async () => binding, updateOne: async () => ({ modifiedCount: 1 }) },
+      users: { findOne: async () => ({ _id: userId, email: "empty@example.com", status: "active" }) },
+      h3SharedTasks: { find: () => testCursor([]) },
+      h3TaskAudits: { insertOne: async () => { auditWrites++; return {}; } },
+    })[name] || { find: () => testCursor([]), findOne: async () => null, updateOne: async () => ({}), insertOne: async () => ({}) },
+    enforceRateLimit: async () => ({ allowed: true }),
+    queueCoordinator: { snapshot: async () => ({ cached: true, queuedCount: 0, activeNodeCount: 1, oldestQueuedAt: null, cacheAgeMs: 0 }), invalidate: async () => {} },
+  });
+  const response = await isolated.request("http://localhost/api/h3/tasks/claim", {
+    method: "POST",
+    headers: { "content-type": "application/json", [H3_ACCOUNT_BINDING_HEADER]: `gab_${"e".repeat(48)}` },
+    body: JSON.stringify({ node_id: binding.nodeId, node_name: binding.nodeName, capabilities: { max_duration_seconds: 15, profiles: ["balanced"], sampling_steps: [4], max_image_count: 9, max_video_count: 3, max_audio_count: 3 } }),
+  });
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.task, null);
+  assert.equal(payload.claim_plan.assigned_count, 0);
+  assert.equal(auditWrites, 0);
+});
+
 test("H3 claim assigns the oldest task to the least-loaded bound LAN node", async () => {
   const isolated = new OpenAPIHono();
   const userId = new ObjectId();
