@@ -473,6 +473,9 @@ function publicOrder(order, issueDownloadUrl, queue = null) {
     eta_seconds: order.etaSeconds == null ? null : integer(order.etaSeconds),
     queue_position: order.status === "queued" ? queue?.position ?? null : null,
     estimated_wait_seconds: order.status === "queued" ? queue?.estimatedWaitSeconds ?? null : null,
+    queue_reason_code: order.status === "queued" ? queue?.reasonCode ?? null : null,
+    queue_message: order.status === "queued" ? queue?.message ?? null : null,
+    auto_cancel_at: order.autoCancelAt || null,
     attempt: integer(order.attempt),
     max_attempts: integer(order.maxAttempts),
     preferred_node_id: order.preferredNodeId || null,
@@ -480,7 +483,8 @@ function publicOrder(order, issueDownloadUrl, queue = null) {
     billing: { currency: "CNY", price_fen: integer(order.priceFen), charge_status: order.chargeStatus, refund_status: order.refundStatus },
     inline_result: order.inlineResult || null,
     results,
-    error: order.error || null,
+    error: order.cancelReason === "queue_timeout"
+      ? { code: "CAPABILITY_QUEUE_TIMEOUT", message: "排队截止前没有兼容节点完成任务，订单已自动结束。请稍后重试。" } : order.error || null,
     cancellation_tombstone: Boolean(order.cancellationTombstone),
     created_at: order.createdAt,
     claimed_at: order.claimedAt || null,
@@ -524,30 +528,33 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
   const gulongEntitlement = dependencies.readGulongEngineEntitlement || ((ownerId, now) => readGulongEngineEntitlement(ownerId, now, getCollection));
   const requestKey = (ownerId, key) => createHash("sha256").update(`${ownerId}:${key}`).digest("hex");
 
-  async function videoAvailability(ownerId, now = new Date()) {
-    const video = CAPABILITY_MAP.get("gulong_engine.video");
-    if (!video?.dispatchable) return { verified_node_count: 0, free_slot_count: 0, status: "adapter_required" };
+  async function gulongAvailability(capabilityId, ownerId, { order = null, now = new Date() } = {}) {
+    const capability = CAPABILITY_MAP.get(capabilityId);
+    if (!capability?.dispatchable) return { verified_node_count: 0, free_slot_count: 0, status: "adapter_required" };
     const reports = await (await getCollection("capabilityNodeReports"))
-      .find({ "capabilities.capabilityId": video.capabilityId, reportedAt: { $gte: new Date(now.getTime() - 3 * 60_000) } })
-      .limit(100).toArray();
+      .find({ "capabilities.capabilityId": capabilityId, reportedAt: { $gte: new Date(now.getTime() - 3 * 60_000) } })
+      .limit(200).toArray();
     if (!reports.length) return { verified_node_count: 0, free_slot_count: 0, status: "offline" };
     const bindings = await (await getCollection("nodeAccountBindings"))
       .find({ _id: { $in: reports.map((report) => report.bindingId) }, status: "active", revokedAt: null }).toArray();
-    const activeBindings = new Set(bindings.map((binding) => String(binding._id)));
+    const activeBindings = new Map(bindings.map((binding) => [String(binding._id), binding]));
     let nodeCount = 0;
     let freeSlots = 0;
     for (const report of reports) {
-      if (!activeBindings.has(String(report.bindingId))) continue;
-      const capability = report.capabilities?.find((item) => item.capabilityId === video.capabilityId
+      const binding = activeBindings.get(String(report.bindingId));
+      if (!binding || binding.nodeId !== report.nodeId || String(binding.userId) !== String(report.userId)
+        || report.protocolVersion !== CAPABILITY_ORDER_PROTOCOL) continue;
+      const reportedCapability = report.capabilities?.find((item) => item.capabilityId === capabilityId
         && item.installed && item.validated && item.enabled
-        && (item.supportedModels || []).includes("minimax_h3")
-        && new Date(item.validation?.testedAt || 0) >= new Date(now.getTime() - CAPABILITY_REPORT_MAX_AGE_MS)
-        && (String(report.userId) === String(ownerId) || item.sharingOptIn));
-      if (!capability) continue;
+        && new Date(item.validation?.testedAt || 0) >= new Date(now.getTime() - CAPABILITY_REPORT_MAX_AGE_MS));
+      if (!reportedCapability) continue;
+      const availableSlots = Math.max(0, Math.min(integer(reportedCapability.maxConcurrent, 1), integer(report.resources?.max_concurrent_tasks, integer(reportedCapability.maxConcurrent, 1))) - integer(report.resources?.running_task_count));
+      if (!capabilityNodeCanRunOrder({ nodeId: report.nodeId, binding, availableSlots: Math.max(1, availableSlots), capabilities: [reportedCapability] },
+        order || { capabilityId, requesterUserId: ownerId, sharingScope: "gulong_shared" })) continue;
       nodeCount += 1;
-      freeSlots += Math.max(0, Math.min(integer(capability.maxConcurrent, 1), integer(report.resources?.max_concurrent_tasks, 1)) - integer(report.resources?.running_task_count));
+      freeSlots += availableSlots;
     }
-    return { verified_node_count: nodeCount, free_slot_count: freeSlots, status: nodeCount ? "ready" : "offline" };
+    return { verified_node_count: nodeCount, free_slot_count: freeSlots, status: freeSlots ? "ready" : nodeCount ? "busy" : "offline" };
   }
 
   async function queueSnapshot(order) {
@@ -556,9 +563,16 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       capabilityId: order.capabilityId, status: "queued",
       $or: [{ createdAt: { $lt: order.createdAt } }, { createdAt: order.createdAt, _id: { $lte: order._id } }],
     });
-    const availability = order.capabilityId === "gulong_engine.video" ? await videoAvailability(order.requesterUserId) : null;
-    return { position, estimatedWaitSeconds: availability?.free_slot_count
-      ? Math.ceil(Math.max(0, position - 1) * CAPABILITY_MAP.get(order.capabilityId).defaultEtaSeconds / availability.free_slot_count) : null };
+    const availability = isGulongEngineCapability(order.capabilityId)
+      ? await gulongAvailability(order.capabilityId, order.requesterUserId, { order }) : null;
+    return {
+      position,
+      estimatedWaitSeconds: availability?.free_slot_count
+        ? Math.ceil(Math.max(0, position - 1) * CAPABILITY_MAP.get(order.capabilityId).defaultEtaSeconds / availability.free_slot_count) : null,
+      reasonCode: availability?.status === "offline" ? "NO_COMPATIBLE_NODE" : availability?.status === "busy" ? "NODES_BUSY" : null,
+      message: availability?.status === "offline" ? "当前没有在线且已验证的兼容共享节点，任务仍在排队；截止前仍无人接单将自动结束。"
+        : availability?.status === "busy" ? "兼容节点正在处理其他任务，当前继续排队。" : null,
+    };
   }
 
   async function requireEnglish(c, ownerId) {
@@ -608,7 +622,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
         await orders.updateOne({ _id: order._id, status: order.status, claimLeaseUntil: { $lte: now } }, { $set: { status: "failed", stage: "failed", error: { code: "CAPABILITY_EXECUTION_TIMEOUT", message: "节点执行超时，已达到最大重试次数" }, failedAt: now, updatedAt: now } });
       }
     }
-    await orders.updateMany({ status: "queued", autoCancelAt: { $lte: now } }, { $set: { status: "cancelled", stage: "cancelled", cancelReason: "queue_timeout", cancelledAt: now, updatedAt: now } });
+    await orders.updateMany({ status: "queued", autoCancelAt: { $lte: now } }, { $set: { status: "cancelled", stage: "cancelled", cancelReason: "queue_timeout", error: { code: "CAPABILITY_QUEUE_TIMEOUT", message: "排队截止前没有兼容节点完成任务，订单已自动结束。请稍后重试。" }, cancelledAt: now, updatedAt: now } });
   }
 
   async function ownedAssets(ownerId, refs, capability) {
@@ -636,8 +650,10 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       : auth.kind === "desktop-gulong-engine" ? CAPABILITY_ORDER_DEFINITIONS.filter((item) => isGulongEngineCapability(item.capabilityId)) : CAPABILITY_ORDER_DEFINITIONS;
     c.header("Cache-Control", "private, no-store, max-age=0");
     const capabilities = definitions.map(publicDefinition);
-    const video = capabilities.find((item) => item.capability_id === "gulong_engine.video");
-    if (video) video.availability = await videoAvailability(auth.user.id);
+    for (const item of capabilities.filter((entry) => isGulongEngineCapability(entry.capability_id))) {
+      item.availability = await gulongAvailability(item.capability_id, auth.user.id);
+      item.dispatchable = item.dispatchable && item.availability.verified_node_count > 0;
+    }
     return c.json({ protocol_version: CAPABILITY_ORDER_PROTOCOL, capabilities });
   });
 
@@ -742,6 +758,12 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     }
     if (isEnglishCapability(capabilityId)) { const rejected = await requireEnglish(c, ownerId); if (rejected) return rejected; }
     if (isGulongEngineCapability(capabilityId)) { const rejected = await requireGulong(c, ownerId); if (rejected) return rejected; }
+    if (isGulongEngineCapability(capabilityId)) {
+      const availability = await gulongAvailability(capabilityId, ownerId, {
+        order: { capabilityId, requesterUserId: ownerId, sharingScope: "gulong_shared", preferredNodeId, capabilityVersion: requestedCapabilityVersion, parameters },
+      });
+      if (!availability.verified_node_count) return c.json({ code: "CAPABILITY_NO_COMPATIBLE_NODE", message: "当前没有在线且已验证的兼容共享节点，暂不能创建任务，请稍后重试。", availability }, 409);
+    }
     const now = new Date();
     const orderId = new ObjectId();
     const estimate = capability.defaultEtaSeconds;
@@ -1071,11 +1093,11 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/by-request/{key}", tags: ["Unified Capability Orders"], summary: "按同账户稳定请求编号恢复订单", responses: { 200: { description: "自己的原订单；套餐到期仍可查询" }, 404: { description: "尚无该请求" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders/by-request/{key}/cancel", tags: ["Unified Capability Orders"], summary: "按请求编号幂等取消并阻止迟到创建", responses: { 200: { description: "原订单或原子cancelled tombstone；不会产生新执行任务" } } });
   const reportSchema = z.object({ capability_id: z.string(), capability_version: z.string(), protocol_version: z.literal(CAPABILITY_ORDER_PROTOCOL), installed: z.literal(true), validated: z.literal(true), enabled: z.literal(true), max_concurrent: z.number().int().min(1).max(16), sharing_opt_in: z.boolean().optional(), validation: z.object({ tested_at: z.iso.datetime(), artifact_sha256: z.string().regex(/^[A-Fa-f0-9]{64}$/), runtime_version: z.string().optional(), test_id: z.string().optional() }) });
-  app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/catalog", tags: ["Unified Capability Orders"], summary: "读取官网统一能力目录", description: "english_coach.* 已全部转为 local_only，不再接受新派单；历史合法订单仍可查询、取消或沿原生命周期完成。gulong_engine.video 独立零价合同提供网页 H3 对齐的视频参数、9 图/3 视频/3 音频素材规则及 availability（verified_node_count、free_slot_count、status）。真实节点完成消费适配验收前 dispatchable=false，不能创建订单；收费 /api/h3/tasks 始终独立。", responses: { 200: { description: "能力 ID、版本化 parameters JSON Schema、素材/输出 role 与 MIME/数量/大小、真实节点可用性、租约和旧接口路由" } } });
+  app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/catalog", tags: ["Unified Capability Orders"], summary: "读取官网统一能力目录", description: "english_coach.* 已全部转为 local_only。gulong_engine.* 的 dispatchable 根据近 3 分钟真实上报、有效绑定、30 天内推理验证与共享授权动态计算；availability 返回 verified_node_count、free_slot_count、status=ready|busy|offline|adapter_required。busy 表示有兼容节点但暂无线程空位，仍可排队；offline 不接受新任务。gulong_engine.video 在消费适配完成前始终 adapter_required；收费 /api/h3/tasks 独立。目录不缓存，不保证随后创建时可用性不变。", responses: { 200: { description: "能力合同与实时节点可用性" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-assets/presign", tags: ["Unified Capability Orders"], summary: "签发能力订单输入素材 COS 直传票据", description: "英语教练新录音已在桌面端本地处理，英语桌面凭据调用返回 409 CAPABILITY_LOCAL_ONLY；已签发旧票据可按原合同完成校验。其他产品能力不变。", responses: { 201: { description: "账号专属短时 PUT 票据" }, 409: { description: "英语教练新录音已改为本地处理" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-assets/{id}/complete", tags: ["Unified Capability Orders"], summary: "校验能力订单输入素材大小、摘要与归属", responses: { 200: { description: "返回安全 asset_id" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders", tags: ["Unified Capability Orders"], summary: "幂等创建同账户本地能力订单", description: "english_coach.* 新任务已改为本地处理，返回 409 CAPABILITY_LOCAL_ONLY；旧订单仍可读取或取消。BIN、模型配件和 runtime 不是独立能力。收费 minimax_h3.video_generation 继续使用 /api/h3/tasks；零价 gulong_engine.video 保持独立能力 ID，并在消费者完成真实验收前返回 409 CAPABILITY_ADAPTER_REQUIRED。v1 本地能力订单价格为 0 分，不扣钱包且无分佣。", responses: { 201: { description: "订单已进入同账户节点队列，包含 queue_position 和 ETA" }, 409: { description: "英语能力改为本地处理、幂等冲突、能力适配未验收或应使用旧 H3 接口" } } });
-  app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/{id}", tags: ["Unified Capability Orders"], summary: "查询订单进度、排队位置、ETA 与短时结果下载票据", responses: { 200: { description: "仅返回本人订单；排队时含 queue_position、estimated_wait_seconds，执行时含 progress、eta_seconds" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders", tags: ["Unified Capability Orders"], summary: "幂等创建同账户本地能力订单", description: "english_coach.* 新任务已改为本地处理，返回 409 CAPABILITY_LOCAL_ONLY；旧订单仍可读取或取消。BIN、模型配件和 runtime 不是独立能力。收费 minimax_h3.video_generation 继续使用 /api/h3/tasks；零价 gulong_engine.video 在消费者完成真实验收前返回 409 CAPABILITY_ADAPTER_REQUIRED。gulong_engine.text/image 若无实时兼容节点返回 409 CAPABILITY_NO_COMPATIBLE_NODE，不创建订单；已创建的旧订单不受此创建门禁影响。v1 本地能力订单价格为 0 分，不扣钱包且无分佣。", responses: { 201: { description: "订单已入队，含 queue_position、auto_cancel_at、queue_reason_code、queue_message" }, 409: { description: "本地处理、无兼容节点、幂等冲突、适配未验收或旧 H3 接口" } } });
+  app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/{id}", tags: ["Unified Capability Orders"], summary: "查询订单进度、排队位置、ETA 与短时结果下载票据", responses: { 200: { description: "仅返回本人订单；排队含 queue_position、estimated_wait_seconds、queue_reason_code、queue_message、auto_cancel_at；排队超时返回 cancelled、CAPABILITY_QUEUE_TIMEOUT；执行含 progress、eta_seconds" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders/{id}/cancel", tags: ["Unified Capability Orders"], summary: "幂等取消能力订单", responses: { 200: { description: "取消状态与零费用退款边界" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/{id}/worker-state", tags: ["Unified Capability Orders"], summary: "执行节点轮询取消与租约状态", description: "执行节点每 15 秒轮询；claim_id 必须匹配且只能由 assigned_node 自己的绑定令牌读取。started/progress 回调会把 5 分钟租约重新续满。", security: [{ accountBinding: [] }], request: { query: z.object({ claim_id: z.string().min(8) }) }, responses: { 200: { description: "cancellation_requested、should_stop 与 lease_expires_at" }, 409: { description: "订单未分配或 claim 不匹配" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders/claim", tags: ["Unified Capability Orders"], summary: "按同账户、FIFO 与最短预计负载领取能力订单", description: "节点只能上报 installed=true、validated=true、enabled=true 且 30 天内完成真实推理验证的能力。局域网中所有候选节点都必须绑定同一账户；可指定执行节点，只有指定节点自己的 X-Gulong-Account-Binding 可回调。dry_run=true 不领取。", security: [{ accountBinding: [] }], request: { body: { content: { "application/json": { schema: z.object({ protocol_version: z.literal(CAPABILITY_ORDER_PROTOCOL), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: z.array(reportSchema).min(1), resources: z.object({ running_task_count: z.number().int().min(0), estimated_total_seconds: z.number().int().min(0), max_concurrent_tasks: z.number().int().min(1).max(16) }), lan_cluster: z.object({ cluster_id: z.string(), nodes: z.array(z.object({ node_id: z.string(), node_name: z.string(), capabilities: z.array(reportSchema), resources: z.object({ running_task_count: z.number().int().min(0), estimated_total_seconds: z.number().int().min(0), max_concurrent_tasks: z.number().int().min(1).max(16) }) })) }).optional() }) } } } }, responses: { 200: { description: "最小权限 worker task、素材短时下载票据与输出上传入口" } } });

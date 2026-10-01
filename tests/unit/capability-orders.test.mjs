@@ -153,17 +153,130 @@ test("OpenAPI publishes the versioned create, claim, output and callback contrac
 test("Gulong video catalog exposes the full zero-price contract but no unverified node", async () => {
   const app = new OpenAPIHono();
   registerCapabilityOrderRoutes(app, {
+    getCollection: async () => ({ find: () => ({ limit: () => ({ toArray: async () => [] }) }) }),
     authenticate: async () => ({ user: { id: new ObjectId().toString() }, kind: "desktop-gulong-engine" }),
     requireTrustedMutation: () => null,
   });
   const response = await app.request("http://localhost/api/v1/capability-orders/catalog");
   assert.equal(response.status, 200);
-  const video = (await response.json()).capabilities.find((item) => item.capability_id === "gulong_engine.video");
+  const capabilities = (await response.json()).capabilities;
+  const video = capabilities.find((item) => item.capability_id === "gulong_engine.video");
   assert.equal(video.price_fen, 0);
   assert.equal(video.dispatchable, false);
   assert.deepEqual(video.availability, { verified_node_count: 0, free_slot_count: 0, status: "adapter_required" });
   assert.equal(video.max_assets, 15);
   assert.deepEqual(video.input_assets.map((item) => item.max_count), [9, 3, 3]);
+  const text = capabilities.find((item) => item.capability_id === "gulong_engine.text");
+  assert.equal(text.dispatchable, false);
+  assert.deepEqual(text.availability, { verified_node_count: 0, free_slot_count: 0, status: "offline" });
+});
+
+test("Gulong catalog only advertises live verified compatible nodes, including busy nodes", async () => {
+  const ownerId = new ObjectId();
+  const otherId = new ObjectId();
+  const binding = { _id: new ObjectId(), userId: otherId, nodeId: "shared-text-node", status: "active", revokedAt: null };
+  const report = {
+    bindingId: binding._id, userId: otherId, nodeId: binding.nodeId, protocolVersion: CAPABILITY_ORDER_PROTOCOL,
+    reportedAt: new Date(), resources: { max_concurrent_tasks: 1, running_task_count: 0 },
+    capabilities: [{ capabilityId: "gulong_engine.text", capabilityVersion: "1", installed: true, validated: true, enabled: true,
+      sharingOptIn: true, maxConcurrent: 1, validation: { testedAt: new Date(), artifactSha256: "A".repeat(64) } }],
+  };
+  const app = new OpenAPIHono();
+  registerCapabilityOrderRoutes(app, {
+    getCollection: async (name) => name === "capabilityNodeReports"
+      ? { find: () => ({ limit: () => ({ toArray: async () => [report] }) }) }
+      : { find: () => ({ toArray: async () => [binding] }) },
+    authenticate: async () => ({ user: { id: ownerId.toString() }, kind: "desktop-gulong-engine" }),
+    requireTrustedMutation: () => null,
+  });
+  const load = async () => (await (await app.request("http://localhost/api/v1/capability-orders/catalog")).json()).capabilities.find((item) => item.capability_id === "gulong_engine.text");
+  assert.deepEqual((await load()).availability, { verified_node_count: 1, free_slot_count: 1, status: "ready" });
+  report.resources.running_task_count = 1;
+  const busy = await load();
+  assert.equal(busy.dispatchable, true);
+  assert.deepEqual(busy.availability, { verified_node_count: 1, free_slot_count: 0, status: "busy" });
+  report.resources.running_task_count = 0;
+  report.capabilities[0].sharingOptIn = false;
+  assert.equal((await load()).dispatchable, false);
+  report.capabilities[0].sharingOptIn = true;
+  report.capabilities[0].validation.testedAt = new Date(Date.now() - 31 * 24 * 60 * 60_000);
+  assert.equal((await load()).availability.status, "offline");
+});
+
+test("an existing Gulong text order reports no-node queue reason and exact deadline without mutation", async () => {
+  const userId = new ObjectId();
+  const deadline = new Date(Date.now() + 60_000);
+  const order = { _id: new ObjectId(), requesterUserId: userId, orderNo: "CAP-TEXT-WAITING", capabilityId: "gulong_engine.text",
+    status: "queued", stage: "queued", createdAt: new Date(), autoCancelAt: deadline, priceFen: 0, chargeStatus: "exempt", refundStatus: "not_applicable" };
+  let orderWrites = 0;
+  const app = new OpenAPIHono();
+  registerCapabilityOrderRoutes(app, {
+    getCollection: async (name) => name === "capabilityOrders" ? {
+      find: () => ({ limit: () => ({ toArray: async () => [] }) }),
+      updateMany: async () => { orderWrites += 1; },
+      findOne: async () => order,
+      countDocuments: async () => 2,
+    } : { find: () => ({ limit: () => ({ toArray: async () => [] }) }) },
+    authenticate: async () => ({ user: { id: userId.toString() }, kind: "desktop-gulong-engine" }),
+    requireTrustedMutation: () => null,
+  });
+  const response = await app.request(`http://localhost/api/v1/capability-orders/${order._id}`);
+  assert.equal(response.status, 200);
+  const result = (await response.json()).order;
+  assert.equal(result.status, "queued");
+  assert.equal(result.queue_position, 2);
+  assert.equal(result.queue_reason_code, "NO_COMPATIBLE_NODE");
+  assert.match(result.queue_message, /没有在线且已验证的兼容共享节点/);
+  assert.equal(result.auto_cancel_at, deadline.toISOString());
+  assert.equal(orderWrites, 1); // The existing expiry scan executes but finds no due order.
+  assert.equal(order.status, "queued");
+});
+
+test("new Gulong text orders are rejected without a compatible live node, without inserting an order", async () => {
+  const userId = new ObjectId();
+  let inserted = 0;
+  const app = new OpenAPIHono();
+  registerCapabilityOrderRoutes(app, {
+    getCollection: async (name) => name === "capabilityOrders"
+      ? { findOne: async () => null, insertOne: async () => { inserted += 1; } }
+      : { find: () => ({ limit: () => ({ toArray: async () => [] }) }) },
+    authenticate: async () => ({ user: { id: userId.toString() }, kind: "desktop-gulong-engine" }),
+    requireTrustedMutation: () => null,
+    enforceRateLimit: async () => ({ allowed: true }),
+    readGulongEngineEntitlement: async () => ({ active: true }),
+  });
+  const response = await app.request("http://localhost/api/v1/capability-orders", {
+    method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": "offline-text-0001" },
+    body: JSON.stringify({ capability_id: "gulong_engine.text", parameters: { prompt: "测试请求" } }),
+  });
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).code, "CAPABILITY_NO_COMPATIBLE_NODE");
+  assert.equal(inserted, 0);
+});
+
+test("expired queued orders return a stable Chinese failure receipt on read", async () => {
+  const userId = new ObjectId();
+  const order = { _id: new ObjectId(), requesterUserId: userId, orderNo: "CAP-TEXT-EXPIRED", capabilityId: "gulong_engine.text",
+    status: "queued", createdAt: new Date(Date.now() - 120_000), autoCancelAt: new Date(Date.now() - 60_000), priceFen: 0 };
+  const app = new OpenAPIHono();
+  registerCapabilityOrderRoutes(app, {
+    getCollection: async () => ({
+      find: () => ({ limit: () => ({ toArray: async () => [] }) }),
+      updateMany: async (filter, update) => {
+        if (filter.status === "queued" && filter.autoCancelAt?.$lte) Object.assign(order, update.$set);
+      },
+      findOne: async () => order,
+    }),
+    authenticate: async () => ({ user: { id: userId.toString() }, kind: "desktop-gulong-engine" }),
+    requireTrustedMutation: () => null,
+  });
+  const response = await app.request(`http://localhost/api/v1/capability-orders/${order._id}`);
+  assert.equal(response.status, 200);
+  const receipt = (await response.json()).order;
+  assert.equal(receipt.status, "cancelled");
+  assert.equal(receipt.error.code, "CAPABILITY_QUEUE_TIMEOUT");
+  assert.match(receipt.error.message, /排队截止前/);
+  assert.equal(receipt.auto_cancel_at, order.autoCancelAt.toISOString());
 });
 
 test("queued orders expose FIFO position without inventing an ETA while no verified video node is ready", async () => {
