@@ -444,7 +444,7 @@ function publicH3ConversationMessage(message, now = new Date()) {
   };
 }
 
-function publicH3ConversationTask(task) {
+export function publicH3ConversationTask(task) {
   return {
     id: task._id.toString(),
     orderNo: task.orderNo,
@@ -455,7 +455,7 @@ function publicH3ConversationTask(task) {
     remainingSeconds: Math.max(0, integer(task.remainingSeconds)),
     expectedCompletedAt: task.expectedCompletedAt || null,
     autoCancelAt: task.autoCancelAt || null,
-    error: task.error ? { ...task.error, message: localizeErrorMessage(task.error.message, "共享节点任务处理失败") } : null,
+    error: task.error ? { ...task.error, message: publicH3WorkerFailureMessage(task.error.code, task.error.message) } : null,
     progressUpdatedAt: task.progressUpdatedAt || task.updatedAt || null,
     progressStage: task.progressStage || null,
     createdAt: task.createdAt,

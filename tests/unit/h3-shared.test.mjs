@@ -18,6 +18,7 @@ import {
   h3OutputExpiresAt,
   h3NodeCanRunTask,
   isH3GpuStartupFailure,
+  publicH3ConversationTask,
   publicH3WorkerFailureMessage,
   h3TaskAutoCancelAt,
   cleanupExpiredH3Output,
@@ -218,6 +219,12 @@ test("GPU startup stack traces are recognized but never shown to website users",
   const message = publicH3WorkerFailureMessage("NODE_EXECUTION_FAILED", stack);
   assert.match(message, /GPU 推理内核启动失败/);
   assert.doesNotMatch(message, /RuntimeError|comfy-kitchen|网关就绪/);
+  const legacyFailedTask = publicH3ConversationTask({
+    _id: new ObjectId(), orderNo: "H3-LEGACY-GPU-FAILURE", status: "failed", progress: 0,
+    error: { code: "NODE_EXECUTION_FAILED", message: stack },
+  });
+  assert.match(legacyFailedTask.error.message, /GPU 推理内核启动失败/);
+  assert.doesNotMatch(legacyFailedTask.error.message, /RuntimeError|comfy-kitchen|网关就绪/);
 });
 
 test("unclaimed H3 tasks cannot be failed by a bound node", async () => {
