@@ -25,15 +25,17 @@ import { GULONG_ENGINE_WALLET_SOURCE, creditGulongEngineSubscriptionBalance, rec
 const now = new Date("2026-09-24T08:00:00.000Z");
 const period = { currentPeriodStart: new Date("2026-09-01T00:00:00.000Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00.000Z"), enabled: true, status: "active" };
 
-test("古龙引擎包月有独立 198 元权益，不伪装普通会员", () => {
+test("古龙引擎包月有独立 999 元权益，不伪装普通会员", () => {
   assert.equal(GULONG_ENGINE_PLAN_ID, "gulong_engine_monthly");
-  assert.equal(GULONG_ENGINE_MONTHLY_PRICE_FEN, 19_800);
+  assert.equal(GULONG_ENGINE_MONTHLY_PRICE_FEN, 99_900);
   assert.equal(GULONG_ENGINE_PRODUCT.name, "古龙引擎包月");
+  assert.equal(GULONG_ENGINE_PRODUCT.monthlyFen, 99_900);
+  assert.equal(SUBSCRIPTION_PRODUCTS.find((item) => item.id === GULONG_ENGINE_PLAN_ID).monthlyFen, 99_900);
   assert.equal(GULONG_ENGINE_PRODUCT.yearlyFen, null);
   const subscription = { plan: GULONG_ENGINE_PLAN_ID, products: { [GULONG_ENGINE_PLAN_ID]: period } };
   const entitlement = gulongEngineEntitlement(subscription, now);
   assert.equal(entitlement.active, true);
-  assert.deepEqual(entitlement.capabilities, ["pearapi.free_text", "brain.read", "brain.write", "gulong_engine.text", "gulong_engine.image", "gulong_engine.video", "minimax_h3_shared.video"]);
+  assert.deepEqual(entitlement.capabilities, ["pearapi.free_text", "brain.read", "brain.write", "gulong_engine.text", "gulong_engine.image", "gulong_engine.image_2k", "gulong_engine.tts", "gulong_engine.video", "minimax_h3_shared.video"]);
   assert.equal(legacyAccessSubscription(subscription, now).status, "active");
   assert.equal(legacyAccessSubscription(subscription, now).plan, GULONG_ENGINE_PLAN_ID);
   assert.equal(subscriptionProducts(subscription, now).find((item) => item.id === GULONG_ENGINE_PLAN_ID).status, "active");
@@ -113,7 +115,7 @@ test("管理员单独调整古龙引擎有效期不会覆盖英语教练或普�
 });
 
 test("绿色版能力价格固定 0 分，视频在真实适配器上线前不可派单", () => {
-  assert.deepEqual(GULONG_ENGINE_CAPABILITY_DEFINITIONS.map((item) => item.capabilityId), ["gulong_engine.text", "gulong_engine.image", "gulong_engine.video"]);
+  assert.deepEqual(GULONG_ENGINE_CAPABILITY_DEFINITIONS.map((item) => item.capabilityId), ["gulong_engine.text", "gulong_engine.image", "gulong_engine.image_2k", "gulong_engine.tts", "gulong_engine.video"]);
   assert.ok(GULONG_ENGINE_CAPABILITY_DEFINITIONS.every((item) => item.priceFen === 0 && item.sharingScope === "gulong_shared"));
   const video = GULONG_ENGINE_CAPABILITY_DEFINITIONS.find((item) => item.capabilityId === "gulong_engine.video");
   assert.equal(video.dispatchable, false);
@@ -148,6 +150,23 @@ test("绿色版能力价格固定 0 分，视频在真实适配器上线前不�
   const parameters = normalizeCapabilityParameters({ model: "zimage", prompt: "真实测试" }, image);
   assert.equal(parameters.width, 1024);
   assert.throws(() => normalizeCapabilityParameters({ model: "unknown", prompt: "test" }, image), (error) => error.code === "INVALID_CAPABILITY_PARAMETERS");
+  const image2k = GULONG_ENGINE_CAPABILITY_DEFINITIONS.find((item) => item.capabilityId === "gulong_engine.image_2k");
+  assert.equal(image2k.requiredCapabilityVersion, "1.0.0");
+  assert.equal(image2k.assetRules[0].max, 10);
+  const image2kParams = normalizeCapabilityParameters({ model: "qwen_image_2_1", task: "multi_image_edit", prompt: "十张图生成海报", width: 1792, height: 2400 }, image2k);
+  assert.equal(image2kParams.prompt_enhancement, "none");
+  const tenReferences = Array.from({ length: 10 }, (_, index) => ({ assetId: `image-${index + 1}`, role: "reference_image", contentType: "image/png", bytes: 1024 }));
+  assert.doesNotThrow(() => validateCapabilityInput(image2k, image2kParams, tenReferences));
+  assert.throws(() => validateCapabilityInput(image2k, image2kParams, [...tenReferences, { ...tenReferences[0], assetId: "image-11" }]), (error) => error.code === "CAPABILITY_INPUT_LIMIT_EXCEEDED");
+  assert.throws(() => validateCapabilityInput(image2k, { ...image2kParams, task: "text_to_image" }, tenReferences), (error) => error.code === "INVALID_CAPABILITY_PARAMETERS");
+  assert.throws(() => validateCapabilityInput(image2k, { ...image2kParams, task: "multi_image_edit" }, []), (error) => error.code === "INVALID_CAPABILITY_PARAMETERS");
+  assert.throws(() => validateCapabilityInput(image2k, { ...image2kParams, width: 2400, height: 2400 }, tenReferences), (error) => error.code === "INVALID_CAPABILITY_PARAMETERS");
+  assert.throws(() => validateCapabilityInput(image2k, { ...image2kParams, generation_mode: "fast_lora_6" }, tenReferences), (error) => error.code === "INVALID_CAPABILITY_PARAMETERS");
+  assert.doesNotThrow(() => validateCapabilityInput(image2k, { ...image2kParams, generation_mode: "fast_lora_6", steps: 6, prompt_enhancement: "local" }, tenReferences));
+  const image2kReport = { capability_id: image2k.capabilityId, capability_version: "1.0.0", protocol_version: "gulong-capability-orders-v1", installed: true, validated: true, enabled: true, supported_models: ["qwen_image_2_1"], sharing_opt_in: true, validation: { tested_at: new Date().toISOString(), artifact_sha256: "A".repeat(64) } };
+  assert.equal(normalizeCapabilityReport(image2kReport).capabilityVersion, "1.0.0");
+  assert.throws(() => normalizeCapabilityReport({ ...image2kReport, capability_version: "2.1" }), (error) => error.code === "CAPABILITY_VERSION_UNSUPPORTED");
+  assert.throws(() => normalizeCapabilityReport({ ...image2kReport, supported_models: [] }), (error) => error.code === "CAPABILITY_VERSION_UNSUPPORTED");
 });
 
 test("跨账户共享需要显式同意和真实验证；文本结果拒绝空值与超限内容", () => {

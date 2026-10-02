@@ -13,9 +13,9 @@
 | 注销 | `POST /api/v1/desktop/gulong-engine/auth/logout` | `{ "ok":true }` |
 | 权益 | `GET /api/v1/desktop/gulong-engine/account` | `user`、`entitlement`、`checked_at` |
 
-登录 JSON 为 `{ "identifier":"用户名或邮箱", "password":"密码" }`；刷新 JSON 为 `{ "refresh_token":"gge_rt_..." }`；注销携带访问令牌和可选刷新令牌。权益 `product="gulong_engine"`、`plan_id="gulong_engine_monthly"`、`monthly_price_fen=19800`，`status` 为 `inactive|scheduled|active|expired`，并返回 `starts_at`、`expires_at`、`capabilities`。访问令牌 15 分钟，刷新会话最长 30 天；仅服务端保存令牌哈希。英语教练的 `gec_`、古龙的 `gge_` 令牌互不通用。到期拒绝新的模型或能力订单，历史结果仍允许本人查询。错误使用中文 `{ "code", "message" }`。
+登录 JSON 为 `{ "identifier":"用户名或邮箱", "password":"密码" }`；刷新 JSON 为 `{ "refresh_token":"gge_rt_..." }`；注销携带访问令牌和可选刷新令牌。权益 `product="gulong_engine"`、`plan_id="gulong_engine_monthly"`、`monthly_price_fen=99900`，`status` 为 `inactive|scheduled|active|expired`，并返回 `starts_at`、`expires_at`、`capabilities`（含 `gulong_engine.image_2k`）。访问令牌 15 分钟，刷新会话最长 30 天；仅服务端保存令牌哈希。英语教练的 `gec_`、古龙的 `gge_` 令牌互不通用。大展宏图绿色版复用该登录/刷新/账号权益合同；只有 `entitlement.active=true` 时可启动本机、局域网或官网共享生图任务。到期拒绝新任务，历史结果仍允许本人查询。错误使用中文 `{ "code", "message" }`。
 
-官网 `/pricing?tab=subscription` 支持 `planType=gulong_engine_monthly`、`cycle=month`、`provider=offline` 的 198 元线下审核订单。管理员可在“订阅用户”中独立设置该产品的生效和到期时间；手动设置有效期不等于收款，不触发余额入账。真实订单审核通过时才开通独立权益并按实付金额 1:1 入账，同一订单号重复审核不会重复入账。
+官网 `/pricing?tab=subscription` 支持 `planType=gulong_engine_monthly`、`cycle=month`、`provider=offline` 的 999 元线下审核订单。管理员可在“订阅用户”中独立设置该产品的生效和到期时间；手动设置有效期不等于收款，不触发余额入账。真实订单审核通过时才开通独立权益并按实付金额 1:1 入账，同一订单号重复审核不会重复入账。价格更新只适用于新订单；历史已审核订单和账本不追溯改价。
 
 ## 8 个免费文本模型
 
@@ -54,3 +54,7 @@
 目录为该能力额外返回 `availability:{"verified_node_count":0,"free_slot_count":0,"status":"adapter_required"}`。只有真实消费适配、节点已绑定且近期上报经验证的模型能力后，才可变为 `ready`。目前 `dispatchable=false`，`POST /api/v1/capability-orders` 返回 `409 CAPABILITY_ADAPTER_REQUIRED`，节点也不能上报它接单；为避免无效大文件占用 COS，绿色版视频/音频参考素材的预签名上传同样暂返回该错误码。不能用已有收费的 `/api/h3/tasks` 偷换成零价路径。将来开放后，创建和 `GET /api/v1/capability-orders/{id}` 返回 `queue_position`、`estimated_wait_seconds`（无空闲已验收节点时为 `null`）、`progress`、`eta_seconds`，供桌面端轮询展示。节点 `started/progress` 回调继续更新 ETA。
 
 节点沿用 `X-Gulong-Account-Binding: gab_...`，必须上报已安装、已验证、已启用、30 天内的验证摘要；服务其他账户时还必须明确 `sharing_opt_in=true`。订单领取、素材/输出签名地址、回调和幂等规则见 [统一能力订单合同](./unified-capability-orders-v1.md)。用户钱包、邮箱等敏感字段不会下发给执行节点。
+
+## 共享配音
+
+`gulong_engine_monthly` 生效时，权益 `capabilities` 还包含 `gulong_engine.tts`。具体文字/声音参数、节点上报、音频直传和真实 SHA-256 校验见[共享 TTS 合同](./gulong-shared-tts.md)；目录显示 `offline` 时不能创建任务，不能把后端合同已上线误认为有真实配音节点。

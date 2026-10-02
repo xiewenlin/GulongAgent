@@ -203,6 +203,120 @@ test("Gulong catalog only advertises live verified compatible nodes, including b
   assert.equal((await load()).availability.status, "offline");
 });
 
+test("native 2K catalog exposes the new contract as offline without an explicit versioned report", async () => {
+  const userId = new ObjectId();
+  const app = new OpenAPIHono();
+  registerCapabilityOrderRoutes(app, {
+    getCollection: async () => ({ find: () => ({ limit: () => ({ toArray: async () => [] }) }) }),
+    authenticate: async () => ({ user: { id: userId.toString() }, kind: "desktop-gulong-engine" }),
+    requireTrustedMutation: () => null,
+  });
+  const response = await app.request("http://localhost/api/v1/capability-orders/catalog");
+  assert.equal(response.status, 200);
+  const image = (await response.json()).capabilities.find((item) => item.capability_id === "gulong_engine.image_2k");
+  assert.equal(image.required_capability_version, "1.0.0");
+  assert.equal(image.dispatchable, false);
+  assert.deepEqual(image.availability, { verified_node_count: 0, free_slot_count: 0, status: "offline" });
+  assert.equal(image.input_assets[0].max_count, 10);
+  assert.deepEqual(image.parameters_schema.properties.prompt_enhancement.enum, ["none", "official", "local"]);
+});
+
+test("native 2K create requires an active membership and a verified node; no order is inserted while offline", async () => {
+  const userId = new ObjectId();
+  let inserted = 0;
+  let membershipActive = false;
+  const app = new OpenAPIHono();
+  registerCapabilityOrderRoutes(app, {
+    getCollection: async (name) => name === "capabilityOrders"
+      ? { findOne: async () => null, insertOne: async () => { inserted += 1; } }
+      : { find: () => ({ limit: () => ({ toArray: async () => [] }) }) },
+    authenticate: async () => ({ user: { id: userId.toString() }, kind: "desktop-gulong-engine" }),
+    requireTrustedMutation: () => null,
+    enforceRateLimit: async () => ({ allowed: true }),
+    readGulongEngineEntitlement: async () => ({ active: membershipActive }),
+  });
+  const request = () => app.request("http://localhost/api/v1/capability-orders", {
+    method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": "image-2k-0001" },
+    body: JSON.stringify({ capability_id: "gulong_engine.image_2k", parameters: { model: "qwen_image_2_1", task: "text_to_image", prompt: "山川海报", width: 1792, height: 2400 } }),
+  });
+  const forbidden = await request();
+  assert.equal(forbidden.status, 403);
+  assert.equal((await forbidden.json()).code, "GULONG_ENGINE_SUBSCRIPTION_REQUIRED");
+  membershipActive = true;
+  const unavailable = await request();
+  assert.equal(unavailable.status, 409);
+  assert.equal((await unavailable.json()).code, "CAPABILITY_NO_COMPATIBLE_NODE");
+  assert.equal(inserted, 0);
+});
+
+test("native 2K catalog requires the exact version, model, and sharing opt-in from another account", async () => {
+  const userId = new ObjectId();
+  const ownerId = new ObjectId();
+  const binding = { _id: new ObjectId(), userId: ownerId, nodeId: "verified-qwen-2k-node", status: "active", revokedAt: null };
+  const capability = { capabilityId: "gulong_engine.image_2k", capabilityVersion: "1.0.0", installed: true, validated: true, enabled: true,
+    supportedModels: ["qwen_image_2_1"], sharingOptIn: true, maxConcurrent: 1, validation: { testedAt: new Date() } };
+  const report = { bindingId: binding._id, userId: ownerId, nodeId: binding.nodeId, protocolVersion: CAPABILITY_ORDER_PROTOCOL,
+    reportedAt: new Date(), resources: { running_task_count: 0, max_concurrent_tasks: 1 }, capabilities: [capability] };
+  const app = new OpenAPIHono();
+  registerCapabilityOrderRoutes(app, {
+    getCollection: async (name) => name === "capabilityNodeReports"
+      ? { find: (filter) => ({ limit: () => ({ toArray: async () => filter["capabilities.capabilityId"] === capability.capabilityId ? [report] : [] }) }) }
+      : { find: () => ({ toArray: async () => [binding] }) },
+    authenticate: async () => ({ user: { id: userId.toString() }, kind: "desktop-gulong-engine" }),
+    requireTrustedMutation: () => null,
+  });
+  const load = async () => (await (await app.request("http://localhost/api/v1/capability-orders/catalog")).json()).capabilities.find((item) => item.capability_id === capability.capabilityId);
+  assert.deepEqual((await load()).availability, { verified_node_count: 1, free_slot_count: 1, status: "ready" });
+  capability.capabilityVersion = "2.1";
+  assert.equal((await load()).dispatchable, false);
+  capability.capabilityVersion = "1.0.0";
+  capability.sharingOptIn = false;
+  assert.equal((await load()).dispatchable, false);
+  capability.sharingOptIn = true;
+  capability.supportedModels = [];
+  assert.equal((await load()).dispatchable, false);
+});
+
+test("native 2K create preserves ten reference images in input order and charges zero", async () => {
+  const userId = new ObjectId();
+  const nodeOwnerId = new ObjectId();
+  const binding = { _id: new ObjectId(), userId: nodeOwnerId, nodeId: "qwen-2k-verified-node", status: "active", revokedAt: null };
+  const references = Array.from({ length: 10 }, (_, index) => ({ _id: new ObjectId(), ownerId: userId, filename: `ref-${index + 1}.png`,
+    contentType: "image/png", bytes: 1024, sha256: "A".repeat(64), objectKey: `test/ref-${index + 1}` }));
+  const report = { bindingId: binding._id, userId: nodeOwnerId, nodeId: binding.nodeId, protocolVersion: CAPABILITY_ORDER_PROTOCOL,
+    reportedAt: new Date(), resources: { running_task_count: 0, max_concurrent_tasks: 1 },
+    capabilities: [{ capabilityId: "gulong_engine.image_2k", capabilityVersion: "1.0.0", installed: true, validated: true,
+      enabled: true, supportedModels: ["qwen_image_2_1"], sharingOptIn: true, maxConcurrent: 1, validation: { testedAt: new Date() } }] };
+  let inserted = null;
+  const app = new OpenAPIHono();
+  registerCapabilityOrderRoutes(app, {
+    getCollection: async (name) => ({
+      capabilityOrders: { findOne: async () => null, insertOne: async (order) => { inserted = order; }, countDocuments: async () => 1 },
+      capabilityAssetUploads: { find: () => ({ toArray: async () => references }) },
+      capabilityNodeReports: { find: () => ({ limit: () => ({ toArray: async () => [report] }) }) },
+      nodeAccountBindings: { find: () => ({ toArray: async () => [binding] }) },
+    })[name],
+    authenticate: async () => ({ user: { id: userId.toString() }, kind: "desktop-gulong-engine" }),
+    requireTrustedMutation: () => null,
+    enforceRateLimit: async () => ({ allowed: true }),
+    readGulongEngineEntitlement: async () => ({ active: true }),
+  });
+  const response = await app.request("http://localhost/api/v1/capability-orders", {
+    method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": "image-2k-ten-references" },
+    body: JSON.stringify({ capability_id: "gulong_engine.image_2k", capability_version: "1.0.0", parameters: {
+      model: "qwen_image_2_1", task: "multi_image_edit", prompt: "保留十位人物的顺序", width: 1792, height: 2400,
+      generation_mode: "fast_lora_6", steps: 6, prompt_enhancement: "official",
+    }, assets: references.map((item) => ({ asset_id: item._id.toString(), role: "reference_image" })) }),
+  });
+  assert.equal(response.status, 201);
+  assert.equal(inserted.capabilityVersion, "1.0.0");
+  assert.equal(inserted.priceFen, 0);
+  assert.equal(inserted.chargeStatus, "exempt");
+  assert.equal(inserted.parameters.prompt_enhancement, "official");
+  assert.deepEqual(inserted.assets.map((item) => item.assetId), references.map((item) => item._id.toString()));
+  assert.equal((await response.json()).order.status, "queued");
+});
+
 test("an existing Gulong text order reports no-node queue reason and exact deadline without mutation", async () => {
   const userId = new ObjectId();
   const deadline = new Date(Date.now() + 60_000);

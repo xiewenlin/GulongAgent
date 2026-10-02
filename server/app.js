@@ -2321,7 +2321,7 @@ const getSubscriptionPricingRoute = createRoute({
   description: "公开返回古龙官网当前生效的会员价格及短视频包月固定价格。管理员发布会员价格后立即更新；响应禁止缓存，桌面端应在打开订阅页时重新拉取。",
   security: [],
   responses: {
-    200: { description: "当前生效的订阅价格与支付渠道快照", content: { "application/json": { schema: z.object({ revision: z.string(), currency: z.literal("CNY"), monthly: SubscriptionPricePointSchema, yearly: SubscriptionPricePointSchema, shortVideo: z.object({ id: z.literal("short_video_monthly"), name: z.literal("短视频包月"), monthlyFen: z.number().int(), yearlyFen: z.number().int(), paymentProviders: z.array(z.literal("offline")), walletCreditMultiplier: z.literal(1), unlimitedModel: z.literal("minimax_h3_shared") }), englishCoach: z.object({ id: z.literal("english_coach_monthly"), name: z.string(), monthlyFen: z.literal(19800), yearlyFen: z.null(), paymentProviders: z.array(z.literal("offline")) }), gulongEngine: z.object({ id: z.literal("gulong_engine_monthly"), name: z.string(), monthlyFen: z.literal(19800), yearlyFen: z.null(), paymentProviders: z.array(z.literal("offline")) }), updatedAt: z.coerce.date(), paymentAvailability: PaymentAvailabilitySchema }) } } },
+    200: { description: "当前生效的订阅价格与支付渠道快照", content: { "application/json": { schema: z.object({ revision: z.string(), currency: z.literal("CNY"), monthly: SubscriptionPricePointSchema, yearly: SubscriptionPricePointSchema, shortVideo: z.object({ id: z.literal("short_video_monthly"), name: z.literal("短视频包月"), monthlyFen: z.number().int(), yearlyFen: z.number().int(), paymentProviders: z.array(z.literal("offline")), walletCreditMultiplier: z.literal(1), unlimitedModel: z.literal("minimax_h3_shared") }), englishCoach: z.object({ id: z.literal("english_coach_monthly"), name: z.string(), monthlyFen: z.literal(19800), yearlyFen: z.null(), paymentProviders: z.array(z.literal("offline")) }), gulongEngine: z.object({ id: z.literal("gulong_engine_monthly"), name: z.string(), monthlyFen: z.literal(GULONG_ENGINE_MONTHLY_PRICE_FEN), yearlyFen: z.null(), paymentProviders: z.array(z.literal("offline")) }), updatedAt: z.coerce.date(), paymentAvailability: PaymentAvailabilitySchema }) } } },
   },
 });
 
@@ -7252,7 +7252,7 @@ app.post("/api/billing/orders", async (c) => {
   }
   if (!cycle && kind === "subscription") return c.json({ code: "VALIDATION_ERROR", message: "订阅周期不正确" }, 400);
   if (subscriptionPlan === ENGLISH_COACH_PLAN_ID && (cycle !== "month" || provider !== "offline")) return c.json({ code: "ENGLISH_MONTHLY_OFFLINE_REQUIRED", message: "英语教练为198元包月套餐，请使用月度线下付款审核渠道" }, 400);
-  if (subscriptionPlan === GULONG_ENGINE_PLAN_ID && (cycle !== "month" || provider !== "offline")) return c.json({ code: "GULONG_ENGINE_MONTHLY_OFFLINE_REQUIRED", message: "古龙绿色版为198元包月套餐，请使用月度线下付款审核渠道" }, 400);
+  if (subscriptionPlan === GULONG_ENGINE_PLAN_ID && (cycle !== "month" || provider !== "offline")) return c.json({ code: "GULONG_ENGINE_MONTHLY_OFFLINE_REQUIRED", message: "古龙引擎为999元包月套餐，请使用月度线下付款审核渠道" }, 400);
   if (provider === "offline" && !["subscription", "recharge"].includes(kind)) return c.json({ code: "VALIDATION_ERROR", message: "线下支付仅用于会员订阅或账户充值审核" }, 400);
   if (subscriptionPlan === SHORT_VIDEO_PLAN_ID && provider !== "offline") return c.json({ code: "OFFLINE_PAYMENT_REQUIRED", message: "短视频包月当前仅支持线下支付" }, 400);
   let orderNo = `GL${Date.now()}${randomBytes(4).toString("hex").toUpperCase()}`;
@@ -8778,7 +8778,7 @@ app.openAPIRegistry.registerPath({
   path: "/api/billing/orders",
   tags: ["Billing"],
   summary: "创建微信支付或线下审核订单",
-  description: "线上仅支持微信。subscription 默认创建普通会员月/年订单；planType=short_video_monthly 创建短视频包月订单且仅允许 provider=offline，月费 599900 分、年费 5999900 分；planType=english_coach_monthly 或 gulong_engine_monthly、cycle=month、provider=offline 分别创建 19800 分的独立产品月度订单。古龙引擎包月审核通过后将实付金额等额计入视频余额，不额外赠送；英语教练包月不计入余额。普通会员实付金额额外赠送 10%；recharge 单次实付满 500 元额外赠送 10%。金额单位均为整数分。",
+  description: "线上仅支持微信。subscription 默认创建普通会员月/年订单；planType=short_video_monthly 创建短视频包月订单且仅允许 provider=offline，月费 599900 分、年费 5999900 分；planType=english_coach_monthly、cycle=month、provider=offline 为 19800 分，planType=gulong_engine_monthly、cycle=month、provider=offline 为 99900 分。古龙引擎包月审核通过后将实付金额等额计入余额，不额外赠送；有效期内共享算力能力零扣费、零分佣，远程付费 PearAPI 模型仍按余额计费。英语教练包月不计入余额。普通会员实付金额额外赠送 10%；recharge 单次实付满 500 元额外赠送 10%。金额单位均为整数分。",
   request: { body: { content: { "application/json": { schema: z.object({ kind: z.enum(["subscription", "recharge", "custom", "worker_task"]), planType: z.enum(["member", "short_video_monthly", "english_coach_monthly", "gulong_engine_monthly"]).optional(), provider: z.enum(["wechat", "offline"]), cycle: z.enum(["month", "year"]).optional(), amountFen: z.number().int().min(100).optional(), subject: z.string().max(80).optional(), taskId: z.string().optional() }) } } } },
   responses: { 201: { description: "Chandler 微信预支付信息，或线下待审核订单" }, 400: { description: "参数或渠道不受支持" }, 401: { description: "未登录" } },
 });
