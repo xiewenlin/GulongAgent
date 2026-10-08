@@ -67,14 +67,14 @@ function MemberComputeGroupPanel({userId,externalBusy,onBusyChange}) {
     finally {if(mounted.current&&ticket===request.current)setBusy("");}
   }
   async function create(event) {
-    event.preventDefault();if(locked||!eligible)return;
+    event.preventDefault();if(locked)return;
     const name=newName.trim();if(!name){setError("请填写用户分组名称。");return;}
     setBusy("create");onBusyChange(true);setError("");setNotice("");
     try {
       const result=await apiFetch("/api/admin/compute-groups",{method:"POST",body:JSON.stringify({name})});
       if(!mounted.current)return;
       if(!result.group?.id)throw new Error("分组创建结果不完整，请重新读取后确认。");
-      setGroups(old=>[result.group,...old.filter(group=>group.id!==result.group.id)]);setSelectedId(result.group.id);setSelectionSnapshot(result.group);setNewName("");setNotice("用户分组已创建，请点击“保存用户分组”完成分配。");
+      setGroups(old=>[result.group,...old.filter(group=>group.id!==result.group.id)]);setSelectedId(result.group.id);setSelectionSnapshot(result.group);setNewName("");setNotice(eligible?"用户分组已创建，请点击“保存用户分组”完成分配。":"用户分组已创建。开通并保存古龙引擎包月产品后，即可将分组分配给此用户。");
     } catch(reason) {if(mounted.current)setError(localizeErrorMessage(reason,"分组创建失败，请稍后重试。"));}
     finally {if(mounted.current)setBusy("");onBusyChange(false);}
   }
@@ -91,11 +91,11 @@ function MemberComputeGroupPanel({userId,externalBusy,onBusyChange}) {
   return <section className="member-compute-group" aria-labelledby="member-compute-group-title">
     <header><div className="member-compute-group-heading"><UsersThree size={25}/><div><h3 id="member-compute-group-title">共享算力用户分组</h3><p>为古龙引擎包月用户分配专属节点分组。分组与产品订阅分别保存。</p></div></div><span className={`status-pill ${currentId?"active":"inactive"}`}>{currentId?"已分配分组":"未设置分组"}</span></header>
     {busy==="load"?<p className="member-compute-group-loading" role="status">正在读取用户分组…</p>:!membership?<div className="member-compute-group-message error" role="alert"><span>{error||"用户分组暂时无法读取。"}</span><button type="button" className="button small secondary" disabled={externalBusy} onClick={load}>重新读取</button></div>:<>
-      {!eligible&&<p className="member-compute-group-note">此用户尚未配置古龙引擎包月产品。请先开通并保存该产品订阅，再重新打开详情分配分组。</p>}
+      {!eligible&&<p className="member-compute-group-note">可先新建用户分组。此用户尚未配置古龙引擎包月产品，开通并保存该产品订阅后，再重新打开详情分配分组。</p>}
       <div className="member-compute-group-current"><span>当前分组</span><strong>{membership.computeGroup?.name||(currentId?"已分配用户分组":"未设置分组")}</strong><span>用户分组 ID</span><code>{currentId||"未分配"}</code></div>
       <div className="member-compute-group-controls">
         <form className="member-compute-group-search" onSubmit={search}><label htmlFor="member-compute-group-query">按名称搜索分组</label><div><input id="member-compute-group-query" type="search" value={query} onChange={event=>setQuery(event.target.value)} placeholder="输入分组名称关键词" disabled={locked}/><button type="submit" className="button secondary" disabled={locked}><MagnifyingGlass size={17}/>{busy==="search"?"搜索中":"搜索"}</button></div></form>
-        <form className="member-compute-group-create" onSubmit={create}><label htmlFor="member-compute-group-name">新建用户分组</label><div><input id="member-compute-group-name" value={newName} onChange={event=>setNewName(event.target.value)} placeholder="填写新分组名称" maxLength={80} disabled={locked||!eligible}/><button type="submit" className="button secondary" disabled={locked||!eligible||!newName.trim()}><Plus size={17}/>{busy==="create"?"创建中":"新建分组"}</button></div></form>
+        <form className="member-compute-group-create" onSubmit={create}><label htmlFor="member-compute-group-name">新建用户分组</label><div><input id="member-compute-group-name" value={newName} onChange={event=>setNewName(event.target.value)} placeholder="填写新分组名称" maxLength={80} disabled={locked}/><button type="submit" className="button secondary" disabled={locked||!newName.trim()}><Plus size={17}/>{busy==="create"?"创建中":"新建分组"}</button></div></form>
       </div>
       <div className="member-compute-group-assignment"><label htmlFor="member-compute-group-select">分配用户分组<select id="member-compute-group-select" value={selectedId} onChange={event=>{setSelectedId(event.target.value);setSelectionSnapshot(options.find(group=>group.id===event.target.value)||null);setError("");setNotice("");}} disabled={locked||(!eligible&&!currentId)}><option value="">不设置分组</option>{options.map(group=><option key={group.id} value={group.id} disabled={!eligible}>{group.name}</option>)}</select></label><div className="member-compute-group-selected"><span>将保存的用户分组 ID</span><code>{chosen?.id||selectedId||"未分配"}</code></div><button type="button" className="button primary" onClick={saveGroup} disabled={!canSave}><CheckCircle size={18}/>{busy==="save"?"正在保存":"保存用户分组"}</button></div>
       {!groups.length&&<p className="member-compute-group-note">{query?"没有找到匹配分组，可调整关键词或新建分组。":"暂无用户分组，先新建分组，再分配给用户。"}</p>}

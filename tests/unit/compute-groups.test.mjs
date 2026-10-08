@@ -85,6 +85,36 @@ test("only admin creates unique immutable group IDs and normalized duplicate nam
   assert.equal((await f.request("/api/admin/compute-groups", { name: " 新一组 " })).status, 409);
   assert.equal(f.data.computeGroupAudits.length, 2);
 });
+
+test("admin may create global groups while viewing a non-member, but cannot assign them to that user", async () => {
+  const f = fixture();
+  f.user.computeGroupId = null;
+  f.data.subscriptions.length = 0;
+  f.setMembership(false);
+  const userPath = `/api/admin/users/${f.user._id}/compute-group`;
+  const detail = await f.request(userPath, undefined, "GET");
+  assert.equal(detail.status, 200);
+  assert.deepEqual(await detail.json(), { computeGroupId: null, computeGroup: null, eligible: false });
+
+  const created = await f.request("/api/admin/compute-groups", { name: "提前创建的团队分组" });
+  assert.equal(created.status, 201);
+  const { group } = await created.json();
+  assert.match(group.id, /^gug_[a-f0-9]{32}$/);
+  assert.equal(group.name, "提前创建的团队分组");
+  assert.ok(f.data.computeGroups.some((item) => item.id === group.id));
+  assert.equal(f.data.computeGroupAudits.filter((item) => item.action === "group_created" && item.groupId === group.id).length, 1);
+
+  const denied = await f.request(userPath, { groupId: group.id }, "PUT");
+  assert.equal(denied.status, 403);
+  assert.equal((await denied.json()).code, "GULONG_ENGINE_SUBSCRIPTION_REQUIRED");
+  assert.equal(f.user.computeGroupId, null);
+  assert.equal(f.data.computeGroupAudits.filter((item) => item.action === "user_assigned").length, 0);
+  assert.ok(f.data.computeGroups.some((item) => item.id === group.id), "rejected assignment must not remove the reusable global group");
+
+  const listed = await f.request("/api/admin/compute-groups?q=提前创建", undefined, "GET");
+  assert.equal(listed.status, 200);
+  assert.equal((await listed.json()).groups[0].id, group.id);
+});
 test("group name fuzzy search is literal, paginated and available only to bound nodes", async () => {
   const f = fixture();
   assert.equal((await f.request("/api/desktop/compute-groups", undefined, "GET")).status, 401);

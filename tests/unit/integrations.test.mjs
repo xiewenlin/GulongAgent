@@ -1229,6 +1229,20 @@ test("compute grouping OpenAPI publishes bound-node configuration and one-time d
   assert.ok(document.components.securitySchemes.sessionCookie);
 });
 
+test("administrator group creation is independent of the selected user's membership but assignment remains gated", async () => {
+  const source = await readFile(new URL("../../src/components/UserSubscriptionDialog.jsx", import.meta.url), "utf8");
+  const createHandler = source.match(/async function create\(event\) \{([\s\S]*?)\n  async function saveGroup/)?.[1];
+  const createForm = source.match(/<form className="member-compute-group-create"[\s\S]*?<\/form>/)?.[0];
+  assert.ok(createHandler);
+  assert.ok(createForm);
+  assert.doesNotMatch(createHandler, /!eligible/);
+  assert.doesNotMatch(createForm, /eligible/);
+  assert.match(createForm, /id="member-compute-group-name"[\s\S]*?disabled=\{locked\}/);
+  assert.match(createForm, /disabled=\{locked\|\|!newName\.trim\(\)\}/);
+  assert.match(source, /canSave=changed&&\(eligible\|\|selectedId===""\)&&!locked/);
+  assert.match(source, /可先新建用户分组/);
+});
+
 test("Vercel routes all compute-group APIs to the platform handler and preserves binding authentication", async () => {
   const configuration = JSON.parse(await readFile(new URL("../../vercel.json", import.meta.url), "utf8"));
   for (const path of ["/api/admin/compute-groups", "/api/desktop/compute-groups", "/api/desktop/nodes/compute-group", "/api/desktop/compute-access/:path*", "/api/v1/compute-access/:path*"]) {
