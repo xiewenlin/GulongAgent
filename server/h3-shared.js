@@ -8,6 +8,7 @@ import { createPresignedDownloadUrl, createPresignedPutUrl, deleteObject, ensure
 import { calculateH3ClaimPlan, createH3QueueCoordinator, H3_CLAIM_LEASE_MS, H3_LAN_REPORT_MAX_NODES, rankH3LanNodes } from "./h3-queue.js";
 import { localizeErrorMessage } from "../shared/error-messages.js";
 import { readGulongEngineEntitlement } from "./english-coach-products.js";
+import { computeGroupFilter, computeGroupsMatch, getUserComputeGroupId as readUserComputeGroupId, normalizeComputeGroupId } from "./compute-groups.js";
 import { acceptH3OptimizedPrompt, buildH3AuthoringPrompt, compileH3Prompt, containsCjkText, h3PromptOptimizerMessages, hardenH3CompiledPrompt, parseH3AuthoringPrompt } from "./h3-prompt.js";
 import {
   SHORT_VIDEO_PLAN_ID,
@@ -599,7 +600,7 @@ export function toH3WorkerTask(task, { assets = [], outputUpload = null } = {}) 
     videoCount: task.videoCount,
     audioCount: task.audioCount,
     assets,
-    assigned_node: task.claimedByNode ? { node_id: task.claimedByNode.nodeId, node_name: task.claimedByNode.nodeName || null } : null,
+    assigned_node: task.claimedByNode ? { node_id: task.claimedByNode.nodeId, node_name: task.claimedByNode.nodeName || null, compute_group_id: normalizeComputeGroupId(task.claimedByNode.computeGroupId) } : null,
     dispatch_estimated_total_seconds: Math.max(0, integer(task.dispatchEstimatedTotalSeconds)),
     auto_cancel_at: task.autoCancelAt || null,
     output_upload: outputUpload,
@@ -1158,6 +1159,7 @@ function routeError(c, error) {
 
 export function registerH3SharedRoutes(app, dependencies) {
   const getCollection = dependencies.getCollection || databaseCollection;
+  const getUserComputeGroupId = dependencies.getUserComputeGroupId || ((userId) => readUserComputeGroupId(userId, getCollection));
   const enforceRateLimit = dependencies.enforceRateLimit || databaseRateLimit;
   const issueDownloadUrl = dependencies.createPresignedDownloadUrl || createPresignedDownloadUrl;
   const issueUploadUrl = dependencies.createPresignedPutUrl || createPresignedPutUrl;
@@ -1183,6 +1185,24 @@ export function registerH3SharedRoutes(app, dependencies) {
     return { binding, user };
   }
 
+  // Both sides are read from server-owned records. Reported group IDs never
+  // grant access, and a stale task snapshot cannot cross a later user regroup.
+  async function authorizeTaskComputeGroup(task, binding, { requireActiveMembership = false } = {}) {
+    const currentBinding = await (await getCollection("nodeAccountBindings")).findOne({ _id: binding._id, userId: binding.userId, status: "active", revokedAt: null });
+    if (!currentBinding || idText(currentBinding._id) !== idText(binding._id) || idText(currentBinding.userId) !== idText(binding.userId)) {
+      throw Object.assign(new Error("当前节点的账号绑定已失效，请重新绑定后再接单"), { code: "INVALID_ACCOUNT_BINDING", status: 401 });
+    }
+    const requesterGroupId = await getUserComputeGroupId(task.requesterUserId);
+    if (!computeGroupsMatch(task.computeGroupId, requesterGroupId) || !computeGroupsMatch(requesterGroupId, currentBinding.computeGroupId)) {
+      throw Object.assign(new Error("任务用户与执行节点不属于同一用户分组，禁止跨分组调用"), { code: "COMPUTE_GROUP_MISMATCH", status: 403 });
+    }
+    if (requesterGroupId && requireActiveMembership && !await h3RequesterIsAdministrator(getCollection, task)
+      && !(await readGulongEngineEntitlement(task.requesterUserId, new Date(), getCollection)).active) {
+      throw Object.assign(new Error("分组共享节点仅限有效期内的古龙引擎包月会员使用，请先续费或开通会员"), { code: "GULONG_ENGINE_SUBSCRIPTION_REQUIRED", status: 403 });
+    }
+    return currentBinding;
+  }
+
   async function trustedAssets(ownerId, assets) {
     const flattened = [...assets.images, ...assets.videos, ...assets.audio];
     if (!flattened.length) return assets;
@@ -1206,6 +1226,7 @@ export function registerH3SharedRoutes(app, dependencies) {
   }
 
   async function issueOutputUpload(task, auth, now) {
+    await authorizeTaskComputeGroup(task, auth.binding, { requireActiveMembership: true });
     const grantId = randomBytes(18).toString("base64url");
     const objectKey = `h3/tasks/${task._id}/outputs/${grantId}.mp4`;
     const expiresAt = new Date(now.getTime() + 60 * 60_000);
@@ -1258,11 +1279,11 @@ export function registerH3SharedRoutes(app, dependencies) {
     const previous = await bindings.findOne({ activationLicenseId: activation.record._id, nodeId });
     const binding = await bindings.findOneAndUpdate(
       { activationLicenseId: activation.record._id, nodeId },
-      { $set: { userId: user._id, emailSnapshot: email, nodeName, appVersion, activationDeviceId: activation.payload.deviceId, tokenHash, status: "active", revokedAt: null, updatedAt: now, lastVerifiedAt: now }, $setOnInsert: { createdAt: now } },
+      { $set: { userId: user._id, emailSnapshot: email, nodeName, appVersion, activationDeviceId: activation.payload.deviceId, tokenHash, status: "active", revokedAt: null, updatedAt: now, lastVerifiedAt: now, ...(!previous || idText(previous.userId) !== idText(user._id) ? { computeGroupId: null } : {}) }, $setOnInsert: { createdAt: now } },
       { upsert: true, returnDocument: "after" },
     );
     await audit(await getCollection("nodeAccountBindingAudits"), previous && previous.userId?.toString() !== user._id.toString() ? "rebound" : "bound", { bindingId: binding._id, userId: user._id, previousUserId: previous?.userId || null, activationLicenseId: activation.record._id, nodeId, nodeName, appVersion, ipFingerprint: ip });
-    return c.json({ ok: true, binding_token: rawToken, binding: { id: binding._id.toString(), email, user_id: user._id.toString(), display_name: user.displayName || user.username || email.split("@")[0], node_id: nodeId, node_name: nodeName, app_version: appVersion, verified_at: now.toISOString() } });
+    return c.json({ ok: true, binding_token: rawToken, binding: { id: binding._id.toString(), email, user_id: user._id.toString(), display_name: user.displayName || user.username || email.split("@")[0], node_id: nodeId, node_name: nodeName, compute_group_id: normalizeComputeGroupId(binding.computeGroupId), app_version: appVersion, verified_at: now.toISOString() } });
   });
 
   app.post("/api/desktop/account-bindings/unbind", async (c) => {
@@ -1363,6 +1384,7 @@ export function registerH3SharedRoutes(app, dependencies) {
       const rawIdempotency = String(c.req.header("Idempotency-Key") || body.idempotency_key || "").trim();
       if (rawIdempotency.length < 8 || rawIdempotency.length > 160) return c.json({ code: "IDEMPOTENCY_KEY_REQUIRED", message: "请提供 8–160 字符的 Idempotency-Key" }, 400);
       const ownerId = new ObjectId(auth.user.id);
+      const computeGroupId = await getUserComputeGroupId(ownerId);
       const idempotencyKey = createHash("sha256").update(`${ownerId}:${rawIdempotency}`).digest("hex");
       const requestedConversationId = String(body.conversation_id || body.conversationId || "").trim();
       const requestFingerprint = h3TaskRequestFingerprint(input, { conversationId: requestedConversationId });
@@ -1393,11 +1415,14 @@ export function registerH3SharedRoutes(app, dependencies) {
       const chargeKey = `h3:charge:${orderNo}:0`;
       const exempt = auth.user.role === "admin";
       const memberFree = !exempt && (await readGulongEngineEntitlement(ownerId, now, getCollection)).active;
+      if (computeGroupId && !exempt && !memberFree) {
+        return c.json({ code: "GULONG_ENGINE_SUBSCRIPTION_REQUIRED", message: "分组共享节点仅限有效期内的古龙引擎包月会员使用，请先续费或开通会员" }, 403);
+      }
       const noCharge = exempt || memberFree;
       const dispatchEstimatedTotalSeconds = estimateH3TaskTotalSeconds(input);
       const autoCancelAt = h3TaskAutoCancelAt(now, dispatchEstimatedTotalSeconds);
       const task = {
-        _id: taskId, orderNo, idempotencyKey, requestFingerprint, requesterUserId: ownerId, requesterEmailSnapshot: auth.user.email || null, requesterRoleSnapshot: auth.user.role || "user", ...input, ...conversation,
+        _id: taskId, orderNo, idempotencyKey, requestFingerprint, requesterUserId: ownerId, requesterEmailSnapshot: auth.user.email || null, requesterRoleSnapshot: auth.user.role || "user", ...input, ...conversation, computeGroupId,
         ...(noCharge ? {} : { walletLedgerId: chargeKey, activeChargeKey: chargeKey }),
         chargedFen: noCharge ? 0 : input.priceFen,
         billingMode: exempt ? "administrator_exempt" : memberFree ? "gulong_engine_membership" : "wallet",
@@ -1713,16 +1738,24 @@ export function registerH3SharedRoutes(app, dependencies) {
     const claimed = [];
     try {
       for (let index = 0; index < claimPlan.recommendedBatchSize; index += 1) {
-        const oldestCandidates = await tasks.find({ status: "queued", model: H3_SHARED_MODEL }).sort({ createdAt: 1, _id: 1 }).limit(100).toArray();
+        const allowedGroups = [...new Set(clusterNodes.map((node) => normalizeComputeGroupId(node.binding.computeGroupId)))];
+        const oldestCandidates = await tasks.find({ status: "queued", model: H3_SHARED_MODEL, $or: allowedGroups.map((groupId) => computeGroupFilter(groupId)) }).sort({ createdAt: 1, _id: 1 }).limit(100).toArray();
         let selectedTask = null;
         let selectedNode = null;
         for (const candidate of oldestCandidates) {
-          const eligibleNodes = rankH3LanNodes(clusterNodes).filter((node) => h3NodeCanRunTask(node, candidate));
+          let requesterGroupId;
+          try { requesterGroupId = await getUserComputeGroupId(candidate.requesterUserId); }
+          catch { continue; }
+          if (!computeGroupsMatch(candidate.computeGroupId, requesterGroupId)) continue;
+          const eligibleNodes = rankH3LanNodes(clusterNodes).filter((node) => computeGroupsMatch(requesterGroupId, node.binding.computeGroupId) && h3NodeCanRunTask(node, candidate));
           if (!eligibleNodes.length) continue;
           for (const candidateNode of eligibleNodes) {
-            const assignedNode = { nodeId: candidateNode.nodeId, nodeName: candidateNode.nodeName || candidateNode.binding.nodeName || null, bindingId: candidateNode.binding._id, userId: candidateNode.binding.userId, at: now, capabilities: candidateNode.capabilities };
+            let checkedBinding;
+            try { checkedBinding = await authorizeTaskComputeGroup(candidate, candidateNode.binding, { requireActiveMembership: true }); }
+            catch { continue; }
+            const assignedNode = { nodeId: candidateNode.nodeId, nodeName: candidateNode.nodeName || checkedBinding.nodeName || null, bindingId: checkedBinding._id, userId: checkedBinding.userId, computeGroupId: normalizeComputeGroupId(checkedBinding.computeGroupId), at: now, capabilities: candidateNode.capabilities };
             const claimedTask = await tasks.findOneAndUpdate(
-              { _id: candidate._id, status: "queued", model: H3_SHARED_MODEL },
+              { _id: candidate._id, status: "queued", model: H3_SHARED_MODEL, ...computeGroupFilter(requesterGroupId) },
               { $set: { status: "claimed", progressStage: "claimed", progressUpdatedAt: now, claimedByNode: assignedNode, claimRequestedByNode: dispatcherNode, claimedAt: now, claimLeaseUntil: new Date(now.getTime() + H3_CLAIM_LEASE_MS), updatedAt: now }, $unset: { error: "" } },
               { returnDocument: "after" },
             );
@@ -1756,7 +1789,7 @@ export function registerH3SharedRoutes(app, dependencies) {
           queueCoordinator.invalidate(),
         ]);
       }
-      throw error;
+      return routeError(c, error);
     }
     const assignedCount = claimed.length;
     const pollAfterMs = assignedCount === 0 && claimPlan.recommendedBatchSize > 0 ? Math.max(5_000, claimPlan.pollAfterMs) : claimPlan.pollAfterMs;
@@ -1833,6 +1866,8 @@ export function registerH3SharedRoutes(app, dependencies) {
     if (idText(task.claimedByNode.bindingId) !== idText(auth.binding._id)) {
       return c.json({ code: "TASK_ASSIGNED_TO_ANOTHER_NODE", message: "该任务已由调度器分配给其他局域网节点，请由响应 assigned_node 指定的节点执行和回调" }, 409);
     }
+    try { await authorizeTaskComputeGroup(task, auth.binding); }
+    catch (error) { return routeError(c, error); }
     const status = String(metadata.status || "").trim().toLowerCase();
     if (!["optimizing", "started", "processing", "progress", "completed", "succeeded", "failed", "cancelled"].includes(status)) return c.json({ code: "VALIDATION_ERROR", message: "回调状态不正确" }, 400);
     const eventKey = h3CallbackEventKey(task._id, metadata);
@@ -1842,7 +1877,7 @@ export function registerH3SharedRoutes(app, dependencies) {
       { $setOnInsert: { eventKey, taskId: task._id, orderNo: task.orderNo, status, event: String(metadata.event || status), localJobId: String(metadata.local_job_id || "").slice(0, 160), bindingId: auth.binding._id, executorUserId: auth.user._id, metadata, createdAt: now }, $set: { lastReceivedAt: now } },
       { upsert: true },
     );
-    const executionNode = { nodeId: auth.binding.nodeId, nodeName: String(metadata.node_name || auth.binding.nodeName || "").slice(0, 120), bindingId: auth.binding._id, at: now };
+    const executionNode = { nodeId: auth.binding.nodeId, nodeName: String(metadata.node_name || auth.binding.nodeName || "").slice(0, 120), bindingId: auth.binding._id, computeGroupId: normalizeComputeGroupId(auth.binding.computeGroupId), at: now };
     const heartbeat = { nodeName: executionNode.nodeName, lastSeenAt: now, lastCallbackAt: now, queueStatus: ["optimizing", "started", "processing", "progress"].includes(status) ? "processing" : "idle", updatedAt: now };
     if (["completed", "succeeded"].includes(status)) heartbeat.lastCompletedAt = now;
     await (await getCollection("nodeAccountBindings")).updateOne({ _id: auth.binding._id, userId: auth.user._id, status: "active" }, { $set: heartbeat });
@@ -2031,8 +2066,12 @@ export function registerH3SharedRoutes(app, dependencies) {
     const tasks = await getCollection("h3SharedTasks");
     const task = await tasks.findOne(filter);
     if (!task) return c.json({ code: "TASK_NOT_FOUND", message: "共享节点任务不存在" }, 404);
+    const computeGroupId = await getUserComputeGroupId(task.requesterUserId);
     const exempt = task.chargeStatus === "exempt" || await h3RequesterIsAdministrator(getCollection, task);
     const memberFree = !exempt && (await readGulongEngineEntitlement(task.requesterUserId, new Date(), getCollection)).active;
+    if (computeGroupId && !exempt && !memberFree) {
+      return c.json({ code: "GULONG_ENGINE_SUBSCRIPTION_REQUIRED", message: "分组共享节点仅限有效期内的古龙引擎包月会员使用，请先续费或开通会员" }, 403);
+    }
     const previouslyFree = H3_NO_CHARGE_STATUSES.has(task.chargeStatus);
     if (!["failed", "cancelled"].includes(task.status) || (!previouslyFree && task.refundStatus !== "refunded")) return c.json({ code: "TASK_NOT_RETRYABLE", message: "只有免扣费任务或已经退款的失败、取消任务可以重试" }, 409);
     const retryCount = integer(task.retryCount) + 1;
@@ -2051,7 +2090,7 @@ export function registerH3SharedRoutes(app, dependencies) {
     }
     const queued = await tasks.findOneAndUpdate(
       { _id: task._id, status: task.status, ...(previouslyFree ? {} : { refundStatus: "refunded" }) },
-      { $set: { status: "queued", ...retryBilling, refundStatus: null, gpuStartupRedispatches: 0, failedGpuNodeIds: isH3GpuStartupFailure(task.error?.code, task.error?.message) && task.executedByNode?.nodeId ? [task.executedByNode.nodeId] : [], ...(exempt ? { administratorExemptedAt: new Date() } : memberFree ? {} : { activeChargeKey: chargeKey, walletLedgerId: chargeKey }), retryCount, autoCancelAt: h3TaskAutoCancelAt(new Date(), integer(task.dispatchEstimatedTotalSeconds || task.estimatedTotalSeconds, estimateH3TaskTotalSeconds(task))), queuedAt: new Date(), updatedAt: new Date() }, $unset: { ...(memberFree ? { activeChargeKey: "", walletLedgerId: "" } : {}), claimedByNode: "", claimRequestedByNode: "", executedByNode: "", assigneeUserId: "", assigneeEmailSnapshot: "", assigneeDisplayNameSnapshot: "", output: "", error: "", settlement: "", claimedAt: "", claimLeaseUntil: "", completedAt: "", failedAt: "", cancelledAt: "", timedOutAt: "", refundedAt: "", refundReason: "" } },
+      { $set: { status: "queued", computeGroupId, ...retryBilling, refundStatus: null, gpuStartupRedispatches: 0, failedGpuNodeIds: isH3GpuStartupFailure(task.error?.code, task.error?.message) && task.executedByNode?.nodeId ? [task.executedByNode.nodeId] : [], ...(exempt ? { administratorExemptedAt: new Date() } : memberFree ? {} : { activeChargeKey: chargeKey, walletLedgerId: chargeKey }), retryCount, autoCancelAt: h3TaskAutoCancelAt(new Date(), integer(task.dispatchEstimatedTotalSeconds || task.estimatedTotalSeconds, estimateH3TaskTotalSeconds(task))), queuedAt: new Date(), updatedAt: new Date() }, $unset: { ...(memberFree ? { activeChargeKey: "", walletLedgerId: "" } : {}), claimedByNode: "", claimRequestedByNode: "", executedByNode: "", assigneeUserId: "", assigneeEmailSnapshot: "", assigneeDisplayNameSnapshot: "", output: "", error: "", settlement: "", claimedAt: "", claimLeaseUntil: "", completedAt: "", failedAt: "", cancelledAt: "", timedOutAt: "", refundedAt: "", refundReason: "" } },
       { returnDocument: "after" },
     );
     await queueCoordinator.invalidate().catch(() => {});
@@ -2091,8 +2130,8 @@ export function registerH3SharedRoutes(app, dependencies) {
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}", tags: ["MiniMax H3 Shared Nodes"], summary: "查看共享节点订单详情", description: "输出只包含受控 previewPath/downloadPath 和 24 小时到期状态，不返回 COS objectKey 或永久 URL。", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "订单详情" }, 404: { description: "订单不存在或无权查看" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}/output", tags: ["MiniMax H3 Shared Nodes"], summary: "鉴权预览或下载 H3 输出视频", description: "仅任务请求用户或管理员可访问。服务端按次签发不超过 5 分钟且不越过 24 小时保留截止时间的 COS GET 地址；disposition=attachment 用于下载。过期返回 410 并触发幂等删除。", request: { params: z.object({ id: z.string() }), query: z.object({ disposition: z.enum(["inline", "attachment"]).optional() }) }, responses: { 302: { description: "跳转到短时 COS 签名地址" }, 404: { description: "视频不存在或无权访问" }, 410: { description: "视频已过期并删除" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/desktop/agent/tools/minimax-h3-shared", tags: ["Desktop Agent Tools"], summary: "读取桌面古龙智能体的 H3 共享节点工具合同", description: "使用现有古龙会话或具有 tasks:read 的 API Key。返回 createTask、素材上传 URL、本地提示词处理合同、9图3视频3音频限制、整数分价格与当前余额；不再返回网页 optimizePrompt。管理员响应 wallet.unlimited=true，桌面端不得按余额拦截。桌面创建任务时 source_channel 必须为 desktop_agent。", responses: { 200: { description: "工具合同、本地提示词处理要求、钱包余额与管理员不限额标记" }, 401: { description: "未认证" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/claim", tags: ["MiniMax H3 Shared Nodes"], summary: "按局域网集群负载原子调度最早等待任务", description: "轮询节点通过 lan_cluster.nodes 上报同一局域网内全部已绑定节点的 running_task_count、estimated_total_seconds 与能力。服务端先验证所有节点均属于当前 binding token 对应账号，再按预计剩余总耗时、运行任务数、node_id 排序，把按 createdAt、_id 最早且能力匹配的任务分配给耗时最少的节点；响应 workerTask.assigned_node 是唯一允许回调的执行节点。老客户端缺少 lan_cluster 时暂按单节点兼容。capabilities 必须上报 max_duration_seconds、profiles、sampling_steps 与素材上限；只有 longform_v1=true 的节点可领取 video_mode=extended。local_prompt_optimization_v1=true 表示节点能够处理用户开启魔法优化的任务。DTO 包含 assigned_node、dispatch_estimated_total_seconds、auto_cancel_at、素材短期下载票据与 output_upload，但不含 requester、价格、钱包流水或内部绑定信息。任务自创建起超过服务端预计总耗时 10 倍仍未完成会自动取消、幂等退款并提醒用户更换视频模型。dry_run=true 绝不领取任务。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "application/json": { schema: z.object({ bound_account_email: z.string().optional(), bound_account_id: z.string().optional(), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: h3NodeCapabilitiesSchema, lan_cluster: z.object({ cluster_id: z.string().min(12).max(160), observed_at: z.iso.datetime(), nodes: z.array(h3LanNodeSchema).min(1).max(H3_LAN_REPORT_MAX_NODES) }).optional() }) } } } }, responses: { 200: { description: "dry_run 返回可达状态；正式领取返回指定执行节点、素材票据、输出票据和动态 claim_plan" }, 400: { description: "节点能力或局域网报告无效/过期" }, 401: { description: "绑定无效" }, 403: { description: "局域网报告包含其他账号或未绑定节点" }, 409: { description: "回调节点不是 assigned_node" }, 429: { description: "未遵循轮询退避或请求频率过高" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/callback", tags: ["MiniMax H3 Shared Nodes"], summary: "执行节点回调可选本地优化、生成进度或结果", description: "multipart/form-data 仅发送 metadata 字段，不得上传 video 文件。仅已领取任务的指定绑定节点可回调；未接单任务返回 409 TASK_NOT_CLAIMED。prompt_optimization_enabled=true 的任务先发送 status=optimizing，成功后以 status=started、compiled_prompt、estimated_total_seconds 上报；false 的任务不得发送 optimizing 或 compiled_prompt，直接以原始 prompt 执行并在 started 中提交 estimated_total_seconds。后续 progress 回调发送 progress（0–99）与可选 remaining_seconds。成功状态还需 video.sha256/bytes/filename/object_key，服务端 HEAD 校验对象归属。GPU 推理内核启动失败时，同一订单最多重派两次，排除已故障节点，原预扣和流水不变；最终失败才幂等退款，且用户不接收原始堆栈。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "multipart/form-data": { schema: z.object({ metadata: z.string() }) } } } }, responses: { 200: { description: "可选本地优化阶段、生成进度、故障重派或最终结果已幂等处理" }, 400: { description: "回执不完整、缺少必需 compiled_prompt 或在关闭优化时非法提交 compiled_prompt" }, 401: { description: "绑定无效" }, 409: { description: "任务未接单、回调节点不匹配、本地优化、COS 回执、上传票据或结算状态不匹配" }, 413: { description: "禁止把视频文件经 Vercel 中转" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/claim", tags: ["MiniMax H3 Shared Nodes"], summary: "按局域网集群负载原子调度最早等待任务", description: "有分组的非管理员需求用户还须拥有当前有效古龙引擎包月权益，未生效或已过期任务暂不领取；已领取任务回调仍按分组校验，不因运行中到期阻塞结果。用户与执行节点的分组必须严格相同；null 只匹配 null 或历史未设置字段。服务端从 users 和 nodeAccountBindings 读取 computeGroupId，忽略客户端上报分组；先按任务分组筛选，再动态校验用户当前分组，并在原子领取及 COS 票据签发前复查。assigned_node.compute_group_id 返回实际执行节点分组。轮询节点通过 lan_cluster.nodes 上报同一局域网内全部已绑定节点的 running_task_count、estimated_total_seconds 与能力。服务端先验证所有节点均属于当前 binding token 对应账号，再按预计剩余总耗时、运行任务数、node_id 排序，把按 createdAt、_id 最早且能力匹配的任务分配给耗时最少的节点；响应 workerTask.assigned_node 是唯一允许回调的执行节点。老客户端缺少 lan_cluster 时暂按单节点兼容。capabilities 必须上报 max_duration_seconds、profiles、sampling_steps 与素材上限；只有 longform_v1=true 的节点可领取 video_mode=extended。local_prompt_optimization_v1=true 表示节点能够处理用户开启魔法优化的任务。DTO 包含 assigned_node、dispatch_estimated_total_seconds、auto_cancel_at、素材短期下载票据与 output_upload，但不含 requester、价格、钱包流水或内部绑定信息。任务自创建起超过服务端预计总耗时 10 倍仍未完成会自动取消、幂等退款并提醒用户更换视频模型。dry_run=true 绝不领取任务。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "application/json": { schema: z.object({ bound_account_email: z.string().optional(), bound_account_id: z.string().optional(), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: h3NodeCapabilitiesSchema, lan_cluster: z.object({ cluster_id: z.string().min(12).max(160), observed_at: z.iso.datetime(), nodes: z.array(h3LanNodeSchema).min(1).max(H3_LAN_REPORT_MAX_NODES) }).optional() }) } } } }, responses: { 200: { description: "dry_run 返回可达状态；正式领取返回指定执行节点、素材票据、输出票据和动态 claim_plan" }, 400: { description: "节点能力或局域网报告无效/过期" }, 401: { description: "绑定无效" }, 403: { description: "局域网报告包含其他账号或未绑定节点" }, 409: { description: "回调节点不是 assigned_node" }, 429: { description: "未遵循轮询退避或请求频率过高" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/callback", tags: ["MiniMax H3 Shared Nodes"], summary: "执行节点回调可选本地优化、生成进度或结果", description: "所有回调在写入进度、结果、钱包或 COS 回执前，重新读取任务需求用户和实际执行节点的分组；跨组返回 403 COMPUTE_GROUP_MISMATCH，客户端 metadata 不可覆盖分组。multipart/form-data 仅发送 metadata 字段，不得上传 video 文件。仅已领取任务的指定绑定节点可回调；未接单任务返回 409 TASK_NOT_CLAIMED。prompt_optimization_enabled=true 的任务先发送 status=optimizing，成功后以 status=started、compiled_prompt、estimated_total_seconds 上报；false 的任务不得发送 optimizing 或 compiled_prompt，直接以原始 prompt 执行并在 started 中提交 estimated_total_seconds。后续 progress 回调发送 progress（0–99）与可选 remaining_seconds。成功状态还需 video.sha256/bytes/filename/object_key，服务端 HEAD 校验对象归属。GPU 推理内核启动失败时，同一订单最多重派两次，排除已故障节点，原预扣和流水不变；最终失败才幂等退款，且用户不接收原始堆栈。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "multipart/form-data": { schema: z.object({ metadata: z.string() }) } } } }, responses: { 200: { description: "可选本地优化阶段、生成进度、故障重派或最终结果已幂等处理" }, 400: { description: "回执不完整、缺少必需 compiled_prompt 或在关闭优化时非法提交 compiled_prompt" }, 401: { description: "绑定无效" }, 403: { description: "用户与执行节点分组不匹配，禁止跨分组回调" }, 409: { description: "任务未接单、回调节点不匹配、本地优化、COS 回执、上传票据或结算状态不匹配" }, 413: { description: "禁止把视频文件经 Vercel 中转" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/admin/h3/tasks", tags: ["Administration"], summary: "管理员筛选共享节点任务派单", responses: { 200: { description: "任务列表" }, 403: { description: "需要管理员角色" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/admin/h3/tasks/{id}", tags: ["Administration"], summary: "管理员查看共享节点任务、回调和审计详情", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "任务详情、回调和审计时间线" }, 404: { description: "任务不存在" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/admin/h3/tasks/{id}/cancel", tags: ["Administration"], summary: "管理员幂等取消任务并退款", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "取消状态和退款结果" }, 409: { description: "已完成任务不能取消" } } });

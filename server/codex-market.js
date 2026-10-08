@@ -6,6 +6,7 @@ import { hashOpaqueToken } from "./security.js";
 import { enforceRateLimit as databaseRateLimit } from "./rate-limit.js";
 import { codexMarketStorage } from "./codex-market-store.js";
 import { gulongEngineEntitlement } from "./english-coach-products.js";
+import { computeGroupFilter, computeGroupsMatch, getUserComputeGroupId } from "./compute-groups.js";
 import {
   CODEX_MARKET_MODELS, CODEX_MARKET_PRICING_REVISION, CODEX_MARKET_MAX_JSON_BYTES,
   CODEX_MARKET_WALLET_REMAINDER_FIELD,
@@ -111,6 +112,15 @@ export function registerCodexMarketRoutes(app, dependencies) {
   const clock = dependencies.now || (() => new Date());
   const hash = dependencies.hashToken || hashOpaqueToken;
   const collection = (name) => getCollection(`codexMarket${name}`);
+  const readUserGroup = dependencies.getUserComputeGroupId || ((userId, session) => getUserComputeGroupId(userId, async (name) => {
+    const records = await getCollection(name);
+    return { findOne: (filter, options) => records.findOne(filter, { ...options, ...(session ? { session } : {}) }) };
+  }));
+  async function checkTaskGroup(task, executorOwnerId, session) {
+    const requesterGroup = await readUserGroup(task.ownerId, session);
+    const executorGroup = await readUserGroup(executorOwnerId, session);
+    if (!computeGroupsMatch(task.computeGroupId, requesterGroup) || !computeGroupsMatch(task.computeGroupId, executorGroup)) throw marketError("COMPUTE_GROUP_MISMATCH", "执行节点与订单所属算力分组不一致，禁止跨分组调用", 403);
+  }
   async function membershipActive(ownerId, session) {
     const subscription = await (await getCollection("subscriptions")).findOne({ ownerId }, { session });
     return gulongEngineEntitlement(subscription, clock()).active;
@@ -157,12 +167,12 @@ export function registerCodexMarketRoutes(app, dependencies) {
     const user = await (await getCollection("users")).findOne({ _id: value.ownerId, status: "active" });
     if (!user) throw marketError("INVALID_NODE_ACCOUNT", "节点所属账号不可用", 403);
     await limit(`node:${value._id}`, 120);
-    return { ...value, rawToken };
+    return { ...value, computeGroupId: await readUserGroup(value.ownerId), rawToken };
   }
   async function verifyNodeInTransaction(auth, session) {
     const current = await (await collection("Nodes")).findOne({ _id: auth._id, status: "active", tokenHash: auth.tokenHash }, { session });
     if (!current) throw marketError("INVALID_NODE_TOKEN", "节点认证已更新，请重新注册", 401);
-    return current;
+    return { ...current, computeGroupId: await readUserGroup(current.ownerId, session) };
   }
   function verifyClient(auth, input) {
     const supplied = typeof input.clientId === "string" && input.clientId ? nodeId(input.clientId) : null;
@@ -172,9 +182,10 @@ export function registerCodexMarketRoutes(app, dependencies) {
     if (supplied && supplied !== auth.nodeId) throw marketError("CLIENT_ID_MISMATCH", "clientId 与节点令牌不匹配", 409);
     return supplied || auth.nodeId;
   }
-  function checkLease(task, auth, input, now) {
+  async function checkLease(task, auth, input, now, session) {
     if (!task || String(task.assignedNodeId) !== String(auth._id) || task.claimId !== input.claimId || typeof input.leaseToken !== "string" || task.leaseTokenHash !== hash(input.leaseToken, "codex-market-task-lease")) throw marketError("LEASE_CONFLICT", "任务已由其他节点或新租约接管", 409);
     if (!TERMINAL.has(task.status) && (!task.leaseExpiresAt || new Date(task.leaseExpiresAt) <= now)) throw marketError("LEASE_EXPIRED", "领取租约已过期，不能回调或结算", 409);
+    await checkTaskGroup(task, auth.ownerId, session);
   }
   async function writeLedger(session, { key, ownerId, task, kind, amountMilliYuan }) {
     const ledgers = await collection("Ledger");
@@ -231,14 +242,31 @@ export function registerCodexMarketRoutes(app, dependencies) {
     const pricing = getPricing();
     let storeReady = false;
     if (pricing) { try { await ensureStore(); storeReady = true; } catch {} }
+    const auth = await account(c);
+    const computeGroupId = auth.error ? null : await readUserGroup(id(auth.user.id));
+    const compatibleNodes = [];
+    if (storeReady) {
+      const nodes = await (await collection("Nodes")).find({ status: "active", lastSeenAt: { $gte: new Date(+clock() - 3 * 60_000) } }).limit(200).toArray();
+      for (const candidate of nodes) {
+        if (!candidate.capabilities?.codexAvailable) continue;
+        try {
+          if (computeGroupsMatch(computeGroupId, await readUserGroup(candidate.ownerId))) compatibleNodes.push(candidate);
+        } catch (error) {
+          if (error?.code !== "COMPUTE_GROUP_OWNER_UNAVAILABLE") throw error;
+        }
+      }
+    }
     return c.json({ models: CODEX_MARKET_MODELS.map((model) => {
       const rate = pricing?.models.find((candidate) => candidate.id === model.id);
       const configured = Boolean(rate);
+      const compatibleNodeCount = compatibleNodes.filter((node) => node.capabilities.models?.includes(model.id)
+        && (model.id !== "longyan" || node.capabilities.usageReportingVersion === "codex-app-server-v1")).length;
       return {
         ...model,
         ...(Number.isSafeInteger(rate?.officialAmountMilliYuan) ? { officialAmountMilliYuan: rate.officialAmountMilliYuan, officialAmountFen: milliYuanToFen(rate.officialAmountMilliYuan) } : {}),
-        available: storeReady && configured, pricingRevision: pricing?.revision || CODEX_MARKET_PRICING_REVISION,
-        unavailableCode: !pricing || !configured ? "OFFICIAL_PRICING_UNAVAILABLE" : !storeReady ? "TRANSACTIONAL_STORE_REQUIRED" : null,
+        available: storeReady && configured && (computeGroupId === null || compatibleNodeCount > 0), pricingRevision: pricing?.revision || CODEX_MARKET_PRICING_REVISION,
+        availability: { compatibleNodeCount, status: compatibleNodeCount ? "ready" : "offline" },
+        unavailableCode: !pricing || !configured ? "OFFICIAL_PRICING_UNAVAILABLE" : !storeReady ? "TRANSACTIONAL_STORE_REQUIRED" : computeGroupId !== null && !compatibleNodeCount ? "NO_COMPATIBLE_GROUP_NODE" : null,
       };
     }), nodeShareBps: 5000, currency: "CNY", accountingUnit: "CNY_MILLIYUAN", milliYuanPerYuan: 1_000, maxJsonBytes: CODEX_MARKET_MAX_JSON_BYTES });
   });
@@ -261,6 +289,8 @@ export function registerCodexMarketRoutes(app, dependencies) {
       const now = clock();
       const administrator = auth.user.role === "admin";
       const memberFree = !administrator && await membershipActive(ownerId, session);
+      const computeGroupId = await readUserGroup(ownerId, session);
+      if (computeGroupId !== null && !administrator && !memberFree) throw marketError("GULONG_ENGINE_SUBSCRIPTION_REQUIRED", "分组算力仅供有效的古龙引擎包月会员使用，请先开通或续费", 403);
       const price = marketQuotePrice(getPricing(), input.model, { administrator: administrator || memberFree, usageLimit });
       const quote = { _id: new ObjectId(), ownerId, requestId: key, model: input.model, request, usageLimit, fingerprint, ...price, billingMode: administrator ? "administrator_exempt" : memberFree ? "gulong_engine_membership" : "wallet", expiresAt: new Date(+now + 5 * 60_000), createdAt: now };
       await quotes.insertOne(quote, { session });
@@ -291,11 +321,13 @@ export function registerCodexMarketRoutes(app, dependencies) {
       const quotedChargeMilliYuan = exactAmount(quote, "charged");
       const administrator = auth.user.role === "admin";
       const memberFree = !administrator && await membershipActive(ownerId, session);
+      const computeGroupId = await readUserGroup(ownerId, session);
+      if (computeGroupId !== null && !administrator && !memberFree) throw marketError("GULONG_ENGINE_SUBSCRIPTION_REQUIRED", "分组算力仅供有效的古龙引擎包月会员使用，请先开通或续费", 403);
       const billingMode = administrator ? "administrator_exempt" : memberFree ? "gulong_engine_membership" : "wallet";
       if (quote.billingMode !== billingMode || (quotedChargeMilliYuan === 0) !== (administrator || memberFree)) throw marketError("QUOTE_AUTHORIZATION_CHANGED", "账号计费权限已变化，请重新获取报价", 409);
       const now = clock();
       const task = {
-        _id: new ObjectId(), ownerId, requestId: key, quoteId, model: quote.model, request: quote.request,
+        _id: new ObjectId(), ownerId, computeGroupId, requestId: key, quoteId, model: quote.model, request: quote.request,
         executionModel: quote.executionModel, reasoningEffort: quote.reasoningEffort || null,
         accountingUnit: "CNY_MILLIYUAN", milliYuanPerYuan: 1_000,
         ...exactFields("officialAmount", exactAmount(quote, "officialAmount")),
@@ -396,7 +428,7 @@ export function registerCodexMarketRoutes(app, dependencies) {
       const renewed = [];
       for (const lease of leases) {
         const task = await (await collection("Tasks")).findOne({ _id: id(lease.taskId) }, { session });
-        checkLease(task, auth, lease, clock());
+        await checkLease(task, auth, lease, clock(), session);
         if (!TERMINAL.has(task.status)) {
           if (task.deadlineAt <= clock()) { await failTask(session, task, "TASK_TIMEOUT", "共享节点任务超时，已退款"); return { taskExpired: true }; }
           const leaseExpiresAt = new Date(Math.min(+clock() + CODEX_LEASE_MS, +task.deadlineAt));
@@ -426,9 +458,10 @@ export function registerCodexMarketRoutes(app, dependencies) {
       let task = null;
       if (hasResumeIdentity) {
         task = await tasks.findOne({ _id: id(input.taskId) }, { session });
-        checkLease(task, auth, input, now);
+        await checkLease(task, auth, input, now, session);
       } else if (!cooperative) {
         task = await tasks.findOne({ assignedNodeId: auth._id, status: { $in: ["claimed", "processing"] }, leaseExpiresAt: { $gt: now } }, { session });
+        if (task) await checkTaskGroup(task, currentNode.ownerId, session);
       }
       if (!task) {
         const activeTasks = await tasks.find({ assignedNodeId: auth._id, status: { $in: ["claimed", "processing"] }, leaseExpiresAt: { $gt: now } }, { session }).limit(maximum + 1).toArray();
@@ -436,7 +469,22 @@ export function registerCodexMarketRoutes(app, dependencies) {
         const claimId = randomBytes(16).toString("hex");
         const leaseToken = `cml_${hash(`${auth.rawToken}:${claimId}`, "codex-market-claim")}`;
         const claimableModels = currentNode.capabilities.models.filter((model) => model !== "longyan" || currentNode.capabilities.usageReportingVersion === "codex-app-server-v1");
-        task = claimableModels.length ? await tasks.findOneAndUpdate({ model: { $in: claimableModels }, deadlineAt: { $gt: now }, $or: [{ status: "queued" }, { status: { $in: ["claimed", "processing"] }, leaseExpiresAt: { $lte: now } }] }, { $set: { assignedNodeId: auth._id, executorOwnerId: auth.ownerId, status: "claimed", claimId, leaseTokenHash: hash(leaseToken, "codex-market-task-lease"), leaseExpiresAt: new Date(+now + CODEX_LEASE_MS), updatedAt: now }, $inc: { attempt: 1 } }, { session, returnDocument: "after", sort: { createdAt: 1, _id: 1 } }) : null;
+        const claimableFilter = { ...computeGroupFilter(currentNode.computeGroupId), model: { $in: claimableModels }, deadlineAt: { $gt: now }, $or: [{ status: "queued" }, { status: { $in: ["claimed", "processing"] }, leaseExpiresAt: { $lte: now } }] };
+        const candidates = claimableModels.length ? await tasks.find(claimableFilter, { session }).sort({ createdAt: 1, _id: 1 }).limit(100).toArray() : [];
+        for (const candidate of candidates) {
+          // Recheck the requester's live assignment, including historical orders
+          // whose saved group predates the administrator's reassignment.
+          if (!computeGroupsMatch(await readUserGroup(candidate.ownerId, session), currentNode.computeGroupId)) continue;
+          if (currentNode.computeGroupId !== null) {
+            const requester = await (await getCollection("users")).findOne({ _id: candidate.ownerId }, { session });
+            if (requester?.role !== "admin" && !await membershipActive(candidate.ownerId, session)) {
+              await failTask(session, candidate, "GULONG_ENGINE_SUBSCRIPTION_REQUIRED", "古龙引擎包月已到期或撤销，分组任务已取消", "cancelled");
+              continue;
+            }
+          }
+          task = await tasks.findOneAndUpdate({ ...claimableFilter, _id: candidate._id }, { $set: { assignedNodeId: auth._id, executorOwnerId: auth.ownerId, status: "claimed", claimId, leaseTokenHash: hash(leaseToken, "codex-market-task-lease"), leaseExpiresAt: new Date(+now + CODEX_LEASE_MS), updatedAt: now }, $inc: { attempt: 1 } }, { session, returnDocument: "after" });
+          if (task) break;
+        }
       }
       // Updating the node row serializes concurrent claims for one client. A
       // retried transaction observes the newly-created active lease count.
@@ -455,7 +503,7 @@ export function registerCodexMarketRoutes(app, dependencies) {
       await verifyNodeInTransaction(auth, session);
       const tasks = await collection("Tasks");
       let task = await tasks.findOne({ _id: id(input.taskId) }, { session });
-      checkLease(task, auth, input, clock());
+      await checkLease(task, auth, input, clock(), session);
       const output = input.status === "completed" ? validateResult(task.model, input.result) : null;
       const usage = input.status === "completed" && task.model === "longyan" ? assertUsageWithinLimit(input.usage, task.usageLimit) : null;
       const progress = Number.isInteger(input.progress) ? Math.max(0, Math.min(99, input.progress)) : 0;
@@ -553,11 +601,11 @@ export function registerCodexMarketRoutes(app, dependencies) {
       ["post", "/tasks/{id}/cancel", "请求者或管理员按单个任务幂等取消并退款，不影响同节点其他活动租约", null, false],
       ["post", "/nodes/register", "使用登录账号绑定 Codex 节点；cooperative-host-slots-v2 必须声明 10 个协同执行槽，旧客户端保持单槽", nodeRequest.extend({ nodeName: z.string(), appVersion: z.string().optional(), capabilities: nodeCapabilities }), false],
       ["post", "/nodes/heartbeat", "按 clientId 和 activeTasks 独立续租最多 10 个活动任务；旧 activeTask 合同继续兼容", nodeRequest.extend({ capabilities: nodeCapabilities.optional(), activeTask: lease.optional(), activeTasks: z.array(lease).max(CODEX_CAPACITY_TOTAL).optional() }), true],
-      ["post", "/tasks/claim", "FIFO 原子领取兼容任务；十槽协同节点最多持有 10 个独立活动租约，第 11 个保持排队", nodeRequest.merge(lease.partial()), true],
+      ["post", "/tasks/claim", "FIFO 原子领取同分组兼容任务；主机分组从所属用户读取，未分组仅匹配未分组；十槽节点最多持有 10 个独立活动租约", nodeRequest.merge(lease.partial()), true],
       ["post", "/tasks/callback", "使用 clientId 与独立领取租约幂等回调；一个任务的终态不影响其他租约；完成后按毫元五五分账", nodeRequest.merge(lease).extend({ eventId: z.string().min(8).max(160), status: z.enum(["started", "progress", "completed", "failed", "cancelled"]), progress: z.number().int().min(0).max(99).optional(), usage: actualUsage.optional(), result: z.object({ text: z.string().optional(), images: z.array(z.object({ dataUrl: z.string() })).optional() }).optional(), error: z.object({ code: z.string().optional(), message: z.string() }).optional() }), true],
     ];
     for (const [method, path, summary, schema, nodeAuth] of schemas) {
-      app.openAPIRegistry.registerPath({ method, path: `${PREFIX}${path}`, tags: ["Codex Marketplace"], summary, ...(nodeAuth ? { security: [{ codexNode: [] }] } : {}), ...(schema ? { request: { body: { required: true, content: { "application/json": { schema } } } } } : {}), responses: { 200: { description: "请求成功或幂等重放" }, ...(method === "post" ? { 201: { description: "报价、订单或节点已创建" } } : {}), 400: { description: "请求合同无效" }, 401: { description: "登录或节点认证无效" }, 402: { description: "可用余额不足，订单未扣费" }, 409: { description: "报价、幂等键、租约、用量上限或任务状态冲突" }, 413: { description: "JSON 总量超过 3 MB" }, 422: { description: "龙言完成回调缺少可接受的真实用量" }, 503: { description: "报价已停用或数据库不支持事务，拒绝收费" } } });
+      app.openAPIRegistry.registerPath({ method, path: `${PREFIX}${path}`, tags: ["Codex Marketplace"], summary, description: "任务与主机仅允许相同 computeGroupId；未分组仅匹配未分组。分组以官网用户记录为准，客户端上传的分组无效。续租、领取重放和回调均重新检查双方当前分组；不匹配返回 403 COMPUTE_GROUP_MISMATCH，且不产生结算。", ...(nodeAuth ? { security: [{ codexNode: [] }] } : {}), ...(schema ? { request: { body: { required: true, content: { "application/json": { schema } } } } } : {}), responses: { 200: { description: "请求成功或幂等重放" }, ...(method === "post" ? { 201: { description: "报价、订单或节点已创建" } } : {}), 400: { description: "请求合同无效" }, 401: { description: "登录或节点认证无效" }, 402: { description: "可用余额不足，订单未扣费" }, 403: { description: "当前需求用户与执行主机的算力分组不匹配" }, 409: { description: "报价、幂等键、租约、用量上限或任务状态冲突" }, 413: { description: "JSON 总量超过 3 MB" }, 422: { description: "龙言完成回调缺少可接受的真实用量" }, 503: { description: "报价已停用或数据库不支持事务，拒绝收费" } } });
     }
   }
 }

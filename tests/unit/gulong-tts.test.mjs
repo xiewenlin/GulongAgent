@@ -3,8 +3,9 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import { OpenAPIHono } from "@hono/zod-openapi";
 import { ObjectId } from "mongodb";
-import { CAPABILITY_ORDER_PROTOCOL, normalizeCapabilityParameters, normalizeCapabilityReport, registerCapabilityOrderRoutes, validateCapabilityInput, verifyCapabilityAudioDigest } from "../../server/capability-orders.js";
+import { CAPABILITY_ORDER_PROTOCOL, normalizeCapabilityParameters, normalizeCapabilityReport, registerCapabilityOrderRoutes as registerCapabilityOrderRoutesImpl, validateCapabilityInput, verifyCapabilityAudioDigest } from "../../server/capability-orders.js";
 import { GULONG_ENGINE_CAPABILITY_DEFINITIONS } from "../../server/gulong-engine-capabilities.js";
+const registerCapabilityOrderRoutes = (app, dependencies) => registerCapabilityOrderRoutesImpl(app, { getUserComputeGroupId: async () => null, ...dependencies });
 
 const tts = GULONG_ENGINE_CAPABILITY_DEFINITIONS.find((item) => item.capabilityId === "gulong_engine.tts");
 const report = () => ({ capability_id: "gulong_engine.tts", capability_version: "1.0.0", protocol_version: CAPABILITY_ORDER_PROTOCOL,

@@ -9,9 +9,10 @@ import {
   capabilityNodeCanRunOrder,
   normalizeCapabilityParameters,
   normalizeCapabilityReport,
-  registerCapabilityOrderRoutes,
+  registerCapabilityOrderRoutes as registerCapabilityOrderRoutesImpl,
   validateCapabilityInput,
 } from "../../server/capability-orders.js";
+const registerCapabilityOrderRoutes = (app, dependencies) => registerCapabilityOrderRoutesImpl(app, { getUserComputeGroupId: async () => null, ...dependencies });
 
 const READY_REPORT = () => ({
   capability_id: "qwen_image_2_1.text_to_image",

@@ -424,7 +424,7 @@ test("H3 worker task DTO excludes requester and billing identity", () => {
     outputUpload: { url: "https://example.invalid/upload", object_key: "h3/tasks/test/output.mp4" },
   });
   assert.deepEqual(Object.keys(task), ["id", "orderNo", "model", "prompt", "source_prompt", "original_prompt", "prompt_mode", "prompt_optimization_enabled", "local_prompt_optimization_required", "video_mode", "longform_mode", "segment_duration_seconds", "prompt_list", "aspectRatio", "durationSeconds", "profile", "sampling_steps", "seed", "imageCount", "videoCount", "audioCount", "assets", "assigned_node", "dispatch_estimated_total_seconds", "auto_cancel_at", "output_upload", "progress_callback"]);
-  assert.deepEqual(task.assigned_node, { node_id: "stable-node-worker-0001", node_name: "渲染节点" });
+  assert.deepEqual(task.assigned_node, { node_id: "stable-node-worker-0001", node_name: "渲染节点", compute_group_id: null });
   assert.equal(task.video_mode, "smart_multiframe");
   assert.equal(task.sampling_steps, 8);
   assert.equal(task.seed, 20260827);
@@ -741,6 +741,7 @@ test("administrator-created H3 tasks queue without wallet deduction or revenue s
   let storedTask = null;
   let walletMutations = 0;
   const collections = {
+    users: { findOne: async () => ({ _id: adminId, status: "active", role: "admin" }) },
     h3SharedTasks: {
       findOne: async (filter) => filter.idempotencyKey && storedTask?.idempotencyKey === filter.idempotencyKey ? storedTask : null,
       insertOne: async (record) => { storedTask = record; return { insertedId: record._id }; },
@@ -879,7 +880,7 @@ test("H3 claim assigns the oldest task to the least-loaded bound LAN node", asyn
   const clusterState = { nextClaimAt: new Date(0) };
   const collections = {
     nodeAccountBindings: {
-      findOne: async () => caller,
+      findOne: async (filter) => filter._id?.toString() === target._id.toString() ? target : caller,
       find: () => testCursor([caller, target]),
       updateOne: async () => ({ modifiedCount: 1 }),
     },
@@ -921,7 +922,7 @@ test("H3 claim assigns the oldest task to the least-loaded bound LAN node", asyn
   });
   assert.equal(response.status, 200);
   const payload = await response.json();
-  assert.deepEqual(payload.task.assigned_node, { node_id: target.nodeId, node_name: target.nodeName });
+  assert.deepEqual(payload.task.assigned_node, { node_id: target.nodeId, node_name: target.nodeName, compute_group_id: null });
   assert.equal(payload.claim_plan.scheduling, "fifo_least_estimated_lan_load");
   assert.equal(task.claimedByNode.bindingId.toString(), target._id.toString());
   assert.equal(task.claimRequestedByNode.bindingId.toString(), caller._id.toString());
@@ -1117,7 +1118,7 @@ test("H3 implementation keeps identity, capability, COS ownership and ledger gat
   assert.match(source, /verifyActivationReceipt\(body\.activation_receipt\)[\s\S]+users[\s\S]+USER_NOT_FOUND/);
   assert.match(source, /h3NodeCanRunTask\(node, task\)[\s\S]+capabilities\.profiles/);
   const dryRunBranch = source.indexOf('if (body.dry_run === true) return c.json({ ok: true, service: "gulong-h3-shared", queue: "reachable" });');
-  const queueMutation = source.indexOf('{ _id: candidate._id, status: "queued", model: H3_SHARED_MODEL }');
+  const queueMutation = source.indexOf('{ _id: candidate._id, status: "queued", model: H3_SHARED_MODEL, ...computeGroupFilter(requesterGroupId) }');
   assert.ok(dryRunBranch > -1 && queueMutation > dryRunBranch, "dry-run returns before the first queue mutation so the queue cannot decrease");
   assert.match(source, /sort: \{ createdAt: 1, _id: 1 \}/);
   assert.match(source, /calculateH3ClaimPlan[\s\S]+additional_tasks:[\s\S]+poll_after_ms/);

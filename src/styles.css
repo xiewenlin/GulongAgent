@@ -7522,3 +7522,34 @@ textarea:focus {
 .pricing-grid:has(>article:nth-child(5)){grid-template-columns:repeat(3,minmax(0,1fr))}.pricing-grid .manual-renew-note strong,.pricing-grid .manual-renew-note small{overflow-wrap:break-word;word-break:normal}
 @media(max-width:1000px){.subscription-product-grid{grid-template-columns:1fr}.subscription-product-dates{grid-template-columns:1fr 1fr}.pricing-grid:has(>article:nth-child(5)){grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:600px){.subscription-dialog-header{padding:18px 16px;gap:14px}.subscription-dialog-header h2{font-size:22px}.subscription-dialog-header>div>span{font-size:18px;letter-spacing:.08em}.subscription-dialog-body{padding:18px 16px 0}.subscription-product-card{padding:18px 15px}.subscription-product-card header{flex-direction:column;gap:10px}.subscription-product-dates{grid-template-columns:1fr}.subscription-product-actions{align-items:stretch;flex-direction:column;gap:12px;padding-bottom:18px}.subscription-product-actions>div{display:grid;grid-template-columns:1fr 1fr;gap:9px}.subscription-product-actions .button{padding:12px 10px;font-size:18px}.subscription-history article{grid-template-columns:1fr}.pricing-grid:has(>article:nth-child(5)){grid-template-columns:1fr}}
+
+/* Compute groups are saved independently from product subscription periods. */
+.member-compute-group{max-width:1400px;margin:0 auto 26px;padding:24px;border:1px solid var(--line);border-radius:16px;background:var(--surface);display:flex;flex-direction:column;gap:20px;min-width:0}
+.member-compute-group>header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}
+.member-compute-group-heading{display:flex;gap:13px;align-items:flex-start;min-width:0}
+.member-compute-group-heading>svg{flex-shrink:0;color:var(--jade);margin-top:3px}
+.member-compute-group-heading h3{margin:0;font-size:20px;color:var(--text)}
+.member-compute-group-heading p,.member-compute-group-note{margin:7px 0 0;font-size:18px;line-height:1.7;color:var(--muted)}
+.member-compute-group .status-pill,.member-compute-group .button{white-space:nowrap;flex-shrink:0}
+.member-compute-group-current{display:grid;grid-template-columns:auto minmax(120px,1fr) auto minmax(180px,1.4fr);align-items:center;gap:12px;padding:15px 18px;background:var(--jade-soft);border-radius:11px;min-width:0}
+.member-compute-group-current>span,.member-compute-group-selected>span{color:var(--muted);font-size:18px}
+.member-compute-group-current>strong{font-size:18px;overflow-wrap:anywhere}
+.member-compute-group code{font-size:18px;line-height:1.7;color:var(--jade);overflow-wrap:anywhere;user-select:all}
+.member-compute-group-controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px;min-width:0}
+.member-compute-group-controls form{margin:0;min-width:0}
+.member-compute-group-controls label,.member-compute-group-assignment>label{display:flex;flex-direction:column;gap:9px;font-size:18px;color:var(--text);min-width:0}
+.member-compute-group-controls form>div{display:flex;align-items:center;gap:10px;margin-top:9px;min-width:0}
+.member-compute-group input,.member-compute-group select{width:100%;min-width:0;padding:12px 14px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--text);font:inherit;font-size:18px}
+.member-compute-group input:focus,.member-compute-group select:focus{outline:2px solid color-mix(in srgb,var(--jade) 30%,transparent);outline-offset:2px;border-color:var(--jade)}
+.member-compute-group input:disabled,.member-compute-group select:disabled{opacity:.6}
+.member-compute-group-assignment{display:grid;grid-template-columns:minmax(180px,1fr) minmax(220px,1.4fr) auto;align-items:end;gap:20px;min-width:0}
+.member-compute-group-selected{display:flex;flex-direction:column;justify-content:center;gap:7px;min-height:49px;min-width:0}
+.member-compute-group-assignment>.button{min-height:49px}
+.member-compute-group-rule{display:flex;gap:9px;align-items:flex-start;padding-top:17px;border-top:1px solid var(--line);margin:0;color:var(--muted);font-size:18px;line-height:1.7}
+.member-compute-group-rule svg{flex-shrink:0;color:var(--jade);margin-top:4px}
+.member-compute-group-message{display:flex;align-items:center;justify-content:space-between;gap:14px;border-radius:10px;padding:13px 16px;font-size:18px;line-height:1.7;margin:0}
+.member-compute-group-message.error{color:var(--danger);background:#fbeae5}
+.member-compute-group-message.success{color:var(--jade);background:var(--jade-soft)}
+.member-compute-group-loading{margin:0;color:var(--muted);font-size:18px}
+@media(max-width:1000px){.member-compute-group-current{grid-template-columns:120px minmax(0,1fr)}.member-compute-group-controls{grid-template-columns:1fr}.member-compute-group-assignment{grid-template-columns:minmax(180px,1fr) minmax(180px,1fr)}.member-compute-group-assignment>.button{grid-column:1/-1;justify-self:end}}
+@media(max-width:600px){.member-compute-group{padding:18px 15px;gap:17px}.member-compute-group>header{flex-direction:column;gap:12px}.member-compute-group-current{padding:12px;grid-template-columns:1fr;gap:6px}.member-compute-group-current>span:nth-of-type(2){margin-top:9px}.member-compute-group-controls form>div{align-items:stretch;flex-direction:column}.member-compute-group-assignment{grid-template-columns:1fr;gap:13px}.member-compute-group-assignment>.button{width:100%;justify-content:center}.member-compute-group-message{align-items:stretch;flex-direction:column}.member-compute-group-heading h3{font-size:19px}}

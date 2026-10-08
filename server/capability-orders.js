@@ -9,6 +9,7 @@ import { localizeErrorMessage } from "../shared/error-messages.js";
 import { readEnglishEntitlement, readGulongEngineEntitlement } from "./english-coach-products.js";
 import { ENGLISH_CAPABILITY_DEFINITIONS, englishNodeSharesCapability, englishWorkerOwnsClaim, isEnglishCapability, validateEnglishInlineResult } from "./english-coach-capabilities.js";
 import { GULONG_ENGINE_CAPABILITY_DEFINITIONS, gulongEngineNodeSharesCapability, gulongEngineUploadAllowed, isGulongEngineCapability, validateGulongEngineInlineResult } from "./gulong-engine-capabilities.js";
+import { computeGroupFilter, computeGroupsMatch, getUserComputeGroupId, normalizeComputeGroupId } from "./compute-groups.js";
 
 export const CAPABILITY_ORDER_PROTOCOL = "gulong-capability-orders-v1";
 export const CAPABILITY_BINDING_HEADER = "X-Gulong-Account-Binding";
@@ -439,6 +440,7 @@ export function normalizeCapabilityReport(value = {}, now = new Date(), { allowL
 
 export function capabilityNodeCanRunOrder(node, order) {
   if (!node || node.availableSlots < 1) return false;
+  if (!computeGroupsMatch(order.computeGroupId, node.binding?.computeGroupId)) return false;
   if (order.preferredNodeId && order.preferredNodeId !== node.nodeId) return false;
   if (node.binding?.userId && String(node.binding.userId) !== String(order.requesterUserId)
     && !(order.sharingScope === "english_shared" && englishNodeSharesCapability(node, order.capabilityId))
@@ -567,6 +569,18 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
   const englishEntitlement = dependencies.readEnglishEntitlement || ((ownerId, now) => readEnglishEntitlement(ownerId, now, getCollection));
   const gulongEntitlement = dependencies.readGulongEngineEntitlement || ((ownerId, now) => readGulongEngineEntitlement(ownerId, now, getCollection));
   const requestKey = (ownerId, key) => createHash("sha256").update(`${ownerId}:${key}`).digest("hex");
+  const readUserGroup = dependencies.getUserComputeGroupId || ((userId) => getUserComputeGroupId(userId, getCollection));
+
+  async function workerGroupError(c, order, auth) {
+    const [groupId, currentBinding] = await Promise.all([
+      readUserGroup(order.requesterUserId),
+      (await getCollection("nodeAccountBindings")).findOne({ _id: auth.binding._id, userId: auth.user._id, nodeId: auth.binding.nodeId,
+        tokenHash: auth.binding.tokenHash, status: "active", revokedAt: null }),
+    ]);
+    if (!currentBinding) return c.json({ code: "INVALID_ACCOUNT_BINDING", message: "执行节点账号绑定已失效，请停止当前任务并重新绑定" }, 401);
+    if (!computeGroupsMatch(order.computeGroupId, groupId) || !computeGroupsMatch(order.computeGroupId, currentBinding.computeGroupId)) return c.json({ code: "COMPUTE_GROUP_MISMATCH", message: "执行节点与订单所属算力分组不一致，禁止跨分组调用" }, 403);
+    return null;
+  }
 
   async function gulongAvailability(capabilityId, ownerId, { order = null, now = new Date() } = {}) {
     const capability = CAPABILITY_MAP.get(capabilityId);
@@ -575,6 +589,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       .find({ "capabilities.capabilityId": capabilityId, reportedAt: { $gte: new Date(now.getTime() - 3 * 60_000) } })
       .limit(200).toArray();
     if (!reports.length) return { verified_node_count: 0, free_slot_count: 0, status: "offline", ...(capabilityId === "gulong_engine.tts" ? { voice_ids: [] } : {}) };
+    const computeGroupId = await readUserGroup(ownerId);
     const bindings = await (await getCollection("nodeAccountBindings"))
       .find({ _id: { $in: reports.map((report) => report.bindingId) }, status: "active", revokedAt: null }).toArray();
     const activeBindings = new Map(bindings.map((binding) => [String(binding._id), binding]));
@@ -593,8 +608,10 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       if (!reportedCapability) continue;
       const availableSlots = Math.max(0, Math.min(integer(reportedCapability.maxConcurrent, 1), integer(report.resources?.max_concurrent_tasks, integer(reportedCapability.maxConcurrent, 1))) - integer(report.resources?.running_task_count));
       if (!capabilityNodeCanRunOrder({ nodeId: report.nodeId, binding, availableSlots: Math.max(1, availableSlots), capabilities: [reportedCapability] },
-        order || { capabilityId, requesterUserId: ownerId, sharingScope: "gulong_shared", capabilityVersion: capability.requiredCapabilityVersion || null,
-          parameters: capabilityId === "gulong_engine.image_2k" ? { model: "qwen_image_2_1" } : {} })) continue;
+        { ...(order || { capabilityId, requesterUserId: ownerId,
+          sharingScope: isEnglishCapability(capabilityId) ? "english_shared" : isGulongEngineCapability(capabilityId) ? "gulong_shared" : null,
+          capabilityVersion: capability.requiredCapabilityVersion || null,
+          parameters: capabilityId === "gulong_engine.image_2k" ? { model: "qwen_image_2_1" } : {} }), computeGroupId })) continue;
       nodeCount += 1;
       freeSlots += availableSlots;
       if (capabilityId === "gulong_engine.tts") for (const voice of reportedCapability.supportedVoices || []) voiceIds.add(voice);
@@ -607,6 +624,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     if (order.status !== "queued" || !order.capabilityId) return null;
     const position = await (await getCollection("capabilityOrders")).countDocuments({
       capabilityId: order.capabilityId, status: "queued",
+      ...computeGroupFilter(await readUserGroup(order.requesterUserId)),
       $or: [{ createdAt: { $lt: order.createdAt } }, { createdAt: order.createdAt, _id: { $lte: order._id } }],
     });
     const availability = isGulongEngineCapability(order.capabilityId)
@@ -696,7 +714,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       : auth.kind === "desktop-gulong-engine" ? CAPABILITY_ORDER_DEFINITIONS.filter((item) => isGulongEngineCapability(item.capabilityId)) : CAPABILITY_ORDER_DEFINITIONS;
     c.header("Cache-Control", "private, no-store, max-age=0");
     const capabilities = definitions.map(publicDefinition);
-    for (const item of capabilities.filter((entry) => isGulongEngineCapability(entry.capability_id))) {
+    for (const item of capabilities.filter((entry) => !entry.legacy_route)) {
       item.availability = await gulongAvailability(item.capability_id, auth.user.id);
       item.dispatchable = item.dispatchable && item.availability.verified_node_count > 0;
     }
@@ -790,9 +808,11 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const preferredNodeId = String(body.preferred_node_id || "").trim() || null;
     const requestedCapabilityVersion = String(body.capability_version || "").trim().slice(0, 80) || capability.requiredCapabilityVersion || null;
     if (capability.requiredCapabilityVersion && requestedCapabilityVersion !== capability.requiredCapabilityVersion) return c.json({ code: "CAPABILITY_VERSION_UNSUPPORTED", message: `该能力必须使用 ${capability.requiredCapabilityVersion} 合同版本` }, 409);
+    const computeGroupId = await readUserGroup(ownerId);
     if (preferredNodeId) {
       const binding = await (await getCollection("nodeAccountBindings")).findOne({ userId: ownerId, nodeId: preferredNodeId, status: "active", revokedAt: null });
       if (!binding) return c.json({ code: "PREFERRED_NODE_NOT_OWNED", message: "指定执行节点不属于当前账户" }, 403);
+      if (!computeGroupsMatch(computeGroupId, binding.computeGroupId)) return c.json({ code: "COMPUTE_GROUP_MISMATCH", message: "指定执行节点与当前用户不在同一算力分组" }, 403);
     }
     const fingerprint = requestFingerprint({ capabilityId, capabilityVersion: requestedCapabilityVersion, parameters, assets: assets.map((item) => ({ assetId: item.assetId, role: item.role, sha256: item.sha256 })), preferredNodeId });
     const idempotencyKey = requestKey(ownerId, rawKey);
@@ -804,10 +824,10 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       return c.json({ order: publicOrder(existing, issueDownloadUrl, await queueSnapshot(existing)), idempotent: true }, 201);
     }
     if (isEnglishCapability(capabilityId)) { const rejected = await requireEnglish(c, ownerId); if (rejected) return rejected; }
-    if (isGulongEngineCapability(capabilityId)) { const rejected = await requireGulong(c, ownerId); if (rejected) return rejected; }
+    if ((isGulongEngineCapability(capabilityId) || computeGroupId !== null) && auth.user.role !== "admin") { const rejected = await requireGulong(c, ownerId); if (rejected) return rejected; }
     if (isGulongEngineCapability(capabilityId)) {
       const availability = await gulongAvailability(capabilityId, ownerId, {
-        order: { capabilityId, requesterUserId: ownerId, sharingScope: "gulong_shared", preferredNodeId, capabilityVersion: requestedCapabilityVersion, parameters },
+        order: { capabilityId, requesterUserId: ownerId, computeGroupId, sharingScope: "gulong_shared", preferredNodeId, capabilityVersion: requestedCapabilityVersion, parameters },
       });
       if (!availability.verified_node_count) return c.json({ code: "CAPABILITY_NO_COMPATIBLE_NODE", message: "当前没有在线且已验证的兼容共享节点，暂不能创建任务，请稍后重试。", availability }, 409);
     }
@@ -819,6 +839,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       orderNo: `CAP${Date.now()}${randomBytes(3).toString("hex").toUpperCase()}`,
       protocolVersion: CAPABILITY_ORDER_PROTOCOL,
       requesterUserId: ownerId,
+      computeGroupId,
       sourceChannel: body.source_channel === "desktop_agent" ? "desktop_agent" : "website",
       capabilityId,
       ...(isEnglishCapability(capabilityId) ? { sharingScope: "english_shared", entitlementPlan: "english_coach_monthly" } : {}),
@@ -917,6 +938,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     if (!order?.assignedNode?.nodeId) return c.json({ code: "ORDER_NOT_ASSIGNED", message: "能力订单尚未分配执行节点" }, 409);
     const auth = await authenticateBinding(c, order.assignedNode.nodeId); if (auth.error) return auth.error;
     if (!workerOwnsClaim(order, auth) || String(c.req.query("claim_id") || "") !== order.claimId) return c.json({ code: "CLAIM_MISMATCH", message: "订单领取身份不匹配" }, 409);
+    const groupRejected = await workerGroupError(c, order, auth); if (groupRejected) return groupRejected;
     const terminal = CAPABILITY_TERMINAL.has(order.status);
     const cancellationRequested = order.status === "cancelled";
     const leaseExpired = !terminal && order.claimLeaseUntil && new Date(order.claimLeaseUntil) <= new Date();
@@ -975,28 +997,36 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const ownerScope = { $or: [{ requesterUserId: auth.user._id },
       ...(sharedEnglishIds.length ? [{ capabilityId: { $in: sharedEnglishIds }, sharingScope: "english_shared" }] : []),
       ...(sharedGulongIds.length ? [{ capabilityId: { $in: sharedGulongIds }, sharingScope: "gulong_shared" }] : [])] };
-    const candidates = await (await getCollection("capabilityOrders")).find({ ...ownerScope, status: "queued", capabilityId: { $in: capabilityIds }, nextEligibleAt: { $lte: now }, autoCancelAt: { $gt: now } }).sort({ createdAt: 1, _id: 1 }).limit(100).toArray();
+    const groupIds = [...new Set(nodes.map((item) => normalizeComputeGroupId(item.binding.computeGroupId)))];
+    const candidates = await (await getCollection("capabilityOrders")).find({ ...ownerScope, computeGroupId: { $in: groupIds }, status: "queued", capabilityId: { $in: capabilityIds }, nextEligibleAt: { $lte: now }, autoCancelAt: { $gt: now } }).sort({ createdAt: 1, _id: 1 }).limit(100).toArray();
     let selected = null;
     for (const order of candidates) {
+      const computeGroupId = await readUserGroup(order.requesterUserId);
+      // Current membership assignment is authoritative even for old/stale orders.
+      if (!computeGroupsMatch(computeGroupId, order.computeGroupId)) continue;
       if (isEnglishCapability(order.capabilityId) && !(await englishEntitlement(order.requesterUserId, now)).active) {
         await (await getCollection("capabilityOrders")).updateOne({ _id: order._id, status: "queued" }, { $set: { status: "cancelled", stage: "cancelled", cancelReason: "english_subscription_inactive", error: { code: "ENGLISH_SUBSCRIPTION_REQUIRED", message: "英语教练套餐尚未生效、已到期或已撤销" }, cancelledAt: now, updatedAt: now } });
         continue;
       }
-      if (isGulongEngineCapability(order.capabilityId) && !(await gulongEntitlement(order.requesterUserId, now)).active) {
+      const requester = computeGroupId !== null || isGulongEngineCapability(order.capabilityId)
+        ? await (await getCollection("users")).findOne({ _id: order.requesterUserId }) : null;
+      if ((isGulongEngineCapability(order.capabilityId) || computeGroupId !== null) && requester?.role !== "admin" && !(await gulongEntitlement(order.requesterUserId, now)).active) {
         await (await getCollection("capabilityOrders")).updateOne({ _id: order._id, status: "queued" }, { $set: { status: "cancelled", stage: "cancelled", cancelReason: "gulong_engine_subscription_inactive", error: { code: "GULONG_ENGINE_SUBSCRIPTION_REQUIRED", message: "古龙绿色版套餐尚未生效、已到期或已撤销" }, cancelledAt: now, updatedAt: now } });
         continue;
       }
       // A LAN proxy cannot opt another node into serving unrelated accounts.
       const foreign = String(order.requesterUserId) !== String(auth.user._id);
-      const node = nodes.find((item) => (!foreign || item === ownNode) && capabilityNodeCanRunOrder(item, order));
+      const node = nodes.find((item) => (!foreign || item === ownNode) && capabilityNodeCanRunOrder(item, { ...order, computeGroupId }));
       if (node) { selected = { order, node }; break; }
     }
     if (!selected) return c.json({ task: null, claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: "same_account_fifo_least_estimated_load", eligible_capability_ids: capabilityIds } });
+    const currentBinding = await (await getCollection("nodeAccountBindings")).findOne({ _id: selected.node.binding._id, status: "active", revokedAt: null });
+    if (!currentBinding || !computeGroupsMatch(await readUserGroup(selected.order.requesterUserId), currentBinding.computeGroupId)) return c.json({ task: null, claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: "same_account_fifo_least_estimated_load", group_changed: true } });
     const claimId = randomBytes(18).toString("base64url");
     const claimLeaseUntil = new Date(now.getTime() + CAPABILITY_CLAIM_LEASE_MS);
     const selectedCapability = selected.node.capabilities.find((item) => item.capabilityId === selected.order.capabilityId && (!selected.order.capabilityVersion || item.capabilityVersion === selected.order.capabilityVersion));
     const assignedNode = { nodeId: selected.node.nodeId, nodeName: selected.node.nodeName, bindingId: selected.node.binding._id, userId: selected.node.binding.userId };
-    const claimed = await (await getCollection("capabilityOrders")).findOneAndUpdate({ _id: selected.order._id, status: "queued", nextEligibleAt: { $lte: now } }, { $set: { status: "claimed", stage: "claimed", claimId, claimRequestedByNodeId: auth.binding.nodeId, assignedNode, capabilityVersion: selectedCapability.capabilityVersion, claimedAt: now, claimLeaseUntil, updatedAt: now }, $inc: { attempt: 1 } }, { returnDocument: "after" });
+    const claimed = await (await getCollection("capabilityOrders")).findOneAndUpdate({ _id: selected.order._id, ...computeGroupFilter(currentBinding.computeGroupId), status: "queued", nextEligibleAt: { $lte: now } }, { $set: { status: "claimed", stage: "claimed", claimId, claimRequestedByNodeId: auth.binding.nodeId, assignedNode, capabilityVersion: selectedCapability.capabilityVersion, claimedAt: now, claimLeaseUntil, updatedAt: now }, $inc: { attempt: 1 } }, { returnDocument: "after" });
     if (!claimed) return c.json({ task: null, claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: "same_account_fifo_least_estimated_load", race_lost: true } });
     return c.json({ task: workerOrder(claimed, claimAssets(claimed.assets)), claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: "same_account_fifo_least_estimated_load", selected_node_id: selected.node.nodeId } });
   });
@@ -1010,6 +1040,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     if (!order.claimLeaseUntil || new Date(order.claimLeaseUntil) <= now) return c.json({ code: "CLAIM_LEASE_EXPIRED", message: "订单领取租约已过期，不能再签发输出票据" }, 409);
     const auth = await authenticateBinding(c, order.assignedNode?.nodeId); if (auth.error) return auth.error;
     if (!workerOwnsClaim(order, auth)) return c.json({ code: "CLAIM_MISMATCH", message: "订单执行账户不匹配" }, 409);
+    const groupRejected = await workerGroupError(c, order, auth); if (groupRejected) return groupRejected;
     if (String(body.claim_id || "") !== order.claimId) return c.json({ code: "CLAIM_MISMATCH", message: "订单领取凭据不匹配" }, 409);
     const capability = CAPABILITY_MAP.get(order.capabilityId);
     const contentType = String(body.content_type || "").trim().toLowerCase();
@@ -1027,6 +1058,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const objectKey = `capability-orders/${order._id}/outputs/${outputId}-${filename}`;
     const expiresAt = new Date(now.getTime() + 60 * 60_000);
     const headers = { "Content-Type": contentType, "x-cos-meta-sha256": sha256, "x-cos-meta-bytes": String(bytes), "x-cos-meta-capability-order-id": order._id.toString(), "x-cos-meta-capability-output-id": outputId, "x-cos-meta-node-id-hash": createHash("sha256").update(auth.binding.nodeId).digest("hex") };
+    const finalGroupRejected = await workerGroupError(c, order, auth); if (finalGroupRejected) return finalGroupRejected;
     await outputUploads.insertOne({ outputId, orderId: order._id, claimId: order.claimId, ownerId: order.requesterUserId, issuedToBindingId: auth.binding._id, issuedToNodeId: auth.binding.nodeId, role, filename, contentType, bytes, sha256, objectKey, status: "issued", createdAt: now, updatedAt: now, expiresAt });
     return c.json({
       output_id: outputId,
@@ -1049,6 +1081,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     if (!order) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
     const auth = await authenticateBinding(c, order.assignedNode?.nodeId); if (auth.error) return auth.error;
     if (!workerOwnsClaim(order, auth) || String(body.claim_id || "") !== order.claimId) return c.json({ code: "CLAIM_MISMATCH", message: "订单领取身份不匹配" }, 409);
+    const groupRejected = await workerGroupError(c, order, auth); if (groupRejected) return groupRejected;
     const eventId = String(body.event_id || "").trim();
     if (!/^[A-Za-z0-9._:-]{8,160}$/.test(eventId)) return c.json({ code: "CALLBACK_EVENT_REQUIRED", message: "回调必须提供稳定 event_id" }, 400);
     const callbacks = await getCollection("capabilityOrderCallbacks");
@@ -1064,7 +1097,10 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const progress = status === "completed" ? 100 : Math.min(99, Math.max(0, integer(body.progress)));
     const etaSeconds = body.eta_seconds == null ? (estimatedTotalSeconds ? Math.max(0, estimatedTotalSeconds - elapsedSeconds) : order.etaSeconds) : Math.max(0, integer(body.eta_seconds));
     if (status === "started" && estimatedTotalSeconds < 1) return c.json({ code: "ESTIMATE_REQUIRED", message: "首次 started 回调必须提供 estimated_total_seconds" }, 400);
+    let finalGroupRejection = null;
     const claimEvent = async () => {
+      finalGroupRejection = await workerGroupError(c, order, auth);
+      if (finalGroupRejection) return false;
       try {
         await callbacks.insertOne({ orderId: order._id, eventId, claimId: order.claimId, status, nodeId: auth.binding.nodeId, createdAt: now, resultStatus: "processing" });
         return true;
@@ -1074,7 +1110,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       }
     };
     if (["started", "progress"].includes(status)) {
-      if (!await claimEvent()) return c.json({ ok: true, idempotent: true, order_status: (await callbacks.findOne({ orderId: order._id, eventId }))?.resultStatus });
+      if (!await claimEvent()) return finalGroupRejection || c.json({ ok: true, idempotent: true, order_status: (await callbacks.findOne({ orderId: order._id, eventId }))?.resultStatus });
       const updated = await orders.findOneAndUpdate({ _id: order._id, status: { $in: ["claimed", "processing"] }, claimId: order.claimId }, { $set: { status: "processing", stage: String(body.stage || "processing").slice(0, 120), progress, elapsedSeconds, etaSeconds, estimatedTotalSeconds: estimatedTotalSeconds || order.estimatedTotalSeconds || null, claimLeaseUntil: new Date(now.getTime() + CAPABILITY_CLAIM_LEASE_MS), updatedAt: now } }, { returnDocument: "after" });
       await callbacks.updateOne({ orderId: order._id, eventId }, { $set: { resultStatus: updated?.status || order.status } });
       return c.json({ ok: true, idempotent: false, order_status: updated?.status || order.status, progress, eta_seconds: etaSeconds });
@@ -1117,7 +1153,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
         }
         outputs.push({ outputId: grant.outputId, role: grant.role, filename: grant.filename, contentType: grant.contentType, bytes: grant.bytes, sha256: grant.sha256, objectKey: grant.objectKey });
       }
-      if (!await claimEvent()) return c.json({ ok: true, idempotent: true, order_status: (await callbacks.findOne({ orderId: order._id, eventId }))?.resultStatus });
+      if (!await claimEvent()) return finalGroupRejection || c.json({ ok: true, idempotent: true, order_status: (await callbacks.findOne({ orderId: order._id, eventId }))?.resultStatus });
       const completed = await orders.findOneAndUpdate({ _id: order._id, status: { $in: ["claimed", "processing"] }, claimId: order.claimId }, { $set: { status: "completed", stage: "completed", progress: 100, elapsedSeconds, etaSeconds: 0, inlineResult, outputs, completedAt: now, updatedAt: now }, $unset: { claimLeaseUntil: "" } }, { returnDocument: "after" });
       if (!completed) return c.json({ code: "ORDER_STATE_CONFLICT", message: "订单状态已变化，完成结果未重复写入" }, 409);
       if (grants.length) await (await getCollection("capabilityOutputUploads")).updateMany({ outputId: { $in: outputIds }, status: "issued" }, { $set: { status: "completed", completedAt: now, updatedAt: now }, $unset: { expiresAt: "" } });
@@ -1128,7 +1164,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       const retryable = body.retryable === true;
       const canRetry = retryable && integer(order.attempt) < integer(order.maxAttempts, 2);
       const error = { code: String(body.error_code || "CAPABILITY_EXECUTION_FAILED").slice(0, 100), message: localizeErrorMessage(body.error_message, "本地能力执行失败").slice(0, 500), retryable };
-      if (!await claimEvent()) return c.json({ ok: true, idempotent: true, order_status: (await callbacks.findOne({ orderId: order._id, eventId }))?.resultStatus });
+      if (!await claimEvent()) return finalGroupRejection || c.json({ ok: true, idempotent: true, order_status: (await callbacks.findOne({ orderId: order._id, eventId }))?.resultStatus });
       if (canRetry) {
         await orders.updateOne({ _id: order._id, claimId: order.claimId, status: { $in: ["claimed", "processing"] } }, { $set: { status: "queued", stage: "retry_wait", error, nextEligibleAt: new Date(now.getTime() + Math.min(300, Math.max(5, integer(body.retry_after_seconds, 15))) * 1000), updatedAt: now }, $unset: { assignedNode: "", claimId: "", claimLeaseUntil: "", claimedAt: "" } });
         await callbacks.updateOne({ orderId: order._id, eventId }, { $set: { resultStatus: "queued" } });
@@ -1138,7 +1174,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       await callbacks.updateOne({ orderId: order._id, eventId }, { $set: { resultStatus: "failed" } });
       return c.json({ ok: true, idempotent: false, order_status: "failed", retry_scheduled: false });
     }
-    if (!await claimEvent()) return c.json({ ok: true, idempotent: true, order_status: (await callbacks.findOne({ orderId: order._id, eventId }))?.resultStatus });
+    if (!await claimEvent()) return finalGroupRejection || c.json({ ok: true, idempotent: true, order_status: (await callbacks.findOne({ orderId: order._id, eventId }))?.resultStatus });
     await orders.updateOne({ _id: order._id, claimId: order.claimId, status: { $in: ["claimed", "processing"] } }, { $set: { status: "cancelled", stage: "cancelled", cancelledAt: now, cancelReason: "worker_cancelled", updatedAt: now }, $unset: { claimLeaseUntil: "" } });
     await callbacks.updateOne({ orderId: order._id, eventId }, { $set: { resultStatus: "cancelled" } });
     return c.json({ ok: true, idempotent: false, order_status: "cancelled" });

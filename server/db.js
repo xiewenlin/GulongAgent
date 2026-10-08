@@ -100,6 +100,16 @@ export async function ensureIndexes() {
         },
       };
       await Promise.all([
+        db.collection("computeGroups").createIndex({ id: 1 }, { unique: true, name: "uniq_compute_group_id" }),
+        db.collection("computeGroups").createIndex({ nameNormalized: 1 }, { unique: true, name: "uniq_compute_group_name" }),
+        db.collection("users").createIndex({ computeGroupId: 1 }, { name: "users_compute_group" }),
+        db.collection("nodeAccountBindings").createIndex({ computeGroupId: 1, status: 1 }, { name: "nodes_compute_group" }),
+        db.collection("h3SharedTasks").createIndex({ computeGroupId: 1, status: 1, createdAt: 1 }, { name: "h3_compute_group_queue" }),
+        db.collection("capabilityOrders").createIndex({ computeGroupId: 1, status: 1, createdAt: 1 }, { name: "capability_compute_group_queue" }),
+        db.collection("codexMarketTasks").createIndex({ computeGroupId: 1, status: 1, createdAt: 1 }, { name: "codex_compute_group_queue" }),
+        db.collection("computeAccessPermits").createIndex({ tokenHash: 1 }, { unique: true, name: "uniq_compute_access_permit" }),
+        db.collection("computeAccessPermits").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0, name: "ttl_compute_access_permit" }),
+        db.collection("computeGroupAudits").createIndex({ createdAt: -1, userId: 1, bindingId: 1 }, { name: "compute_group_audits" }),
         db.collection("users").createIndex(
           { usernameNormalized: 1 },
           { unique: true, sparse: true, name: "uniq_username" },

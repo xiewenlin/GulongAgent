@@ -1198,7 +1198,7 @@ test("English Coach desktop authentication and subscription are documented in Op
     "/api/v1/desktop/english-coach/account",
     "/api/v1/capability-orders/by-request/{key}",
   ]) assert.ok(document.paths[path], `${path} must be documented`);
-  assert.equal(document.info.version, "2.10.1");
+  assert.equal(document.info.version, "2.11.0");
   assert.ok(document.components.securitySchemes.englishCoachDesktopBearer);
 });
 
@@ -1214,6 +1214,19 @@ test("Gulong Engine desktop account and free text recovery routes are documented
     "/api/v1/desktop/pearapi/generations/by-request/{key}",
   ]) assert.ok(document.paths[path], `${path} must be documented`);
   assert.equal(document.components.securitySchemes.gulongEngineDesktopBearer.type, "http");
+});
+
+test("compute grouping OpenAPI publishes bound-node configuration and one-time direct access contracts", async () => {
+  const response = await app.request("https://example.test/api/openapi.json");
+  assert.equal(response.status, 200);
+  const document = await response.json();
+  for (const path of ["/api/admin/compute-groups", "/api/admin/users/{id}/compute-group", "/api/desktop/compute-groups", "/api/desktop/nodes/compute-group", "/api/v1/compute-access/authorize", "/api/desktop/compute-access/verify"]) assert.ok(document.paths[path], path);
+  const nodeRoute = document.paths["/api/desktop/nodes/compute-group"].put;
+  assert.deepEqual(nodeRoute.security, [{ accountBinding: [] }]);
+  assert.ok(nodeRoute.requestBody.content["application/json"].schema.required.includes("group_id"));
+  assert.deepEqual(document.paths["/api/v1/compute-access/authorize"].post.responses[200].content["application/json"].schema.properties.one_time.enum, [true]);
+  assert.deepEqual(document.paths["/api/desktop/compute-access/verify"].post.responses[200].content["application/json"].schema.properties.allowed.enum, [true]);
+  assert.ok(document.components.securitySchemes.sessionCookie);
 });
 
 test("admin subscriptions use a full-screen multi-product editor", async () => {

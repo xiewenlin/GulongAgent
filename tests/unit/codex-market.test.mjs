@@ -16,6 +16,132 @@ test("precise wallet balance keeps the milli-yuan remainder for desktop status",
   assert.equal(readMarketWalletAmount({ balanceFen: 81, codexMarketRemainderMilliYuan: 99 }).balanceMilliYuan, 810);
 });
 
+test("Codex hosts cannot claim another group's shared orders even with a spoofed client group", async () => {
+  const f = fixture({ member: true });
+  f.rows.users[0].computeGroupId = "group-a";
+  f.rows.users[1].computeGroupId = "group-b";
+  const created = await f.create("group-order-0001");
+  assert.equal(created.status, 201);
+  assert.equal(f.rows.codexMarketTasks[0].computeGroupId, "group-a");
+  const node = await f.register();
+  const denied = await f.claim(node, { computeGroupId: "group-a" });
+  assert.equal(denied.status, 200);
+  assert.equal(denied.body.task, null);
+  assert.equal(f.rows.codexMarketTasks[0].status, "queued");
+  f.rows.users[1].computeGroupId = "group-a";
+  const allowed = await f.claim(node);
+  assert.equal(allowed.body.task.id, created.body.task.id);
+  assert.equal((await f.callback(node, allowed.body.task)).status, 200);
+});
+
+test("Codex ungrouped orders only run on ungrouped hosts", async () => {
+  const f = fixture();
+  f.rows.users[1].computeGroupId = "group-a";
+  const created = await f.create("ungrouped-order-0001");
+  assert.equal(f.rows.codexMarketTasks[0].computeGroupId, null);
+  const node = await f.register();
+  assert.equal((await f.claim(node)).body.task, null);
+  delete f.rows.users[1].computeGroupId;
+  assert.equal((await f.claim(node)).body.task.id, created.body.task.id);
+});
+
+test("Codex claims recheck current user assignments instead of trusting saved order groups", async () => {
+  const f = fixture({ member: true });
+  f.rows.users[0].computeGroupId = "group-a";
+  f.rows.users[1].computeGroupId = "group-a";
+  await f.create("moved-user-order-0001");
+  const node = await f.register();
+  f.rows.users[0].computeGroupId = "group-b";
+  assert.equal((await f.claim(node)).body.task, null);
+  assert.equal(f.rows.codexMarketTasks[0].status, "queued");
+});
+
+test("Codex callback, heartbeat, and lease resume reject live cross-group changes before settlement", async () => {
+  const f = fixture({ member: true });
+  f.rows.users[0].computeGroupId = "group-a";
+  f.rows.users[1].computeGroupId = "group-a";
+  await f.create("callback-group-order-0001");
+  const node = await f.register();
+  const claimed = (await f.claim(node)).body.task;
+  f.rows.users[1].computeGroupId = "group-b";
+  const callback = await f.callback(node, claimed);
+  assert.equal(callback.status, 403);
+  assert.equal(callback.body.code, "COMPUTE_GROUP_MISMATCH");
+  const heartbeat = await f.call("/nodes/heartbeat", { nodeId: node.nodeId, activeTask: { taskId: claimed.id, claimId: claimed.claimId, leaseToken: claimed.leaseToken } }, { token: node.token });
+  assert.equal(heartbeat.status, 403);
+  assert.equal(heartbeat.body.code, "COMPUTE_GROUP_MISMATCH");
+  assert.equal((await f.claim(node, { taskId: claimed.id, claimId: claimed.claimId, leaseToken: claimed.leaseToken })).status, 403);
+  assert.equal(f.rows.codexMarketTasks[0].status, "claimed");
+  assert.equal((f.rows.codexMarketCallbacks || []).length, 0);
+  assert.equal((f.rows.codexMarketLedger || []).filter((row) => /commission/.test(row.kind)).length, 0);
+});
+
+test("Codex model availability ignores live hosts from other groups", async () => {
+  const f = fixture();
+  f.rows.users[0].computeGroupId = "group-a";
+  f.rows.users[1].computeGroupId = "group-b";
+  await f.register();
+  const unavailable = await f.call("/models");
+  assert.equal(unavailable.body.models[1].available, false);
+  assert.deepEqual(unavailable.body.models[1].availability, { compatibleNodeCount: 0, status: "offline" });
+  f.rows.users[1].computeGroupId = "group-a";
+  const available = await f.call("/models");
+  assert.equal(available.body.models[1].available, true);
+  assert.deepEqual(available.body.models[1].availability, { compatibleNodeCount: 1, status: "ready" });
+});
+
+test("grouped Codex users require an active membership before quotes or creation", async () => {
+  const f = fixture();
+  f.rows.users[0].computeGroupId = "group-a";
+  const denied = await f.quote("group-inactive-0001");
+  assert.equal(denied.status, 403);
+  assert.equal(denied.body.code, "GULONG_ENGINE_SUBSCRIPTION_REQUIRED");
+  assert.equal(f.rows.wallets[0].balanceFen, 100);
+  assert.equal((f.rows.codexMarketTasks || []).length, 0);
+  const active = fixture({ member: true });
+  active.rows.users[0].computeGroupId = "group-a";
+  const quote = await active.quote("group-expired-0001");
+  active.rows.subscriptions[0].products.gulong_engine_monthly.enabled = false;
+  const stopped = await active.call("/tasks", { quoteId: quote.body.quoteId, requestId: "group-expired-0001" });
+  assert.equal(stopped.status, 403);
+  assert.equal(stopped.body.code, "GULONG_ENGINE_SUBSCRIPTION_REQUIRED");
+  assert.equal(active.rows.wallets[0].balanceFen, 100);
+});
+
+test("Codex group membership expiry cancels queued jobs but does not block already-running results", async () => {
+  const f = fixture({ member: true });
+  f.rows.users[0].computeGroupId = "group-a";
+  f.rows.users[1].computeGroupId = "group-a";
+  await f.create("group-membership-end-0001");
+  const node = await f.register();
+  f.rows.subscriptions[0].products.gulong_engine_monthly.enabled = false;
+  assert.equal((await f.claim(node)).body.task, null);
+  assert.equal(f.rows.codexMarketTasks[0].status, "cancelled");
+  const running = fixture({ member: true });
+  running.rows.users[0].computeGroupId = "group-a";
+  running.rows.users[1].computeGroupId = "group-a";
+  await running.create("running-membership-end-0001");
+  const runner = await running.register();
+  const claimed = (await running.claim(runner)).body.task;
+  running.rows.subscriptions[0].products.gulong_engine_monthly.enabled = false;
+  assert.equal((await running.callback(runner, claimed)).status, 200);
+});
+
+test("Codex callbacks require the saved task group even when both current groups change together", async () => {
+  const f = fixture({ member: true });
+  f.rows.users[0].computeGroupId = "group-a";
+  f.rows.users[1].computeGroupId = "group-a";
+  await f.create("codex-snapshot-group-0001");
+  const node = await f.register();
+  const claimed = (await f.claim(node)).body.task;
+  f.rows.users[0].computeGroupId = "group-b";
+  f.rows.users[1].computeGroupId = "group-b";
+  const response = await f.callback(node, claimed);
+  assert.equal(response.status, 403);
+  assert.equal(response.body.code, "COMPUTE_GROUP_MISMATCH");
+  assert.equal((f.rows.codexMarketCallbacks || []).length, 0);
+});
+
 test("Codex market reuses the platform wallet unique index name", async () => {
   const source = await readFile(new URL("../../server/codex-market-store.js", import.meta.url), "utf8");
   assert.match(source, /createIndex\(\{ ownerId: 1 \}, \{ unique: true, name: "uniq_wallet_owner" \}\)/);
@@ -23,7 +149,7 @@ test("Codex market reuses the platform wallet unique index name", async () => {
 
 const PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6jU8AAAAASUVORK5CYII=";
 const valueOf = (value) => value instanceof ObjectId ? value.toString() : value instanceof Date ? +value : value;
-const equal = (left, right) => valueOf(left) === valueOf(right);
+const equal = (left, right) => valueOf(left) === valueOf(right) || (left == null && right == null);
 function matches(document, query) {
   return Object.entries(query).every(([key, value]) => {
     if (key === "$or") return value.some((branch) => matches(document, branch));
@@ -51,7 +177,7 @@ function clone(value) {
 // A transaction harness checks that every financial mutation carries a session
 // and that injected failures roll back the complete unit of work. It does not
 // claim to test MongoDB's replication or distributed transaction implementation.
-function fixture({ balance = 100, failStore = false, getPricing = readMarketPricing } = {}) {
+function fixture({ balance = 100, failStore = false, getPricing = readMarketPricing, member = false } = {}) {
   const requester = new ObjectId(); const executor = new ObjectId(); const administrator = new ObjectId();
   const accounts = { requester, executor, administrator };
   const rows = { users: [
@@ -59,6 +185,7 @@ function fixture({ balance = 100, failStore = false, getPricing = readMarketPric
     { _id: executor, role: "user", status: "active" },
     { _id: administrator, role: "admin", status: "active" },
   ], wallets: [{ _id: new ObjectId(), ownerId: requester, balanceFen: balance }] };
+  if (member) rows.subscriptions = [{ ownerId: requester, products: { gulong_engine_monthly: { enabled: true, status: "active", currentPeriodStart: new Date("2026-09-01T00:00:00Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00Z") } } }];
   const session = { testSession: true };
   let now = new Date("2026-09-10T00:00:00Z");
   let tail = Promise.resolve();

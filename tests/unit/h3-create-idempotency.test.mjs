@@ -62,6 +62,7 @@ test("H3 create replays the original success and rejects a changed payload for t
     h3TaskAudits: { insertOne: async () => ({ insertedId: new ObjectId() }) },
   };
   registerH3SharedRoutes(app, {
+    getUserComputeGroupId: async () => null,
     getCollection: async (name) => collections[name] || {
       findOne: async () => null,
       insertOne: async () => ({ insertedId: new ObjectId() }),
@@ -113,6 +114,7 @@ test("active Gulong Engine member queues H3 at zero balance without a wallet led
     wallets: { findOne: async () => ({ ownerId: userId, balanceFen: 0 }), findOneAndUpdate: async () => { walletReservations++; return null; } },
   };
   registerH3SharedRoutes(app, {
+    getUserComputeGroupId: async () => null,
     getCollection: async (name) => collections[name] || { findOne: async () => null, insertOne: async () => ({}), updateOne: async () => ({ matchedCount: 0 }) },
     enforceRateLimit: async () => ({ allowed: true }),
     authenticate: async () => ({ user: { id: userId.toString(), email: "member@example.com", role: "user" } }),
@@ -172,6 +174,7 @@ test("H3 create replays insufficient balance as 402 and rejects a changed payloa
   };
 
   registerH3SharedRoutes(app, {
+    getUserComputeGroupId: async () => null,
     getCollection: async (name) => collections[name] || {
       findOne: async () => null,
       insertOne: async () => ({ insertedId: new ObjectId() }),
