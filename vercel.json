@@ -54,6 +54,26 @@
       "destination": "/api/platform?_platform_path=desktop/earnings/:path*"
     },
     {
+      "source": "/api/admin/compute-groups",
+      "destination": "/api/platform?_platform_path=admin/compute-groups"
+    },
+    {
+      "source": "/api/desktop/compute-groups",
+      "destination": "/api/platform?_platform_path=desktop/compute-groups"
+    },
+    {
+      "source": "/api/desktop/nodes/compute-group",
+      "destination": "/api/platform?_platform_path=desktop/nodes/compute-group"
+    },
+    {
+      "source": "/api/desktop/compute-access/:path*",
+      "destination": "/api/platform?_platform_path=desktop/compute-access/:path*"
+    },
+    {
+      "source": "/api/v1/compute-access/:path*",
+      "destination": "/api/platform?_platform_path=v1/compute-access/:path*"
+    },
+    {
       "source": "/api/h3/:path*",
       "destination": "/api/platform?_platform_path=h3/:path*"
     },

@@ -1229,6 +1229,18 @@ test("compute grouping OpenAPI publishes bound-node configuration and one-time d
   assert.ok(document.components.securitySchemes.sessionCookie);
 });
 
+test("Vercel routes all compute-group APIs to the platform handler and preserves binding authentication", async () => {
+  const configuration = JSON.parse(await readFile(new URL("../../vercel.json", import.meta.url), "utf8"));
+  for (const path of ["/api/admin/compute-groups", "/api/desktop/compute-groups", "/api/desktop/nodes/compute-group", "/api/desktop/compute-access/:path*", "/api/v1/compute-access/:path*"]) {
+    const rewrite = configuration.rewrites.find((entry) => entry.source === path);
+    assert.equal(rewrite?.destination, `/api/platform?_platform_path=${path.slice(5)}`);
+  }
+  const { default: platform } = await import("../../api/platform.js");
+  const response = await platform.fetch(new Request("https://example.test/api/platform?_platform_path=desktop/compute-groups&q=团队"));
+  assert.equal(response.status, 401);
+  assert.equal((await response.json()).code, "BINDING_REQUIRED");
+});
+
 test("admin subscriptions use a full-screen multi-product editor", async () => {
   const [adminSource, dialogSource, css] = await Promise.all([
     readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),

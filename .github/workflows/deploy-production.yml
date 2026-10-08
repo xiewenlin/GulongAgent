@@ -244,3 +244,6 @@ jobs:
 
       - name: Compare every published client file
         run: node scripts/verify-production-parity.mjs https://sologle.com https://111.229.70.235
+
+      - name: Verify compute-group API routing on both targets
+        run: node scripts/verify-compute-group-deployment.mjs https://sologle.com https://111.229.70.235
