@@ -14,14 +14,28 @@ function sha256(bytes) {
 async function fetchBytes(base, pathname, cacheKey) {
   const url = new URL(pathname, `${base.replace(/\/$/, "")}/`);
   url.searchParams.set("deployment", cacheKey || Date.now().toString());
-  const response = await fetch(url, {
-    cache: "no-store",
-    headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
-    redirect: "follow",
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!response.ok) throw new Error(`${url.origin}${url.pathname} 返回 HTTP ${response.status}`);
-  return Buffer.from(await response.arrayBuffer());
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        cache: "no-store",
+        headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
+        redirect: "follow",
+        signal: AbortSignal.timeout(90_000),
+      });
+      if (!response.ok) {
+        const error = new Error(`返回 HTTP ${response.status}`);
+        error.retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+        throw error;
+      }
+      return Buffer.from(await response.arrayBuffer());
+    } catch (error) {
+      if (attempt === 3 || error.retryable === false) {
+        throw new Error(`${url.origin}${url.pathname} 下载校验失败（第 ${attempt} 次）：${error.message}`, { cause: error });
+      }
+      console.warn(`${url.origin}${url.pathname} 下载暂时失败，正在重试 ${attempt}/3：${error.message}`);
+      await new Promise((resolve) => setTimeout(resolve, attempt * 1_000));
+    }
+  }
 }
 
 async function fetchManifest(base) {
@@ -44,6 +58,7 @@ assert.ok(entries.length > 0, "部署清单不能为空");
 for (const [relative, expected] of entries) {
   assert.match(relative, /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9_./-]+$/, `部署清单包含不安全路径：${relative}`);
   const pathname = `/${relative}`;
+  console.log(`Verifying ${relative} (${expected.bytes} bytes)`);
   const [vercelBytes, tencentBytes] = await Promise.all([
     fetchBytes(vercelBase, pathname, vercelManifest.commit),
     fetchBytes(tencentBase, pathname, tencentManifest.commit),

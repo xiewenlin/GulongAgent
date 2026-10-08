@@ -81,6 +81,12 @@ test("production parity verifier checks manifests, commit identity, and every cl
   assert.match(source, /manifest\.commit, expectedCommit/);
   assert.match(source, /sha256\(vercelBytes\)/);
   assert.match(source, /sha256\(tencentBytes\)/);
+  assert.match(source, /attempt <= 3/);
+  assert.match(source, /AbortSignal\.timeout\(90_000\)/);
+  assert.match(source, /error\.retryable === false/);
+  assert.match(source, /vercelBytes\.length, expected\.bytes/);
+  assert.match(source, /tencentBytes\.length, expected\.bytes/);
+  assert.match(source, /Verifying \$\{relative\}/);
 });
 
 test("long-lived browser sessions detect a newer dual-target deployment without discarding drafts", async () => {
