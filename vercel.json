@@ -298,7 +298,7 @@
     },
     {
       "path": "/api/cron/capability-output-cleanup",
-      "schedule": "23 * * * *"
+      "schedule": "23 3 * * *"
     }
   ]
 }

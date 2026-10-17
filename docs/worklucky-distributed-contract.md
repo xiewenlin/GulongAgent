@@ -166,7 +166,7 @@ WorkLucky 包含在现有 `gulong_engine_monthly` 权益中，不新增用户体
 
 ## 孤立输出清理
 
-音乐最终结果从有 PUT 权限的源对象复制到随机且没有 PUT 票据的私有 published 路径后，原源对象和中断流程可能遗留的 staging 副本由 `GET /api/cron/capability-output-cleanup` 清理。仅 `CRON_SECRET` Bearer 可调用，未配置返回503、匿名返回401，每轮最多检查50个对象。Vercel 每小时第23分钟执行；腾讯已有分钟维护器保留 H3 任务，用文件锁及固定小时状态文件保证此能力清理每UTC小时最多一次正常执行。
+音乐最终结果从有 PUT 权限的源对象复制到随机且没有 PUT 票据的私有 published 路径后，原源对象和中断流程可能遗留的 staging 副本由 `GET /api/cron/capability-output-cleanup` 清理。仅 `CRON_SECRET` Bearer 可调用，未配置返回503、匿名返回401，每轮最多检查50个对象。腾讯已有分钟维护器保留 H3 任务，用文件锁及固定小时状态文件保证此能力清理每UTC小时最多一次正常执行；Vercel 现有 Hobby 免费账户只支持每日定时，配置为每天03:23 UTC的补偿清理，不要求升级付费计划。不能把 Vercel 的每日补偿宣称为每小时运行。
 
 只删除严格匹配该订单、输出ID与受控前缀的过期对象，删除前重新读取订单引用。`order.outputs` 正引用的对象永远优先保留，记录 retained 且去除清理到期时间；不以 staging 标记或旧回调状态判定真实输出可删。源对象等待原一小时 PUT 票据到期后再处理，避免尚有效的票据将对象重建。删除失败保留重试并退避，响应和错误记录不包含签名 URL、凭据或原始 COS 异常。
 

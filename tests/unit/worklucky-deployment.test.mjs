@@ -9,7 +9,10 @@ test("Vercel dispatches desktop, consumer-administration and protected cleanup p
   assert.equal(mapping.get("/api/v1/desktop/:path*"), "/api/platform?_platform_path=v1/desktop/:path*");
   assert.equal(mapping.get("/api/admin/capability-consumers/:path*"), "/api/platform?_platform_path=admin/capability-consumers/:path*");
   assert.equal(mapping.get("/api/cron/:path*"), "/api/platform?_platform_path=cron/:path*");
-  assert.deepEqual(config.crons.find((entry) => entry.path === "/api/cron/capability-output-cleanup"), { path: "/api/cron/capability-output-cleanup", schedule: "23 * * * *" });
+  assert.deepEqual(config.crons.find((entry) => entry.path === "/api/cron/capability-output-cleanup"), { path: "/api/cron/capability-output-cleanup", schedule: "23 3 * * *" });
+  // The configured production account is Hobby: sub-daily schedules fail
+  // before deployment. Tencent remains the hourly maintenance authority.
+  for (const cron of config.crons) assert.match(cron.schedule, /^\d{1,2} \d{1,2} \* \* \*$/);
   const spa = config.rewrites.findIndex((entry) => entry.destination === "/index.html");
   for (const source of ["/api/v1/desktop/:path*", "/api/admin/capability-consumers/:path*", "/api/cron/:path*"]) assert.ok(config.rewrites.findIndex((entry) => entry.source === source) < spa);
 });

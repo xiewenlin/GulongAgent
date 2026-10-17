@@ -122,7 +122,7 @@ test("cleanup endpoint is secret-gated, uncached, bounded, and returns no object
 
 test("both target schedules wire protected cleanup without making minute timer scan all outputs", () => {
   const vercel = JSON.parse(readFileSync(new URL("../../vercel.json", import.meta.url), "utf8"));
-  assert.deepEqual(vercel.crons.find((entry) => entry.path === CAPABILITY_OUTPUT_CLEANUP_PATH), { path: CAPABILITY_OUTPUT_CLEANUP_PATH, schedule: "23 * * * *" });
+  assert.deepEqual(vercel.crons.find((entry) => entry.path === CAPABILITY_OUTPUT_CLEANUP_PATH), { path: CAPABILITY_OUTPUT_CLEANUP_PATH, schedule: "23 3 * * *" });
   const deployment = readFileSync(new URL("../../deploy/tencent/deploy-release.sh", import.meta.url), "utf8");
   assert.match(deployment, /flock --nonblock 9/); assert.match(deployment, /cleanup_hour="\$\(date -u \+%Y%m%d%H\)"/);
   assert.match(deployment, /previous_hour" != "\$cleanup_hour/); assert.match(deployment, /capability_cleanup_auth_check/);
