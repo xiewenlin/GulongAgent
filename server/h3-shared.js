@@ -21,7 +21,7 @@ export const H3_SHARED_MODEL = "minimax_h3_shared";
 export const H3_OUTPUT_RETENTION_MS = 24 * 60 * 60_000;
 export const H3_TASK_TIMEOUT_MULTIPLIER = 10;
 // Phase A installs the guard on both targets before phase B advertises it.
-export const H3_NO_CHARGE_CREATION = Object.freeze({ version: 1, requestField: "require_no_charge", enforced: false, onUnavailable: "reject_without_order_or_charge" });
+export const H3_NO_CHARGE_CREATION = Object.freeze({ version: 1, requestField: "require_no_charge", enforced: true, onUnavailable: "reject_without_order_or_charge" });
 const H3_MAX_DURATION_SECONDS = 600;
 const H3_VIDEO_MODES = new Set(["all_reference", "first_last", "smart_multiframe", "extended"]);
 const H3_LONGFORM_MODES = new Set(["continuous", "independent"]);

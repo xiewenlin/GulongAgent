@@ -200,6 +200,7 @@ test("H3 tool and OpenAPI publish the exact optional no-charge request contract"
   const policy = (await response.json()).tool.noChargeCreation;
   assert.deepEqual({ ...policy, enforced: false }, { version: 1, requestField: "require_no_charge", enforced: false, onUnavailable: "reject_without_order_or_charge" });
   assert.equal(typeof policy.enforced, "boolean");
+  assert.equal(policy.enforced, true, "activation is permitted only after the dual-target guard baseline");
   const document = f.app.getOpenAPI31Document({ openapi: "3.1.0", info: { title: "test", version: "1" } });
   const post = document.paths["/api/h3/tasks"].post, schema = post.requestBody.content["application/json"].schema;
   assert.equal(schema.properties.require_no_charge.type, "boolean"); assert.ok(!schema.required.includes("require_no_charge"));
