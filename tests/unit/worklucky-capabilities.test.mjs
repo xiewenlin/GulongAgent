@@ -35,7 +35,7 @@ const musicResponse = (parameters = music()) => ({ lyric_verification: {
 function report(capabilityId, overrides = {}) {
   return {
     capability_version: "1.0.0", default_model: model,
-    models: capabilityId === embedId ? [{ id: model, dimension: 3 }] : capabilityId === chatId ? [{ id: model, tools: true, multimodal: true }] : [{ id: model }],
+    models: capabilityId === embedId ? [{ id: model, dimension: 3 }] : capabilityId === chatId ? [{ id: model, tools: true, multimodal: true }] : [{ id: model, max_duration_seconds: 300 }],
     asr_languages: ["zh", "en"], validation: { contract_tests: {
       exact_request: true, complete_response: true, tools: true, multimodal: true, exact_model_dimension: true,
       music_generation: true, whole_audio_asr: true, exact_lyrics: true, exact_duration: true,
@@ -176,9 +176,46 @@ test("music preserves precise unsigned uint64 decimal seeds and rejects truncati
 test("music requires same-consumer generation and whole-audio ASR proofs with actual supported language", () => {
   const ready = normalizeSpecialNodeModels(musicId, report(musicId));
   assert.equal(specialNodeMatches({ capabilityId: musicId, parameters: music() }, ready), true);
-  assert.deepEqual(specialAvailability(musicId, [ready]).asr_languages, ["en", "zh"]);
+  assert.deepEqual(specialAvailability(musicId, [{ ...ready, trustedAcceptance: true }]).asr_languages, ["en", "zh"]);
   assert.throws(() => normalizeSpecialNodeModels(musicId, report(musicId, { asr_languages: ["auto"] })), coded("MUSIC_ASR_LANGUAGE_REQUIRED"));
   assert.throws(() => normalizeSpecialNodeModels(musicId, report(musicId, { validation: { contract_tests: { music_generation: true, whole_audio_asr: false, exact_lyrics: true, exact_duration: true } } })), coded("CAPABILITY_CONSUMER_PROOF_REQUIRED"));
+});
+
+test("music node duration admission preserves exact 300/600 second limits without truncation", () => {
+  const maximum300 = normalizeSpecialNodeModels(musicId, report(musicId));
+  const maximum600 = normalizeSpecialNodeModels(musicId, report(musicId, { models: [{ id: model, max_duration_seconds: 600 }] }));
+  const makeOrder = (seconds) => ({ capabilityId: musicId, parameters: { ...music(), seconds, seed: "18446744073709551615" } });
+  assert.deepEqual(maximum300.models, [{ id: model, max_duration_seconds: 300 }]);
+  assert.deepEqual(maximum600.models, [{ id: model, max_duration_seconds: 600 }]);
+  assert.equal(specialNodeMatches(makeOrder(300), maximum300), true);
+  assert.equal(specialNodeMatches(makeOrder(301), maximum300), false);
+  assert.equal(specialNodeMatches(makeOrder(600), maximum300), false);
+  assert.equal(specialNodeMatches(makeOrder(600), maximum600), true);
+  assert.equal(specialNodeMatches(makeOrder(601), maximum600), false);
+  const order = makeOrder(301), original = JSON.stringify(order.parameters);
+  assert.equal(validateSpecialParameters(musicId, order.parameters), true, "global future-consumer schema remains 600 seconds");
+  assert.equal(specialNodeMatches(order, maximum300), false);
+  assert.equal(JSON.stringify(order.parameters), original, "rejection cannot truncate seconds, lyrics or uint64 seed");
+  const differentModel = { ...maximum600, models: [{ id: "different/accepted-model", max_duration_seconds: 600 }] };
+  assert.equal(specialNodeMatches(makeOrder(600), differentModel), false, "another model cannot donate its duration budget");
+});
+
+test("music reports require finite numeric verified max_duration_seconds", () => {
+  for (const maximum of [undefined, null, NaN, Infinity, -1, 0, 600.01, "300", "600"]) {
+    assert.throws(() => normalizeSpecialNodeModels(musicId, report(musicId, { models: [{ id: model, max_duration_seconds: maximum }] })), coded("MUSIC_DURATION_REPORT_REQUIRED"));
+  }
+  const fractional = normalizeSpecialNodeModels(musicId, report(musicId, { models: [{ id: model, max_duration_seconds: 300.25 }] }));
+  assert.equal(fractional.models[0].max_duration_seconds, 300.25);
+  assert.equal(specialNodeMatches({ capabilityId: musicId, parameters: { ...music(), seconds: 300.26 } }, fractional), false);
+});
+
+test("music catalog aggregates the greatest duration only from trusted accepted models", () => {
+  const maximum300 = { ...normalizeSpecialNodeModels(musicId, report(musicId)), trustedAcceptance: true };
+  const maximum600 = { ...normalizeSpecialNodeModels(musicId, report(musicId, { models: [{ id: model, max_duration_seconds: 600 }] })), trustedAcceptance: true };
+  assert.deepEqual(specialAvailability(musicId, [maximum300, { ...maximum600, trustedAcceptance: false }]).models, [{ id: model, max_duration_seconds: 300 }]);
+  assert.deepEqual(specialAvailability(musicId, [maximum300, maximum600]).models, [{ id: model, max_duration_seconds: 600 }]);
+  assert.deepEqual(specialAvailability(musicId, [maximum600, maximum300]).models, [{ id: model, max_duration_seconds: 600 }]);
+  assert.deepEqual(specialAvailability(musicId, [{ ...maximum600, trustedAcceptance: undefined }]).models, []);
 });
 
 test("music rejects verified-only, partial ASR, missing or unknown actual language", () => {

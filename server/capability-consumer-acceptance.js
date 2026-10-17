@@ -32,7 +32,7 @@ const requestSchema = z.discriminatedUnion("capability_id", [
     default_model: modelIdSchema.nullable().optional(),
   }).strict(),
   z.object({ ...common, capability_id: z.literal("gulong_engine.music"),
-    models: z.array(z.object({ id: modelIdSchema }).strict()).min(1).max(64),
+    models: z.array(z.object({ id: modelIdSchema, max_duration_seconds: z.number().min(1).max(600) }).strict()).min(1).max(64),
     default_model: modelIdSchema.nullable().optional(), asr_languages: z.array(z.enum(["zh", "en"])).min(1).max(2),
   }).strict(),
 ]);

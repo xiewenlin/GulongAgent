@@ -35,6 +35,10 @@ test("production app GET-only OpenAPI exposes WorkLucky and its administrator/le
   assert.match(contract.properties.limits.description, /60次/); assert.match(contract.properties.lifecycle.description, /300秒/);
   const claim = spec.paths["/api/v1/capability-orders/claim"].post.requestBody.content["application/json"].schema;
   assert.ok(claim.properties.capabilities.items.properties.validation.properties.acceptance_id);
+  const acceptance = spec.paths["/api/admin/capability-consumers/acceptances"].post.requestBody.content["application/json"].schema;
+  const music = acceptance.oneOf.find((entry) => entry.properties.capability_id.enum.includes("gulong_engine.music"));
+  assert.ok(music.properties.models.items.required.includes("max_duration_seconds"));
+  assert.deepEqual(music.properties.models.items.properties.max_duration_seconds, { type: "number", minimum: 1, maximum: 600 });
   assert.deepEqual(spec.paths["/api/cron/capability-output-cleanup"].get.security, [{ capabilityCleanupCronBearer: [] }]);
 });
 

@@ -29,6 +29,10 @@ for (const raw of origins) {
     ["/api/admin/capability-consumers/acceptances", "post"], ["/api/cron/capability-output-cleanup", "get"],
   ]) assert.ok(document.paths[path]?.[method], `${method} ${path}`);
   assert.ok(document.components.schemas.WorkLuckySharedCapabilityContract);
+  const acceptances = document.paths["/api/admin/capability-consumers/acceptances"].post.requestBody.content["application/json"].schema;
+  const musicAcceptance = acceptances.oneOf.find((item) => item.properties.capability_id.enum?.includes("gulong_engine.music"));
+  assert.ok(musicAcceptance.properties.models.items.required.includes("max_duration_seconds"));
+  assert.deepEqual(musicAcceptance.properties.models.items.properties.max_duration_seconds, { type: "number", minimum: 1, maximum: 600 });
   await read("/api/v1/desktop/worklucky/account", 401);
   await read("/api/v1/capability-orders/catalog?product=worklucky", 401);
   await read("/api/admin/capability-consumers/acceptances", 401);

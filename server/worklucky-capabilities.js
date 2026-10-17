@@ -122,6 +122,11 @@ export function normalizeSpecialNodeModels(capabilityId, report = {}) {
       if (!Number.isSafeInteger(model.dimension) || model.dimension < 1 || model.dimension > 65536) fail("每个向量模型必须上报实际验收的精确 dimension", "EMBEDDING_DIMENSION_REPORT_REQUIRED");
       normalized.dimension = model.dimension;
     }
+    if (capabilityId === "gulong_engine.music") {
+      if (typeof model.max_duration_seconds !== "number" || !Number.isFinite(model.max_duration_seconds)
+        || model.max_duration_seconds < 1 || model.max_duration_seconds > 600) fail("每个音乐模型必须上报实际验收的最长时长 max_duration_seconds（1–600 秒），不能省略或使用字符串", "MUSIC_DURATION_REPORT_REQUIRED");
+      normalized.max_duration_seconds = model.max_duration_seconds;
+    }
     if (capabilityId === "gulong_engine.agent_chat") {
       if (typeof model.tools !== "boolean" || typeof model.multimodal !== "boolean") fail("每个对话模型必须明确声明 tools 和 multimodal 的真实验收状态", "CAPABILITY_FEATURE_PROOF_REQUIRED");
       if ((model.tools && tests.tools !== true) || (model.multimodal && tests.multimodal !== true)) fail("工具或多模态声明缺少对应真实验收证明", "CAPABILITY_FEATURE_PROOF_REQUIRED", 409);
@@ -162,20 +167,26 @@ export function specialNodeMatches(order, reported = {}) {
     && (order.capabilityId !== "gulong_engine.embedding" || model.dimension === parameters.dimension)
     && (order.capabilityId !== "gulong_engine.agent_chat" || ((!requiresTools(parameters.request) || model.tools === true)
       && (!requiresMultimodal(parameters.request) || model.multimodal === true)))
-    && (order.capabilityId !== "gulong_engine.music" || (reported.contractTests?.whole_audio_asr === true && reported.asrLanguages?.length > 0)));
+    && (order.capabilityId !== "gulong_engine.music" || (reported.contractTests?.whole_audio_asr === true && reported.asrLanguages?.length > 0
+      && Number.isFinite(model.max_duration_seconds) && model.max_duration_seconds >= 1 && model.max_duration_seconds <= 600
+      && parameters.seconds <= model.max_duration_seconds)));
 }
 
 // Call only with fresh, authenticated reports whose acceptance registry entry
 // matches binding + version + artifact SHA + this exact model matrix.
 export function specialAvailability(capabilityId, reports = []) {
   if (!isWorkLuckyCapability(capabilityId)) return {};
-  const accepted = reports.filter((report) => report.specialContractVersion === WORKLUCKY_CONTRACT_VERSION && Array.isArray(report.models));
+  const accepted = reports.filter((report) => report.specialContractVersion === WORKLUCKY_CONTRACT_VERSION && Array.isArray(report.models)
+    && (capabilityId !== "gulong_engine.music" || report.trustedAcceptance === true));
   const models = new Map();
   for (const report of accepted) {
     for (const model of report.models) {
       const key = `${model.id}\0${model.dimension || ""}`;
       const previous = models.get(key);
-      models.set(key, previous ? { ...previous, ...(capabilityId === "gulong_engine.agent_chat" ? { tools: previous.tools || model.tools, multimodal: previous.multimodal || model.multimodal } : {}) } : { ...model });
+      models.set(key, previous ? { ...previous,
+        ...(capabilityId === "gulong_engine.agent_chat" ? { tools: previous.tools || model.tools, multimodal: previous.multimodal || model.multimodal } : {}),
+        ...(capabilityId === "gulong_engine.music" ? { max_duration_seconds: Math.max(previous.max_duration_seconds, model.max_duration_seconds) } : {}),
+      } : { ...model });
     }
   }
   const matrix = [...models.values()].sort((a, b) => a.id.localeCompare(b.id) || (a.dimension || 0) - (b.dimension || 0));

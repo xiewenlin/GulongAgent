@@ -60,7 +60,7 @@ function rawCapability(suffix = "agent_chat", maxConcurrent = 3) {
         : suffix === "music" ? { music_generation: true, whole_audio_asr: true, exact_lyrics: true, exact_duration: true }
           : { exact_request: true, complete_response: true, tools: true, multimodal: true } },
     ...(suffix === "music" ? { asr_languages: ["zh", "en"] } : {}),
-    models: suffix === "music" ? [{ id: "verified-music" }] : suffix === "embedding" ? [{ id: "verified-embedding", dimension: 8 }]
+    models: suffix === "music" ? [{ id: "verified-music", max_duration_seconds: 300 }] : suffix === "embedding" ? [{ id: "verified-embedding", dimension: 8 }]
       : [{ id: "verified-chat", tools: true, multimodal: true }],
     default_model: suffix === "music" ? "verified-music" : suffix === "embedding" ? null : "verified-chat",
   };
@@ -202,10 +202,10 @@ function fixture({ physicalLimit = 3, capabilities = ["agent_chat"], requesterGr
     node_id: binding.nodeId, node_name: binding.nodeName, protocol_version: CAPABILITY_ORDER_PROTOCOL, capabilities: rawReports,
     resources: { max_concurrent_tasks: physicalLimit, running_task_count: 0, estimated_total_seconds: 0 }, ...extra,
   }, { "X-Gulong-Account-Binding": token, ...headers });
-  const accept = async () => {
-    for (const report of rawReports) {
+  const accept = async (targetBinding = binding, targetReports = rawReports) => {
+    for (const report of targetReports) {
       const result = await call("/api/admin/capability-consumers/acceptances", {
-        binding_id: String(binding._id), capability_id: report.capability_id, capability_version: report.capability_version,
+        binding_id: String(targetBinding._id), capability_id: report.capability_id, capability_version: report.capability_version,
         artifact_sha256: report.validation.artifact_sha256, test_evidence_sha256: "B".repeat(64), tested_at: report.validation.tested_at,
         expires_at: new Date(Date.now() + 7 * 86400_000).toISOString(), models: report.models, default_model: report.default_model,
         contract_tests: report.validation.contract_tests, admin_confirmed_real_consumer: true,
@@ -595,6 +595,55 @@ test("anonymous oversized callback fails authentication before its stream is con
   assert.equal(chunked.pullCount(), 0);
   assert.equal(f.rows.capabilityOrders.length, 0);
   assert.equal(f.rows.capabilityOrderCallbacks.length, 0);
+});
+
+test("music admission honors the accepted model maximum without silently shortening requested seconds", async () => {
+  const f = fixture({ capabilities: ["music"] }); await f.accept(); await f.advertise();
+  const catalog = await f.catalog();
+  const music = catalog.body.capabilities.find((entry) => entry.capability_id === "gulong_engine.music");
+  assert.deepEqual(music.availability.models, [{ id: "verified-music", max_duration_seconds: 300 }]);
+  const createDuration = (seconds) => f.call("/api/v1/capability-orders", {
+    client_product: "worklucky", source_channel: "desktop_agent", capability_id: "gulong_engine.music", capability_version: "1.0.0",
+    parameters: { ...parameters("music"), seconds },
+  });
+  for (const seconds of [301, 600]) {
+    const rejected = await createDuration(seconds);
+    assert.equal(rejected.status, 409, JSON.stringify(rejected.body));
+    assert.equal(rejected.body.code, "CAPABILITY_NO_COMPATIBLE_NODE");
+    assert.equal(f.rows.capabilityOrders.length, 0);
+  }
+  const created = await createDuration(300);
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.equal(f.rows.capabilityOrders[0].parameters.seconds, 300);
+  const claimed = await f.claim();
+  assert.equal(claimed.body.task.id, created.body.order.id);
+  assert.equal(claimed.body.task.parameters.seconds, 300);
+});
+
+test("a legacy queued 600-second music order remains queued until an accepted 600-second consumer claims it", async () => {
+  const f = fixture({ capabilities: ["music"] }); await f.accept(); await f.advertise();
+  const created = await f.create("music"); assert.equal(created.status, 201);
+  // Model an old stored order admitted before per-model duration limits existed.
+  f.rows.capabilityOrders[0].parameters.seconds = 600;
+  const unavailable = await f.claim();
+  assert.equal(unavailable.status, 200);
+  assert.equal(unavailable.body.task, null);
+  assert.equal(f.rows.capabilityOrders[0].status, "queued");
+  assert.equal(f.rows.capabilityNodeSlots.length, 0);
+  const token600 = `gab_${"J".repeat(48)}`;
+  const node600 = { _id: new ObjectId(), userId: f.executor._id, nodeId: "verified-music-600-node", nodeName: "accepted 600-second consumer",
+    status: "active", revokedAt: null, computeGroupId: f.binding.computeGroupId, tokenHash: hashOpaqueToken(token600, "h3-account-binding") };
+  f.rows.nodeAccountBindings.push(node600);
+  const capability600 = rawCapability("music"); capability600.models[0].max_duration_seconds = 600;
+  await f.accept(node600, [capability600]);
+  const claimed = await f.call("/api/v1/capability-orders/claim", {
+    node_id: node600.nodeId, node_name: node600.nodeName, protocol_version: CAPABILITY_ORDER_PROTOCOL, capabilities: [capability600],
+    resources: { max_concurrent_tasks: 1, running_task_count: 0, estimated_total_seconds: 0 },
+  }, { "X-Gulong-Account-Binding": token600 });
+  assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
+  assert.equal(claimed.body.task.id, created.body.order.id);
+  assert.equal(claimed.body.task.parameters.seconds, 600);
+  assert.equal(claimed.body.task.assigned_node.node_id, node600.nodeId);
 });
 
 test("music completion binds full lyrics ASR to actual validated FLAC output and a stable upload receipt", async () => {

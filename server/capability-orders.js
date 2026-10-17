@@ -924,7 +924,9 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       const availability = await gulongAvailability(capabilityId, ownerId, {
         order: { capabilityId, requesterUserId: ownerId, computeGroupId, sharingScope: "gulong_shared", preferredNodeId, capabilityVersion: requestedCapabilityVersion, parameters },
       });
-      if (!availability.verified_node_count) return c.json({ code: "CAPABILITY_NO_COMPATIBLE_NODE", message: "当前没有在线且已验证的兼容共享节点，暂不能创建任务，请稍后重试。", availability }, 409);
+      if (!availability.verified_node_count) return c.json({ code: "CAPABILITY_NO_COMPATIBLE_NODE", message: capabilityId === "gulong_engine.music"
+        ? "当前没有已验收节点支持所选音乐模型及时长，请根据目录中的模型时长上限调整后重试；系统不会自动截短。"
+        : "当前没有在线且已验证的兼容共享节点，暂不能创建任务，请稍后重试。", availability }, 409);
     }
     const now = new Date();
     const orderId = new ObjectId();
@@ -1399,7 +1401,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     capability_id: z.string(), capability_version: z.string(), protocol_version: z.literal(CAPABILITY_ORDER_PROTOCOL),
     installed: z.literal(true), validated: z.literal(true), enabled: z.literal(true), max_concurrent: z.number().int().min(1).max(16),
     sharing_opt_in: z.boolean().optional(), supported_models: z.array(z.string()).optional(), supported_voices: z.array(z.string()).optional(),
-    models: z.array(z.object({ id: z.string().min(1).max(240), dimension: z.number().int().positive().optional(), tools: z.boolean().optional(), multimodal: z.boolean().optional() })).optional(),
+    models: z.array(z.object({ id: z.string().min(1).max(240), dimension: z.number().int().positive().optional(), max_duration_seconds: z.number().min(1).max(600).optional(), tools: z.boolean().optional(), multimodal: z.boolean().optional() })).optional(),
     default_model: z.string().nullable().optional(), asr_languages: z.array(z.enum(["zh", "en"])).optional(),
     validation: z.object({ tested_at: z.iso.datetime(), artifact_sha256: z.string().regex(/^[A-Fa-f0-9]{64}$/), runtime_version: z.string().optional(), test_id: z.string().optional(), acceptance_id: z.string().optional(), contract_tests: z.record(z.string(), z.boolean()).optional() }),
   });
@@ -1409,6 +1411,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       agent_chat: { type: "object", description: "capability_id=gulong_engine.agent_chat；parameters={model,request}，request 为完整 OpenAI Chat Completions JSON，model 必须精确相等。inline_result.response 为完整原始响应含 choices/tools/usage，不由官网执行工具。每模型 tools/multimodal 必须单独验收。" },
       embedding: { type: "object", description: "capability_id=gulong_engine.embedding；parameters={model,dimension,request}，request 为完整 OpenAI Embeddings JSON；完整 response.data 索引、顺序、向量维度和 usage 必须保留，不能换模型/裁切/补齐。" },
       music: { type: "object", description: "capability_id=gulong_engine.music；parameters={caption,lyrics,seconds,seed,model?}，seed 非负安全整数或 uint64 十进制字符串原值；seconds 为最长秒数。primary_audio 必须 FLAC，经私有 COS 条件复制至无 PUT 授权随机 published key 后完整流式校验 SHA/大小及 STREAMINFO 实际 duration_seconds。inline_result.lyric_verification 必须 {algorithm:ordered-whole-lyrics-v1,audio_sha256,lyrics_sha256,full_audio:true,language:zh|en,transcript:整段原文含尾部}。不能仅给 verified 布尔值。" },
+      music_node_limits: { type: "object", description: "music节点 models 每项必须为 {id,max_duration_seconds}，时长上限为1–600秒的有限数值，精确绑定管理员真实验收。availability.models 汇总同模型已验收节点的最长支持时长。创建/领取只匹配原始 seconds 不超过该节点模型上限的任务；300秒节点不会领取301/600秒，不会裁切参数。全局600秒schema不代表当前节点已支持600秒。" },
       limits: { type: "object", description: "parameters 最大1MiB，inline_result 最大4MiB；claim请求256KiB，callback包络4MiB+128KiB；FLAC最大64MiB。超限413，不截断。callback按绑定限流60次/分钟，单音乐完成校验最多2次/分钟，429后按同event_id恢复。" },
       lifecycle: { type: "object", description: "claim租约300秒，started/progress同时续租订单和槽位；每15秒worker-state，should_stop或租约失效必须停止。用户取消先保留运行槽，执行节点cancelled确认停机后释放。event_id+payload指纹幂等，改变payload409，写入中断可重放原事件补偿。音乐单primary_audio签发幂等同output_id；其他输出可用output_key。" },
     },

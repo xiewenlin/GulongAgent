@@ -55,7 +55,7 @@ WorkLucky 包含在现有 `gulong_engine_monthly` 权益中，不新增用户体
 
 - agent_chat：每个 `models` 项必须含布尔 `tools` 和 `multimodal`，`default_model` 必须属于本模型列表；若任一模型声明工具或媒体可用，`contract_tests.tools` 或 `multimodal` 也必须为 true，且已有对应实机验收。
 - embedding：每项为 `{id,dimension}`；`contract_tests` 必须含 `exact_request:true`、`complete_response:true`、`exact_model_dimension:true`。`default_model` 可省略或为 null，若填写必须在模型列表内。
-- music：每项为 `{id}`，提供 `asr_languages:["zh"]`、`["en"]` 或两者；`contract_tests` 必须含 `music_generation:true`、`whole_audio_asr:true`、`exact_lyrics:true`、`exact_duration:true`。没有完整生成及整段 ASR 证据不得登记。`default_model` 可省略或为 null，若填写必须在模型列表内。
+- music：每项必须为 `{id,max_duration_seconds}`；`max_duration_seconds` 是1–600间的有限数值，并且是该节点对应真实模型已验收的时长上限，不得按官网全局schema填写。提供 `asr_languages:["zh"]`、`["en"]` 或两者；`contract_tests` 必须含 `music_generation:true`、`whole_audio_asr:true`、`exact_lyrics:true`、`exact_duration:true`。没有完整生成及整段 ASR 证据不得登记。`default_model` 可省略或为 null，若填写必须在模型列表内。
 
 成功返回201 `{acceptance:{id:"gca_<UUID>",binding_id,capability_id,capability_version,...,status:"active"}}`。节点随后通过 Claim 的能力报告上送：
 
@@ -79,7 +79,7 @@ WorkLucky 包含在现有 `gulong_engine_monthly` 权益中，不新增用户体
 }
 ```
 
-验收记录须与 binding、能力/版本、制品摘要、模型/维度/功能矩阵、默认模型、ASR语言和测试声明完全匹配。过期、审计未激活、停用绑定或不同矩阵均不可接单。管理员 GET 同一路径可按 `binding_id`、`capability_id`、`status` 查询，`limit` 最大100；若POST返回503，必须先查询确认，不能假设已激活或盲目重建证据。
+验收记录须与 binding、能力/版本、制品摘要、模型/维度/功能矩阵、默认模型、ASR语言和测试声明完全匹配。music 报告和验收的每模型 `max_duration_seconds` 也必须精确相等；不能自行将已验收300秒提升为600秒。过期、审计未激活、停用绑定或不同矩阵均不可接单。管理员 GET 同一路径可按 `binding_id`、`capability_id`、`status` 查询，`limit` 最大100；若POST返回503，必须先查询确认，不能假设已激活或盲目重建证据。
 
 ## 创建、恢复与取消
 
@@ -126,6 +126,8 @@ WorkLucky 包含在现有 `gulong_engine_monthly` 权益中，不新增用户体
 输入 `parameters.caption`、`lyrics`、`seconds`、`seed` 必须保留用户批准的完整歌词与时长，禁止截掉后半歌词以通过验证。结果 `primary_audio` 必须为 FLAC；回执提供经实际对象校验的 `bytes`、`sha256`、`duration_seconds`，不能把客户端自行填写的元数据当作完整验收。
 
 `seconds` 是1–600秒的最长输出时长，并不要求补齐到该时长。服务端从完整 FLAC 的 STREAMINFO 读取真实 `duration_seconds`，必须为正且不超过请求 `seconds`（仅允许50毫秒解析/采样误差），不信任自报时长。`seed` 为非负 JavaScript 安全整数，或完整无前导零的 uint64 十进制字符串，最大 `"18446744073709551615"`；大种子保持字符串原值，不能先转浮点数丢精度。
+
+全局schema允许600秒是为未来真实600秒消费者保留空间，不代表所有节点均能运行600秒。`availability.models` 的音乐条目为 `{id,max_duration_seconds}`，同一模型跨当前可信节点聚合该已验收上限的最大值；这不是把不同节点的时长相加。创建与领取必须以订单原始 `seconds` 匹配具体执行节点的模型上限：原生只支持300秒的消费者不能领取301秒或600秒订单，不能截断参数、拼段或改成300秒绕过。无兼容上限时拒绝创建/领取，而不是收费降级。目录探测不带任务参数时仅检查可信消费者是否存在，不应按虚构600秒任务把已验收300秒节点过滤成离线。
 
 同一执行消费者还必须对该完整音频进行 ASR，并在 `inline_result.lyric_verification` 返回：
 

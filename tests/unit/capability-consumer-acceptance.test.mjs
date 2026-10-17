@@ -27,7 +27,7 @@ function payload(capability = "agent_chat", extra = {}) {
       contract_tests: { exact_request: true, complete_response: true, tools: true } }
       : capability === "embedding" ? { models: [{ id: "exact-vector-model", dimension: 1024 }], default_model: null,
         contract_tests: { exact_request: true, complete_response: true, exact_model_dimension: true } }
-        : { models: [{ id: "exact-music-model" }], default_model: "exact-music-model", asr_languages: ["zh", "en"],
+        : { models: [{ id: "exact-music-model", max_duration_seconds: 300 }], default_model: "exact-music-model", asr_languages: ["zh", "en"],
           contract_tests: { music_generation: true, whole_audio_asr: true, exact_lyrics: true, exact_duration: true } }),
     ...extra,
   };
@@ -143,6 +143,12 @@ test("vector dimensions and music whole-audio ASR language attestations are exac
     const changed = capability === "embedding" ? { ...correct, models: [{ id: input.models[0].id, dimension: 768 }] }
       : { ...correct, asrLanguages: ["en"] };
     assert.equal(await findTrustedConsumerAcceptance({ getCollection: f.getCollection, bindingId: BINDING, report: changed, now: NOW }), null);
+    if (capability === "music") {
+      const overstatedLimit = { ...correct, models: [{ ...correct.models[0], max_duration_seconds: 600 }] };
+      assert.equal(await findTrustedConsumerAcceptance({ getCollection: f.getCollection, bindingId: BINDING, report: overstatedLimit, now: NOW }), null);
+      const reducedLimit = { ...correct, models: [{ ...correct.models[0], max_duration_seconds: 299 }] };
+      assert.equal(await findTrustedConsumerAcceptance({ getCollection: f.getCollection, bindingId: BINDING, report: reducedLimit, now: NOW }), null);
+    }
   }
   const missingProof = payload("music"); delete missingProof.contract_tests.whole_audio_asr;
   assert.equal((await f.call(missingProof)).status, 409);
@@ -168,6 +174,8 @@ test("unknown fields, wrong model schemas, unsupported capabilities and oversize
   for (const input of [payload("agent_chat", { extra: "untrusted" }), payload("agent_chat", { capability_id: "gulong_engine.video" }),
     payload("agent_chat", { capability_version: "latest" }), payload("agent_chat", { models: [{ id: "model", tools: true, multimodal: false, dimension: 768 }] }),
     payload("embedding", { models: [{ id: "model", dimension: -1 }] }), payload("music", { asr_languages: ["auto"] }),
+    payload("music", { models: [{ id: "model" }] }), payload("music", { models: [{ id: "model", max_duration_seconds: 0 }] }),
+    payload("music", { models: [{ id: "model", max_duration_seconds: 601 }] }),
     payload("agent_chat", { contract_tests: { exact_request: true, complete_response: true, fabricated_proof: true } }),
   ]) assert.equal((await f.call(input)).status, 400);
   assert.equal((await f.call(payload("agent_chat", { padding: "X".repeat(65 * 1024) }))).status, 413);
