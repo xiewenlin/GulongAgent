@@ -34,6 +34,9 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
+      - name: Validate the Tencent deployment shell
+        run: bash -n deploy/tencent/deploy-release.sh
+
       - name: Build the production bundle
         run: npm run build
 
@@ -250,3 +253,6 @@ jobs:
 
       - name: Verify H3 no-charge contract without creating orders
         run: node scripts/verify-h3-no-charge-deployment.mjs --phase=active https://sologle.com https://111.229.70.235
+
+      - name: Verify WorkLucky contract and authentication on both targets
+        run: node scripts/verify-worklucky-deployment.mjs https://sologle.com https://111.229.70.235

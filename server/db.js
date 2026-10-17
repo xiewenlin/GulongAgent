@@ -598,6 +598,22 @@ export async function ensureIndexes() {
           { orderId: 1, eventId: 1 },
           { unique: true, name: "uniq_capability_order_callback_event" },
         ),
+        db.collection("capabilityConsumerAcceptances").createIndex(
+          { bindingId: 1, capabilityId: 1, status: 1, expiresAt: 1 },
+          { name: "capability_consumer_accepted_binding" },
+        ),
+        db.collection("capabilityConsumerAcceptanceAudits").createIndex(
+          { acceptanceId: 1, createdAt: -1 },
+          { name: "capability_consumer_acceptance_audit" },
+        ),
+        db.collection("capabilityOutputCopies").createIndex(
+          { objectKey: 1 },
+          { unique: true, name: "uniq_capability_published_copy" },
+        ),
+        db.collection("capabilityOutputCopies").createIndex(
+          { status: 1, expiresAt: 1 },
+          { name: "capability_staging_copy_cleanup" },
+        ),
         db.collection("capabilityAssetUploads").createIndex(
           { objectKey: 1 },
           { unique: true, name: "uniq_capability_asset_object" },
@@ -609,6 +625,10 @@ export async function ensureIndexes() {
         db.collection("capabilityOutputUploads").createIndex(
           { outputId: 1 },
           { unique: true, name: "uniq_capability_output_id" },
+        ),
+        db.collection("capabilityOutputUploads").createIndex(
+          { orderId: 1, claimId: 1, outputKey: 1 },
+          { unique: true, partialFilterExpression: { outputKey: { $type: "string" } }, name: "uniq_capability_output_request" },
         ),
         db.collection("capabilityOutputUploads").createIndex(
           { orderId: 1, status: 1, createdAt: -1 },

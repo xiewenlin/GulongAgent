@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { OpenAPIHono } from "@hono/zod-openapi";
 import { ObjectId } from "mongodb";
+import { createCapabilityMemoryCollection } from "../helpers/capability-memory.mjs";
 import {
   CAPABILITY_ORDER_DEFINITIONS,
   CAPABILITY_ORDER_PROTOCOL,
@@ -12,7 +13,12 @@ import {
   registerCapabilityOrderRoutes as registerCapabilityOrderRoutesImpl,
   validateCapabilityInput,
 } from "../../server/capability-orders.js";
-const registerCapabilityOrderRoutes = (app, dependencies) => registerCapabilityOrderRoutesImpl(app, { getUserComputeGroupId: async () => null, ...dependencies });
+const registerCapabilityOrderRoutes = (app, dependencies) => {
+  const nodeSlots = createCapabilityMemoryCollection();
+  return registerCapabilityOrderRoutesImpl(app, { getUserComputeGroupId: async () => null, ...dependencies,
+    getCollection: async (name) => name === "capabilityNodeSlots" ? nodeSlots : dependencies.getCollection?.(name),
+  });
+};
 
 const READY_REPORT = () => ({
   capability_id: "qwen_image_2_1.text_to_image",
@@ -184,7 +190,8 @@ test("Gulong catalog only advertises live verified compatible nodes, including b
   };
   const app = new OpenAPIHono();
   registerCapabilityOrderRoutes(app, {
-    getCollection: async (name) => name === "capabilityNodeReports"
+    getCollection: async (name) => name === "users" ? { findOne: async ({ _id }) => String(_id) === String(otherId) ? { _id: otherId, status: "active" } : null }
+      : name === "capabilityNodeReports"
       ? { find: () => ({ limit: () => ({ toArray: async () => [report] }) }) }
       : { find: () => ({ toArray: async () => [binding] }) },
     authenticate: async () => ({ user: { id: ownerId.toString() }, kind: "desktop-gulong-engine" }),
@@ -260,7 +267,8 @@ test("native 2K catalog requires the exact version, model, and sharing opt-in fr
     reportedAt: new Date(), resources: { running_task_count: 0, max_concurrent_tasks: 1 }, capabilities: [capability] };
   const app = new OpenAPIHono();
   registerCapabilityOrderRoutes(app, {
-    getCollection: async (name) => name === "capabilityNodeReports"
+    getCollection: async (name) => name === "users" ? { findOne: async ({ _id }) => String(_id) === String(ownerId) ? { _id: ownerId, status: "active" } : null }
+      : name === "capabilityNodeReports"
       ? { find: (filter) => ({ limit: () => ({ toArray: async () => filter["capabilities.capabilityId"] === capability.capabilityId ? [report] : [] }) }) }
       : { find: () => ({ toArray: async () => [binding] }) },
     authenticate: async () => ({ user: { id: userId.toString() }, kind: "desktop-gulong-engine" }),
@@ -296,6 +304,7 @@ test("native 2K create preserves ten reference images in input order and charges
       capabilityAssetUploads: { find: () => ({ toArray: async () => references }) },
       capabilityNodeReports: { find: () => ({ limit: () => ({ toArray: async () => [report] }) }) },
       nodeAccountBindings: { find: () => ({ toArray: async () => [binding] }) },
+      users: { findOne: async ({ _id }) => [userId, nodeOwnerId].some((id) => String(id) === String(_id)) ? { _id, status: "active" } : null },
     })[name],
     authenticate: async () => ({ user: { id: userId.toString() }, kind: "desktop-gulong-engine" }),
     requireTrustedMutation: () => null,

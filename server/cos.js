@@ -152,6 +152,49 @@ export async function putObject(key, body, contentType) {
   });
 }
 
+function copyError(message, code = "COS_COPY_KEY_INVALID", status = 400) {
+  throw Object.assign(new Error(message), { code, status });
+}
+
+function copyKey(value) {
+  if (typeof value !== "string" || !value || value !== value.trim() || Buffer.byteLength(value) > 1024
+    || /^[a-z][a-z0-9+.-]*:/iu.test(value) || value.startsWith("/") || /[\\\u0000-\u001f\u007f]/u.test(value)) {
+    copyError("复制对象必须提供完整且安全的 COS 对象键，不能传入网址或本地路径");
+  }
+  for (const part of value.split("/")) {
+    if (!part || part === "." || part === "..") copyError("COS 对象键不能包含空目录或路径穿越片段");
+    // Preserve literal percent characters safely by encoding each segment once
+    // below, but reject encoded separators/traversal as ambiguous key input.
+    let decoded = part;
+    try { decoded = decodeURIComponent(part); } catch { /* A literal % is a valid key character. */ }
+    if (decoded === "." || decoded === ".." || /[\/\\\u0000-\u001f\u007f]/u.test(decoded)) copyError("COS 对象键不能包含编码后的路径穿越或目录分隔符");
+  }
+  return value;
+}
+
+/** Pure builder, exported for verification without credentials or a COS write. */
+export function buildCopyParams(sourceKey, targetKey, { sourceETag, config = cosConfig() } = {}) {
+  const source = copyKey(sourceKey);
+  const target = copyKey(targetKey);
+  if (source === target) copyError("已验证输出必须复制到独立的私有对象键，不能覆盖原上传对象");
+  if (typeof sourceETag !== "string" || !sourceETag || sourceETag !== sourceETag.trim() || sourceETag.length > 256
+    || /[^\x20-\x7e]/u.test(sourceETag)) copyError("复制前必须提供有效的源对象 ETag，以防校验期间文件被替换", "COS_COPY_ETAG_REQUIRED");
+  if (!config || !/^[a-z0-9][a-z0-9-]{1,99}$/u.test(config.bucket || "") || !/^[a-z][a-z0-9-]{1,63}$/u.test(config.region || "")) {
+    copyError("腾讯云 COS 复制配置无效", "COS_COPY_CONFIGURATION_INVALID", 503);
+  }
+  const encodedPath = source.split("/").map((part) => encodeURIComponent(part)).join("/");
+  return {
+    Bucket: config.bucket, Region: config.region, Key: target,
+    CopySource: `${config.bucket}.cos.${config.region}.myqcloud.com/${encodedPath}`,
+    CopySourceIfMatch: sourceETag, MetadataDirective: "Copy", ACL: "private",
+  };
+}
+
+export async function copyObject(sourceKey, targetKey, { sourceETag } = {}) {
+  const params = buildCopyParams(sourceKey, targetKey, { sourceETag });
+  return getClient().putObjectCopy(params);
+}
+
 export function sanitizeFilename(value, fallback = "file.bin") {
   const normalized = String(value || fallback)
     .normalize("NFKC")

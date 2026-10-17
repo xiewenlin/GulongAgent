@@ -1,0 +1,964 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "WorkLucky desktop companion API",
+    "version": "worklucky-desktop-v1",
+    "description": "WorkLucky is a full route alias of the existing Gulong Engine desktop authentication and uses its shared gge session store, token prefix and desktop-gulong-engine auth kind. It is not an independent credential scope or permission boundary. Refresh and logout act on that same session family. The server reads the existing gulong_engine_monthly entitlement and price; client_product is provenance and idempotency metadata, not authorization. Existing account, compute-group, shared-node, validation, capability and order ownership checks remain authoritative. The six operations are also registered in the live /api/openapi.json. Static capability IDs are registration only, never evidence of consumers: authenticated catalog dispatchable/models/default_model/free_slot_count are authoritative. Video remains adapter_required and paid fallback is forbidden. See worklucky-distributed-contract.md for exact agent_chat, embedding, music and lease contracts. No deployment or real-consumer acceptance is implied by this offline document."
+  },
+  "servers": [
+    {
+      "url": "https://www.sologle.com"
+    }
+  ],
+  "paths": {
+    "/api/v1/desktop/worklucky/config": {
+      "get": {
+        "operationId": "getWorkLuckyProductConfig",
+        "tags": [
+          "WorkLucky desktop"
+        ],
+        "summary": "Discover product, account, subscription and update endpoints",
+        "description": "Public configuration. No client-supplied endpoint is accepted. Monthly price comes from GULONG_ENGINE_MONTHLY_PRICE_FEN; WorkLucky is included in the current Gulong Engine monthly plan with no separate purchase.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store, max-age=0"
+              },
+              "Pragma": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-cache"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductConfig"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/desktop/worklucky/updates": {
+      "get": {
+        "operationId": "getWorkLuckyDesktopUpdates",
+        "tags": [
+          "WorkLucky desktop"
+        ],
+        "summary": "Read the current signed desktop release status",
+        "description": "This patch intentionally returns no_update/release_not_published until an actual verified WorkLucky release manifest is published. Query values are accepted as client metadata and do not turn upstream source tags into executable updates. A 404, network failure or invalid JSON is not a no_update response.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store, max-age=0"
+              },
+              "Pragma": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-cache"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NoUpdate"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "platform",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "windows"
+              ]
+            }
+          },
+          {
+            "name": "arch",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "x64"
+              ]
+            }
+          },
+          {
+            "name": "package_type",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "portable_zip"
+              ]
+            }
+          },
+          {
+            "name": "current_version",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "example": "0.1.0"
+            }
+          },
+          {
+            "name": "knowledge_version",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "example": "v0.8.3"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/desktop/worklucky/auth/login": {
+      "post": {
+        "operationId": "loginWorkLuckyDesktop",
+        "tags": [
+          "WorkLucky desktop"
+        ],
+        "summary": "Create a Gulong Engine desktop session using website credentials",
+        "description": "Delegates to the unchanged Gulong Engine desktop auth factory. Uses existing password validation, identifier/IP rate limiting and local disabled-account checks. The gge access token is the same shared session kind accepted by existing Gulong Engine desktop routes. Login success alone does not grant an active monthly subscription.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Gulong Engine desktop token pair; access lifetime is normally 900 seconds.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store, max-age=0"
+              },
+              "Pragma": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-cache"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenPair"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid JSON, content type or account input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credentials or expired/revoked desktop session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The existing desktop account rate limit was exceeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The authoritative account service is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginInput"
+              }
+            }
+          },
+          "description": "JSON object; maximum request body is 16,384 bytes."
+        }
+      }
+    },
+    "/api/v1/desktop/worklucky/auth/refresh": {
+      "post": {
+        "operationId": "refreshWorkLuckyDesktop",
+        "tags": [
+          "WorkLucky desktop"
+        ],
+        "summary": "Rotate the existing shared desktop session token pair",
+        "description": "The refresh token belongs to the same gge session family as the original desktop API. Successful refresh invalidates the previous pair; a proven replay revokes that family. Refresh cannot extend the authoritative 30-day session expiry.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Rotated token pair.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store, max-age=0"
+              },
+              "Pragma": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-cache"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenPair"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid JSON, content type or account input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credentials or expired/revoked desktop session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The existing desktop account rate limit was exceeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The authoritative account service is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshInput"
+              }
+            }
+          },
+          "description": "JSON object; maximum request body is 16,384 bytes."
+        }
+      }
+    },
+    "/api/v1/desktop/worklucky/auth/logout": {
+      "post": {
+        "operationId": "logoutWorkLuckyDesktop",
+        "tags": [
+          "WorkLucky desktop"
+        ],
+        "summary": "Revoke the provided shared Gulong Engine desktop session",
+        "description": "Supply an access bearer token and/or a refresh token in JSON. This aliases the existing revoke operation and affects the same session used via the original desktop routes; it does not delete other user sessions. Malformed or absent tokens are tolerated by the existing idempotent revoke implementation.",
+        "security": [
+          {
+            "GulongEngineBearer": []
+          },
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "Revocation completed or no valid session token was provided.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store, max-age=0"
+              },
+              "Pragma": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-cache"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogoutResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid JSON, content type or account input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credentials or expired/revoked desktop session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The existing desktop account rate limit was exceeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The authoritative account service is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LogoutInput"
+              }
+            }
+          },
+          "description": "JSON object; maximum request body is 16,384 bytes."
+        }
+      }
+    },
+    "/api/v1/desktop/worklucky/account": {
+      "get": {
+        "operationId": "getWorkLuckyDesktopAccount",
+        "tags": [
+          "WorkLucky desktop"
+        ],
+        "summary": "Read the signed-in account and authoritative WorkLucky entitlement",
+        "description": "Requires a valid original or alias-issued gge access token. The active period and price are read from the existing gulong_engine_monthly subscription. Expired, scheduled, cancelled or unrelated plans do not provide worklucky.use. This response never includes password or bearer credentials.",
+        "security": [
+          {
+            "GulongEngineBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Account and current server-derived entitlement.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store, max-age=0"
+              },
+              "Pragma": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-cache"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Account"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid JSON, content type or account input.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credentials or expired/revoked desktop session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The existing desktop account rate limit was exceeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The authoritative account service is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "GulongEngineBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "gge_at_<uuid>.<opaque-secret>",
+        "description": "Existing Gulong Engine desktop token, stored in the shared gulongEngineDesktopSessions collection; no new WorkLucky-only token scope."
+      }
+    },
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ]
+      },
+      "LoginInput": {
+        "type": "object",
+        "properties": {
+          "identifier": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 320
+          },
+          "password": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "format": "password",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "identifier",
+          "password"
+        ]
+      },
+      "RefreshInput": {
+        "type": "object",
+        "properties": {
+          "refresh_token": {
+            "type": "string",
+            "minLength": 1,
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "refresh_token"
+        ]
+      },
+      "LogoutInput": {
+        "type": "object",
+        "properties": {
+          "refresh_token": {
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": []
+      },
+      "TokenPair": {
+        "type": "object",
+        "properties": {
+          "access_token": {
+            "type": "string"
+          },
+          "refresh_token": {
+            "type": "string"
+          },
+          "expires_in": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 900
+          },
+          "token_type": {
+            "type": "string",
+            "enum": [
+              "Bearer"
+            ]
+          }
+        },
+        "required": [
+          "access_token",
+          "refresh_token",
+          "expires_in",
+          "token_type"
+        ]
+      },
+      "LogoutResult": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        },
+        "required": [
+          "ok"
+        ]
+      },
+      "Entitlement": {
+        "type": "object",
+        "properties": {
+          "product": {
+            "type": "string",
+            "enum": [
+              "worklucky"
+            ]
+          },
+          "plan_id": {
+            "type": "string",
+            "enum": [
+              "gulong_engine_monthly"
+            ]
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "inactive",
+              "expired",
+              "scheduled"
+            ]
+          },
+          "starts_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "worklucky.use",
+                "gulong_engine.text",
+                "gulong_engine.image",
+                "gulong_engine.image_2k",
+                "gulong_engine.tts",
+                "gulong_engine.video"
+              ]
+            }
+          },
+          "monthly_price_fen": {
+            "type": "integer",
+            "nullable": true,
+            "minimum": 0,
+            "description": "The authoritative existing Gulong Engine monthly price in CNY fen; not a separate WorkLucky price."
+          }
+        },
+        "required": [
+          "product",
+          "plan_id",
+          "active",
+          "status",
+          "starts_at",
+          "expires_at",
+          "capabilities",
+          "monthly_price_fen"
+        ]
+      },
+      "Account": {
+        "type": "object",
+        "properties": {
+          "user": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "display_name": {
+                "type": "string"
+              },
+              "email": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "display_name",
+              "email"
+            ]
+          },
+          "entitlement": {
+            "$ref": "#/components/schemas/Entitlement"
+          },
+          "checked_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "user",
+          "entitlement",
+          "checked_at"
+        ]
+      },
+      "ProductConfig": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "enum": [
+              "worklucky-product-v1"
+            ]
+          },
+          "product_id": {
+            "type": "string",
+            "enum": [
+              "worklucky"
+            ]
+          },
+          "product": {
+            "type": "string",
+            "enum": [
+              "worklucky"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "enum": [
+              "WorkLucky"
+            ]
+          },
+          "protocol_version": {
+            "type": "string",
+            "enum": [
+              "worklucky-desktop-v1"
+            ]
+          },
+          "subscription": {
+            "type": "object",
+            "properties": {
+              "plan_id": {
+                "type": "string",
+                "enum": [
+                  "gulong_engine_monthly"
+                ]
+              },
+              "monthly_price_fen": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "included_in_plan": {
+                "type": "boolean",
+                "enum": [
+                  true
+                ]
+              },
+              "separate_purchase": {
+                "type": "boolean",
+                "enum": [
+                  false
+                ]
+              }
+            },
+            "required": [
+              "plan_id",
+              "monthly_price_fen",
+              "included_in_plan",
+              "separate_purchase"
+            ]
+          },
+          "auth": {
+            "type": "object",
+            "properties": {
+              "login": {
+                "type": "string",
+                "enum": [
+                  "/api/v1/desktop/worklucky/auth/login"
+                ]
+              },
+              "refresh": {
+                "type": "string",
+                "enum": [
+                  "/api/v1/desktop/worklucky/auth/refresh"
+                ]
+              },
+              "logout": {
+                "type": "string",
+                "enum": [
+                  "/api/v1/desktop/worklucky/auth/logout"
+                ]
+              },
+              "account": {
+                "type": "string",
+                "enum": [
+                  "/api/v1/desktop/worklucky/account"
+                ]
+              }
+            },
+            "required": [
+              "login",
+              "refresh",
+              "logout",
+              "account"
+            ]
+          },
+          "capability_orders": {
+            "type": "object",
+            "properties": {
+              "catalog": {
+                "type": "string",
+                "enum": [
+                  "/api/v1/capability-orders/catalog?product=worklucky"
+                ]
+              },
+              "create": {
+                "type": "string",
+                "enum": [
+                  "/api/v1/capability-orders"
+                ]
+              },
+              "product": {
+                "type": "string",
+                "enum": [
+                  "worklucky"
+                ]
+              },
+              "capability_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "gulong_engine.text",
+                    "gulong_engine.image",
+                    "gulong_engine.image_2k",
+                    "gulong_engine.tts",
+                    "gulong_engine.video",
+                    "gulong_engine.agent_chat",
+                    "gulong_engine.embedding",
+                    "gulong_engine.music"
+                  ]
+                }
+              },
+              "pricing": {
+                "type": "string",
+                "enum": [
+                  "zero_price_shared_only"
+                ]
+              },
+              "video": {
+                "type": "string",
+                "enum": [
+                  "adapter_required"
+                ]
+              },
+              "availability_source": {
+                "type": "string",
+                "enum": ["authenticated_catalog"]
+              },
+              "execution_requires": {
+                "type": "string",
+                "enum": ["verified_consumer_contract"]
+              },
+              "paid_fallback": {
+                "type": "boolean",
+                "enum": [false]
+              }
+            },
+            "required": [
+              "catalog",
+              "create",
+              "product",
+              "capability_ids",
+              "pricing",
+              "video",
+              "availability_source",
+              "execution_requires",
+              "paid_fallback"
+            ]
+          },
+          "updates": {
+            "type": "object",
+            "properties": {
+              "endpoint": {
+                "type": "string",
+                "enum": [
+                  "https://www.sologle.com/api/v1/desktop/worklucky/updates"
+                ]
+              },
+              "signature_algorithm": {
+                "type": "string",
+                "enum": [
+                  "worklucky-ed25519-sha256-v1"
+                ]
+              }
+            },
+            "required": [
+              "endpoint",
+              "signature_algorithm"
+            ]
+          },
+          "updates_url": {
+            "type": "string",
+            "enum": [
+              "/api/v1/desktop/worklucky/updates"
+            ]
+          }
+        },
+        "required": [
+          "schema_version",
+          "product_id",
+          "product",
+          "name",
+          "protocol_version",
+          "subscription",
+          "auth",
+          "capability_orders",
+          "updates",
+          "updates_url"
+        ]
+      },
+      "NoUpdate": {
+        "type": "object",
+        "properties": {
+          "product_id": {
+            "type": "string",
+            "enum": [
+              "worklucky"
+            ]
+          },
+          "product": {
+            "type": "string",
+            "enum": [
+              "worklucky"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "no_update"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "release_not_published"
+            ]
+          },
+          "release": {
+            "type": "object",
+            "nullable": true,
+            "enum": [
+              null
+            ]
+          }
+        },
+        "required": [
+          "product_id",
+          "product",
+          "status",
+          "reason",
+          "release"
+        ]
+      }
+    }
+  }
+}

@@ -1,3 +1,5 @@
+import { WORKLUCKY_CAPABILITY_DEFINITIONS } from "./worklucky-capabilities.js";
+
 const field = (minLength, maxLength) => ({ type: "string", minLength, maxLength });
 const schema = (properties, required) => ({ type: "object", additionalProperties: false, properties, required });
 const imageMime = ["image/png", "image/jpeg", "image/webp"];
@@ -28,6 +30,7 @@ function definition(suffix, parametersSchema, options = {}) {
 }
 
 export const GULONG_ENGINE_CAPABILITY_DEFINITIONS = Object.freeze([
+  ...WORKLUCKY_CAPABILITY_DEFINITIONS,
   definition("text", schema({
     model: { ...field(1, 120), default: "auto" },
     prompt: field(1, 24000),

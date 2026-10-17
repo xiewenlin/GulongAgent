@@ -54,6 +54,10 @@
       "destination": "/api/platform?_platform_path=desktop/earnings/:path*"
     },
     {
+      "source": "/api/admin/capability-consumers/:path*",
+      "destination": "/api/platform?_platform_path=admin/capability-consumers/:path*"
+    },
+    {
       "source": "/api/admin/compute-groups",
       "destination": "/api/platform?_platform_path=admin/compute-groups"
     },
@@ -291,6 +295,10 @@
     {
       "path": "/api/cron/h3-output-cleanup",
       "schedule": "17 1 * * *"
+    },
+    {
+      "path": "/api/cron/capability-output-cleanup",
+      "schedule": "23 * * * *"
     }
   ]
 }

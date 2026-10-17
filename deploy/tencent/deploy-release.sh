@@ -63,6 +63,13 @@ health_check() {
   return 1
 }
 
+capability_cleanup_auth_check() {
+  local status
+  status="$(curl --silent --show-error --max-time 5 --output /dev/null --write-out '%{http_code}' \
+    http://127.0.0.1:8787/api/cron/capability-output-cleanup)" || return 1
+  [[ "$status" == "401" ]]
+}
+
 rollback() {
   if [[ "$activated" -ne 1 || -z "$previous" || ! -d "$previous" ]]; then
     return 0
@@ -144,13 +151,34 @@ fi
 cat >/usr/local/sbin/gulong-h3-maintenance <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+exec 9>/run/lock/gulong-h3-maintenance.lock
+/usr/bin/flock --nonblock 9 || exit 0
 set -a
 source /etc/gulong/gulong.env
 set +a
 test -n "${CRON_SECRET:-}"
-exec /usr/bin/curl --fail --silent --show-error --max-time 55 \
+maintenance_status=0
+/usr/bin/curl --fail --silent --show-error --max-time 55 \
   --header "Authorization: Bearer ${CRON_SECRET}" \
-  http://127.0.0.1:8787/api/cron/h3-output-cleanup
+  http://127.0.0.1:8787/api/cron/h3-output-cleanup || maintenance_status=$?
+# The minute timer keeps H3 deadlines responsive. This protected cleanup runs
+# only once per UTC hour, with a tiny fixed state file and the same file lock.
+cleanup_hour="$(date -u +%Y%m%d%H)"
+cleanup_state=/run/gulong-capability-output-cleanup.hour
+previous_hour=""
+if [[ -f "$cleanup_state" && ! -L "$cleanup_state" ]]; then
+  IFS= read -r previous_hour <"$cleanup_state" || previous_hour=""
+fi
+if [[ "$previous_hour" != "$cleanup_hour" ]]; then
+  if /usr/bin/curl --fail --silent --show-error --max-time 55 \
+    --header "Authorization: Bearer ${CRON_SECRET}" \
+    http://127.0.0.1:8787/api/cron/capability-output-cleanup; then
+    printf '%s\n' "$cleanup_hour" >"$cleanup_state"
+  else
+    maintenance_status=1
+  fi
+fi
+exit "$maintenance_status"
 EOF
 chmod 0750 /usr/local/sbin/gulong-h3-maintenance
 
@@ -188,7 +216,7 @@ ln -s "$target" "$next_link"
 mv -Tf "$next_link" "$current_link"
 activated=1
 
-if ! systemctl restart "$service_name" || ! health_check; then
+if ! systemctl restart "$service_name" || ! health_check || ! capability_cleanup_auth_check; then
   echo "New release failed its health gate; restoring the previous release." >&2
   if rollback; then
     echo "Previous release restored successfully." >&2

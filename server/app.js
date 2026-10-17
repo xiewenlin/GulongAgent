@@ -105,9 +105,11 @@ import { creditGulongEngineSubscriptionBalance } from "./gulong-engine-billing.j
 import { registerH3SharedRoutes } from "./h3-shared.js";
 import { registerCodexMarketRoutes } from "./codex-market.js";
 import { registerCapabilityOrderRoutes } from "./capability-orders.js";
+import { registerCapabilityConsumerAcceptanceRoutes } from "./capability-consumer-acceptance.js";
+import { registerCapabilityOutputCleanupRoutes } from "./capability-output-cleanup.js";
 import { registerComputeGroupRoutes } from "./compute-groups.js";
 import { registerEnglishDesktopAuthRoutes, authenticateEnglishDesktop } from "./desktop-english-auth.js";
-import { registerGulongEngineDesktopAuthRoutes, authenticateGulongEngineDesktop } from "./desktop-gulong-auth.js";
+import { registerGulongEngineDesktopAuthRoutes, registerWorkLuckyDesktopAuthRoutes, authenticateGulongEngineDesktop } from "./desktop-gulong-auth.js";
 import { ENGLISH_COACH_PLAN_ID, ENGLISH_COACH_MONTHLY_PRICE_FEN, ENGLISH_COACH_PRODUCT, GULONG_ENGINE_PLAN_ID, GULONG_ENGINE_MONTHLY_PRICE_FEN, GULONG_ENGINE_PRODUCT, SUBSCRIPTION_PRODUCT_IDS, productSubscription, subscriptionProducts, buildProductPeriodPatch, legacyAccessSubscription } from "./english-coach-products.js";
 import { readMarketWalletAmount } from "./codex-market-pricing.js";
 import {
@@ -3331,10 +3333,13 @@ registerCodexMarketRoutes(app, {
 });
 registerEnglishDesktopAuthRoutes(app);
 registerGulongEngineDesktopAuthRoutes(app);
+registerWorkLuckyDesktopAuthRoutes(app);
 registerCapabilityOrderRoutes(app, {
   authenticate: async (c, options) => (await authenticateEnglishDesktop(c)) || (await authenticateGulongEngineDesktop(c)) || authenticateSiteOrDesktopChandler(c, options),
   requireTrustedMutation,
 });
+registerCapabilityConsumerAcceptanceRoutes(app, { getCollection, requireAdmin, requireTrustedMutation });
+registerCapabilityOutputCleanupRoutes(app, { getCollection });
 registerComputeGroupRoutes(app, {
   authenticate: async (c, options) => (await authenticateGulongEngineDesktop(c)) || authenticateSiteOrDesktopChandler(c, options),
   requireAdmin,

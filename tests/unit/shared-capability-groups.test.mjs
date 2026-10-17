@@ -3,6 +3,7 @@ import test from "node:test";
 import { ObjectId } from "mongodb";
 import { OpenAPIHono } from "@hono/zod-openapi";
 import { hashOpaqueToken } from "../../server/security.js";
+import { createCapabilityMemoryCollection } from "../helpers/capability-memory.mjs";
 import { CAPABILITY_ORDER_PROTOCOL, capabilityNodeCanRunOrder, normalizeCapabilityReport, registerCapabilityOrderRoutes } from "../../server/capability-orders.js";
 
 const idValue = (value) => value instanceof ObjectId ? String(value) : value instanceof Date ? +value : value;
@@ -45,9 +46,12 @@ function fixture({ userGroup = "group-a", nodeGroup = "group-a", sameAccount = f
   const report = { bindingId: binding._id, userId: executor._id, nodeId: binding.nodeId, protocolVersion: CAPABILITY_ORDER_PROTOCOL,
     capabilities: [normalizeCapabilityReport(rawReport)], resources: { running_task_count: 0, max_concurrent_tasks: 2 }, reportedAt: new Date() };
   const rows = { users: sameAccount ? [requester] : [requester, executor], nodeAccountBindings: [binding], capabilityNodeReports: [report], capabilityOrders: [], capabilityOutputUploads: [], capabilityOrderCallbacks: [] };
+  const nodeSlots = createCapabilityMemoryCollection();
+  rows.capabilityNodeSlots = nodeSlots.rows;
   const hooks = {};
   const mutate = (row, update) => { Object.assign(row, update.$set || {}); for (const key of Object.keys(update.$unset || {})) delete row[key]; for (const [key, value] of Object.entries(update.$inc || {})) row[key] = (row[key] || 0) + value; };
   const getCollection = async (name) => {
+    if (name === "capabilityNodeSlots") return nodeSlots;
     rows[name] ||= [];
     return {
       findOne: async (query) => {

@@ -35,7 +35,8 @@ test("古龙引擎包月有独立 999 元权益，不伪装普通会员", () => 
   const subscription = { plan: GULONG_ENGINE_PLAN_ID, products: { [GULONG_ENGINE_PLAN_ID]: period } };
   const entitlement = gulongEngineEntitlement(subscription, now);
   assert.equal(entitlement.active, true);
-  assert.deepEqual(entitlement.capabilities, ["pearapi.free_text", "brain.read", "brain.write", "gulong_engine.text", "gulong_engine.image", "gulong_engine.image_2k", "gulong_engine.tts", "gulong_engine.video", "minimax_h3_shared.video"]);
+  assert.deepEqual(entitlement.included_products, ["gulong_engine", "worklucky"]);
+  assert.deepEqual(entitlement.capabilities, ["worklucky.use", "pearapi.free_text", "brain.read", "brain.write", "gulong_engine.text", "gulong_engine.image", "gulong_engine.image_2k", "gulong_engine.tts", "gulong_engine.video", "gulong_engine.agent_chat", "gulong_engine.embedding", "gulong_engine.music", "minimax_h3_shared.video"]);
   assert.equal(legacyAccessSubscription(subscription, now).status, "active");
   assert.equal(legacyAccessSubscription(subscription, now).plan, GULONG_ENGINE_PLAN_ID);
   assert.equal(subscriptionProducts(subscription, now).find((item) => item.id === GULONG_ENGINE_PLAN_ID).status, "active");
@@ -115,7 +116,7 @@ test("管理员单独调整古龙引擎有效期不会覆盖英语教练或普�
 });
 
 test("绿色版能力价格固定 0 分，视频在真实适配器上线前不可派单", () => {
-  assert.deepEqual(GULONG_ENGINE_CAPABILITY_DEFINITIONS.map((item) => item.capabilityId), ["gulong_engine.text", "gulong_engine.image", "gulong_engine.image_2k", "gulong_engine.tts", "gulong_engine.video"]);
+  assert.deepEqual(GULONG_ENGINE_CAPABILITY_DEFINITIONS.map((item) => item.capabilityId), ["gulong_engine.agent_chat", "gulong_engine.embedding", "gulong_engine.music", "gulong_engine.text", "gulong_engine.image", "gulong_engine.image_2k", "gulong_engine.tts", "gulong_engine.video"]);
   assert.ok(GULONG_ENGINE_CAPABILITY_DEFINITIONS.every((item) => item.priceFen === 0 && item.sharingScope === "gulong_shared"));
   const video = GULONG_ENGINE_CAPABILITY_DEFINITIONS.find((item) => item.capabilityId === "gulong_engine.video");
   assert.equal(video.dispatchable, false);

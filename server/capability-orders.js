@@ -4,12 +4,18 @@ import { z } from "@hono/zod-openapi";
 import { getCollection as databaseCollection } from "./db.js";
 import { enforceRateLimit as databaseRateLimit } from "./rate-limit.js";
 import { fingerprintIp, hashOpaqueToken } from "./security.js";
-import { createPresignedDownloadUrl, createPresignedPutUrl, deleteObject, ensureBrowserUploadCors, headObject, sanitizeFilename } from "./cos.js";
+import { copyObject, createPresignedDownloadUrl, createPresignedPutUrl, deleteObject, ensureBrowserUploadCors, headObject, sanitizeFilename } from "./cos.js";
 import { localizeErrorMessage } from "../shared/error-messages.js";
 import { readEnglishEntitlement, readGulongEngineEntitlement } from "./english-coach-products.js";
 import { ENGLISH_CAPABILITY_DEFINITIONS, englishNodeSharesCapability, englishWorkerOwnsClaim, isEnglishCapability, validateEnglishInlineResult } from "./english-coach-capabilities.js";
 import { GULONG_ENGINE_CAPABILITY_DEFINITIONS, gulongEngineNodeSharesCapability, gulongEngineUploadAllowed, isGulongEngineCapability, validateGulongEngineInlineResult } from "./gulong-engine-capabilities.js";
 import { computeGroupFilter, computeGroupsMatch, getUserComputeGroupId, normalizeComputeGroupId } from "./compute-groups.js";
+
+import { capabilityProducts, withClientProductFingerprint, clientProductConflicts } from "./worklucky-product.js";
+import { isWorkLuckyCapability, validateSpecialParameters, validateSpecialInlineResult, normalizeSpecialNodeModels, specialNodeMatches, specialAvailability } from "./worklucky-capabilities.js";
+import { createCapabilitySlotCoordinator, normalizeCapabilityResources } from "./capability-slots.js";
+import { findTrustedConsumerAcceptance } from "./capability-consumer-acceptance.js";
+import { inspectFlacStream } from "./capability-flac.js";
 
 export const CAPABILITY_ORDER_PROTOCOL = "gulong-capability-orders-v1";
 export const CAPABILITY_BINDING_HEADER = "X-Gulong-Account-Binding";
@@ -21,6 +27,30 @@ const CAPABILITY_TERMINAL = new Set(["completed", "failed", "cancelled"]);
 const IMAGE_MIME = ["image/png", "image/jpeg", "image/webp"];
 const AUDIO_MIME = ["audio/mpeg", "audio/wav", "audio/x-wav", "audio/flac"];
 const VIDEO_MIME = ["video/mp4", "video/webm", "video/quicktime"];
+
+async function boundedRequestJson(c, maxBytes = 128 * 1024) {
+  const oversized = () => Object.assign(new Error("请求内容超过接口允许的大小，请减少单次数据量"), { code: "REQUEST_TOO_LARGE", status: 413 });
+  if (Number(c.req.header("content-length")) > maxBytes) throw oversized();
+  const reader = c.req.raw.body?.getReader();
+  if (!reader) return {};
+  const buffer = Buffer.allocUnsafe(maxBytes);
+  let bytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > maxBytes) { await reader.cancel(); throw oversized(); }
+      buffer.set(value, bytes - value.byteLength);
+    }
+    const parsed = JSON.parse(buffer.subarray(0, bytes).toString("utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return parsed;
+  } catch (error) {
+    if (error?.code === "REQUEST_TOO_LARGE") throw error;
+    return {};
+  }
+}
 
 export async function verifyCapabilityAudioDigest(objectKey, expectedBytes, expectedSha256, { issueDownloadUrl = createPresignedDownloadUrl, fetchObject = fetch } = {}) {
   const response = await fetchObject(issueDownloadUrl(objectKey, { expires: 120 }), { signal: AbortSignal.timeout(60_000) });
@@ -334,10 +364,11 @@ function validateJsonValue(schema, value, path = "parameters") {
 export function normalizeCapabilityParameters(value, capability) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw Object.assign(new Error("parameters 必须是 JSON 对象"), { code: "VALIDATION_ERROR", status: 400 });
   const serialized = JSON.stringify(value);
-  if (serialized.length > 64_000) throw Object.assign(new Error("能力参数不能超过 64 KB"), { code: "VALIDATION_ERROR", status: 400 });
+  if (Buffer.byteLength(serialized) > (capability.maxParameterBytes || 64_000)) throw Object.assign(new Error("能力参数超过该能力允许的大小"), { code: "VALIDATION_ERROR", status: 400 });
   if (/"(?:__proto__|prototype|constructor)"\s*:/u.test(serialized)) throw Object.assign(new Error("能力参数包含不安全字段"), { code: "VALIDATION_ERROR", status: 400 });
   const normalized = applySchemaDefaults(capability.parametersSchema, JSON.parse(serialized));
   validateJsonValue(capability.parametersSchema, normalized);
+  validateSpecialParameters(capability.capabilityId, normalized);
   return normalized;
 }
 
@@ -429,7 +460,9 @@ export function normalizeCapabilityReport(value = {}, now = new Date(), { allowL
     sharingOptIn: (isEnglishCapability(capabilityId) || isGulongEngineCapability(capabilityId)) && value.sharing_opt_in === true,
     supportedModels,
     supportedVoices,
+    ...(isWorkLuckyCapability(capabilityId) ? normalizeSpecialNodeModels(capabilityId, value) : {}),
     validation: {
+      acceptanceId: String(value.validation?.acceptance_id || value.validation?.acceptanceId || "").trim() || null,
       testedAt,
       artifactSha256,
       runtimeVersion: String(value.validation?.runtime_version || value.validation?.runtimeVersion || "").trim().slice(0, 120) || null,
@@ -448,9 +481,10 @@ export function capabilityNodeCanRunOrder(node, order) {
   return Boolean(node.capabilities?.some((item) => item.capabilityId === order.capabilityId
     && (!order.capabilityVersion || item.capabilityVersion === order.capabilityVersion)
     && item.installed && item.validated && item.enabled
+    && (!isWorkLuckyCapability(order.capabilityId) || (item.trustedAcceptance === true && (order.catalogProbe === true || specialNodeMatches(order, item))))
     && (order.capabilityId !== "gulong_engine.tts" || !order.parameters?.voice_id || item.supportedVoices?.includes(order.parameters.voice_id))
     && (!isGulongEngineCapability(order.capabilityId) || !order.parameters?.model || order.parameters.model === "auto"
-      || (item.supportedModels || []).includes(order.parameters.model))));
+      || isWorkLuckyCapability(order.capabilityId) || (item.supportedModels || []).includes(order.parameters.model))));
 }
 
 function publicDefinition(item) {
@@ -463,6 +497,7 @@ function publicDefinition(item) {
   });
   return {
     capability_id: item.capabilityId,
+    products: capabilityProducts(item.capabilityId),
     protocol_version: item.protocolVersion,
     parameters_schema_version: item.parametersSchemaVersion,
     parameters_schema: item.parametersSchema,
@@ -498,6 +533,7 @@ function publicOrder(order, issueDownloadUrl, queue = null) {
     content_type: item.contentType,
     bytes: item.bytes,
     sha256: item.sha256,
+    ...(item.durationSeconds != null ? { duration_seconds: item.durationSeconds } : {}),
     download_url: issueDownloadUrl(item.objectKey, { expires: 15 * 60, filename: item.filename }),
     download_expires_in_seconds: 900,
   }));
@@ -505,6 +541,7 @@ function publicOrder(order, issueDownloadUrl, queue = null) {
     id: order._id.toString(),
     order_no: order.orderNo,
     protocol_version: order.protocolVersion,
+    client_product: order.clientProduct || null,
     capability_id: order.capabilityId,
     capability_version: order.capabilityVersion || null,
     status: order.status,
@@ -564,12 +601,33 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
   const inspectCosObject = dependencies.headObject || headObject;
   const verifyAudioObject = dependencies.verifyAudioObject || ((grant) => verifyCapabilityAudioDigest(grant.objectKey, grant.bytes, grant.sha256, { issueDownloadUrl }));
   const removeCosObject = dependencies.deleteObject || deleteObject;
+  const publishCosObject = dependencies.copyObject || copyObject;
   const ensureUploadCors = dependencies.ensureBrowserUploadCors || ensureBrowserUploadCors;
   const { authenticate, requireTrustedMutation } = dependencies;
   const englishEntitlement = dependencies.readEnglishEntitlement || ((ownerId, now) => readEnglishEntitlement(ownerId, now, getCollection));
   const gulongEntitlement = dependencies.readGulongEngineEntitlement || ((ownerId, now) => readGulongEngineEntitlement(ownerId, now, getCollection));
   const requestKey = (ownerId, key) => createHash("sha256").update(`${ownerId}:${key}`).digest("hex");
   const readUserGroup = dependencies.getUserComputeGroupId || ((userId) => getUserComputeGroupId(userId, getCollection));
+  const slots = dependencies.slotCoordinator || createCapabilitySlotCoordinator({ getCollection });
+  const trustedAcceptance = dependencies.findTrustedConsumerAcceptance || ((bindingId, report, now) => findTrustedConsumerAcceptance({ getCollection, bindingId, report, now }));
+  const verifyFlacObject = dependencies.verifyFlacObject || (async (grant) => {
+    const response = await fetch(issueDownloadUrl(grant.objectKey, { expires: 120 }), { signal: AbortSignal.timeout(60_000), redirect: "error" });
+    if (!response.ok || !response.body) throw new Error("完整音乐文件暂时无法读取");
+    return inspectFlacStream(response.body, { expectedBytes: grant.bytes, expectedSha256: grant.sha256, maxBytes: 64 * 1024 * 1024 });
+  });
+  const slotFence = (order) => ({ bindingId: order.assignedNode?.bindingId, nodeId: order.assignedNode?.nodeId,
+    userId: order.assignedNode?.userId, capabilityId: order.capabilityId, claimId: order.claimId, taskId: order._id });
+  const releaseOrderSlot = (order) => order.slotLeaseRequired ? slots.release(slotFence(order)) : Promise.resolve(false);
+  async function hasOrderSlot(order, now = new Date()) {
+    if (!order.slotLeaseRequired) return true;
+    const snapshot = await slots.snapshot({ bindingId: order.assignedNode?.bindingId, now });
+    return snapshot.available && snapshot.leases.some((lease) => lease.claimId === order.claimId && lease.taskId === String(order._id)
+      && lease.nodeId === order.assignedNode.nodeId && lease.userId === String(order.assignedNode.userId));
+  }
+  async function trustReports(binding, reports, now) {
+    return Promise.all(reports.map(async (report) => !isWorkLuckyCapability(report.capabilityId) ? report
+      : { ...report, trustedAcceptance: Boolean(await trustedAcceptance(binding._id, report, now)) }));
+  }
 
   async function workerGroupError(c, order, auth) {
     const [groupId, currentBinding] = await Promise.all([
@@ -588,7 +646,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const reports = await (await getCollection("capabilityNodeReports"))
       .find({ "capabilities.capabilityId": capabilityId, reportedAt: { $gte: new Date(now.getTime() - 3 * 60_000) } })
       .limit(200).toArray();
-    if (!reports.length) return { verified_node_count: 0, free_slot_count: 0, status: "offline", ...(capabilityId === "gulong_engine.tts" ? { voice_ids: [] } : {}) };
+    if (!reports.length) return { verified_node_count: 0, free_slot_count: 0, status: "offline", ...specialAvailability(capabilityId, []), ...(capabilityId === "gulong_engine.tts" ? { voice_ids: [] } : {}) };
     const computeGroupId = await readUserGroup(ownerId);
     const bindings = await (await getCollection("nodeAccountBindings"))
       .find({ _id: { $in: reports.map((report) => report.bindingId) }, status: "active", revokedAt: null }).toArray();
@@ -596,27 +654,40 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     let nodeCount = 0;
     let freeSlots = 0;
     const voiceIds = new Set();
+    const acceptedReports = [];
     for (const report of reports) {
       const binding = activeBindings.get(String(report.bindingId));
       if (!binding || binding.nodeId !== report.nodeId || String(binding.userId) !== String(report.userId)
         || report.protocolVersion !== CAPABILITY_ORDER_PROTOCOL) continue;
-      const reportedCapability = report.capabilities?.find((item) => item.capabilityId === capabilityId
+      let reportedCapability = report.capabilities?.find((item) => item.capabilityId === capabilityId
         && item.installed && item.validated && item.enabled
         && (!capability.requiredCapabilityVersion || (item.capabilityVersion === capability.requiredCapabilityVersion
           && (capabilityId !== "gulong_engine.image_2k" || item.supportedModels?.includes("qwen_image_2_1"))))
         && new Date(item.validation?.testedAt || 0) >= new Date(now.getTime() - CAPABILITY_REPORT_MAX_AGE_MS));
       if (!reportedCapability) continue;
-      const availableSlots = Math.max(0, Math.min(integer(reportedCapability.maxConcurrent, 1), integer(report.resources?.max_concurrent_tasks, integer(reportedCapability.maxConcurrent, 1))) - integer(report.resources?.running_task_count));
+      const nodeUser = await (await getCollection("users")).findOne({ _id: binding.userId, status: "active" });
+      if (!nodeUser) continue;
+      if (isWorkLuckyCapability(capabilityId)) {
+        if (!await trustedAcceptance(binding._id, reportedCapability, now)) continue;
+        reportedCapability = { ...reportedCapability, trustedAcceptance: true };
+      }
+      const resource = normalizeCapabilityResources(report.resources, reportedCapability.maxConcurrent);
+      const snapshot = await slots.snapshot({ bindingId: binding._id, now });
+      if (!snapshot.available) continue;
+      const availableSlots = Math.max(0, Math.min(reportedCapability.maxConcurrent - (snapshot.byCapability[capabilityId] || 0),
+        resource.max_concurrent_tasks - resource.running_task_count - snapshot.activeCount));
       if (!capabilityNodeCanRunOrder({ nodeId: report.nodeId, binding, availableSlots: Math.max(1, availableSlots), capabilities: [reportedCapability] },
-        { ...(order || { capabilityId, requesterUserId: ownerId,
+        { ...(order || { capabilityId, requesterUserId: ownerId, catalogProbe: true,
           sharingScope: isEnglishCapability(capabilityId) ? "english_shared" : isGulongEngineCapability(capabilityId) ? "gulong_shared" : null,
           capabilityVersion: capability.requiredCapabilityVersion || null,
           parameters: capabilityId === "gulong_engine.image_2k" ? { model: "qwen_image_2_1" } : {} }), computeGroupId })) continue;
       nodeCount += 1;
       freeSlots += availableSlots;
+      acceptedReports.push(reportedCapability);
       if (capabilityId === "gulong_engine.tts") for (const voice of reportedCapability.supportedVoices || []) voiceIds.add(voice);
     }
     return { verified_node_count: nodeCount, free_slot_count: freeSlots, status: freeSlots ? "ready" : nodeCount ? "busy" : "offline",
+      ...specialAvailability(capabilityId, acceptedReports),
       ...(capabilityId === "gulong_engine.tts" ? { voice_ids: [...voiceIds].sort() } : {}) };
   }
 
@@ -680,11 +751,14 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const orders = await getCollection("capabilityOrders");
     const expired = await orders.find({ status: { $in: ["claimed", "processing"] }, claimLeaseUntil: { $lte: now } }).limit(100).toArray();
     for (const order of expired) {
+      let recovered;
+      const expiredFence = { _id: order._id, status: order.status, claimId: order.claimId, claimLeaseUntil: order.claimLeaseUntil };
       if (integer(order.attempt) < integer(order.maxAttempts, 2)) {
-        await orders.updateOne({ _id: order._id, status: order.status, claimLeaseUntil: { $lte: now } }, { $set: { status: "queued", stage: "retry_wait", nextEligibleAt: now, updatedAt: now }, $unset: { assignedNode: "", claimId: "", claimLeaseUntil: "", claimedAt: "" } });
+        recovered = await orders.findOneAndUpdate(expiredFence, { $set: { status: "queued", stage: "retry_wait", nextEligibleAt: now, updatedAt: now }, $unset: { assignedNode: "", claimId: "", claimLeaseUntil: "", claimedAt: "" } }, { returnDocument: "after" });
       } else {
-        await orders.updateOne({ _id: order._id, status: order.status, claimLeaseUntil: { $lte: now } }, { $set: { status: "failed", stage: "failed", error: { code: "CAPABILITY_EXECUTION_TIMEOUT", message: "节点执行超时，已达到最大重试次数" }, failedAt: now, updatedAt: now } });
+        recovered = await orders.findOneAndUpdate(expiredFence, { $set: { status: "failed", stage: "failed", error: { code: "CAPABILITY_EXECUTION_TIMEOUT", message: "节点执行超时，已达到最大重试次数" }, failedAt: now, updatedAt: now } }, { returnDocument: "after" });
       }
+      if (recovered) await releaseOrderSlot(order);
     }
     await orders.updateMany({ status: "queued", autoCancelAt: { $lte: now } }, { $set: { status: "cancelled", stage: "cancelled", cancelReason: "queue_timeout", error: { code: "CAPABILITY_QUEUE_TIMEOUT", message: "排队截止前没有兼容节点完成任务，订单已自动结束。请稍后重试。" }, cancelledAt: now, updatedAt: now } });
   }
@@ -708,17 +782,34 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     return assets.map((asset) => ({ asset_id: asset.assetId, role: asset.role, filename: asset.filename, content_type: asset.contentType, bytes: asset.bytes, sha256: asset.sha256, download_url: issueDownloadUrl(asset.objectKey, { expires: 15 * 60, filename: asset.filename }), download_expires_at: expiresAt }));
   }
 
+  function requestedClientProduct(c, auth, body) {
+    const query = c.req.queries("product");
+    const bodyProduct = body?.client_product;
+    if ((query && (query.length !== 1 || query[0] !== "worklucky"))
+      || (bodyProduct !== undefined && bodyProduct !== "worklucky")) {
+      return { error: c.json({ code: "PRODUCT_CAPABILITY_MISMATCH", message: "产品参数不正确，仅支持 WorkLucky 或不指定产品" }, 400) };
+    }
+    const clientProduct = bodyProduct ?? query?.[0];
+    if (clientProduct && auth.kind === "desktop-english") {
+      return { error: c.json({ code: "PRODUCT_CAPABILITY_MISMATCH", message: "英语教练凭据不能访问或取消 WorkLucky 产品请求" }, 403) };
+    }
+    return { clientProduct };
+  }
+  const productScopeConflict = (c) => c.json({ code: "IDEMPOTENCY_KEY_CONFLICT", message: "该请求属于其他客户端产品，不能跨产品读取、取消或复用" }, 409);
+
   app.get("/api/v1/capability-orders/catalog", async (c) => {
     const auth = await authenticate(c); if (auth.error) return auth.error;
+    const product = requestedClientProduct(c, auth); if (product.error) return product.error;
     const definitions = auth.kind === "desktop-english" ? CAPABILITY_ORDER_DEFINITIONS.filter((item) => isEnglishCapability(item.capabilityId))
       : auth.kind === "desktop-gulong-engine" ? CAPABILITY_ORDER_DEFINITIONS.filter((item) => isGulongEngineCapability(item.capabilityId)) : CAPABILITY_ORDER_DEFINITIONS;
     c.header("Cache-Control", "private, no-store, max-age=0");
-    const capabilities = definitions.map(publicDefinition);
+    const requestedProduct = product.clientProduct;
+    const capabilities = definitions.map(publicDefinition).filter((item) => !requestedProduct || item.products.includes(requestedProduct));
     for (const item of capabilities.filter((entry) => !entry.legacy_route)) {
       item.availability = await gulongAvailability(item.capability_id, auth.user.id);
       item.dispatchable = item.dispatchable && item.availability.verified_node_count > 0;
     }
-    return c.json({ protocol_version: CAPABILITY_ORDER_PROTOCOL, capabilities });
+    return c.json({ protocol_version: CAPABILITY_ORDER_PROTOCOL, ...(requestedProduct ? { product: requestedProduct } : {}), capabilities });
   });
 
   app.post("/api/v1/capability-assets/presign", async (c) => {
@@ -726,7 +817,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const auth = await authenticate(c); if (auth.error) return auth.error;
     const rate = await enforceRateLimit(`capability-asset:${auth.user.id}`, { limit: 60, windowMs: 10 * 60_000 });
     if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "素材上传请求过于频繁" }, 429);
-    const body = await c.req.json().catch(() => ({}));
+    const body = await boundedRequestJson(c);
     const filename = sanitizeFilename(body.filename, "asset.bin");
     const contentType = String(body.content_type || "application/octet-stream").trim().toLowerCase();
     const bytes = integer(body.bytes, -1);
@@ -784,13 +875,16 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const auth = await authenticate(c); if (auth.error) return auth.error;
     const rate = await enforceRateLimit(`capability-create:${auth.user.id}`, { limit: 30, windowMs: 10 * 60_000 });
     if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "能力订单创建过于频繁" }, 429);
-    const body = await c.req.json().catch(() => ({}));
+    const body = await boundedRequestJson(c, 1024 * 1024 + 128 * 1024);
     const rawKey = String(c.req.header("Idempotency-Key") || body.idempotency_key || "").trim();
     if (rawKey.length < 8 || rawKey.length > 160) return c.json({ code: "IDEMPOTENCY_KEY_REQUIRED", message: "请提供 8–160 字符的 Idempotency-Key" }, 400);
     const capabilityId = String(body.capability_id || "").trim().toLowerCase();
     if (auth.kind === "desktop-english" && !isEnglishCapability(capabilityId)) return c.json({ code: "ENGLISH_CAPABILITY_ONLY", message: "英语教练凭据仅可用于英语学习能力" }, 403);
     if (auth.kind === "desktop-gulong-engine" && !isGulongEngineCapability(capabilityId)) return c.json({ code: "GULONG_ENGINE_CAPABILITY_ONLY", message: "古龙绿色版凭据仅可用于本产品共享能力" }, 403);
     const capability = CAPABILITY_MAP.get(capabilityId);
+    const product = requestedClientProduct(c, auth, body); if (product.error) return product.error;
+    const clientProduct = product.clientProduct;
+    if (clientProduct && !capabilityProducts(capabilityId).includes(clientProduct)) return c.json({ code: "PRODUCT_CAPABILITY_MISMATCH", message: "产品与共享能力不匹配" }, 400);
     if (!capability) return c.json({ code: "UNKNOWN_CAPABILITY", message: "该能力未注册到官网统一订单目录" }, 400);
     if (capability.legacyRoute) return c.json({ code: "USE_LEGACY_H3_API", message: "MiniMax H3 视频任务继续使用现有 /api/h3/tasks 合同", legacy_route: capability.legacyRoute }, 409);
     if (!capability.dispatchable) return c.json(isEnglishCapability(capabilityId)
@@ -814,11 +908,12 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       if (!binding) return c.json({ code: "PREFERRED_NODE_NOT_OWNED", message: "指定执行节点不属于当前账户" }, 403);
       if (!computeGroupsMatch(computeGroupId, binding.computeGroupId)) return c.json({ code: "COMPUTE_GROUP_MISMATCH", message: "指定执行节点与当前用户不在同一算力分组" }, 403);
     }
-    const fingerprint = requestFingerprint({ capabilityId, capabilityVersion: requestedCapabilityVersion, parameters, assets: assets.map((item) => ({ assetId: item.assetId, role: item.role, sha256: item.sha256 })), preferredNodeId });
+    const fingerprint = requestFingerprint(withClientProductFingerprint({ capabilityId, capabilityVersion: requestedCapabilityVersion, parameters, assets: assets.map((item) => ({ assetId: item.assetId, role: item.role, sha256: item.sha256 })), preferredNodeId }, clientProduct));
     const idempotencyKey = requestKey(ownerId, rawKey);
     const orders = await getCollection("capabilityOrders");
     const existing = await orders.findOne({ idempotencyKey });
     if (existing) {
+      if (clientProductConflicts(existing, clientProduct)) return c.json({ code: "IDEMPOTENCY_KEY_CONFLICT", message: "同一幂等键不能跨桌面产品复用" }, 409);
       if (existing.cancellationTombstone) return c.json({ order: publicOrder(existing, issueDownloadUrl), idempotent: true }, 201);
       if (existing.requestFingerprint !== fingerprint) return c.json({ code: "IDEMPOTENCY_KEY_CONFLICT", message: "同一幂等键不能用于不同能力订单" }, 409);
       return c.json({ order: publicOrder(existing, issueDownloadUrl, await queueSnapshot(existing)), idempotent: true }, 201);
@@ -841,6 +936,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       requesterUserId: ownerId,
       computeGroupId,
       sourceChannel: body.source_channel === "desktop_agent" ? "desktop_agent" : "website",
+      ...(clientProduct ? { clientProduct } : {}),
       capabilityId,
       ...(isEnglishCapability(capabilityId) ? { sharingScope: "english_shared", entitlementPlan: "english_coach_monthly" } : {}),
       ...(isGulongEngineCapability(capabilityId) ? { sharingScope: "gulong_shared", entitlementPlan: "gulong_engine_monthly" } : {}),
@@ -869,6 +965,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     catch (error) {
       if (error?.code !== 11000) throw error;
       const replay = await orders.findOne({ idempotencyKey });
+      if (replay && clientProductConflicts(replay, clientProduct)) return productScopeConflict(c);
       if (replay?.cancellationTombstone) return c.json({ order: publicOrder(replay, issueDownloadUrl), idempotent: true }, 201);
       if (!replay || replay.requestFingerprint !== fingerprint) return c.json({ code: "IDEMPOTENCY_KEY_CONFLICT", message: "同一幂等键不能用于不同能力订单" }, 409);
       return c.json({ order: publicOrder(replay, issueDownloadUrl, await queueSnapshot(replay)), idempotent: true }, 201);
@@ -878,12 +975,14 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
 
   app.get("/api/v1/capability-orders/by-request/:key", async (c) => {
     const auth = await authenticate(c); if (auth.error) return auth.error;
+    const product = requestedClientProduct(c, auth); if (product.error) return product.error;
     const key = String(c.req.param("key") || "");
     if (!/^[A-Za-z0-9._:-]{8,160}$/.test(key)) return c.json({ code: "VALIDATION_ERROR", message: "请求编号格式无效" }, 400);
     const ownerId = new ObjectId(auth.user.id);
     await recoverExpired();
     const order = await (await getCollection("capabilityOrders")).findOne({ idempotencyKey: requestKey(ownerId, key), requesterUserId: ownerId });
     if (!order || !scopedMayReadOrder(auth, order)) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
+    if (clientProductConflicts(order, product.clientProduct)) return productScopeConflict(c);
     c.header("Cache-Control", "private, no-store, max-age=0");
     return c.json({ order: publicOrder(order, issueDownloadUrl, await queueSnapshot(order)) });
   });
@@ -893,6 +992,9 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const auth = await authenticate(c); if (auth.error) return auth.error;
     const key = String(c.req.param("key") || "");
     if (!/^[A-Za-z0-9._:-]{8,160}$/.test(key)) return c.json({ code: "VALIDATION_ERROR", message: "请求编号格式无效" }, 400);
+    const body = await boundedRequestJson(c);
+    const product = requestedClientProduct(c, auth, body); if (product.error) return product.error;
+    const clientProduct = product.clientProduct;
     const rate = await enforceRateLimit(`capability-cancel-request:${auth.user.id}`, { limit: 60, windowMs: 10 * 60_000 });
     if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "取消请求过于频繁" }, 429);
     const ownerId = new ObjectId(auth.user.id);
@@ -900,23 +1002,26 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const orders = await getCollection("capabilityOrders");
     const now = new Date();
     const tombstone = { _id: new ObjectId(), orderNo: `CAPC${Date.now()}${randomBytes(5).toString("hex").toUpperCase()}`, protocolVersion: CAPABILITY_ORDER_PROTOCOL,
-      requesterUserId: ownerId, idempotencyKey, cancellationTombstone: true, capabilityId: null, status: "cancelled", stage: "cancelled",
+      requesterUserId: ownerId, idempotencyKey, ...(clientProduct ? { clientProduct } : {}), cancellationTombstone: true, capabilityId: null, status: "cancelled", stage: "cancelled",
       cancelReason: "requester_cancelled_before_create", priceFen: 0, chargeStatus: "exempt", refundStatus: "not_applicable", assets: [],
       createdAt: now, updatedAt: now, cancelledAt: now };
     try { await orders.updateOne({ idempotencyKey }, { $setOnInsert: tombstone }, { upsert: true }); }
     catch (error) { if (error?.code !== 11000) throw error; }
     const before = await orders.findOne({ idempotencyKey, requesterUserId: ownerId });
     if (!before || !scopedMayReadOrder(auth, before)) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
+    if (clientProductConflicts(before, clientProduct)) return productScopeConflict(c);
     const order = await cancelOwnedOrder(before, now);
     return c.json({ order: publicOrder(order, issueDownloadUrl), idempotent: CAPABILITY_TERMINAL.has(before.status) });
   });
 
   app.get("/api/v1/capability-orders/:id", async (c) => {
     const auth = await authenticate(c); if (auth.error) return auth.error;
+    const product = requestedClientProduct(c, auth); if (product.error) return product.error;
     if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
     await recoverExpired();
     const order = await (await getCollection("capabilityOrders")).findOne({ _id: new ObjectId(c.req.param("id")), requesterUserId: new ObjectId(auth.user.id) });
     if (!order || !scopedMayReadOrder(auth, order)) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
+    if (clientProductConflicts(order, product.clientProduct)) return productScopeConflict(c);
     c.header("Cache-Control", "private, no-store, max-age=0");
     return c.json({ order: publicOrder(order, issueDownloadUrl, await queueSnapshot(order)) });
   });
@@ -925,10 +1030,13 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const rejected = requireTrustedMutation(c); if (rejected) return rejected;
     const auth = await authenticate(c); if (auth.error) return auth.error;
     if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
+    const body = await boundedRequestJson(c);
+    const product = requestedClientProduct(c, auth, body); if (product.error) return product.error;
     const orders = await getCollection("capabilityOrders");
     const filter = { _id: new ObjectId(c.req.param("id")), requesterUserId: new ObjectId(auth.user.id) };
     const before = await orders.findOne(filter);
     if (!before || !scopedMayReadOrder(auth, before)) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
+    if (clientProductConflicts(before, product.clientProduct)) return productScopeConflict(c);
     return c.json({ order: publicOrder(await cancelOwnedOrder(before), issueDownloadUrl), idempotent: CAPABILITY_TERMINAL.has(before.status) });
   });
 
@@ -941,7 +1049,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const groupRejected = await workerGroupError(c, order, auth); if (groupRejected) return groupRejected;
     const terminal = CAPABILITY_TERMINAL.has(order.status);
     const cancellationRequested = order.status === "cancelled";
-    const leaseExpired = !terminal && order.claimLeaseUntil && new Date(order.claimLeaseUntil) <= new Date();
+    const leaseExpired = !terminal && ((order.claimLeaseUntil && new Date(order.claimLeaseUntil) <= new Date()) || !await hasOrderSlot(order));
     c.header("Cache-Control", "private, no-store, max-age=0");
     return c.json({
       order_id: order._id.toString(),
@@ -959,7 +1067,8 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
   });
 
   app.post("/api/v1/capability-orders/claim", async (c) => {
-    const body = await c.req.json().catch(() => ({}));
+    const preliminaryAuth = await authenticateBinding(c); if (preliminaryAuth.error) return preliminaryAuth.error;
+    const body = await boundedRequestJson(c, 256 * 1024);
     const nodeId = String(body.node_id || "").trim();
     const auth = await authenticateBinding(c, nodeId); if (auth.error) return auth.error;
     const rate = await enforceRateLimit(`capability-claim:${auth.binding._id}`, { limit: 120, windowMs: 60_000 });
@@ -970,7 +1079,8 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     try { ownCapabilities = (Array.isArray(body.capabilities) ? body.capabilities : []).map((item) => normalizeCapabilityReport(item, now, { allowLegacyEnglishOrders: true })); }
     catch (error) { return c.json({ code: error.code || "INVALID_CAPABILITY_REPORT", message: error.message }, error.status || 400); }
     if (!ownCapabilities.length) return c.json({ code: "CAPABILITY_REPORT_REQUIRED", message: "节点必须上报至少一个已安装、已验证、已启用能力" }, 400);
-    const resources = body.resources && typeof body.resources === "object" ? body.resources : {};
+    ownCapabilities = await trustReports(auth.binding, ownCapabilities, now);
+    const resources = normalizeCapabilityResources(body.resources, Math.max(...ownCapabilities.map((item) => item.maxConcurrent)));
     const ownNode = { nodeId, nodeName: String(body.node_name || auth.binding.nodeName || "").slice(0, 120), binding: auth.binding, capabilities: ownCapabilities, runningTaskCount: Math.max(0, integer(resources.running_task_count)), estimatedTotalSeconds: Math.max(0, integer(resources.estimated_total_seconds)), maxConcurrent: Math.min(16, Math.max(1, integer(resources.max_concurrent_tasks, Math.max(...ownCapabilities.map((item) => item.maxConcurrent)))) ) };
     ownNode.availableSlots = Math.max(0, ownNode.maxConcurrent - ownNode.runningTaskCount);
     const nodes = [ownNode];
@@ -983,12 +1093,19 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       let capabilities;
       try { capabilities = (Array.isArray(report.capabilities) ? report.capabilities : []).map((item) => normalizeCapabilityReport(item, now, { allowLegacyEnglishOrders: true })); }
       catch (error) { return c.json({ code: error.code || "INVALID_CAPABILITY_REPORT", message: error.message }, error.status || 400); }
-      const reportResources = report.resources && typeof report.resources === "object" ? report.resources : {};
+      capabilities = await trustReports(binding, capabilities, now);
+      const reportResources = normalizeCapabilityResources(report.resources, Math.max(1, ...capabilities.map((item) => item.maxConcurrent)));
       const maxConcurrent = Math.min(16, Math.max(1, integer(reportResources.max_concurrent_tasks, Math.max(1, ...capabilities.map((item) => item.maxConcurrent)))));
       nodes.push({ nodeId: reportNodeId, nodeName: String(report.node_name || binding.nodeName || "").slice(0, 120), binding, capabilities, runningTaskCount: Math.max(0, integer(reportResources.running_task_count)), estimatedTotalSeconds: Math.max(0, integer(reportResources.estimated_total_seconds)), maxConcurrent, availableSlots: Math.max(0, maxConcurrent - Math.max(0, integer(reportResources.running_task_count))) });
     }
+    for (const node of nodes) {
+      const snapshot = await slots.snapshot({ bindingId: node.binding._id, now });
+      node.availableSlots = snapshot.available ? Math.max(0, node.maxConcurrent - node.runningTaskCount - snapshot.activeCount) : 0;
+      node.activeByCapability = snapshot.byCapability;
+    }
+    // Dry-run is a connectivity probe, never an advertisement or queue mutation.
+    if (body.dry_run === true) return c.json({ ok: true, service: "gulong-capability-orders", protocol_version: CAPABILITY_ORDER_PROTOCOL, queue: "reachable", eligible_capability_ids: ownCapabilities.filter((item) => !isWorkLuckyCapability(item.capabilityId) || item.trustedAcceptance).map((item) => item.capabilityId) });
     await (await getCollection("capabilityNodeReports")).updateOne({ bindingId: auth.binding._id }, { $set: { userId: auth.user._id, nodeId, protocolVersion: CAPABILITY_ORDER_PROTOCOL, capabilities: ownCapabilities, resources, reportedAt: now, updatedAt: now }, $setOnInsert: { createdAt: now } }, { upsert: true });
-    if (body.dry_run === true) return c.json({ ok: true, service: "gulong-capability-orders", protocol_version: CAPABILITY_ORDER_PROTOCOL, queue: "reachable", eligible_capability_ids: ownCapabilities.map((item) => item.capabilityId) });
     await recoverExpired(now);
     nodes.sort((a, b) => a.estimatedTotalSeconds - b.estimatedTotalSeconds || a.runningTaskCount - b.runningTaskCount || a.nodeId.localeCompare(b.nodeId));
     const capabilityIds = [...new Set(nodes.flatMap((item) => item.capabilities.map((capability) => capability.capabilityId)))];
@@ -1016,7 +1133,9 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       }
       // A LAN proxy cannot opt another node into serving unrelated accounts.
       const foreign = String(order.requesterUserId) !== String(auth.user._id);
-      const node = nodes.find((item) => (!foreign || item === ownNode) && capabilityNodeCanRunOrder(item, { ...order, computeGroupId }));
+      const node = nodes.find((item) => (!foreign || item === ownNode)
+        && (item.activeByCapability?.[order.capabilityId] || 0) < (item.capabilities.find((cap) => cap.capabilityId === order.capabilityId)?.maxConcurrent || 0)
+        && capabilityNodeCanRunOrder(item, { ...order, computeGroupId }));
       if (node) { selected = { order, node }; break; }
     }
     if (!selected) return c.json({ task: null, claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: "same_account_fifo_least_estimated_load", eligible_capability_ids: capabilityIds } });
@@ -1026,18 +1145,27 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const claimLeaseUntil = new Date(now.getTime() + CAPABILITY_CLAIM_LEASE_MS);
     const selectedCapability = selected.node.capabilities.find((item) => item.capabilityId === selected.order.capabilityId && (!selected.order.capabilityVersion || item.capabilityVersion === selected.order.capabilityVersion));
     const assignedNode = { nodeId: selected.node.nodeId, nodeName: selected.node.nodeName, bindingId: selected.node.binding._id, userId: selected.node.binding.userId };
-    const claimed = await (await getCollection("capabilityOrders")).findOneAndUpdate({ _id: selected.order._id, ...computeGroupFilter(currentBinding.computeGroupId), status: "queued", nextEligibleAt: { $lte: now } }, { $set: { status: "claimed", stage: "claimed", claimId, claimRequestedByNodeId: auth.binding.nodeId, assignedNode, capabilityVersion: selectedCapability.capabilityVersion, claimedAt: now, claimLeaseUntil, updatedAt: now }, $inc: { attempt: 1 } }, { returnDocument: "after" });
+    const reservation = await slots.reserve({ ...slotFence({ ...selected.order, assignedNode, claimId }), now, expiresAt: claimLeaseUntil,
+      maxConcurrentTasks: Math.max(0, selected.node.maxConcurrent - selected.node.runningTaskCount), capabilityMaxConcurrent: selectedCapability.maxConcurrent });
+    if (!reservation) return c.json({ task: null, claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: "same_account_fifo_least_estimated_load", slots_busy: true } });
+    let claimed;
+    try {
+      claimed = await (await getCollection("capabilityOrders")).findOneAndUpdate({ _id: selected.order._id, ...computeGroupFilter(currentBinding.computeGroupId), status: "queued", nextEligibleAt: { $lte: now } }, { $set: { status: "claimed", stage: "claimed", claimId, slotLeaseRequired: true, claimRequestedByNodeId: auth.binding.nodeId, assignedNode, capabilityVersion: selectedCapability.capabilityVersion, claimedAt: now, claimLeaseUntil, updatedAt: now }, $inc: { attempt: 1 } }, { returnDocument: "after" });
+    } finally {
+      if (!claimed) await slots.release({ ...slotFence({ ...selected.order, assignedNode, claimId }), now });
+    }
     if (!claimed) return c.json({ task: null, claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: "same_account_fifo_least_estimated_load", race_lost: true } });
     return c.json({ task: workerOrder(claimed, claimAssets(claimed.assets)), claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: "same_account_fifo_least_estimated_load", selected_node_id: selected.node.nodeId } });
   });
 
   app.post("/api/v1/capability-orders/:id/outputs/presign", async (c) => {
     if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
-    const body = await c.req.json().catch(() => ({}));
+    const body = await boundedRequestJson(c);
     const now = new Date();
     const order = await (await getCollection("capabilityOrders")).findOne({ _id: new ObjectId(c.req.param("id")), status: { $in: ["claimed", "processing"] } });
     if (!order) return c.json({ code: "ORDER_NOT_ACTIVE", message: "能力订单不存在或不再执行" }, 409);
     if (!order.claimLeaseUntil || new Date(order.claimLeaseUntil) <= now) return c.json({ code: "CLAIM_LEASE_EXPIRED", message: "订单领取租约已过期，不能再签发输出票据" }, 409);
+    if (!await hasOrderSlot(order, now)) return c.json({ code: "CLAIM_SLOT_EXPIRED", message: "节点执行槽已失效，请停止当前任务" }, 409);
     const auth = await authenticateBinding(c, order.assignedNode?.nodeId); if (auth.error) return auth.error;
     if (!workerOwnsClaim(order, auth)) return c.json({ code: "CLAIM_MISMATCH", message: "订单执行账户不匹配" }, 409);
     const groupRejected = await workerGroupError(c, order, auth); if (groupRejected) return groupRejected;
@@ -1052,14 +1180,43 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     if (!outputRule || !mimeAllowed(contentType, outputRule.mimeTypes) || bytes < 1 || bytes > Math.min(CAPABILITY_MAX_ASSET_BYTES, outputRule.maxBytes) || !/^[A-F0-9]{64}$/.test(sha256)) return c.json({ code: "INVALID_OUTPUT_MANIFEST", message: "输出角色、类型、大小或 SHA-256 不符合能力合同" }, 400);
     if (order.capabilityId === "gulong_engine.tts" && contentType !== (order.parameters?.output_format === "wav" ? "audio/wav" : "audio/mpeg")) return c.json({ code: "INVALID_OUTPUT_MANIFEST", message: "配音文件类型与订单选择的输出格式不一致" }, 400);
     const outputUploads = await getCollection("capabilityOutputUploads");
+    // One stable grant per logical output. Lost responses are retried, not uploaded
+    // under a fresh identity; a changed manifest can never overwrite its receipt.
+    const outputKey = isWorkLuckyCapability(order.capabilityId) ? role : String(body.output_key || "").trim();
+    if (outputKey && !/^[A-Za-z0-9._:-]{1,160}$/.test(outputKey)) return c.json({ code: "INVALID_OUTPUT_KEY", message: "输出请求编号格式不正确" }, 400);
+    const stableOutputId = outputKey ? createHash("sha256").update(`${order._id}:${order.claimId}:${outputKey}`).digest("base64url") : null;
+    const ticket = (grant, replay = false) => {
+      const expires = Math.max(1, Math.min(3600, Math.floor((new Date(grant.expiresAt).getTime() - now.getTime()) / 1000)));
+      const headers = { "Content-Type": grant.contentType, "x-cos-meta-sha256": grant.sha256, "x-cos-meta-bytes": String(grant.bytes), "x-cos-meta-capability-order-id": order._id.toString(), "x-cos-meta-capability-output-id": grant.outputId, "x-cos-meta-node-id-hash": createHash("sha256").update(auth.binding.nodeId).digest("hex") };
+      return c.json({ output_id: grant.outputId, upload_url: issueUploadUrl(grant.objectKey, { expires, headers }), method: "PUT", headers, required_headers: headers,
+        object_key: grant.objectKey, expires_at: new Date(grant.expiresAt).toISOString(), expires_in_seconds: expires, idempotent: replay,
+        complete_via: { method: "POST", url: "/api/v1/capability-orders/callback", status: "completed", output_reference: { output_id: grant.outputId } } }, replay ? 200 : 201);
+    };
+    const reuseTicket = (grant) => {
+      if (grant.role !== role || grant.filename !== filename || grant.contentType !== contentType || grant.bytes !== bytes || grant.sha256 !== sha256)
+        return c.json({ code: "OUTPUT_IDEMPOTENCY_CONFLICT", message: "相同输出请求编号不能更改文件清单" }, 409);
+      if (grant.status !== "issued" || new Date(grant.expiresAt) <= now) return c.json({ code: "OUTPUT_GRANT_EXPIRED", message: "原输出票据已完成或过期，不能重新上传" }, 409);
+      return ticket(grant, true);
+    };
+    if (stableOutputId) {
+      const original = await outputUploads.findOne({ outputId: stableOutputId, orderId: order._id, claimId: order.claimId });
+      if (original) return reuseTicket(original);
+    }
     const roleCount = await outputUploads.countDocuments({ orderId: order._id, claimId: order.claimId, role, status: { $in: ["issued", "completed"] } });
     if (roleCount >= outputRule.max) return c.json({ code: "OUTPUT_ROLE_LIMIT_EXCEEDED", message: `输出角色 ${role} 最多允许 ${outputRule.max} 个文件` }, 409);
-    const outputId = randomBytes(18).toString("base64url");
+    const outputId = stableOutputId || randomBytes(18).toString("base64url");
     const objectKey = `capability-orders/${order._id}/outputs/${outputId}-${filename}`;
     const expiresAt = new Date(now.getTime() + 60 * 60_000);
     const headers = { "Content-Type": contentType, "x-cos-meta-sha256": sha256, "x-cos-meta-bytes": String(bytes), "x-cos-meta-capability-order-id": order._id.toString(), "x-cos-meta-capability-output-id": outputId, "x-cos-meta-node-id-hash": createHash("sha256").update(auth.binding.nodeId).digest("hex") };
     const finalGroupRejected = await workerGroupError(c, order, auth); if (finalGroupRejected) return finalGroupRejected;
-    await outputUploads.insertOne({ outputId, orderId: order._id, claimId: order.claimId, ownerId: order.requesterUserId, issuedToBindingId: auth.binding._id, issuedToNodeId: auth.binding.nodeId, role, filename, contentType, bytes, sha256, objectKey, status: "issued", createdAt: now, updatedAt: now, expiresAt });
+    try {
+      await outputUploads.insertOne({ outputId, ...(outputKey ? { outputKey } : {}), orderId: order._id, claimId: order.claimId, ownerId: order.requesterUserId, issuedToBindingId: auth.binding._id, issuedToNodeId: auth.binding.nodeId, role, filename, contentType, bytes, sha256, objectKey, status: "issued", createdAt: now, updatedAt: now, expiresAt });
+    } catch (error) {
+      if (error?.code !== 11000 || !stableOutputId) throw error;
+      const original = await outputUploads.findOne({ outputId: stableOutputId, orderId: order._id, claimId: order.claimId });
+      if (!original) throw error;
+      return reuseTicket(original);
+    }
     return c.json({
       output_id: outputId,
       upload_url: issueUploadUrl(objectKey, { expires: 3600, headers }),
@@ -1074,22 +1231,45 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
   });
 
   app.post("/api/v1/capability-orders/callback", async (c) => {
-    const body = await c.req.json().catch(() => ({}));
+    const auth = await authenticateBinding(c); if (auth.error) return auth.error;
+    const rate = await enforceRateLimit(`capability-callback:${auth.binding._id}`, { limit: 60, windowMs: 60_000 });
+    if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "节点回调过于频繁，请稍后重试原回调" }, 429);
+    const body = await boundedRequestJson(c, 4 * 1024 * 1024 + 128 * 1024);
     if (!ObjectId.isValid(body.order_id)) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
     const orders = await getCollection("capabilityOrders");
     let order = await orders.findOne({ _id: new ObjectId(body.order_id) });
     if (!order) return c.json({ code: "ORDER_NOT_FOUND", message: "能力订单不存在" }, 404);
-    const auth = await authenticateBinding(c, order.assignedNode?.nodeId); if (auth.error) return auth.error;
-    if (!workerOwnsClaim(order, auth) || String(body.claim_id || "") !== order.claimId) return c.json({ code: "CLAIM_MISMATCH", message: "订单领取身份不匹配" }, 409);
     const groupRejected = await workerGroupError(c, order, auth); if (groupRejected) return groupRejected;
     const eventId = String(body.event_id || "").trim();
     if (!/^[A-Za-z0-9._:-]{8,160}$/.test(eventId)) return c.json({ code: "CALLBACK_EVENT_REQUIRED", message: "回调必须提供稳定 event_id" }, 400);
     const callbacks = await getCollection("capabilityOrderCallbacks");
     const existing = await callbacks.findOne({ orderId: order._id, eventId });
-    if (existing) return c.json({ ok: true, idempotent: true, order_status: existing.resultStatus });
+    const payloadFingerprint = createHash("sha256").update(canonicalJson(body)).digest("hex");
+    if (existing) {
+      if (existing.claimId !== String(body.claim_id || "") || existing.nodeId !== auth.binding.nodeId
+        || (existing.bindingId && String(existing.bindingId) !== String(auth.binding._id))) return c.json({ code: "CLAIM_MISMATCH", message: "回调回执不属于当前执行节点" }, 409);
+      if (existing.payloadFingerprint && existing.payloadFingerprint !== payloadFingerprint) return c.json({ code: "CALLBACK_IDEMPOTENCY_CONFLICT", message: "相同回调编号不能更改结果内容" }, 409);
+      if (existing.resultStatus !== "processing" || !existing.payloadFingerprint) return c.json({ ok: true, idempotent: true, order_status: existing.resultStatus });
+      if (order.lastCallbackEventId === eventId && order.lastCallbackFingerprint === payloadFingerprint) {
+        if (order.status === "completed") await (await getCollection("capabilityOutputUploads")).updateMany({ orderId: order._id, claimId: existing.claimId, status: "issued" }, { $set: { status: "completed", completedAt: order.completedAt, updatedAt: new Date() }, $unset: { expiresAt: "" } });
+        if (CAPABILITY_TERMINAL.has(order.status) || order.status === "queued") await releaseOrderSlot({ ...order, claimId: existing.claimId, assignedNode: existing.assignedNode || order.assignedNode });
+        await callbacks.updateOne({ orderId: order._id, eventId }, { $set: { resultStatus: order.status } });
+        return c.json({ ok: true, idempotent: true, order_status: order.status });
+      }
+    }
+    if (!workerOwnsClaim(order, auth) || String(body.claim_id || "") !== order.claimId || order.assignedNode?.nodeId !== auth.binding.nodeId) return c.json({ code: "CLAIM_MISMATCH", message: "订单领取身份不匹配" }, 409);
+    if (order.status === "cancelled" && body.status === "cancelled") {
+      // A requester cancellation keeps the slot fenced until the worker confirms
+      // it stopped (or the lease expires). Do not assign new work while it stops.
+      try { await callbacks.insertOne({ orderId: order._id, eventId, claimId: order.claimId, nodeId: auth.binding.nodeId, bindingId: auth.binding._id, payloadFingerprint, resultStatus: "cancelled", status: "cancelled", createdAt: new Date() }); }
+      catch (error) { if (error?.code !== 11000) throw error; }
+      await releaseOrderSlot(order);
+      return c.json({ ok: true, idempotent: false, order_status: "cancelled" });
+    }
     if (CAPABILITY_TERMINAL.has(order.status)) return c.json({ code: "ORDER_ALREADY_TERMINAL", message: "订单已结束，不能再提交新的回调" }, 409);
     const now = new Date();
     if (!order.claimLeaseUntil || new Date(order.claimLeaseUntil) <= now) return c.json({ code: "CLAIM_LEASE_EXPIRED", message: "订单领取租约已过期，请停止本地任务并等待重新派单" }, 409);
+    if (!await hasOrderSlot(order, now)) return c.json({ code: "CLAIM_SLOT_EXPIRED", message: "节点执行槽已过期，请停止任务并等待重新派单" }, 409);
     const status = String(body.status || "").trim().toLowerCase();
     if (!["started", "progress", "completed", "failed", "cancelled"].includes(status)) return c.json({ code: "INVALID_CALLBACK_STATUS", message: "回调状态不正确" }, 400);
     const elapsedSeconds = Math.max(0, integer(body.elapsed_seconds));
@@ -1101,27 +1281,37 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const claimEvent = async () => {
       finalGroupRejection = await workerGroupError(c, order, auth);
       if (finalGroupRejection) return false;
+      if (existing?.resultStatus === "processing") return true;
       try {
-        await callbacks.insertOne({ orderId: order._id, eventId, claimId: order.claimId, status, nodeId: auth.binding.nodeId, createdAt: now, resultStatus: "processing" });
+        await callbacks.insertOne({ orderId: order._id, eventId, claimId: order.claimId, status, nodeId: auth.binding.nodeId, bindingId: auth.binding._id, assignedNode: order.assignedNode, payloadFingerprint, createdAt: now, resultStatus: "processing" });
         return true;
       } catch (error) {
-        if (error?.code === 11000) return false;
+        if (error?.code === 11000) {
+          const winner = await callbacks.findOne({ orderId: order._id, eventId });
+          if (winner?.payloadFingerprint && winner.payloadFingerprint !== payloadFingerprint) finalGroupRejection = c.json({ code: "CALLBACK_IDEMPOTENCY_CONFLICT", message: "相同回调编号不能更改结果内容" }, 409);
+          return winner?.payloadFingerprint === payloadFingerprint && winner?.resultStatus === "processing";
+        }
         throw error;
       }
     };
     if (["started", "progress"].includes(status)) {
+      if (order.slotLeaseRequired && !await slots.renew({ ...slotFence(order), now, expiresAt: new Date(now.getTime() + CAPABILITY_CLAIM_LEASE_MS) })) return c.json({ code: "CLAIM_SLOT_EXPIRED", message: "节点执行槽续期失败，请停止任务" }, 409);
       if (!await claimEvent()) return finalGroupRejection || c.json({ ok: true, idempotent: true, order_status: (await callbacks.findOne({ orderId: order._id, eventId }))?.resultStatus });
-      const updated = await orders.findOneAndUpdate({ _id: order._id, status: { $in: ["claimed", "processing"] }, claimId: order.claimId }, { $set: { status: "processing", stage: String(body.stage || "processing").slice(0, 120), progress, elapsedSeconds, etaSeconds, estimatedTotalSeconds: estimatedTotalSeconds || order.estimatedTotalSeconds || null, claimLeaseUntil: new Date(now.getTime() + CAPABILITY_CLAIM_LEASE_MS), updatedAt: now } }, { returnDocument: "after" });
+      const updated = await orders.findOneAndUpdate({ _id: order._id, status: { $in: ["claimed", "processing"] }, claimId: order.claimId }, { $set: { status: "processing", lastCallbackEventId: eventId, lastCallbackFingerprint: payloadFingerprint, stage: String(body.stage || "processing").slice(0, 120), progress, elapsedSeconds, etaSeconds, estimatedTotalSeconds: estimatedTotalSeconds || order.estimatedTotalSeconds || null, claimLeaseUntil: new Date(now.getTime() + CAPABILITY_CLAIM_LEASE_MS), updatedAt: now } }, { returnDocument: "after" });
       await callbacks.updateOne({ orderId: order._id, eventId }, { $set: { resultStatus: updated?.status || order.status } });
       return c.json({ ok: true, idempotent: false, order_status: updated?.status || order.status, progress, eta_seconds: etaSeconds });
     }
     if (status === "completed") {
       const capability = CAPABILITY_MAP.get(order.capabilityId);
+      if (order.capabilityId === "gulong_engine.music") {
+        const musicRate = await enforceRateLimit(`capability-music-verify:${order._id}:${order.claimId}`, { limit: 2, windowMs: 60_000 });
+        if (!musicRate.allowed) return c.json({ code: "RATE_LIMITED", message: "完整音频正在校验，请稍后重试同一完成回调" }, 429);
+      }
       const inlineResult = body.inline_result == null ? null : body.inline_result;
       if (!validateEnglishInlineResult(order.capabilityId, inlineResult, order.parameters)) return c.json({ code: "ENGLISH_RESULT_INVALID", message: "英语结果必须符合文本或声学发音评估合同" }, 400);
       if (!validateGulongEngineInlineResult(order.capabilityId, inlineResult)) return c.json({ code: "GULONG_ENGINE_RESULT_INVALID", message: "绿色版文本结果必须包含不超过 64 KB 的文字" }, 400);
       const outputRefs = Array.isArray(body.outputs) ? body.outputs : [];
-      if (inlineResult != null && (!capability.inlineResult || JSON.stringify(inlineResult).length > 64_000)) return c.json({ code: "INLINE_RESULT_NOT_ALLOWED", message: "该能力不允许此内联结果或结果超过 64 KB" }, 400);
+      if (inlineResult != null && (!capability.inlineResult || Buffer.byteLength(JSON.stringify(inlineResult)) > (capability.maxInlineResultBytes || 64_000))) return c.json({ code: "INLINE_RESULT_NOT_ALLOWED", message: "该能力不允许此内联结果或结果超过本能力大小上限" }, 400);
       if (!outputRefs.length && inlineResult == null) return c.json({ code: "OUTPUT_REQUIRED", message: "完成回调必须包含输出清单或允许的内联结果" }, 400);
       const outputIds = outputRefs.map((item) => String(item.output_id || ""));
       if (new Set(outputIds).size !== outputIds.length) return c.json({ code: "DUPLICATE_OUTPUT_REFERENCE", message: "完成回调不能重复引用同一个 output_id" }, 400);
@@ -1131,10 +1321,11 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       for (const grant of grants) roleCounts.set(grant.role, (roleCounts.get(grant.role) || 0) + 1);
       for (const rule of capability.outputRules) {
         const count = roleCounts.get(rule.role) || 0;
-        const requiredMinimum = inlineResult != null && capability.inlineResult ? 0 : rule.min;
+        const requiredMinimum = inlineResult != null && capability.inlineResult && !isWorkLuckyCapability(order.capabilityId) ? 0 : rule.min;
         if (count < requiredMinimum || count > rule.max) return c.json({ code: "INVALID_OUTPUT_ROLE_COUNT", message: `输出角色 ${rule.role} 需要 ${requiredMinimum}–${rule.max} 个，当前为 ${count} 个` }, 400);
       }
       const outputs = [];
+      const publishedCopyIds = [];
       for (const grant of grants) {
         let head;
         try { head = await inspectCosObject(grant.objectKey); } catch { return c.json({ code: "OUTPUT_NOT_FOUND", message: `COS 中尚未找到输出 ${grant.filename}` }, 409); }
@@ -1151,12 +1342,31 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
           catch { return c.json({ code: "OUTPUT_VERIFICATION_UNAVAILABLE", message: "配音文件暂时无法完成内容校验，请稍后重试完成回调" }, 503); }
           if (!digestMatches) return c.json({ code: "OUTPUT_CONTENT_HASH_MISMATCH", message: "配音文件实际内容与 SHA-256 回执不一致" }, 409);
         }
-        outputs.push({ outputId: grant.outputId, role: grant.role, filename: grant.filename, contentType: grant.contentType, bytes: grant.bytes, sha256: grant.sha256, objectKey: grant.objectKey });
+        let actualAudio = null;
+        let publishedKey = grant.objectKey;
+        if (order.capabilityId === "gulong_engine.music") {
+          publishedKey = `capability-orders/${order._id}/published/${grant.outputId}-${randomBytes(12).toString("hex")}-${grant.filename}`;
+          const sourceETag = objectHeader(head, "etag");
+          if (!sourceETag) return c.json({ code: "OUTPUT_ETAG_REQUIRED", message: "音乐文件缺少对象版本校验凭据，请重试上传" }, 409);
+          try {
+            const copyId = new ObjectId();
+            await (await getCollection("capabilityOutputCopies")).insertOne({ _id: copyId, orderId: order._id, claimId: order.claimId, outputId: grant.outputId, objectKey: publishedKey, status: "staging", expiresAt: new Date(now.getTime() + 60 * 60_000), createdAt: now });
+            publishedCopyIds.push(copyId);
+            await publishCosObject(grant.objectKey, publishedKey, { sourceETag });
+            actualAudio = await verifyFlacObject({ ...grant, objectKey: publishedKey });
+          } catch (error) { return c.json({ code: typeof error.code === "string" ? error.code : "OUTPUT_VERIFICATION_UNAVAILABLE", message: typeof error.code === "string" && error.code.startsWith("FLAC_") ? error.message : "完整音乐文件暂时无法安全发布或校验，请稍后重试原完成回调", }, error.status >= 400 && error.status < 500 ? error.status : 503); }
+          if (actualAudio.bytes !== grant.bytes || actualAudio.sha256.toUpperCase() !== grant.sha256) return c.json({ code: "OUTPUT_CONTENT_HASH_MISMATCH", message: "音乐文件实际内容与摘要回执不一致" }, 409);
+        }
+        outputs.push({ outputId: grant.outputId, role: grant.role, filename: grant.filename, contentType: grant.contentType, bytes: grant.bytes, sha256: grant.sha256, objectKey: publishedKey, ...(actualAudio ? { durationSeconds: actualAudio.durationSeconds } : {}) });
       }
+      try { validateSpecialInlineResult(order, inlineResult, { outputs }); }
+      catch (error) { return c.json({ code: error.code || "CAPABILITY_RESULT_INVALID", message: error.message }, error.status || 400); }
       if (!await claimEvent()) return finalGroupRejection || c.json({ ok: true, idempotent: true, order_status: (await callbacks.findOne({ orderId: order._id, eventId }))?.resultStatus });
-      const completed = await orders.findOneAndUpdate({ _id: order._id, status: { $in: ["claimed", "processing"] }, claimId: order.claimId }, { $set: { status: "completed", stage: "completed", progress: 100, elapsedSeconds, etaSeconds: 0, inlineResult, outputs, completedAt: now, updatedAt: now }, $unset: { claimLeaseUntil: "" } }, { returnDocument: "after" });
+      const completed = await orders.findOneAndUpdate({ _id: order._id, status: { $in: ["claimed", "processing"] }, claimId: order.claimId }, { $set: { status: "completed", lastCallbackEventId: eventId, lastCallbackFingerprint: payloadFingerprint, stage: "completed", progress: 100, elapsedSeconds, etaSeconds: 0, inlineResult, outputs, completedAt: now, updatedAt: now }, $unset: { claimLeaseUntil: "" } }, { returnDocument: "after" });
       if (!completed) return c.json({ code: "ORDER_STATE_CONFLICT", message: "订单状态已变化，完成结果未重复写入" }, 409);
+      if (publishedCopyIds.length) await (await getCollection("capabilityOutputCopies")).updateMany({ _id: { $in: publishedCopyIds }, status: "staging" }, { $set: { status: "retained", retainedAt: now }, $unset: { expiresAt: "" } });
       if (grants.length) await (await getCollection("capabilityOutputUploads")).updateMany({ outputId: { $in: outputIds }, status: "issued" }, { $set: { status: "completed", completedAt: now, updatedAt: now }, $unset: { expiresAt: "" } });
+      await releaseOrderSlot(order);
       await callbacks.updateOne({ orderId: order._id, eventId }, { $set: { resultStatus: "completed" } });
       return c.json({ ok: true, idempotent: false, order_status: "completed" });
     }
@@ -1166,23 +1376,43 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       const error = { code: String(body.error_code || "CAPABILITY_EXECUTION_FAILED").slice(0, 100), message: localizeErrorMessage(body.error_message, "本地能力执行失败").slice(0, 500), retryable };
       if (!await claimEvent()) return finalGroupRejection || c.json({ ok: true, idempotent: true, order_status: (await callbacks.findOne({ orderId: order._id, eventId }))?.resultStatus });
       if (canRetry) {
-        await orders.updateOne({ _id: order._id, claimId: order.claimId, status: { $in: ["claimed", "processing"] } }, { $set: { status: "queued", stage: "retry_wait", error, nextEligibleAt: new Date(now.getTime() + Math.min(300, Math.max(5, integer(body.retry_after_seconds, 15))) * 1000), updatedAt: now }, $unset: { assignedNode: "", claimId: "", claimLeaseUntil: "", claimedAt: "" } });
+        await orders.updateOne({ _id: order._id, claimId: order.claimId, status: { $in: ["claimed", "processing"] } }, { $set: { status: "queued", lastCallbackEventId: eventId, lastCallbackFingerprint: payloadFingerprint, stage: "retry_wait", error, nextEligibleAt: new Date(now.getTime() + Math.min(300, Math.max(5, integer(body.retry_after_seconds, 15))) * 1000), updatedAt: now }, $unset: { assignedNode: "", claimId: "", claimLeaseUntil: "", claimedAt: "" } });
+        await releaseOrderSlot(order);
         await callbacks.updateOne({ orderId: order._id, eventId }, { $set: { resultStatus: "queued" } });
         return c.json({ ok: true, idempotent: false, order_status: "queued", retry_scheduled: true });
       }
-      await orders.updateOne({ _id: order._id, claimId: order.claimId, status: { $in: ["claimed", "processing"] } }, { $set: { status: "failed", stage: "failed", error, failedAt: now, updatedAt: now }, $unset: { claimLeaseUntil: "" } });
+      await orders.updateOne({ _id: order._id, claimId: order.claimId, status: { $in: ["claimed", "processing"] } }, { $set: { status: "failed", lastCallbackEventId: eventId, lastCallbackFingerprint: payloadFingerprint, stage: "failed", error, failedAt: now, updatedAt: now }, $unset: { claimLeaseUntil: "" } });
+      await releaseOrderSlot(order);
       await callbacks.updateOne({ orderId: order._id, eventId }, { $set: { resultStatus: "failed" } });
       return c.json({ ok: true, idempotent: false, order_status: "failed", retry_scheduled: false });
     }
     if (!await claimEvent()) return finalGroupRejection || c.json({ ok: true, idempotent: true, order_status: (await callbacks.findOne({ orderId: order._id, eventId }))?.resultStatus });
-    await orders.updateOne({ _id: order._id, claimId: order.claimId, status: { $in: ["claimed", "processing"] } }, { $set: { status: "cancelled", stage: "cancelled", cancelledAt: now, cancelReason: "worker_cancelled", updatedAt: now }, $unset: { claimLeaseUntil: "" } });
+    await orders.updateOne({ _id: order._id, claimId: order.claimId, status: { $in: ["claimed", "processing"] } }, { $set: { status: "cancelled", lastCallbackEventId: eventId, lastCallbackFingerprint: payloadFingerprint, stage: "cancelled", cancelledAt: now, cancelReason: "worker_cancelled", updatedAt: now }, $unset: { claimLeaseUntil: "" } });
+    await releaseOrderSlot(order);
     await callbacks.updateOne({ orderId: order._id, eventId }, { $set: { resultStatus: "cancelled" } });
     return c.json({ ok: true, idempotent: false, order_status: "cancelled" });
   });
 
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/by-request/{key}", tags: ["Unified Capability Orders"], summary: "按同账户稳定请求编号恢复订单", responses: { 200: { description: "自己的原订单；套餐到期仍可查询" }, 404: { description: "尚无该请求" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders/by-request/{key}/cancel", tags: ["Unified Capability Orders"], summary: "按请求编号幂等取消并阻止迟到创建", responses: { 200: { description: "原订单或原子cancelled tombstone；不会产生新执行任务" } } });
-  const reportSchema = z.object({ capability_id: z.string(), capability_version: z.string(), protocol_version: z.literal(CAPABILITY_ORDER_PROTOCOL), installed: z.literal(true), validated: z.literal(true), enabled: z.literal(true), max_concurrent: z.number().int().min(1).max(16), sharing_opt_in: z.boolean().optional(), supported_models: z.array(z.string()).optional(), supported_voices: z.array(z.string()).optional(), validation: z.object({ tested_at: z.iso.datetime(), artifact_sha256: z.string().regex(/^[A-Fa-f0-9]{64}$/), runtime_version: z.string().optional(), test_id: z.string().optional() }) });
+  const reportSchema = z.object({
+    capability_id: z.string(), capability_version: z.string(), protocol_version: z.literal(CAPABILITY_ORDER_PROTOCOL),
+    installed: z.literal(true), validated: z.literal(true), enabled: z.literal(true), max_concurrent: z.number().int().min(1).max(16),
+    sharing_opt_in: z.boolean().optional(), supported_models: z.array(z.string()).optional(), supported_voices: z.array(z.string()).optional(),
+    models: z.array(z.object({ id: z.string().min(1).max(240), dimension: z.number().int().positive().optional(), tools: z.boolean().optional(), multimodal: z.boolean().optional() })).optional(),
+    default_model: z.string().nullable().optional(), asr_languages: z.array(z.enum(["zh", "en"])).optional(),
+    validation: z.object({ tested_at: z.iso.datetime(), artifact_sha256: z.string().regex(/^[A-Fa-f0-9]{64}$/), runtime_version: z.string().optional(), test_id: z.string().optional(), acceptance_id: z.string().optional(), contract_tests: z.record(z.string(), z.boolean()).optional() }),
+  });
+  app.openAPIRegistry.registerComponent("schemas", "WorkLuckySharedCapabilityContract", {
+    type: "object", description: "WorkLucky 共享能力 1.0.0：使用 Bearer gge_at_ 会话；新建 JSON 必须 client_product=worklucky、capability_version=1.0.0，查询/恢复必须 ?product=worklucky，取消 JSON 带 client_product。新能力要求与节点 binding、artifact_sha256、models、contract_tests 精确匹配的管理员 acceptance_id。目录 availability.models 为真实模型矩阵，default_model 必须是已验收模型；节点物理容量以 Mongo CAS 原子槽为准。不存在真实模型/维度或未验收不能派单，无远程收费回退。",
+    properties: {
+      agent_chat: { type: "object", description: "capability_id=gulong_engine.agent_chat；parameters={model,request}，request 为完整 OpenAI Chat Completions JSON，model 必须精确相等。inline_result.response 为完整原始响应含 choices/tools/usage，不由官网执行工具。每模型 tools/multimodal 必须单独验收。" },
+      embedding: { type: "object", description: "capability_id=gulong_engine.embedding；parameters={model,dimension,request}，request 为完整 OpenAI Embeddings JSON；完整 response.data 索引、顺序、向量维度和 usage 必须保留，不能换模型/裁切/补齐。" },
+      music: { type: "object", description: "capability_id=gulong_engine.music；parameters={caption,lyrics,seconds,seed,model?}，seed 非负安全整数或 uint64 十进制字符串原值；seconds 为最长秒数。primary_audio 必须 FLAC，经私有 COS 条件复制至无 PUT 授权随机 published key 后完整流式校验 SHA/大小及 STREAMINFO 实际 duration_seconds。inline_result.lyric_verification 必须 {algorithm:ordered-whole-lyrics-v1,audio_sha256,lyrics_sha256,full_audio:true,language:zh|en,transcript:整段原文含尾部}。不能仅给 verified 布尔值。" },
+      limits: { type: "object", description: "parameters 最大1MiB，inline_result 最大4MiB；claim请求256KiB，callback包络4MiB+128KiB；FLAC最大64MiB。超限413，不截断。callback按绑定限流60次/分钟，单音乐完成校验最多2次/分钟，429后按同event_id恢复。" },
+      lifecycle: { type: "object", description: "claim租约300秒，started/progress同时续租订单和槽位；每15秒worker-state，should_stop或租约失效必须停止。用户取消先保留运行槽，执行节点cancelled确认停机后释放。event_id+payload指纹幂等，改变payload409，写入中断可重放原事件补偿。音乐单primary_audio签发幂等同output_id；其他输出可用output_key。" },
+    },
+  });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/catalog", tags: ["Unified Capability Orders"], summary: "读取官网统一能力目录", description: "english_coach.* 已全部转为 local_only。gulong_engine.* 的 dispatchable 根据近 3 分钟真实上报、有效绑定、30 天内推理验证与共享授权动态计算；availability 返回 verified_node_count、free_slot_count、status=ready|busy|offline|adapter_required。busy 表示有兼容节点但暂无线程空位，仍可排队；offline 不接受新任务。gulong_engine.tts 还要求 1.0.0 合同和 supported_voices，目录 availability.voice_ids 仅列出真实在线节点支持的 voice_id，输出 primary_audio 为 audio/mpeg 或 audio/wav。大展宏图原生 2K 使用独立 gulong_engine.image_2k、required_capability_version=1.0.0，节点必须显式上报 supported_models=[qwen_image_2_1]；旧 qwen_image_2_1.* 报告不视为兼容。gulong_engine.video 在消费适配完成前始终 adapter_required；收费 /api/h3/tasks 独立。目录不缓存，不保证随后创建时可用性不变。", responses: { 200: { description: "能力合同与实时节点可用性" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-assets/presign", tags: ["Unified Capability Orders"], summary: "签发能力订单输入素材 COS 直传票据", description: "英语教练新录音已在桌面端本地处理，英语桌面凭据调用返回 409 CAPABILITY_LOCAL_ONLY；已签发旧票据可按原合同完成校验。其他产品能力不变。", responses: { 201: { description: "账号专属短时 PUT 票据" }, 409: { description: "英语教练新录音已改为本地处理" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-assets/{id}/complete", tags: ["Unified Capability Orders"], summary: "校验能力订单输入素材大小、摘要与归属", responses: { 200: { description: "返回安全 asset_id" } } });

@@ -7,7 +7,7 @@ export const ENGLISH_COACH_PLAN_NAME = "英语教练包月";
 export const ENGLISH_COACH_MONTHLY_PRICE_FEN = 19_800;
 export const GULONG_ENGINE_PLAN_ID = "gulong_engine_monthly";
 export const GULONG_ENGINE_MONTHLY_PRICE_FEN = 99_900;
-export const GULONG_ENGINE_PRODUCT = Object.freeze({ id: GULONG_ENGINE_PLAN_ID, name: "古龙引擎包月", monthlyFen: GULONG_ENGINE_MONTHLY_PRICE_FEN, yearlyFen: null, paymentProviders: ["offline"], autoRenew: false, renewalMode: "manual" });
+export const GULONG_ENGINE_PRODUCT = Object.freeze({ includedProducts: ["gulong_engine", "worklucky"], benefits: ["古龙绿色版", "WorkLucky 使用权益"], id: GULONG_ENGINE_PLAN_ID, name: "古龙引擎包月", monthlyFen: GULONG_ENGINE_MONTHLY_PRICE_FEN, yearlyFen: null, paymentProviders: ["offline"], autoRenew: false, renewalMode: "manual" });
 export const SUBSCRIPTION_PRODUCT_IDS = Object.freeze(["member", "short_video_monthly", ENGLISH_COACH_PLAN_ID, GULONG_ENGINE_PLAN_ID]);
 export const ENGLISH_COACH_PRODUCT = Object.freeze({ id: ENGLISH_COACH_PLAN_ID, name: ENGLISH_COACH_PLAN_NAME, monthlyFen: ENGLISH_COACH_MONTHLY_PRICE_FEN, yearlyFen: null, paymentProviders: ["offline"], autoRenew: false, renewalMode: "manual" });
 const NAMES = { member: "普通会员", short_video_monthly: "短视频包月", [ENGLISH_COACH_PLAN_ID]: ENGLISH_COACH_PLAN_NAME, [GULONG_ENGINE_PLAN_ID]: "古龙引擎包月" };
@@ -63,9 +63,9 @@ export function gulongEngineEntitlement(subscription, now = new Date()) {
   const product = productSubscription(subscription, GULONG_ENGINE_PLAN_ID);
   const status = productPeriodStatus(product, now);
   return {
-    product: "gulong_engine", plan_id: GULONG_ENGINE_PLAN_ID, active: status === "active", status,
+    product: "gulong_engine", included_products: ["gulong_engine", "worklucky"], plan_id: GULONG_ENGINE_PLAN_ID, active: status === "active", status,
     starts_at: product?.currentPeriodStart || null, expires_at: product?.currentPeriodEnd || null,
-    capabilities: status === "active" ? ["pearapi.free_text", "brain.read", "brain.write", "gulong_engine.text", "gulong_engine.image", "gulong_engine.image_2k", "gulong_engine.tts", "gulong_engine.video", "minimax_h3_shared.video"] : [],
+    capabilities: status === "active" ? ["worklucky.use", "pearapi.free_text", "brain.read", "brain.write", "gulong_engine.text", "gulong_engine.image", "gulong_engine.image_2k", "gulong_engine.tts", "gulong_engine.video", "gulong_engine.agent_chat", "gulong_engine.embedding", "gulong_engine.music", "minimax_h3_shared.video"] : [],
     monthly_price_fen: GULONG_ENGINE_MONTHLY_PRICE_FEN,
   };
 }

@@ -5,7 +5,13 @@ import { OpenAPIHono } from "@hono/zod-openapi";
 import { ObjectId } from "mongodb";
 import { CAPABILITY_ORDER_PROTOCOL, normalizeCapabilityParameters, normalizeCapabilityReport, registerCapabilityOrderRoutes as registerCapabilityOrderRoutesImpl, validateCapabilityInput, verifyCapabilityAudioDigest } from "../../server/capability-orders.js";
 import { GULONG_ENGINE_CAPABILITY_DEFINITIONS } from "../../server/gulong-engine-capabilities.js";
-const registerCapabilityOrderRoutes = (app, dependencies) => registerCapabilityOrderRoutesImpl(app, { getUserComputeGroupId: async () => null, ...dependencies });
+import { createCapabilityMemoryCollection } from "../helpers/capability-memory.mjs";
+const registerCapabilityOrderRoutes = (app, dependencies) => {
+  const nodeSlots = createCapabilityMemoryCollection();
+  return registerCapabilityOrderRoutesImpl(app, { getUserComputeGroupId: async () => null, enforceRateLimit: async () => ({ allowed: true }), ...dependencies,
+    getCollection: async (name) => name === "capabilityNodeSlots" ? nodeSlots : dependencies.getCollection?.(name),
+  });
+};
 
 const tts = GULONG_ENGINE_CAPABILITY_DEFINITIONS.find((item) => item.capabilityId === "gulong_engine.tts");
 const report = () => ({ capability_id: "gulong_engine.tts", capability_version: "1.0.0", protocol_version: CAPABILITY_ORDER_PROTOCOL,
@@ -48,7 +54,8 @@ test("TTS catalog stays offline without a real worker and only lists live compat
   let online = false;
   const app = new OpenAPIHono();
   registerCapabilityOrderRoutes(app, {
-    getCollection: async (name) => name === "capabilityNodeReports"
+    getCollection: async (name) => name === "users" ? { findOne: async ({ _id }) => String(_id) === String(nodeOwnerId) ? { _id: nodeOwnerId, status: "active" } : null }
+      : name === "capabilityNodeReports"
       ? { find: (filter) => ({ limit: () => ({ toArray: async () => online && filter["capabilities.capabilityId"] === "gulong_engine.tts" ? [nodeReport] : [] }) }) }
       : { find: () => ({ toArray: async () => [binding] }) },
     authenticate: async () => ({ user: { id: ownerId.toString() }, kind: "desktop-gulong-engine" }),
