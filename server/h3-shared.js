@@ -20,6 +20,8 @@ export const H3_ACCOUNT_BINDING_HEADER = "X-Gulong-Account-Binding";
 export const H3_SHARED_MODEL = "minimax_h3_shared";
 export const H3_OUTPUT_RETENTION_MS = 24 * 60 * 60_000;
 export const H3_TASK_TIMEOUT_MULTIPLIER = 10;
+// Phase A installs the guard on both targets before phase B advertises it.
+export const H3_NO_CHARGE_CREATION = Object.freeze({ version: 1, requestField: "require_no_charge", enforced: false, onUnavailable: "reject_without_order_or_charge" });
 const H3_MAX_DURATION_SECONDS = 600;
 const H3_VIDEO_MODES = new Set(["all_reference", "first_last", "smart_multiframe", "extended"]);
 const H3_LONGFORM_MODES = new Set(["continuous", "independent"]);
@@ -44,6 +46,15 @@ const H3_TIMEOUT_ERROR = Object.freeze({
 function integer(value, fallback = 0) {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) ? parsed : fallback;
+}
+
+// Server-owned admission evidence, never a client-supplied membership claim.
+// The original zero-price job may finish/recover after expiry; a new admin
+// retry still checks current entitlement separately before it can requeue.
+export function hasAcceptedH3NoCharge(task) {
+  return task?.requireNoCharge === true && task.chargedFen === 0
+    && ((task.chargeStatus === "member_no_charge" && task.billingMode === "gulong_engine_membership")
+      || (task.chargeStatus === "exempt" && task.billingMode === "administrator_exempt"));
 }
 
 export function isH3GpuStartupFailure(code, message) {
@@ -136,6 +147,9 @@ function assetManifest(value, kind, maximum) {
 }
 
 export function normalizeH3TaskInput(body = {}) {
+  if (body.require_no_charge !== undefined && typeof body.require_no_charge !== "boolean") {
+    throw Object.assign(new Error("require_no_charge 必须为布尔值"), { code: "VALIDATION_ERROR", status: 400 });
+  }
   const originalPrompt = String(body.original_prompt || body.originalPrompt || body.prompt || "").trim();
   if (!originalPrompt || originalPrompt.length > 20_000) throw Object.assign(new Error("提示词需为 1–20000 个字符"), { code: "VALIDATION_ERROR", status: 400 });
   const model = String(body.model || H3_SHARED_MODEL).trim();
@@ -165,6 +179,7 @@ export function normalizeH3TaskInput(body = {}) {
   if (seed < -1 || seed > 2_147_483_647) throw Object.assign(new Error("随机种子必须为 -1 至 2147483647 的整数"), { code: "VALIDATION_ERROR", status: 400 });
   return {
     sourceChannel,
+    ...(body.require_no_charge === true ? { requireNoCharge: true } : {}),
     model,
     prompt: originalPrompt,
     sourcePrompt: originalPrompt,
@@ -233,7 +248,7 @@ function storedH3TaskRequestFingerprint(task) {
   if (typeof task?.requestFingerprint === "string" && /^[a-f0-9]{64}$/.test(task.requestFingerprint)) {
     return task.requestFingerprint;
   }
-  const input = normalizeH3TaskInput(task || {});
+  const input = normalizeH3TaskInput({ ...task, ...(task?.requireNoCharge === true ? { require_no_charge: true } : {}) });
   const conversationId = task?.conversationAssociation === "client_supplied"
     ? task?.conversationId?.toString?.() || task?.conversationId || ""
     : "";
@@ -390,6 +405,7 @@ function publicTask(task, { includePrompt = true } = {}) {
     audioCount: task.audioCount,
     assets: task.assets,
     priceFen: task.priceFen,
+    ...(task.requireNoCharge === true ? { requireNoCharge: true } : {}),
     chargedFen: integer(task.chargedFen, H3_NO_CHARGE_STATUSES.has(task.chargeStatus) ? 0 : task.priceFen),
     billingMode: task.billingMode || (task.chargeStatus === "exempt" ? "administrator_exempt" : "wallet"),
     status: task.status,
@@ -1196,7 +1212,7 @@ export function registerH3SharedRoutes(app, dependencies) {
     if (!computeGroupsMatch(task.computeGroupId, requesterGroupId) || !computeGroupsMatch(requesterGroupId, currentBinding.computeGroupId)) {
       throw Object.assign(new Error("任务用户与执行节点不属于同一用户分组，禁止跨分组调用"), { code: "COMPUTE_GROUP_MISMATCH", status: 403 });
     }
-    if (requesterGroupId && requireActiveMembership && !await h3RequesterIsAdministrator(getCollection, task)
+    if (requesterGroupId && requireActiveMembership && !hasAcceptedH3NoCharge(task) && !await h3RequesterIsAdministrator(getCollection, task)
       && !(await readGulongEngineEntitlement(task.requesterUserId, new Date(), getCollection)).active) {
       throw Object.assign(new Error("分组共享节点仅限有效期内的古龙引擎包月会员使用，请先续费或开通会员"), { code: "GULONG_ENGINE_SUBSCRIPTION_REQUIRED", status: 403 });
     }
@@ -1415,6 +1431,9 @@ export function registerH3SharedRoutes(app, dependencies) {
       const chargeKey = `h3:charge:${orderNo}:0`;
       const exempt = auth.user.role === "admin";
       const memberFree = !exempt && (await readGulongEngineEntitlement(ownerId, now, getCollection)).active;
+      if (input.requireNoCharge === true && !exempt && !memberFree) {
+        return c.json({ code: "H3_NO_CHARGE_ENTITLEMENT_REQUIRED", message: "本次请求仅允许零扣费；请先开通或续费古龙引擎包月。未创建订单或扣费。" }, 403);
+      }
       if (computeGroupId && !exempt && !memberFree) {
         return c.json({ code: "GULONG_ENGINE_SUBSCRIPTION_REQUIRED", message: "分组共享节点仅限有效期内的古龙引擎包月会员使用，请先续费或开通会员" }, 403);
       }
@@ -1550,6 +1569,7 @@ export function registerH3SharedRoutes(app, dependencies) {
         name: "MiniMax H3 共享节点",
         sourceChannel: "desktop_agent",
         createTask: { method: "POST", url: "/api/h3/tasks", scope: "tasks:write" },
+        noChargeCreation: H3_NO_CHARGE_CREATION,
         assetUpload: { presign: "/api/h3/assets/presign", complete: "/api/h3/assets/{asset_id}/complete", scope: "tasks:write" },
         promptProcessing: { mode: "requester_choice", enableField: "prompt_optimization_enabled", defaultEnabledForLegacyClients: true, inputField: "prompt", preserveOriginal: true, optimizationWorkerCapability: "local_prompt_optimization_v1" },
         generationParameters: { videoModes: [...H3_VIDEO_MODES], longformModes: [...H3_LONGFORM_MODES], segmentDurationSeconds: { min: 5, max: 15 }, aspectRatios: [...H3_VIDEO_ASPECTS], resolutions: [{ label: "720P", profile: "official_max" }, { label: "1080P", profile: "ultra1080" }, { label: "2K极速", profile: "fast2k" }], samplingSteps: [...H3_SAMPLING_STEPS], seed: { min: -1, max: 2_147_483_647, randomValue: -1 } },
@@ -2069,6 +2089,9 @@ export function registerH3SharedRoutes(app, dependencies) {
     const computeGroupId = await getUserComputeGroupId(task.requesterUserId);
     const exempt = task.chargeStatus === "exempt" || await h3RequesterIsAdministrator(getCollection, task);
     const memberFree = !exempt && (await readGulongEngineEntitlement(task.requesterUserId, new Date(), getCollection)).active;
+    if (task.requireNoCharge === true && !exempt && !memberFree) {
+      return c.json({ code: "H3_NO_CHARGE_ENTITLEMENT_REQUIRED", message: "原订单仅允许零扣费；会员权益不足，未重新排队或扣费。请先续费后重试。" }, 403);
+    }
     if (computeGroupId && !exempt && !memberFree) {
       return c.json({ code: "GULONG_ENGINE_SUBSCRIPTION_REQUIRED", message: "分组共享节点仅限有效期内的古龙引擎包月会员使用，请先续费或开通会员" }, 403);
     }
@@ -2110,6 +2133,7 @@ export function registerH3SharedRoutes(app, dependencies) {
   });
 
   app.openAPIRegistry.registerComponent("securitySchemes", "accountBinding", { type: "apiKey", in: "header", name: H3_ACCOUNT_BINDING_HEADER, description: "桌面端账号绑定时签发的可撤销高熵令牌；服务端仅保存哈希。" });
+  const noChargeContractSchema = z.object({ version: z.literal(1), requestField: z.literal("require_no_charge"), enforced: z.literal(H3_NO_CHARGE_CREATION.enforced), onUnavailable: z.literal("reject_without_order_or_charge") });
   const errorSchema = z.object({ code: z.string(), message: z.string() });
   const bindingSuccessSchema = z.object({ ok: z.literal(true), binding_token: z.string(), binding: z.object({ id: z.string(), email: z.email(), user_id: z.string(), display_name: z.string(), node_id: z.string(), node_name: z.string(), app_version: z.string(), verified_at: z.string() }) });
   const unknownUserSchema = errorSchema.extend({ register_url: z.url() });
@@ -2124,17 +2148,17 @@ export function registerH3SharedRoutes(app, dependencies) {
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/prompts/optimize", tags: ["MiniMax H3 Shared Nodes"], summary: "已停用：服务端提示词优化", description: "官网服务端不执行提示词优化。网页版通过 prompt_optimization_enabled 让用户选择是否由 MiniMax H3 极速视频桌面端执行本地魔法优化。", deprecated: true, responses: { 410: { description: "PROMPT_OPTIMIZATION_MOVED_TO_DESKTOP" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/assets/presign", tags: ["MiniMax H3 Shared Nodes"], summary: "为输入素材签发账号专属 COS 直传票据", description: "签发前会幂等校验并补齐官网当前 HTTPS 来源的腾讯云 COS 浏览器跨域规则；大文件直接上传 COS，不经过官网请求体。", request: { body: { required: true, content: { "application/json": { schema: z.object({ kind: z.enum(["image", "video", "audio"]), filename: z.string(), content_type: z.string(), bytes: z.number().int().positive(), sha256: z.string().regex(/^[A-Fa-f0-9]{64}$/) }) } } } }, responses: { 201: { description: "返回 PUT URL、固定 headers、asset_id 与 object_key" }, 409: { description: "COS 回执不匹配" }, 503: { description: "COS 浏览器跨域规则暂时无法校验或配置" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/assets/{id}/complete", tags: ["MiniMax H3 Shared Nodes"], summary: "校验并完成 H3 输入素材上传", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "返回可用于任务 assets manifest 的素材记录" }, 409: { description: "对象大小、摘要或归属不匹配" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "使用原始中文提示词创建共享节点任务，按会员权益免扣费或预扣余额", description: "实际价格（分）= 时长秒数×20 + 图片数×5 + 视频数×20；音频免费。普通用户原子预扣钱包余额；有效期内的古龙引擎包月会员可在余额为零时无限创建任务，不扣余额、不产生节点或平台分佣；有效期内的短视频包月用户优先扣套餐额度并按实际扣款 50/50 分账，套餐额度归零后仍可无限创建 H3 任务且本次扣款、节点分佣和平台分佣均为 0。管理员始终免扣费且不参与分佣。服务端始终原样保存 prompt，不翻译；prompt_optimization_enabled=true 时由桌面节点执行本地魔法优化并回调 compiled_prompt，false 时必须直接使用原始提示词且禁止回传 compiled_prompt。video_mode、longform_mode、segment_duration_seconds、profile、sampling_steps 与 seed 会进入受信任节点任务合同；超长模式的 duration_seconds 由服务端按空行分段数乘单段时长重新计算。旧客户端省略字段时按全能参考、720P、4 步和随机种子兼容。必须提供 Idempotency-Key；同一键只允许重放同一规范化请求。", request: { body: { required: true, content: { "application/json": { schema: z.object({ source_channel: z.enum(["website", "desktop_agent"]), model: z.literal(H3_SHARED_MODEL), prompt: z.string().min(1).max(20_000), prompt_optimization_enabled: z.boolean().optional(), conversation_id: z.string().optional(), video_mode: z.enum(["all_reference", "first_last", "smart_multiframe", "extended"]).optional(), longform_mode: z.enum(["continuous", "independent"]).optional(), segment_duration_seconds: z.number().int().min(5).max(15).optional(), aspect_ratio: z.enum(["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]), duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profile: z.enum(["official_max", "ultra1080", "fast2k", "fast", "balanced", "turbo544", "quality", "preview"]), sampling_steps: z.union([z.literal(4), z.literal(8), z.literal(20)]).optional(), seed: z.number().int().min(-1).max(2_147_483_647).optional(), assets: z.object({ images: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(9), videos: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3), audio: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3) }), idempotency_key: z.string().min(8).max(160).optional() }) } } } }, responses: { 201: { description: "原始提示词、完整视频参数与用户优化选择已保存，并按账号类型完成扣费或零扣费排队" }, 402: { description: "非免扣费用户余额不足（同键同请求重放仍保持 402）" }, 409: { description: "Idempotency-Key 已绑定到不同的规范化请求" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "使用原始中文提示词创建共享节点任务，按会员权益免扣费或预扣余额", description: "require_no_charge=true 是强制零扣费约束：当前无有效古龙引擎包月或管理员权益时，403 H3_NO_CHARGE_ENTITLEMENT_REQUIRED，拒绝创建且不扣钱包/套餐；省略或false保持旧计费与指纹。true参与幂等指纹并返回task.requireNoCharge=true；同键切换约束409。受理时权益读数决定本次授权，随后到期不得转成付费；管理员主动重试重新校验权益。实际价格（分）= 时长秒数×20 + 图片数×5 + 视频数×20；音频免费。普通用户原子预扣钱包余额；有效期内的古龙引擎包月会员可在余额为零时无限创建任务，不扣余额、不产生节点或平台分佣；有效期内的短视频包月用户优先扣套餐额度并按实际扣款 50/50 分账，套餐额度归零后仍可无限创建 H3 任务且本次扣款、节点分佣和平台分佣均为 0。管理员始终免扣费且不参与分佣。服务端始终原样保存 prompt，不翻译；prompt_optimization_enabled=true 时由桌面节点执行本地魔法优化并回调 compiled_prompt，false 时必须直接使用原始提示词且禁止回传 compiled_prompt。video_mode、longform_mode、segment_duration_seconds、profile、sampling_steps 与 seed 会进入受信任节点任务合同；超长模式的 duration_seconds 由服务端按空行分段数乘单段时长重新计算。旧客户端省略字段时按全能参考、720P、4 步和随机种子兼容。必须提供 Idempotency-Key；同一键只允许重放同一规范化请求。", request: { body: { required: true, content: { "application/json": { schema: z.object({ source_channel: z.enum(["website", "desktop_agent"]), model: z.literal(H3_SHARED_MODEL), prompt: z.string().min(1).max(20_000), require_no_charge: z.boolean().optional(), prompt_optimization_enabled: z.boolean().optional(), conversation_id: z.string().optional(), video_mode: z.enum(["all_reference", "first_last", "smart_multiframe", "extended"]).optional(), longform_mode: z.enum(["continuous", "independent"]).optional(), segment_duration_seconds: z.number().int().min(5).max(15).optional(), aspect_ratio: z.enum(["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]), duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profile: z.enum(["official_max", "ultra1080", "fast2k", "fast", "balanced", "turbo544", "quality", "preview"]), sampling_steps: z.union([z.literal(4), z.literal(8), z.literal(20)]).optional(), seed: z.number().int().min(-1).max(2_147_483_647).optional(), assets: z.object({ images: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(9), videos: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3), audio: z.array(z.object({ asset_id: z.string(), object_key: z.string().optional() })).max(3) }), idempotency_key: z.string().min(8).max(160).optional() }) } } } }, responses: { 201: { description: "原始提示词、完整视频参数与用户优化选择已保存，并按账号类型完成扣费或零扣费排队" }, 403: { description: "H3_NO_CHARGE_ENTITLEMENT_REQUIRED：显式零扣费请求无有效权益，未创建订单或扣费" }, 402: { description: "非免扣费用户余额不足（同键同请求重放仍保持 402）" }, 409: { description: "Idempotency-Key 已绑定到不同的规范化请求" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks", tags: ["MiniMax H3 Shared Nodes"], summary: "查看当前账号的共享节点订单", responses: { 200: { description: "最多返回最近 50 个订单" }, 401: { description: "未认证" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/conversations/recent", tags: ["MiniMax H3 Shared Nodes"], summary: "读取当前用户会话中的 H3 视频结果", description: "仅返回当前登录用户的 H3 assistant 结果消息；历史已完成任务会先进行同用户安全幂等回填。消息不包含 COS 永久地址。", request: { query: z.object({ conversation_id: z.string().optional() }) }, responses: { 200: { description: "当前会话及其 H3 视频结果" }, 401: { description: "未认证" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}", tags: ["MiniMax H3 Shared Nodes"], summary: "查看共享节点订单详情", description: "输出只包含受控 previewPath/downloadPath 和 24 小时到期状态，不返回 COS objectKey 或永久 URL。", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "订单详情" }, 404: { description: "订单不存在或无权查看" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}/output", tags: ["MiniMax H3 Shared Nodes"], summary: "鉴权预览或下载 H3 输出视频", description: "仅任务请求用户或管理员可访问。服务端按次签发不超过 5 分钟且不越过 24 小时保留截止时间的 COS GET 地址；disposition=attachment 用于下载。过期返回 410 并触发幂等删除。", request: { params: z.object({ id: z.string() }), query: z.object({ disposition: z.enum(["inline", "attachment"]).optional() }) }, responses: { 302: { description: "跳转到短时 COS 签名地址" }, 404: { description: "视频不存在或无权访问" }, 410: { description: "视频已过期并删除" } } });
-  app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/desktop/agent/tools/minimax-h3-shared", tags: ["Desktop Agent Tools"], summary: "读取桌面古龙智能体的 H3 共享节点工具合同", description: "使用现有古龙会话或具有 tasks:read 的 API Key。返回 createTask、素材上传 URL、本地提示词处理合同、9图3视频3音频限制、整数分价格与当前余额；不再返回网页 optimizePrompt。管理员响应 wallet.unlimited=true，桌面端不得按余额拦截。桌面创建任务时 source_channel 必须为 desktop_agent。", responses: { 200: { description: "工具合同、本地提示词处理要求、钱包余额与管理员不限额标记" }, 401: { description: "未认证" } } });
+  app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/desktop/agent/tools/minimax-h3-shared", tags: ["Desktop Agent Tools"], summary: "读取桌面古龙智能体的 H3 共享节点工具合同", description: "tool.noChargeCreation返回version=1、requestField=require_no_charge、onUnavailable=reject_without_order_or_charge；仅enforced=true时客户端才可开放零扣费创建。使用现有古龙会话或具有 tasks:read 的 API Key。返回 createTask、素材上传 URL、本地提示词处理合同、9图3视频3音频限制、整数分价格与当前余额；不再返回网页 optimizePrompt。管理员响应 wallet.unlimited=true，桌面端不得按余额拦截。桌面创建任务时 source_channel 必须为 desktop_agent。", responses: { 200: { description: "工具合同、本地提示词处理要求、钱包余额与管理员不限额标记", content: { "application/json": { schema: z.object({ tool: z.object({ noChargeCreation: noChargeContractSchema }).passthrough() }).passthrough() } } }, 401: { description: "未认证" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/claim", tags: ["MiniMax H3 Shared Nodes"], summary: "按局域网集群负载原子调度最早等待任务", description: "有分组的非管理员需求用户还须拥有当前有效古龙引擎包月权益，未生效或已过期任务暂不领取；已领取任务回调仍按分组校验，不因运行中到期阻塞结果。用户与执行节点的分组必须严格相同；null 只匹配 null 或历史未设置字段。服务端从 users 和 nodeAccountBindings 读取 computeGroupId，忽略客户端上报分组；先按任务分组筛选，再动态校验用户当前分组，并在原子领取及 COS 票据签发前复查。assigned_node.compute_group_id 返回实际执行节点分组。轮询节点通过 lan_cluster.nodes 上报同一局域网内全部已绑定节点的 running_task_count、estimated_total_seconds 与能力。服务端先验证所有节点均属于当前 binding token 对应账号，再按预计剩余总耗时、运行任务数、node_id 排序，把按 createdAt、_id 最早且能力匹配的任务分配给耗时最少的节点；响应 workerTask.assigned_node 是唯一允许回调的执行节点。老客户端缺少 lan_cluster 时暂按单节点兼容。capabilities 必须上报 max_duration_seconds、profiles、sampling_steps 与素材上限；只有 longform_v1=true 的节点可领取 video_mode=extended。local_prompt_optimization_v1=true 表示节点能够处理用户开启魔法优化的任务。DTO 包含 assigned_node、dispatch_estimated_total_seconds、auto_cancel_at、素材短期下载票据与 output_upload，但不含 requester、价格、钱包流水或内部绑定信息。任务自创建起超过服务端预计总耗时 10 倍仍未完成会自动取消、幂等退款并提醒用户更换视频模型。dry_run=true 绝不领取任务。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "application/json": { schema: z.object({ bound_account_email: z.string().optional(), bound_account_id: z.string().optional(), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: h3NodeCapabilitiesSchema, lan_cluster: z.object({ cluster_id: z.string().min(12).max(160), observed_at: z.iso.datetime(), nodes: z.array(h3LanNodeSchema).min(1).max(H3_LAN_REPORT_MAX_NODES) }).optional() }) } } } }, responses: { 200: { description: "dry_run 返回可达状态；正式领取返回指定执行节点、素材票据、输出票据和动态 claim_plan" }, 400: { description: "节点能力或局域网报告无效/过期" }, 401: { description: "绑定无效" }, 403: { description: "局域网报告包含其他账号或未绑定节点" }, 409: { description: "回调节点不是 assigned_node" }, 429: { description: "未遵循轮询退避或请求频率过高" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/callback", tags: ["MiniMax H3 Shared Nodes"], summary: "执行节点回调可选本地优化、生成进度或结果", description: "所有回调在写入进度、结果、钱包或 COS 回执前，重新读取任务需求用户和实际执行节点的分组；跨组返回 403 COMPUTE_GROUP_MISMATCH，客户端 metadata 不可覆盖分组。multipart/form-data 仅发送 metadata 字段，不得上传 video 文件。仅已领取任务的指定绑定节点可回调；未接单任务返回 409 TASK_NOT_CLAIMED。prompt_optimization_enabled=true 的任务先发送 status=optimizing，成功后以 status=started、compiled_prompt、estimated_total_seconds 上报；false 的任务不得发送 optimizing 或 compiled_prompt，直接以原始 prompt 执行并在 started 中提交 estimated_total_seconds。后续 progress 回调发送 progress（0–99）与可选 remaining_seconds。成功状态还需 video.sha256/bytes/filename/object_key，服务端 HEAD 校验对象归属。GPU 推理内核启动失败时，同一订单最多重派两次，排除已故障节点，原预扣和流水不变；最终失败才幂等退款，且用户不接收原始堆栈。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "multipart/form-data": { schema: z.object({ metadata: z.string() }) } } } }, responses: { 200: { description: "可选本地优化阶段、生成进度、故障重派或最终结果已幂等处理" }, 400: { description: "回执不完整、缺少必需 compiled_prompt 或在关闭优化时非法提交 compiled_prompt" }, 401: { description: "绑定无效" }, 403: { description: "用户与执行节点分组不匹配，禁止跨分组回调" }, 409: { description: "任务未接单、回调节点不匹配、本地优化、COS 回执、上传票据或结算状态不匹配" }, 413: { description: "禁止把视频文件经 Vercel 中转" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/admin/h3/tasks", tags: ["Administration"], summary: "管理员筛选共享节点任务派单", responses: { 200: { description: "任务列表" }, 403: { description: "需要管理员角色" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/admin/h3/tasks/{id}", tags: ["Administration"], summary: "管理员查看共享节点任务、回调和审计详情", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "任务详情、回调和审计时间线" }, 404: { description: "任务不存在" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/admin/h3/tasks/{id}/cancel", tags: ["Administration"], summary: "管理员幂等取消任务并退款", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "取消状态和退款结果" }, 409: { description: "已完成任务不能取消" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/admin/h3/tasks/{id}/retry", tags: ["Administration"], summary: "管理员重新派发失败任务", description: "普通用户与订阅用户的已退款任务会重新原子预扣；管理员发起的免扣费任务直接重新排队，不产生扣款或分佣。", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "重新排队后的任务" }, 402: { description: "需求用户余额不足" }, 409: { description: "当前状态不可重试" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/admin/h3/tasks/{id}/retry", tags: ["Administration"], summary: "管理员重新派发失败任务", description: "持久化requireNoCharge=true的任务必须保持零扣费，需求用户权益失效时403 H3_NO_CHARGE_ENTITLEMENT_REQUIRED，状态和重试次数不变，续费后可免费重试。其他普通用户与订阅用户的已退款任务会重新原子预扣；管理员发起的免扣费任务直接重新排队，不产生扣款或分佣。", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "重新排队后的任务" }, 403: { description: "H3_NO_CHARGE_ENTITLEMENT_REQUIRED：原零扣费约束仍有效，但需求用户当前无免费重试权益" }, 402: { description: "需求用户余额不足" }, 409: { description: "当前状态不可重试" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/cron/h3-output-cleanup", tags: ["Operations"], summary: "取消超时任务、回填会话结果并清理过期 H3 视频", description: "使用 CRON_SECRET Bearer 鉴权。先幂等取消超过预计总耗时 10 倍的活动任务并退款、提醒用户，再安全回填历史 website 结果，最后删除 completedAt 后已满 24 小时的 COS 对象；删除失败记录指数退避并重试。", responses: { 200: { description: "timeouts、backfill 与 cleanup 汇总" }, 401: { description: "Cron 鉴权失败" }, 503: { description: "Cron 未配置" } } });
 }

@@ -247,3 +247,6 @@ jobs:
 
       - name: Verify compute-group API routing on both targets
         run: node scripts/verify-compute-group-deployment.mjs https://sologle.com https://111.229.70.235
+
+      - name: Verify H3 no-charge contract without creating orders
+        run: node scripts/verify-h3-no-charge-deployment.mjs --phase=baseline https://sologle.com https://111.229.70.235

@@ -33,7 +33,7 @@ test("H3 queue snapshot is shared for three seconds and recovers expired claim l
   let bindingCountReads = 0;
   let expiredUploadCount = 0;
   const tasks = [
-    { _id: expiredId, model: "minimax_h3_shared", status: "claimed", createdAt: new Date("2026-08-19T07:00:00.000Z"), claimLeaseUntil: new Date("2026-08-19T07:59:00.000Z") },
+    { _id: expiredId, model: "minimax_h3_shared", status: "claimed", requireNoCharge: true, chargeStatus: "member_no_charge", billingMode: "gulong_engine_membership", chargedFen: 0, createdAt: new Date("2026-08-19T07:00:00.000Z"), claimLeaseUntil: new Date("2026-08-19T07:59:00.000Z") },
     { _id: queuedId, model: "minimax_h3_shared", status: "queued", createdAt: new Date("2026-08-19T07:30:00.000Z") },
   ];
   const applyUpdate = (target, update) => {
@@ -95,6 +95,10 @@ test("H3 queue snapshot is shared for three seconds and recovers expired claim l
   assert.equal(first.recoveredLeaseCount, 1);
   assert.equal(first.oldestQueuedAt.toISOString(), "2026-08-19T07:00:00.000Z");
   assert.equal(tasks[0].status, "queued");
+  assert.equal(tasks[0].requireNoCharge, true);
+  assert.equal(tasks[0].chargedFen, 0);
+  assert.equal(tasks[0].chargeStatus, "member_no_charge");
+  assert.equal(tasks[0].billingMode, "gulong_engine_membership");
   assert.equal(expiredUploadCount, 1);
 
   const second = await coordinator.snapshot(new Date(now.getTime() + 1_000));

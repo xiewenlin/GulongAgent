@@ -83,7 +83,7 @@ function collection(records = []) {
   };
 }
 
-function fixture({ userGroup = null, nodeGroup = null, taskGroup = userGroup, includeTaskGroup = true, includeTask = true, dependencyGroupReader, userRole = "admin", membershipState = null } = {}) {
+function fixture({ userGroup = null, nodeGroup = null, taskGroup = userGroup, includeTaskGroup = true, includeTask = true, dependencyGroupReader, userRole = "admin", membershipState = null, outputReceipt = false } = {}) {
   const app = new OpenAPIHono();
   const owner = { _id: new ObjectId(), role: userRole, status: "active", email: "requester@example.com", computeGroupId: userGroup };
   const nodeOwner = { _id: new ObjectId(), status: "active", email: "node@example.com" };
@@ -111,7 +111,12 @@ function fixture({ userGroup = null, nodeGroup = null, taskGroup = userGroup, in
     queueCoordinator: { snapshot: async () => ({ queuedCount: 1, activeNodeCount: 1, cached: true }), invalidate: async () => {} },
     createPresignedPutUrl: () => { uploadSignatures++; return "https://cos.example/upload"; },
     createPresignedDownloadUrl: () => "https://cos.example/download",
-    headObject: async () => { objectInspections++; throw new Error("unexpected COS inspection"); },
+    headObject: async () => {
+      objectInspections++;
+      if (!outputReceipt) throw new Error("unexpected COS inspection");
+      const grant = collections.get("h3OutputUploads").records.at(-1);
+      return { headers: { "content-length": "4", "x-cos-meta-bytes": "4", "x-cos-meta-sha256": "A".repeat(64), "x-cos-meta-h3-task-id": String(task._id), "x-cos-meta-h3-upload-grant": grant.grantId } };
+    },
   });
   const claim = (extra = {}) => app.request("/api/h3/tasks/claim", { method: "POST", headers: { "Content-Type": "application/json", [H3_ACCOUNT_BINDING_HEADER]: TOKEN }, body: JSON.stringify({ node_id: binding.nodeId, capabilities: CAPABILITIES, ...extra }) });
   const callback = (extra = {}) => {
@@ -277,4 +282,36 @@ test("同组会员任务已领取后会员到期仍可回传结果，不阻塞�
   const result = await context.callback();
   assert.equal(result.status, 200);
   assert.equal(context.task.status, "processing");
+});
+
+test("已零费受理的同组原任务到期后仍可领取、完成及幂等回传，零扣费零分佣", async () => {
+  const context = await authenticatedFixture({ userGroup: GROUP_A, nodeGroup: GROUP_A, userRole: "user", membershipState: "expired", outputReceipt: true });
+  Object.assign(context.task, { requireNoCharge: true, chargedFen: 0, billingMode: "gulong_engine_membership", chargeStatus: "member_no_charge", revenueStatus: "not_earned" });
+  const claimed = await context.claim();
+  assert.ok((await claimed.json()).task, "server-owned free admission survives expiry, including output ticket issuance");
+  assert.equal((await context.callback()).status, 200);
+  const grant = context.collections.get("h3OutputUploads").records.at(-1);
+  const completed = () => context.callback({ status: "completed", event: "render-completed", local_job_id: "free-completion", video: { sha256: "A".repeat(64), bytes: 4, filename: "clip.mp4", object_key: grant.objectKey } });
+  assert.equal((await completed()).status, 200);
+  assert.equal(context.task.status, "completed");
+  assert.equal((await completed()).status, 200);
+  assert.equal(context.task.requireNoCharge, true);
+  assert.equal(context.task.chargedFen, 0);
+  assert.equal(context.task.chargeStatus, "member_no_charge");
+  assert.equal(context.task.revenueStatus, "not_earned");
+  assert.equal(context.collections.get("wallets").records[0].balanceFen, 10_000);
+  assert.equal(context.collections.get("h3WalletLedger")?.records.length || 0, 0);
+});
+
+test("零扣费任务GPU启动失败自动重派保留约束和账务，不能跨分组恢复", async () => {
+  const context = await authenticatedFixture({ userGroup: GROUP_A, nodeGroup: GROUP_A, userRole: "user", membershipState: "expired" });
+  Object.assign(context.task, { requireNoCharge: true, chargedFen: 0, billingMode: "gulong_engine_membership", chargeStatus: "member_no_charge", revenueStatus: "not_earned" });
+  assert.ok((await (await context.claim()).json()).task);
+  const failure = await context.callback({ status: "failed", error_code: "NODE_EXECUTION_FAILED", error_message: "GPU inference engine recovery failed" });
+  assert.equal(failure.status, 200); assert.equal((await failure.json()).requeued, true);
+  assert.equal(context.task.status, "queued"); assert.equal(context.task.requireNoCharge, true);
+  assert.equal(context.task.chargedFen, 0); assert.equal(context.task.chargeStatus, "member_no_charge");
+  assert.equal(context.collections.get("h3WalletLedger")?.records.length || 0, 0);
+  context.owner.computeGroupId = GROUP_B;
+  assert.equal(Boolean((await (await context.claim()).json()).task), false);
 });
