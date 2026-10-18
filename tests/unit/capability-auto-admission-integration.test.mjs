@@ -518,3 +518,84 @@ test("dedicated report-v2 refuses missing policy before enrollment and cannot fa
   assert.equal((await f.report()).status, 409);
   f.assertNoAccounting(); f.assertNoBusinessOrders();
 });
+
+const nativeLegacyInventory = () => [
+  ["sam.video_track", "3.1-object-multiplex"], ["mediapipe.video_analysis", "0.10.14-pose-full"],
+  ["whisper.transcribe", "large-v3-turbo-whisper.cpp"], ["codex.text", "gpt-6-astra"], ["codex.image", "gpt-6-astra"],
+].map(([capability_id, capability_version]) => ({ capability_id, capability_version, installed: true, enabled: true,
+  sharing_opt_in: true, validated: true, models: [{ id: "native-exact-model" }], artifact_sha256: "E".repeat(64) }));
+
+test("report-v2 accepts full un-migrated native versions as deferred fingerprints without probing or granting admission", async () => {
+  const f = fixture(); const legacy = nativeLegacyInventory();
+  const response = await f.call("/api/v1/capability-verifications/report-v2",
+    v2([f.inventory.capability_id], [f.inventory, ...legacy]), true);
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  for (const input of legacy) {
+    const record = response.body.verifications.find((row) => row.capability_id === input.capability_id);
+    assert.equal(record.capability_version, input.capability_version);
+    assert.equal(record.status, "migration_deferred");
+    assert.equal(record.verified_model, null);
+    const mode = response.body.migration.capabilities.find((row) => row.capability_id === input.capability_id);
+    assert.deepEqual(mode, { capability_id: input.capability_id, mode: "legacy_compatibility", all_models_have_adapter: false });
+  }
+  assert.deepEqual(f.binding.autoVerificationCapabilityIds, [f.inventory.capability_id]);
+  assert.equal((await f.next()).body.challenge.capability_id, f.inventory.capability_id);
+  const catalog = (await f.call("/api/v1/capability-orders/catalog?product=worklucky")).body.capabilities;
+  for (const capability of legacy) assert.notEqual(catalog.find((row) => row.capability_id === capability.capability_id)?.dispatchable, true);
+  f.assertNoAccounting(); f.assertNoBusinessOrders();
+});
+
+test("native versions cannot enter automatic migration, v1, or an already migrated ID omitted on retry", async () => {
+  for (const requested of [true, false]) {
+    const f = fixture();
+    f.inventory.capability_version = "native-runtime-build";
+    const response = requested ? await f.report(v2([f.inventory.capability_id])) : await f.report();
+    assert.equal(response.status, 400, JSON.stringify(response.body));
+    assert.equal(response.body.code, "VERIFICATION_REPORT_INVALID");
+    assert.equal(f.binding.autoVerificationEnrolledAt, undefined);
+    assert.equal(f.collection("capabilityAutoVerifications").rows.length, 0);
+    f.assertNoAccounting(); f.assertNoBusinessOrders();
+  }
+  const f = fixture();
+  assert.equal((await f.report(v2([f.inventory.capability_id]))).status, 200);
+  f.inventory.capability_version = "native-runtime-build";
+  const omitted = await f.report(v2([]));
+  assert.equal(omitted.status, 400, JSON.stringify(omitted.body));
+  assert.deepEqual(f.binding.autoVerificationCapabilityIds, [f.inventory.capability_id]);
+  assert.equal((await f.claim()).body.task, null);
+  f.assertNoAccounting(); f.assertNoBusinessOrders();
+});
+
+test("invalid legacy version or migration list is rejected before any enrollment or evidence write", async () => {
+  for (const version of ["bad/path", "x\n", "a".repeat(121)]) {
+    const f = fixture(); const legacy = nativeLegacyInventory()[0]; legacy.capability_version = version;
+    const response = await f.report(v2([f.inventory.capability_id], [f.inventory, legacy]));
+    assert.equal(response.status, 400, JSON.stringify(response.body));
+    assert.equal(f.binding.autoVerificationEnrolledAt, undefined);
+    assert.equal(f.collection("capabilityAutoVerifications").rows.length, 0);
+    f.assertNoAccounting(); f.assertNoBusinessOrders();
+  }
+  for (const ids of [null, "gulong_engine.agent_chat", [42], [null]]) {
+    const f = fixture();
+    const response = await f.report(v2(ids, [f.inventory, ...nativeLegacyInventory()]));
+    assert.equal(response.status, 400, JSON.stringify(response.body));
+    assert.equal(response.body.code, "VERIFICATION_POLICY_INVALID");
+    assert.equal(f.binding.autoVerificationEnrolledAt, undefined);
+    f.assertNoAccounting(); f.assertNoBusinessOrders();
+  }
+});
+
+test("a concurrent migration cannot persist a legacy-only version into an automatic record", async () => {
+  const f = fixture(); let reads = 0;
+  const legacy = nativeLegacyInventory()[0];
+  f.hooks.findOne = async (name, query) => {
+    if (name !== "nodeAccountBindings" || String(query._id) !== String(f.binding._id) || ++reads !== 2) return;
+    f.binding.autoVerificationCapabilityIds.push(legacy.capability_id);
+  };
+  const response = await f.report(v2([f.inventory.capability_id], [f.inventory, legacy]));
+  assert.equal(response.status, 400, JSON.stringify(response.body));
+  assert.equal(response.body.code, "VERIFICATION_REPORT_INVALID");
+  assert.equal(f.collection("capabilityAutoVerifications").rows.length, 0);
+  assert.ok(f.binding.autoVerificationCapabilityIds.includes(legacy.capability_id), "monotonic enrollment is never undone on a concurrent validation error");
+  f.assertNoAccounting(); f.assertNoBusinessOrders();
+});

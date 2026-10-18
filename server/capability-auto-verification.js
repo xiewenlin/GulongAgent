@@ -25,6 +25,8 @@ const CLIENT_SECRET = /^[A-Za-z0-9_-]{43}$/;
 const HASH = /^[a-f0-9]{64}$/i;
 const MODEL = /^[A-Za-z0-9_./:@+-]{1,240}$/;
 const CAPABILITY = /^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$/;
+const CONTRACT_VERSION = /^\d{1,3}(?:\.\d{1,3}){0,2}$/;
+const LEGACY_VERSION = /^[A-Za-z0-9][A-Za-z0-9_.+-]{0,119}$/;
 const DAY = 86400_000;
 const VALID_FOR = 7 * DAY;
 const LEASE_MS = 15 * 60_000;
@@ -46,13 +48,13 @@ function secretMatches(secret, digest) {
 }
 
 /** Inventory is untrusted input: validated/contract_tests never confer trust. */
-export function normalizeAutoVerificationInventory(report) {
+export function normalizeAutoVerificationInventory(report, { allowLegacyVersion = false } = {}) {
   assert(isObject(report), "VERIFICATION_REPORT_INVALID", "共享能力清单格式不正确", 400);
   const capabilityId = report.capability_id ?? report.capabilityId;
   const capabilityVersion = report.capability_version ?? report.capabilityVersion ?? report.specialContractVersion ?? "1.0.0";
   const artifactSha256 = report.validation?.artifact_sha256 ?? report.validation?.artifactSha256 ?? report.artifact_sha256 ?? report.artifactSha256;
   assert(typeof capabilityId === "string" && CAPABILITY.test(capabilityId) && capabilityId.length <= 120
-    && typeof capabilityVersion === "string" && /^\d{1,3}(?:\.\d{1,3}){0,2}$/.test(capabilityVersion)
+    && typeof capabilityVersion === "string" && (allowLegacyVersion ? LEGACY_VERSION : CONTRACT_VERSION).test(capabilityVersion)
     && HASH.test(artifactSha256 || ""), "VERIFICATION_REPORT_INVALID", "能力清单必须包含能力名称、合同版本和真实制品摘要", 400);
   const rawModels = report.models ?? report.supported_models ?? report.supportedModels;
   assert(Array.isArray(rawModels) && rawModels.length > 0 && rawModels.length <= 64,
@@ -227,22 +229,33 @@ export function createCapabilityAutoVerificationService(dependencies) {
     const active = await currentBinding(binding);
     await limited(String(active._id), "report", 12);
     assert(Array.isArray(reports) && reports.length > 0 && reports.length <= 64, "VERIFICATION_REPORT_INVALID", "每次须上报 1 至 64 项能力", 400);
-    const inventories = reports.map(normalizeAutoVerificationInventory);
-    assert(new Set(inventories.map((item) => item.capabilityId)).size === inventories.length
-      && inventories.reduce((count, item) => count + item.models.length, 0) <= 256,
-    "VERIFICATION_REPORT_INVALID", "能力不能重复，单节点每次最多上报 256 个模型参数组合", 400);
-    const instant = new Date(now());
-    const records = await collection();
     assert(migrationPolicy === undefined || migrationPolicy === CAPABILITY_VERIFICATION_POLICY,
       "VERIFICATION_POLICY_INVALID", "自动验收迁移策略不正确", 400);
     assert(automaticCapabilityIds === undefined || migrationPolicy === CAPABILITY_VERIFICATION_POLICY,
       "VERIFICATION_POLICY_INVALID", "逐能力迁移列表必须使用 capability-v2 策略", 400);
-    const bindings = await getCollection("nodeAccountBindings");
     if (migrationPolicy === CAPABILITY_VERIFICATION_POLICY) {
       assert(Array.isArray(automaticCapabilityIds) && automaticCapabilityIds.length <= 64
         && automaticCapabilityIds.every((id) => typeof id === "string" && CAPABILITY.test(id))
         && new Set(automaticCapabilityIds).size === automaticCapabilityIds.length,
       "VERIFICATION_POLICY_INVALID", "请提供不重复的自动迁移能力列表，最多64项", 400);
+      assert(active.autoVerificationPolicy === CAPABILITY_VERIFICATION_POLICY || !active.autoVerificationEnrolledAt,
+        "VERIFICATION_MIGRATION_REVIEW_REQUIRED", "此绑定已采用旧版整体验收策略，不能自动降级；请先完成迁移审计", 409);
+    }
+    const inventories = reports.map((input) => {
+      const id = input?.capability_id ?? input?.capabilityId;
+      // Opaque native versions are inventory fingerprints only. They must never
+      // relax an already/newly migrated capability's verifier contract.
+      const allowLegacyVersion = migrationPolicy === CAPABILITY_VERIFICATION_POLICY
+        && !automaticCapabilityIds.includes(id) && !requiresAutomaticCapabilityVerification(active, id);
+      return normalizeAutoVerificationInventory(input, { allowLegacyVersion });
+    });
+    assert(new Set(inventories.map((item) => item.capabilityId)).size === inventories.length
+      && inventories.reduce((count, item) => count + item.models.length, 0) <= 256,
+    "VERIFICATION_REPORT_INVALID", "能力不能重复，单节点每次最多上报 256 个模型参数组合", 400);
+    const instant = new Date(now());
+    const records = await collection();
+    const bindings = await getCollection("nodeAccountBindings");
+    if (migrationPolicy === CAPABILITY_VERIFICATION_POLICY) {
       for (const id of automaticCapabilityIds) {
         const inventory = inventories.find((item) => item.capabilityId === id);
         assert(inventory && (requiresAutomaticCapabilityVerification(active, id) || inventory.models.every((model) => adapterFor(inventory, model))),
@@ -263,6 +276,14 @@ export function createCapabilityAutoVerificationService(dependencies) {
         "VERIFICATION_POLICY_REQUIRED", "此绑定已采用逐能力迁移，请沿用 capability-v2 及完整能力库存", 409);
     }
     const enrolledBinding = await currentBinding(binding);
+    // A concurrent report may have migrated a previously-unlisted capability.
+    // Recheck before any inventory/evidence writes; never persist a legacy-only
+    // version as an automatically eligible contract after that transition.
+    inventories.forEach((inventory) => {
+      if (requiresAutomaticCapabilityVerification(enrolledBinding, inventory.capabilityId)) {
+        assert(CONTRACT_VERSION.test(inventory.capabilityVersion), "VERIFICATION_REPORT_INVALID", "自动验收能力须使用对应的数字合同版本，不能使用原生组件版本", 400);
+      }
+    });
     for (const inventory of inventories) {
       const automatic = requiresAutomaticCapabilityVerification(enrolledBinding, inventory.capabilityId);
       await records.updateMany({ bindingId: String(active._id), capabilityId: inventory.capabilityId,
@@ -620,7 +641,8 @@ export function registerCapabilityAutoVerificationRoutes(app, dependencies) {
     const objectSchema = z.record(z.string(), z.unknown());
     const modelSchema = z.object({ id: z.string().min(1).max(240) }).catchall(z.union([z.string(), z.number(), z.boolean()]));
     const artifactSchema = z.string().regex(/^[a-f0-9]{64}$/i);
-    const inventorySchema = z.object({ capability_id: z.string().min(1).max(120), capability_version: z.string().default("1.0.0"),
+    const inventorySchema = z.object({ capability_id: z.string().min(1).max(120), capability_version: z.string().max(120).default("1.0.0")
+      .describe("自动迁移能力须使用数字合同版本并通过对应适配器白名单；仅capability-v2未迁移能力允许原样保留1-120位原生版本[A-Za-z0-9][A-Za-z0-9_.+-]*，仅作库存指纹，不授予验收资格"),
       installed: z.boolean(), enabled: z.boolean(), sharing_opt_in: z.boolean().default(false), artifact_sha256: artifactSchema.optional(),
       validation: z.object({ artifact_sha256: artifactSchema }).passthrough().optional(),
       models: z.array(modelSchema).min(1).max(64), default_model: z.string().optional(), asr_languages: z.array(z.enum(["zh", "en"])).max(2).optional(),

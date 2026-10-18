@@ -1570,4 +1570,7 @@ test("OpenAPI describes explicit complete-inventory per-capability migration and
   assert.deepEqual(dedicated.requestBody.content["application/json"].schema.required.sort(),
     ["automatic_capability_ids", "capabilities", "migration_policy"]);
   assert.match(dedicated.summary, /禁止回退/);
+  const version = dedicated.requestBody.content["application/json"].schema.properties.capabilities.items.properties.capability_version;
+  assert.equal(version.maxLength, 120);
+  assert.match(version.description, /仅.*未迁移/);
 });

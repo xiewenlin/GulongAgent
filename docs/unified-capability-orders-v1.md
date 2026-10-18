@@ -422,6 +422,7 @@ npm run build
 - 服务端原子追加 `autoVerificationCapabilityIds`，保存 `autoVerificationPolicy=capability-v2`；重试、并发上报、列表清空或库存遗漏只能扩展，不能撤销已迁移 ID。
 - 已迁移能力采用自动结果的精确交集；pending、失败、到期、禁用、制品/模型/分组变更均禁止回退到旧 GCA 或客户端 `validated=true`。
 - 未迁移能力记录为 `migration_deferred`，不会领取自动探测，仅保留原有能力版本、验证新鲜度、制品、GCA（若该原合同要求）、产品、算力分组和资源槽位规则。没有旧证明的能力仍不可用；不新建 GCA、不延长旧有效期、不为新制品继承旧证明、不放开原本 `dispatchable=false` 的能力。原生 H3 独立接口也不因另一个能力迁移而被整绑定停用。
+- 仅 v2 **尚未迁移且不在本次迁移列表**的能力允许原样上报有界原生版本：1–120位，匹配 `[A-Za-z0-9][A-Za-z0-9_.+-]*`。例如 `3.1-object-multiplex`、`0.10.14-pose-full`、`large-v3-turbo-whisper.cpp`、`gpt-6-astra`；不截断、不替换为假 `1.0.0`，原值参与库存指纹，拒绝空白、控制字符和路径分隔符。自动迁移能力仍须数字合同版本及对应适配器版本白名单；已迁移ID即使从列表遗漏也不能使用这个兼容入口。该库存兼容不改变旧派单合同、不新授予资格。
 - 图像编辑、SAM/Whisper/MediaPipe 的输入 fixture、统一 video/TTS 等未完整接通时，仍完整上报库存，但不能把文生图通过当作这些功能的验收；只有对应完整适配和实测通过后再追加迁移 ID。
 - 已经是 v1 绑定级策略的节点请求 v2 返回 `409 VERIFICATION_MIGRATION_REVIEW_REQUIRED`，不通过客户端改变策略解除原保护；需要独立迁移审计。v2 节点以后每次 `/report` 都必须沿用策略，省略则返回 `409 VERIFICATION_POLICY_REQUIRED`。
 - 新客户端只调用 `/report-v2`，必须确认响应 `migration.policy=capability-v2`；404、缺少确认或网络未知结果时停止自动登记/恢复原请求，不尝试旧 `/report`。旧 `/report` 保留 v1 行为并兼容显式 v2，但不推荐新消费者使用。已有 v2 节点投入使用后，不应把生产回滚到不识别逐能力策略的旧版本。

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveBuildCommit } from "./deployment-build-identity.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dist = path.join(root, "dist");
@@ -39,7 +40,7 @@ const files = Object.fromEntries(listFiles(client).map((relative) => {
     sha256: createHash("sha256").update(bytes).digest("hex"),
   }];
 }));
-const commit = /^[0-9a-f]{40}$/i.test(process.env.GITHUB_SHA || "") ? process.env.GITHUB_SHA.toLowerCase() : null;
+const commit = resolveBuildCommit({ cwd: root });
 writeFileSync(path.join(client, "deployment-manifest.json"), `${JSON.stringify({ version: 1, commit, files }, null, 2)}\n`);
 
 console.log("Prepared Sites build and deterministic client deployment manifest.");

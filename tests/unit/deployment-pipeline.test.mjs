@@ -19,6 +19,8 @@ test("production workflow gates both hosting targets behind tests and an immutab
   assert.match(source, /name: Deploy Tencent Cloud production[\s\S]*needs: quality/);
   assert.equal((source.match(/if: github\.ref == 'refs\/heads\/main'/g) || []).length, 2);
   assert.match(source, /vercel@50\.28\.0 deploy --prebuilt --prod/);
+  assert.match(source, /verify-build-identity\.mjs \.vercel\/output\/static\/deployment-manifest\.json "\$GITHUB_SHA"/);
+  assert.ok(source.indexOf("node scripts/verify-build-identity.mjs") < source.indexOf("vercel@50.28.0 deploy --prebuilt"));
   assert.match(source, /StrictHostKeyChecking=yes/g);
   assert.match(source, /rsync --archive --compress --checksum --delete/);
   assert.match(source, /cp -a shared "\$bundle\/shared"/);
@@ -77,6 +79,7 @@ test("production parity verifier checks manifests, commit identity, and every cl
   const source = await readFile(parityScriptUrl, "utf8");
 
   assert.match(source, /deployment-manifest\.json/);
+  assert.match(source, /String\(manifest\.commit \|\| ""\)/);
   assert.match(source, /assert\.deepEqual\(tencentManifest, vercelManifest/);
   assert.match(source, /manifest\.commit, expectedCommit/);
   assert.match(source, /sha256\(vercelBytes\)/);

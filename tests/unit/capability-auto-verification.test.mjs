@@ -144,6 +144,19 @@ test("malformed, duplicate and oversized model inventories are rejected", async 
   }
 });
 
+test("legacy inventory version fingerprints preserve the exact bounded native string without weakening default contracts", () => {
+  const input = inventory("image", { capability_version: "gpt-6-astra", models: [{ id: "native-image" }] });
+  const first = normalizeAutoVerificationInventory(input, { allowLegacyVersion: true });
+  assert.equal(first.capabilityVersion, "gpt-6-astra");
+  assert.notEqual(first.matrixSha256, normalizeAutoVerificationInventory({ ...input, capability_version: "GPT-6-astra" }, { allowLegacyVersion: true }).matrixSha256);
+  assert.throws(() => normalizeAutoVerificationInventory(input), (error) => error.code === "VERIFICATION_REPORT_INVALID");
+  for (const version of ["", " x", "x ", "x\n", "x\0y", "a/b", "a\\b", "a:b", ".", "a".repeat(121), "版本1"]) {
+    assert.throws(() => normalizeAutoVerificationInventory({ ...input, capability_version: version }, { allowLegacyVersion: true }),
+      (error) => error.code === "VERIFICATION_REPORT_INVALID", JSON.stringify(version));
+  }
+  assert.equal(normalizeAutoVerificationInventory({ ...input, capability_version: "a".repeat(120) }, { allowLegacyVersion: true }).capabilityVersion.length, 120);
+});
+
 test("dry-run authenticates and rate limits without leases, probes or budget consumption", async () => {
   const f = fixture(); await f.service.report({ binding: f.binding, reports: [inventory()] });
   const before = copy(f.rows);

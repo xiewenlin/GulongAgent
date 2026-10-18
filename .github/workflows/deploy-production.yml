@@ -108,6 +108,7 @@ jobs:
           set -Eeuo pipefail
           npx --yes vercel@50.28.0 pull --yes --environment=production --token="$VERCEL_TOKEN"
           npx --yes vercel@50.28.0 build --prod --token="$VERCEL_TOKEN"
+          node scripts/verify-build-identity.mjs .vercel/output/static/deployment-manifest.json "$GITHUB_SHA"
 
       - name: Publish Vercel production
         id: deploy
@@ -246,7 +247,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Compare every published client file
-        run: node scripts/verify-production-parity.mjs https://sologle.com https://111.229.70.235
+        run: node scripts/verify-production-parity.mjs https://sologle.com https://111.229.70.235 "$GITHUB_SHA"
 
       - name: Verify compute-group API routing on both targets
         run: node scripts/verify-compute-group-deployment.mjs https://sologle.com https://111.229.70.235

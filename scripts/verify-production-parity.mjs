@@ -2,9 +2,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 
-const [vercelBase = "https://sologle.com", tencentBase = "https://111.229.70.235"] = process.argv.slice(2);
-const expectedCommit = /^[0-9a-f]{40}$/i.test(process.env.GITHUB_SHA || "")
-  ? process.env.GITHUB_SHA.toLowerCase()
+const [vercelBase = "https://sologle.com", tencentBase = "https://111.229.70.235", explicitCommit] = process.argv.slice(2);
+if (explicitCommit) assert.match(explicitCommit, /^[0-9a-f]{40}$/i, "目标提交标识格式不正确");
+const expectedCommit = /^[0-9a-f]{40}$/i.test(explicitCommit || process.env.GITHUB_SHA || "")
+  ? (explicitCommit || process.env.GITHUB_SHA).toLowerCase()
   : null;
 
 function sha256(bytes) {
@@ -42,6 +43,7 @@ async function fetchManifest(base) {
   const bytes = await fetchBytes(base, "/deployment-manifest.json", expectedCommit);
   const manifest = JSON.parse(bytes.toString("utf8"));
   assert.equal(manifest.version, 1, `${base} 的部署清单版本不受支持`);
+  assert.match(String(manifest.commit || ""), /^[0-9a-f]{40}$/i, `${base} 的部署清单缺少有效提交标识`);
   assert.ok(manifest.files && typeof manifest.files === "object", `${base} 的部署清单缺少文件哈希`);
   if (expectedCommit) assert.equal(manifest.commit, expectedCommit, `${base} 尚未运行目标提交 ${expectedCommit}`);
   return manifest;
