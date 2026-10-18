@@ -12,7 +12,7 @@
 - `availability.status` 为 `ready`、`busy` 或 `offline`；同时返回 `verified_node_count` 和 `free_slot_count`。`busy` 仍可排队；`offline` 时 `dispatchable=false`，不能创建新订单。旧 Qwen 2.1 节点报告不等于此合同验收。
 - 可用性是瞬时快照，实际提交时再次检查。没有兼容节点时返回 HTTP 409 `CAPABILITY_NO_COMPATIBLE_NODE`，不创建订单。
 
-新消费者必须读取 `availability.models`：只在原生 2K 自动验收有效时包含 `{ "id": "qwen_image_2_1" }`，否则为 `[]`。不会根据固定 schema、旧 Qwen 能力或客户端自报 `supported_models` 猜测已验收模型。结构化矩阵不泄露本地路径等运行信息；创建参数必须使用其中的精确 ID。
+新消费者必须读取 `availability.models`：只在原生 2K 自动验收有效时包含 `{ "id":"qwen_image_2_1", "task":"text_to_image", "input_asset_count":0, "width":2048, "height":2048, "generation_mode":"fast_lora_6", "steps":6, "prompt_enhancement":"none" }`，否则为 `[]`。不会根据固定 schema、旧 Qwen 能力或客户端自报 `supported_models` 猜测已验收模型。结构化矩阵不泄露本地路径等运行信息；创建和领取须匹配这份实际范围，无参考图文生图不能据此扩张为多图编辑、其他画布、标准模式或提示词增强。提示词、负向描述和种子可更改。历史明确验收的非自动消费者原合同保持兼容。
 
 节点必须在 `POST /api/v1/capability-orders/claim` 的 `capabilities` 中明确上报 `capability_id:gulong_engine.image_2k`、`capability_version:1.0.0`、`supported_models:["qwen_image_2_1"]`、`installed/validated/enabled:true`、`sharing_opt_in:true`、真实验证的 `tested_at` 与产物 SHA-256。未实施此能力的旧节点不得冒用新 ID。
 

@@ -12,10 +12,42 @@ const plain = (value) => value !== null && typeof value === "object" && !Array.i
 const fail = (message, code = "VERIFICATION_RESULT_INVALID") => { throw Object.assign(new Error(message), { code, status: 409 }); };
 const require = (condition, message, code) => { if (!condition) fail(message, code); };
 const seed = (nonce) => createHash("sha256").update(nonce, "utf8").digest().readUInt32BE(0) & 0x7fffffff;
+const IMAGE_SCOPES = Object.freeze({
+  "gulong_engine.image": Object.freeze({ task: "text_to_image", input_asset_count: 0, width: 512, height: 512 }),
+  "gulong_engine.image_2k": Object.freeze({ task: "text_to_image", input_asset_count: 0, width: 2048, height: 2048,
+    generation_mode: "fast_lora_6", steps: 6, prompt_enhancement: "none" }),
+  "qwen_image_2_1.text_to_image": Object.freeze({ task: "text_to_image", input_asset_count: 0, width: 512, height: 512,
+    steps: 4, guidance_scale: 4, batch_size: 1 }),
+});
+
+// Only this bounded server-owned projection is an image approval. In particular,
+// an inventory's advertised editing features are never copied into a receipt.
+export function verifiedImageModelScope(capabilityId, model) {
+  const scope = IMAGE_SCOPES[capabilityId];
+  if (!scope || !plain(model) || !(capabilityId === "gulong_engine.image" ? IMAGE_MODELS.has(model.id) : model.id === "qwen_image_2_1")
+    || Object.entries(scope).some(([key, value]) => model[key] !== value)) return null;
+  return { id: model.id, ...scope };
+}
+
+export function automaticImageNodeMatchesOrder(report, order) {
+  if (!report.automaticVerification || !IMAGE_SCOPES[order.capabilityId]) return true; // Historical explicit acceptance remains compatible.
+  if (report.contractTests?.exact_image_scope !== true) return false;
+  const parameters = order.parameters || {};
+  return report.models?.some((model) => {
+    const scope = verifiedImageModelScope(order.capabilityId, model);
+    if (!scope || parameters.model && parameters.model !== scope.id) return false;
+    if (order.catalogProbe === true) return true;
+    if (order.assets !== undefined && !Array.isArray(order.assets)) return false;
+    if ((order.assets?.length || 0) !== scope.input_asset_count || (parameters.task ?? "text_to_image") !== scope.task) return false;
+    return Object.entries(scope).every(([key, value]) => ["id", "task", "input_asset_count"].includes(key) || parameters[key] === value);
+  }) === true;
+}
 
 function supportsImage(inventory, model) {
-  return VERSIONS[inventory.capabilityId]?.includes(inventory.capabilityVersion) === true && plain(model) && (inventory.capabilityId === "gulong_engine.image" ? IMAGE_MODELS.has(model.id)
-    : ["gulong_engine.image_2k", "qwen_image_2_1.text_to_image"].includes(inventory.capabilityId) && model.id === "qwen_image_2_1");
+  const scope = IMAGE_SCOPES[inventory.capabilityId];
+  return VERSIONS[inventory.capabilityId]?.includes(inventory.capabilityVersion) === true && scope && plain(model)
+    && (inventory.capabilityId === "gulong_engine.image" ? IMAGE_MODELS.has(model.id) : model.id === "qwen_image_2_1")
+    && Object.entries(scope).every(([key, value]) => model[key] === undefined || model[key] === value);
 }
 function supportsTts(inventory, model) {
   return inventory.capabilityVersion === "1.0.0" && inventory.capabilityId === "gulong_engine.tts" && plain(model) && typeof model.id === "string"
@@ -76,8 +108,8 @@ export function createCapabilityVerificationAdapters({ verifyMediaOutputs } = {}
     require(Number.isSafeInteger(output.width) && Number.isSafeInteger(output.height)
       && output.width === challenge.parameters.width && output.height === challenge.parameters.height,
     "图像实际像素尺寸与本次请求不一致", "VERIFICATION_IMAGE_DIMENSIONS_MISMATCH");
-    return { verifiedModel: structuredClone(challenge.model),
-      contractTests: { exact_model: true, exact_request: true, native_image_output: true, output_sha256: true, exact_dimensions: true } };
+    return { verifiedModel: { id: challenge.model.id, ...IMAGE_SCOPES[challenge.capabilityId] },
+      contractTests: { exact_model: true, exact_request: true, native_image_output: true, output_sha256: true, exact_dimensions: true, exact_image_scope: true } };
   }
 
   async function ttsResult(input) {
@@ -98,7 +130,8 @@ export function createCapabilityVerificationAdapters({ verifyMediaOutputs } = {}
       contractTests: { exact_model: true, exact_request: true, actual_voice: true, native_audio_output: true, output_sha256: true, actual_duration: true } };
   }
 
-  const image = { supports: supportsImage, createProbe: imageProbe, validateResult: imageResult };
+  const image = { supports: supportsImage, createProbe: imageProbe, validateResult: imageResult,
+    isVerifiedModel: (inventory, model, tests) => tests?.exact_image_scope === true && verifiedImageModelScope(inventory.capabilityId, model) !== null };
   return { "gulong_engine.image": { ...image, versions: VERSIONS["gulong_engine.image"] },
     "gulong_engine.image_2k": { ...image, versions: VERSIONS["gulong_engine.image_2k"] },
     "qwen_image_2_1.text_to_image": { ...image, versions: VERSIONS["qwen_image_2_1.text_to_image"] },

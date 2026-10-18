@@ -18,7 +18,7 @@ import { SHARED_NODE_SCHEDULING, NODE_REPORT_MAX_AGE_MS, normalizeGpuLoadReport,
 import { findTrustedConsumerAcceptance } from "./capability-consumer-acceptance.js";
 import { createCapabilityAutoVerificationService, registerCapabilityAutoVerificationRoutes } from "./capability-auto-verification.js";
 import { createCapabilityVerificationMedia } from "./capability-verification-media.js";
-import { createCapabilityVerificationAdapters } from "./capability-verification-adapters.js";
+import { createCapabilityVerificationAdapters, automaticImageNodeMatchesOrder } from "./capability-verification-adapters.js";
 import { inspectFlacStream } from "./capability-flac.js";
 
 export const CAPABILITY_ORDER_PROTOCOL = "gulong-capability-orders-v1";
@@ -485,6 +485,7 @@ export function capabilityNodeCanRunOrder(node, order) {
   return Boolean(node.capabilities?.some((item) => item.capabilityId === order.capabilityId
     && (!order.capabilityVersion || item.capabilityVersion === order.capabilityVersion)
     && item.installed && item.validated && item.enabled
+    && automaticImageNodeMatchesOrder(item, order)
     && (!isWorkLuckyCapability(order.capabilityId) || (item.trustedAcceptance === true && (order.catalogProbe === true || specialNodeMatches(order, item))))
     && (order.capabilityId !== "gulong_engine.tts" || !order.parameters?.voice_id || item.supportedVoices?.includes(order.parameters.voice_id))
     && (order.capabilityId !== "gulong_engine.tts" || !order.parameters?.model || (item.trustedAcceptance === true
@@ -657,7 +658,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       const accepted = await lookup(binding._id, report, now);
       if (accepted?.source === "automatic") return { ...report, models: accepted.models, defaultModel: accepted.defaultModel,
         supportedModels: accepted.models.map((model) => model.id), supportedVoices: accepted.models.map((model) => model.voice_id).filter(Boolean),
-        contractTests: accepted.contractTests, asrLanguages: accepted.asrLanguages, trustedAcceptance: true };
+        contractTests: accepted.contractTests, asrLanguages: accepted.asrLanguages, trustedAcceptance: true, automaticVerification: true };
       if (binding.autoVerificationEnrolledAt) return { ...report, validated: false, trustedAcceptance: false };
       return isWorkLuckyCapability(report.capabilityId) ? { ...report, trustedAcceptance: Boolean(accepted) } : report;
     }));
@@ -678,7 +679,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
         supported_models: acceptance.models.map((model) => model.id), supported_voices: acceptance.models.map((model) => model.voice_id).filter(Boolean),
         validation: { ...(report.validation || {}), tested_at: acceptance.testedAt, artifact_sha256: acceptance.artifactSha256,
           contract_tests: acceptance.contractTests } }, now, { allowLegacyEnglishOrders: true });
-      ready.push({ ...normalized, models: acceptance.models, trustedAcceptance: true, verificationInventory: report.verificationInventory || report });
+      ready.push({ ...normalized, models: acceptance.models, trustedAcceptance: true, automaticVerification: true, verificationInventory: report.verificationInventory || report });
     }
     return ready;
   }
@@ -725,7 +726,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
         const accepted = await trustedAcceptance(binding._id, reportedCapability, now);
         if (!accepted || binding.autoVerificationEnrolledAt && accepted.source !== "automatic") continue;
         reportedCapability = { ...reportedCapability, trustedAcceptance: true, ...(accepted.source === "automatic" ? {
-          models: accepted.models, defaultModel: accepted.defaultModel, contractTests: accepted.contractTests, asrLanguages: accepted.asrLanguages,
+          models: accepted.models, defaultModel: accepted.defaultModel, contractTests: accepted.contractTests, asrLanguages: accepted.asrLanguages, automaticVerification: true,
           supportedModels: accepted.models.map((model) => model.id), supportedVoices: accepted.models.map((model) => model.voice_id).filter(Boolean),
         } : {}) };
       }
@@ -983,7 +984,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     if ((isGulongEngineCapability(capabilityId) || computeGroupId !== null) && auth.user.role !== "admin") { const rejected = await requireGulong(c, ownerId); if (rejected) return rejected; }
     if (isGulongEngineCapability(capabilityId)) {
       const availability = await gulongAvailability(capabilityId, ownerId, {
-        order: { capabilityId, requesterUserId: ownerId, computeGroupId, sharingScope: "gulong_shared", preferredNodeId, capabilityVersion: requestedCapabilityVersion, parameters },
+        order: { capabilityId, requesterUserId: ownerId, computeGroupId, sharingScope: "gulong_shared", preferredNodeId, capabilityVersion: requestedCapabilityVersion, parameters, assets },
       });
       if (!availability.verified_node_count) return c.json({ code: "CAPABILITY_NO_COMPATIBLE_NODE", message: capabilityId === "gulong_engine.music"
         ? "当前没有已验收节点支持所选音乐模型及时长，请根据目录中的模型时长上限调整后重试；系统不会自动截短。"

@@ -25,69 +25,31 @@ WorkLucky 包含在现有 `gulong_engine_monthly` 权益中，不新增用户体
 
 `GET /api/v1/capability-orders/catalog?product=worklucky` 必须鉴权。注册 ID 包含 text、image、image_2k、tts、video、agent_chat、embedding、music，但客户端只能采用条目的实时 `dispatchable`、`price_fen`、`availability`、版本和参数 schema。
 
-`image_2k` 的 `availability.models` 只包含自动验收有效的 `{id:"qwen_image_2_1"}`。`tts` 的矩阵为 `{id,voice_id}`，客户端必须选择同一条目配对并原样提交 `parameters.model` 与 `parameters.voice_id`；不同模型的音色不能交叉拼接，扁平 `voice_ids` 不足以证明组合可用。两者未验收时均返回 `models:[]`，不设隐式模型或声线。
+`image_2k` 的 `availability.models` 只包含自动验收有效的精确范围：`{id:"qwen_image_2_1",task:"text_to_image",input_asset_count:0,width:2048,height:2048,generation_mode:"fast_lora_6",steps:6,prompt_enhancement:"none"}`。客户端必须逐项采用该范围，不能仅凭模型 ID 开放多图编辑、其他分辨率或其他模式。`tts` 的矩阵为 `{id,voice_id}`，客户端必须选择同一条目配对并原样提交 `parameters.model` 与 `parameters.voice_id`；不同模型的音色不能交叉拼接，扁平 `voice_ids` 不足以证明组合可用。两者未验收时均返回 `models:[]`，不设隐式模型或声线。
 
 - `availability.verified_node_count` 只计有效绑定、及时上报且实际验证通过的兼容消费者，不计网站注册表中的虚拟节点。
 - `availability.free_slot_count` 是实际可接任务槽位；忙节点不凭空增加空位，过期报告不视为在线。共享消费者的槽位必须由服务器原子预留，不能仅信任重复轮询携带的 `running_task_count=0`。
 - `ready` 表示有兼容空位，`busy` 表示兼容消费者存在但暂无线程空位，`offline` 表示没有可验证消费者。无消费者时拒绝新建，不能创建永不执行的订单。
-- 新 agent_chat/embedding/music 使用 `1.0.0` 合同，必须具备管理员登记的可信验收 ID 后才能接单；单纯自行上报 `validated=true`、时间戳或测试名称不能成为验收。管理员记录须绑定实际节点、能力版本和验证产物摘要；模型、工具、多模态、音乐生成和完整音频 ASR 不能通过静态配置推定。
+- 新 agent_chat/embedding/music 使用 `1.0.0` 合同，必须由官网自动验收精确模型后才能接单；单纯自行上报 `validated=true`、时间戳或测试名称不能成为验收。自动记录绑定实际节点、能力版本、制品摘要和模型矩阵；模型、工具、多模态、音乐生成和完整音频 ASR 不能通过静态配置推定。
 - `gulong_engine.video` 在精确参数消费者实机验收前保持 `adapter_required`，不得因 H3 独立合同上线而解除。
 
-### 管理员可信验收登记
+### 自动验收与只读模型状态
 
-管理员后台的“共享能力验收”（`/admin?section=capability-consumers`）是同一套 API 的操作入口，不是模型运行器。先按设备名称或匿名 node_id 查找有效绑定，核对实际部署制品和真实推理证据，再导入登记 JSON、勾选核对声明并在站内弹窗确认。页面不会自动生成证据、替换模型、启动推理或把登记成功宣称为节点在线；节点还须携带相同验收 ID 正式上报。
+管理员后台“共享模型状态”（`/admin?section=capability-consumers`）只查询真实节点和自动验收记录，不再导入 JSON、编辑声明或手工新增验收。旧 `POST /api/admin/capability-consumers/acceptances` 在管理员和变更来源校验后返回 `410 MANUAL_ACCEPTANCE_RETIRED`；不能通过换一个登记 ID 绕过失败、过期或未实测的能力。
 
-`GET /api/admin/capability-consumers/bindings` 仅管理员可查有效绑定，支持 `node_id` 精确匹配及 `q` 名称/节点 ID 关键词，最多50条。响应不含绑定令牌、令牌摘要、邮箱或凭据。没有网站管理员会话时不能拿普通 GGE 工作会话冒充管理员，不允许为验收修改用户角色或制造会话。
+节点使用 `X-Gulong-Account-Binding` 调用以下自动流程，精确请求及恢复合同见[统一能力自动验收](./unified-capability-orders-v1.md#自动共享模型验收2026-10-18)：
 
-验收列表保留原始 `status`，额外返回按当前服务器时间计算的 `effective_status`；原始 active 但已经超过 `expires_at` 的记录不可派单。登记后的可用性仍须以鉴权目录的实时节点报告、精确用户分组、模型和空闲槽位为准。
+1. `POST /api/v1/capability-verifications/report`：上报已安装、启用并明确选择共享的能力、真实制品摘要和完整模型矩阵。上报不是验收通过。
+2. 本地先持久化稳定 `request_id` 和 32 字节随机 `lease_token`，在安全空闲点调用 `POST /api/v1/capability-verifications/next`。每个探测最多一次模型调用，音频最多12秒；与业务任务共用物理执行租约。
+3. 严格执行服务器指定模型和参数；媒体通过 `POST /api/v1/capability-verifications/{id}/outputs` 获得短期私有 COS PUT 票据，不把签名地址永久写入日志。
+4. `POST /api/v1/capability-verifications/{id}/result` 回传完整结果及输出编号。官网核验实际对象、摘要、时长、歌词/向量等能力专属证据，才签发有效7天的精确模型记录。
+5. 丢失响应时，使用原绑定令牌及 `X-Gulong-Verification-Lease` 查询 `/by-request/{key}` 或 `/challenges/{id}`，只恢复原本地执行记录，不重跑、换模型或消耗第二次预算。
 
-只有管理员会话和可信变更来源可以调用 `POST /api/admin/capability-consumers/acceptances`（JSON 上限64 KiB）。它只登记已完成的真实验收，不执行模型，也不生成验收证据。请求公共字段：
+agent_chat 每项模型必须明确 `tools` 和 `multimodal`；纯文字通过不能自动批准工具和多模态。embedding 每项为 `{id,dimension}`，维度必须由真实向量响应证明。music 每项含真实库存上限 `max_duration_seconds` 和实际整段 ASR 语言；自动结果的 `verified_model` 才是已测范围，12秒探测不得批准300/600秒能力。
 
-```json
-{
-  "binding_id": "<nodeAccountBindings 的24位十六进制ID>",
-  "capability_id": "gulong_engine.agent_chat",
-  "capability_version": "1.0.0",
-  "artifact_sha256": "<实际消费者制品的64位SHA256>",
-  "test_evidence_sha256": "<真实验收证据的64位SHA256>",
-  "tested_at": "<真实测试的ISO时间>",
-  "expires_at": "<测试时间起30天内的未来ISO时间>",
-  "admin_confirmed_real_consumer": true,
-  "models": [{"id":"actual-model-id","tools":false,"multimodal":false}],
-  "default_model": "actual-model-id",
-  "contract_tests": {"exact_request":true,"complete_response":true}
-}
-```
+`GET /api/admin/capability-consumers/bindings` 仍支持有效绑定的 `node_id` 精确匹配及 `q` 名称/节点 ID 关键词，最多50条；`GET /api/admin/capability-verifications?binding_id=...` 查询自动状态。响应不含绑定令牌、租约密钥、邮箱或凭据。GGE 工作会话不能冒充管理员，不允许为验收修改角色或制造会话。
 
-示例值不能作为可用模型或证据；必须替换为该绑定节点实际验证值。按能力追加或替换：
-
-- agent_chat：每个 `models` 项必须含布尔 `tools` 和 `multimodal`，`default_model` 必须属于本模型列表；若任一模型声明工具或媒体可用，`contract_tests.tools` 或 `multimodal` 也必须为 true，且已有对应实机验收。
-- embedding：每项为 `{id,dimension}`；`contract_tests` 必须含 `exact_request:true`、`complete_response:true`、`exact_model_dimension:true`。`default_model` 可省略或为 null，若填写必须在模型列表内。
-- music：每项必须为 `{id,max_duration_seconds}`；`max_duration_seconds` 是1–600间的有限数值，并且是该节点对应真实模型已验收的时长上限，不得按官网全局schema填写。提供 `asr_languages:["zh"]`、`["en"]` 或两者；`contract_tests` 必须含 `music_generation:true`、`whole_audio_asr:true`、`exact_lyrics:true`、`exact_duration:true`。没有完整生成及整段 ASR 证据不得登记。`default_model` 可省略或为 null，若填写必须在模型列表内。
-
-成功返回201 `{acceptance:{id:"gca_<UUID>",binding_id,capability_id,capability_version,...,status:"active"}}`。节点随后通过 Claim 的能力报告上送：
-
-```json
-{
-  "capability_id": "gulong_engine.agent_chat",
-  "capability_version": "1.0.0",
-  "protocol_version": "gulong-capability-orders-v1",
-  "installed": true,
-  "validated": true,
-  "enabled": true,
-  "max_concurrent": 1,
-  "models": [{"id":"actual-model-id","tools":false,"multimodal":false}],
-  "default_model": "actual-model-id",
-  "validation": {
-    "acceptance_id": "gca_<登记返回的UUID>",
-    "tested_at": "<真实测试ISO时间>",
-    "artifact_sha256": "<登记的相同制品摘要>",
-    "contract_tests": {"exact_request":true,"complete_response":true}
-  }
-}
-```
-
-验收记录须与 binding、能力/版本、制品摘要、模型/维度/功能矩阵、默认模型、ASR语言和测试声明完全匹配。music 报告和验收的每模型 `max_duration_seconds` 也必须精确相等；不能自行将已验收300秒提升为600秒。过期、审计未激活、停用绑定或不同矩阵均不可接单。管理员 GET 同一路径可按 `binding_id`、`capability_id`、`status` 查询，`limit` 最大100；若POST返回503，必须先查询确认，不能假设已激活或盲目重建证据。
+有效历史 GCA 只为尚未加入自动流程的原消费者保留只读兼容。一旦节点首次完成自动库存登记，服务端保存 `autoVerificationEnrolledAt`，以后不能退回旧 GCA 或自报 `validated=true` 绕过自动记录。新模型、制品、维度、分组或参数矩阵变化须重新验收；未安装、无适配器、到期或失败时不派单。所有可用性仍以实时鉴权目录、组隔离和实际槽位为准。
 
 ## 创建、恢复与取消
 
@@ -168,7 +130,7 @@ WorkLucky 包含在现有 `gulong_engine_monthly` 权益中，不新增用户体
 
 ### 请求体、校验和限流
 
-新三类能力 `parameters` 最大1 MiB、`inline_result` 最大4 MiB，超限拒绝，不截断原消息或歌词。创建包络最大1 MiB＋128 KiB，Claim包络256 KiB，Callback包络4 MiB＋128 KiB，其他能力 JSON 请求默认128 KiB。音乐FLAC最大64 MiB；管理员验收JSON另限64 KiB。
+新三类能力 `parameters` 最大1 MiB、`inline_result` 最大4 MiB，超限拒绝，不截断原消息或歌词。创建包络最大1 MiB＋128 KiB，Claim包络256 KiB，Callback包络4 MiB＋128 KiB，其他能力 JSON 请求默认128 KiB。音乐FLAC最大64 MiB；旧管理员手工新增验收接口已退役。
 
 每绑定节点 Callback 每分钟最多60次，第61次返回429；同一音乐 `order_id + claim_id` 的完整完成校验每分钟最多2次。限流后保留原订单、`claim_id`、`event_id` 和完整请求体重试，不能换事件规避限流或重新发单。相同事件与相同载荷可恢复，修改原载荷返回409。
 

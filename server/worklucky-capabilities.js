@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { verifiedImageModelScope } from "./capability-verification-adapters.js";
 
 export const WORKLUCKY_CONTRACT_VERSION = "1.0.0";
 const IDS = new Set(["gulong_engine.agent_chat", "gulong_engine.embedding", "gulong_engine.music"]);
@@ -175,17 +176,19 @@ export function specialNodeMatches(order, reported = {}) {
 // Call only with fresh, authenticated reports whose acceptance registry entry
 // matches binding + version + artifact SHA + this exact model matrix.
 export function specialAvailability(capabilityId, reports = []) {
-  if (["gulong_engine.image_2k", "gulong_engine.tts"].includes(capabilityId)) {
+  if (["gulong_engine.image", "gulong_engine.image_2k", "gulong_engine.tts"].includes(capabilityId)) {
     // These matrices come only from server-owned automatic receipts. Flat
     // supported_models/voices are independent legacy claims, not evidence that
     // any particular model and voice were tested together.
     const models = new Map();
     for (const report of reports) {
       if (report.trustedAcceptance !== true || !Array.isArray(report.models)) continue;
+      if (capabilityId !== "gulong_engine.tts" && (report.automaticVerification !== true || report.contractTests?.exact_image_scope !== true)) continue;
       for (const model of report.models) {
         if (!object(model) || typeof model.id !== "string" || !modelPattern.test(model.id) || model.id.toLowerCase() === "auto") continue;
-        if (capabilityId === "gulong_engine.image_2k") {
-          if (model.id === "qwen_image_2_1") models.set(model.id, { id: model.id });
+        if (capabilityId !== "gulong_engine.tts") {
+          const scope = verifiedImageModelScope(capabilityId, model);
+          if (scope) models.set(model.id, scope);
         } else if (typeof model.voice_id === "string" && /^[A-Za-z0-9_.:-]{1,120}$/.test(model.voice_id)) {
           models.set(`${model.id}\0${model.voice_id}`, { id: model.id, voice_id: model.voice_id });
         }

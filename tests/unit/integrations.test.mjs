@@ -1538,3 +1538,13 @@ test("administrator release controls are explicit and legacy direct distribution
   assert.match(adminSource, /手动打包发布/);
   assert.match(adminSource, /本地构建不会自动上传腾讯云 COS/);
 });
+
+test("WorkLucky documentation retires manual acceptance creation instead of instructing clients to register evidence", async () => {
+  const source = await readFile(new URL("../../docs/worklucky-distributed-contract.md", import.meta.url), "utf8");
+  assert.match(source, /410 MANUAL_ACCEPTANCE_RETIRED/);
+  assert.match(source, /autoVerificationEnrolledAt/);
+  assert.match(source, /capability-verifications\/report/);
+  assert.match(source, /X-Gulong-Verification-Lease/);
+  assert.match(source, /verified_model/);
+  assert.doesNotMatch(source, /必须具备管理员登记的可信验收 ID|导入登记 JSON|成功返回201 `\{acceptance|登记返回的UUID/);
+});

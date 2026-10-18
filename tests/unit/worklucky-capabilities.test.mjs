@@ -285,7 +285,9 @@ test("native image and TTS availability expose only server-verified exact matric
   assert.deepEqual(specialAvailability("gulong_engine.tts", reports), { models: [
     { id: "tts-a", voice_id: "voice-a" }, { id: "tts-b", voice_id: "voice-b" },
   ] });
-  assert.deepEqual(specialAvailability("gulong_engine.image_2k", [{ trustedAcceptance: true,
-    models: [{ id: "qwen_image_2_1", private_path: "ignored" }, { id: "other" }, { id: "qwen_image_2_1" }] }]),
-  { models: [{ id: "qwen_image_2_1" }] });
+  const imageScope = { id: "qwen_image_2_1", task: "text_to_image", input_asset_count: 0, width: 2048, height: 2048,
+    generation_mode: "fast_lora_6", steps: 6, prompt_enhancement: "none" };
+  assert.deepEqual(specialAvailability("gulong_engine.image_2k", [{ trustedAcceptance: true, automaticVerification: true,
+    contractTests: { exact_image_scope: true }, models: [{ ...imageScope, private_path: "ignored" }, { id: "other" }, { id: "qwen_image_2_1" }] }]),
+  { models: [imageScope] });
 });

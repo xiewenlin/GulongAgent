@@ -441,6 +441,14 @@ HTTP 超时不等于请求没创建。必须用原请求编号和原 secret 查�
 | `qwen_image_2_1.text_to_image` | 真实旧合同 `2.1`；固定 Qwen、512²、单张 PNG | 不把旧消费者合同强改成 `1.0.0` |
 | `gulong_engine.tts` | `1.0.0`；原模型/真实音色、WAV 实物摘要、时长、采样率、声道及非静音 | 未做语音内容 ASR 或发音质量认证 |
 
+图像自动验收按**实际已测范围**签发，不把模型名称当成全部图像功能的通行证。`verified_model` 与目录 `availability.models` 保留以下简单标量字段：
+
+- `gulong_engine.image`：`{id,task:"text_to_image",input_asset_count:0,width:512,height:512}`。
+- `gulong_engine.image_2k`：`{id:"qwen_image_2_1",task:"text_to_image",input_asset_count:0,width:2048,height:2048,generation_mode:"fast_lora_6",steps:6,prompt_enhancement:"none"}`。
+- 自动验收的旧 `qwen_image_2_1.text_to_image`：`{id:"qwen_image_2_1",task:"text_to_image",input_asset_count:0,width:512,height:512,steps:4,guidance_scale:4,batch_size:1}`。
+
+创建和领取均按该范围匹配；原生 `image` 省略 task 视为文生图，但带任何参考素材仍拒绝。未测试的多图编辑、参考图路径、画布和 2K 标准/提示词增强模式不得从无参考图探测扩大开放。提示词、负向描述、随机种子仍可正常更改。显式上报编辑 task 的清单保持 `adapter_required`，不替换为文生图测试。历史自动记录若缺少范围或 `exact_image_scope` 证明，立即不再公开/派单，并在下一次清单上报时自动重新排队；原有明确验收的历史非自动消费者合同不因此改变。清单仍可只上报 `{id}`，范围由服务端实测生成，不能让客户端自行宣称范围。
+
 其他 capability、未知版本、图像编辑、SAM/Whisper/MediaPipe/DWPose 等需要输入素材的能力在缺少可靠 fixture 或结果验证器时，其本轮自动验收状态保持 `adapter_required`，不得伪造验收；原有业务目录是否可用仍按对应独立合同和真实节点状态判断。统一 `gulong_engine.video` 的新消费者适配未完成前也不因此开放；原生 H3 视频仍走 `/api/h3/tasks`。`english_coach.*` 保持 `local_only`，不会因共享自动验收绕过产品边界。商业许可证仍由节点运营者负责，已有 `license_review_required` 限制不因探测通过消失。
 
 ### 媒体探测安全

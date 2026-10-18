@@ -215,6 +215,13 @@ export function createCapabilityAutoVerificationService(dependencies) {
     if (!sample || sample.probeKind === "music" && (typeof verifyMediaOutputs !== "function" || typeof issueProbeOutputUpload !== "function")) return null;
     return { createProbe: ({ nonce }) => baseProbe(inventory, model, nonce) };
   }
+  function verifiedAdapterScope(record, fallbackInventory) {
+    const adapter = adapters[record.capabilityId];
+    if (typeof adapter?.isVerifiedModel !== "function") return true;
+    const inventory = record.inventory || fallbackInventory;
+    return Boolean(inventory && adapterFor(inventory, record.model)
+      && adapter.isVerifiedModel(inventory, record.verifiedModel, record.contractTests) === true);
+  }
   async function report({ binding, reports }) {
     const active = await currentBinding(binding);
     await limited(String(active._id), "report", 12);
@@ -241,6 +248,13 @@ export function createCapabilityAutoVerificationService(dependencies) {
           artifactSha256: inventory.artifactSha256, matrixSha256: inventory.matrixSha256, model, inventory,
           status: !inventory.enabled ? "disabled" : adapter ? "pending" : "adapter_required", attempts: 0, createdAt: instant },
         $set: { reportedAt: instant, updatedAt: instant, inventoryEnabled: inventory.enabled } }, { upsert: true });
+        if (typeof adapters[inventory.capabilityId]?.isVerifiedModel === "function") {
+          const previous = await records.findOne({ _id, status: "active" });
+          if (previous && !verifiedAdapterScope(previous, inventory)) {
+            await records.updateOne({ _id, status: "active" }, { $set: { status: adapter ? "pending" : "adapter_required", updatedAt: instant,
+              error: { code: "VERIFICATION_SCOPE_RECHECK_REQUIRED", message: "历史图像验收未记录完整任务范围，等待按已支持范围重新自动验收" } } });
+          }
+        }
         if (!inventory.enabled) await records.updateOne({ _id }, { $set: { status: "disabled", updatedAt: instant } });
         else if (adapter) await records.updateOne({ _id, status: { $in: ["disabled", "adapter_required", "invalidated"] } }, { $set: { status: "pending", updatedAt: instant } });
       }
@@ -251,7 +265,8 @@ export function createCapabilityAutoVerificationService(dependencies) {
     assert(Number.isSafeInteger(limit) && limit > 0 && limit <= 256, "VERIFICATION_QUERY_INVALID", "每次最多查询 256 项自动验收状态", 400);
     const rows = await (await collection()).find(bindingId ? { bindingId: String(bindingId) } : {}).sort({ createdAt: -1, _id: -1 }).limit(limit).toArray();
     const instant = new Date(now());
-    return rows.map((record) => publicState(record.status === "active" && new Date(record.expiresAt) <= instant ? { ...record, status: "expired" } : record));
+    return rows.map((record) => publicState(record.status === "active" && (new Date(record.expiresAt) <= instant || !verifiedAdapterScope(record))
+      ? { ...record, status: "expired" } : record));
   }
   async function lock(_id, challengeId, instant, bindingId) {
     const leases = await getCollection(LEASES);
@@ -440,7 +455,8 @@ export function createCapabilityAutoVerificationService(dependencies) {
     if (existing && secretMatches(leaseToken, existing.leaseTokenHash) && existing.resultFingerprint) {
       assert(group(existing.computeGroupId) === group(active.computeGroupId), "COMPUTE_GROUP_MISMATCH", "用户分组已变化，禁止恢复旧验收结果", 403);
       assert(existing.resultFingerprint === fingerprint, "VERIFICATION_REPLAY_CONFLICT", "同一验收任务不能更改结果内容", 409);
-      return { ok: true, idempotent: true, verification: publicState(existing) };
+      return { ok: true, idempotent: true, verification: publicState(existing.status === "active" && !verifiedAdapterScope(existing)
+        ? { ...existing, status: "expired" } : existing) };
     }
     const record = await ownedChallenge(active, challengeId, leaseToken);
     const instant = new Date(now());
@@ -485,7 +501,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
       testedAt: { $lte: instant }, expiresAt: { $gt: instant } }).limit(64).toArray();
     if (!accepted.length) return null;
     const records = accepted.filter((item) => item.verifiedModel && item.contractTests && HASH.test(item.testEvidenceSha256 || "")
-      && new Date(item.expiresAt) - new Date(item.testedAt) <= VALID_FOR);
+      && new Date(item.expiresAt) - new Date(item.testedAt) <= VALID_FOR && verifiedAdapterScope(item, inventory));
     if (!records.length) return null;
     const models = records.map((item) => item.verifiedModel);
     const keys = [...new Set(records.flatMap((item) => Object.keys(item.contractTests)))];

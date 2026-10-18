@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createCapabilityVerificationAdapters } from "../../server/capability-verification-adapters.js";
+import { createCapabilityVerificationAdapters, automaticImageNodeMatchesOrder } from "../../server/capability-verification-adapters.js";
 
 const HASH = "a".repeat(64);
 function fixture(capabilityId = "gulong_engine.image", model = { id: "zimage" }) {
@@ -35,6 +35,8 @@ test("图像探测保留精确模型编号，无素材且单次单图，2K使用
   assert.equal(image.probe.parameters.width, 512);
   assert.match(image.probe.parameters.prompt, /gcv-1234567890/);
   assert.equal(image.adapter.supports(image.inventory, { id: "unknown-image" }), false);
+  assert.equal(image.adapter.supports(image.inventory, { id: "zimage", task: "image_edit" }), false);
+  assert.equal(image.adapter.supports(image.inventory, { id: "zimage", input_asset_count: 1 }), false);
   assert.equal(image.adapter.supports({ ...image.inventory, capabilityVersion: "9.0.0" }, image.model), false);
   assert.equal(image.adapter.supports({ ...image.inventory, capabilityVersion: "1" }, image.model), true);
   const twoK = fixture("gulong_engine.image_2k", { id: "qwen_image_2_1" });
@@ -43,6 +45,8 @@ test("图像探测保留精确模型编号，无素材且单次单图，2K使用
   assert.equal(twoK.probe.parameters.height, 2048);
   assert.equal(twoK.probe.parameters.steps, 6);
   assert.equal(twoK.probe.parameters.generation_mode, "fast_lora_6");
+  assert.equal(twoK.adapter.supports(twoK.inventory, { id: "qwen_image_2_1", task: "multi_image_edit" }), false);
+  assert.equal(twoK.adapter.supports(twoK.inventory, { id: "qwen_image_2_1", generation_mode: "standard" }), false);
   const legacy = fixture("qwen_image_2_1.text_to_image", { id: "qwen_image_2_1" });
   assert.equal(legacy.probe.parameters.model, undefined);
   assert.equal(legacy.probe.parameters.batch_size, 1);
@@ -53,7 +57,8 @@ test("图像探测保留精确模型编号，无素材且单次单图，2K使用
 test("图像验收仅接受当前票据经服务端验证后的真实格式尺寸和摘要", async () => {
   const context = fixture();
   const result = await context.adapter.validateResult(context.input);
-  assert.deepEqual(result.verifiedModel, context.model);
+  assert.deepEqual(result.verifiedModel, { id: "zimage", task: "text_to_image", input_asset_count: 0, width: 512, height: 512 });
+  assert.equal(result.contractTests.exact_image_scope, true);
   assert.equal(result.contractTests.exact_dimensions, true);
   assert.equal(context.calls.length, 1);
   assert.equal(context.calls[0].binding._id, "bound-node");
@@ -62,6 +67,31 @@ test("图像验收仅接受当前票据经服务端验证后的真实格式尺�
   await assert.rejects(context.adapter.validateResult(context.input), { code: "VERIFICATION_IMAGE_DIMENSIONS_MISMATCH" });
   context.output = { role: "primary_image", contentType: "image/png", actualContentType: "text/html", bytes: 1000, sha256: HASH, width: 512, height: 512 };
   await assert.rejects(context.adapter.validateResult(context.input), { code: "VERIFICATION_IMAGE_INVALID" });
+});
+
+test("图像自动验收只开放已测试无素材文生图范围，旧历史消费者保持原行为", async () => {
+  const context = fixture("gulong_engine.image_2k", { id: "qwen_image_2_1", image_edit: true, private_path: "must-not-copy" });
+  context.output = { role: "primary_image", contentType: "image/png", bytes: 1000, sha256: HASH, width: 2048, height: 2048 };
+  const approved = await context.adapter.validateResult(context.input);
+  assert.deepEqual(approved.verifiedModel, { id: "qwen_image_2_1", task: "text_to_image", input_asset_count: 0,
+    width: 2048, height: 2048, generation_mode: "fast_lora_6", steps: 6, prompt_enhancement: "none" });
+  const report = { automaticVerification: true, models: [approved.verifiedModel], contractTests: approved.contractTests };
+  const order = { capabilityId: "gulong_engine.image_2k", parameters: { ...context.probe.parameters }, assets: [] };
+  assert.equal(automaticImageNodeMatchesOrder(report, order), true);
+  assert.equal(automaticImageNodeMatchesOrder(report, { ...order, parameters: { ...order.parameters, seed: 987, prompt: "另一条提示词", negative_prompt: "更改排除项" } }), true);
+  for (const parameters of [{ task: "multi_image_edit" }, { generation_mode: "standard" }, { steps: 30 }, { width: 1536 }, { prompt_enhancement: "local" }]) {
+    assert.equal(automaticImageNodeMatchesOrder(report, { ...order, parameters: { ...order.parameters, ...parameters } }), false);
+  }
+  assert.equal(automaticImageNodeMatchesOrder(report, { ...order, assets: [{ assetId: "reference" }] }), false);
+  assert.equal(automaticImageNodeMatchesOrder({ ...report, models: [{ id: "qwen_image_2_1" }] }, order), false);
+  assert.equal(automaticImageNodeMatchesOrder({ ...report, contractTests: {} }, order), false);
+  assert.equal(context.adapter.isVerifiedModel(context.inventory, approved.verifiedModel, {}), false);
+  assert.equal(automaticImageNodeMatchesOrder({ ...report, automaticVerification: false }, { ...order, parameters: { ...order.parameters, task: "multi_image_edit" }, assets: [{ assetId: "legacy-tested-reference" }] }), true);
+  const image = fixture();
+  const imageResult = await image.adapter.validateResult(image.input);
+  const imageReport = { automaticVerification: true, models: [imageResult.verifiedModel], contractTests: imageResult.contractTests };
+  assert.equal(automaticImageNodeMatchesOrder(imageReport, { capabilityId: "gulong_engine.image", parameters: image.probe.parameters, assets: [] }), true);
+  assert.equal(automaticImageNodeMatchesOrder(imageReport, { capabilityId: "gulong_engine.image", parameters: image.probe.parameters, assets: [{ assetId: "ref" }] }), false);
 });
 
 test("客户端validated布尔、URL、伪造模型及缺少媒体摘要都不能通过图像验收", async () => {
