@@ -17,6 +17,7 @@ import { createCapabilitySlotCoordinator, normalizeCapabilityResources } from ".
 import { SHARED_NODE_SCHEDULING, NODE_REPORT_MAX_AGE_MS, normalizeGpuLoadReport, projectSharedNodeLoad, compareSharedNodeLoad, boundedGlobalDispatchWait } from "./shared-node-scheduler.js";
 import { findTrustedConsumerAcceptance } from "./capability-consumer-acceptance.js";
 import { createCapabilityAutoVerificationService, registerCapabilityAutoVerificationRoutes } from "./capability-auto-verification.js";
+import { requiresAutomaticCapabilityVerification } from "./capability-verification-policy.js";
 import { createCapabilityVerificationMedia } from "./capability-verification-media.js";
 import { createCapabilityVerificationAdapters, automaticImageNodeMatchesOrder } from "./capability-verification-adapters.js";
 import { inspectFlacStream } from "./capability-flac.js";
@@ -659,7 +660,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       if (accepted?.source === "automatic") return { ...report, models: accepted.models, defaultModel: accepted.defaultModel,
         supportedModels: accepted.models.map((model) => model.id), supportedVoices: accepted.models.map((model) => model.voice_id).filter(Boolean),
         contractTests: accepted.contractTests, asrLanguages: accepted.asrLanguages, trustedAcceptance: true, automaticVerification: true };
-      if (binding.autoVerificationEnrolledAt) return { ...report, validated: false, trustedAcceptance: false };
+      if (requiresAutomaticCapabilityVerification(binding, report.capabilityId)) return { ...report, validated: false, trustedAcceptance: false };
       return isWorkLuckyCapability(report.capabilityId) ? { ...report, trustedAcceptance: Boolean(accepted) } : report;
     }));
   }
@@ -671,7 +672,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       if (!acceptance) {
         // Candidate inventory is allowed on the separate verification route,
         // never promoted by its own validated flag or a pending challenge.
-        if (report.validated !== true || binding.autoVerificationEnrolledAt || report.verificationInventory) continue;
+        if (report.validated !== true || requiresAutomaticCapabilityVerification(binding, report.capability_id ?? report.capabilityId) || report.verificationInventory) continue;
         ready.push(normalizeCapabilityReport(report, now, { allowLegacyEnglishOrders: true })); continue;
       }
       const normalized = normalizeCapabilityReport({ ...report, validated: true, models: acceptance.models,
@@ -722,9 +723,9 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       if (!reportedCapability) continue;
       const nodeUser = await (await getCollection("users")).findOne({ _id: binding.userId, status: "active" });
       if (!nodeUser) continue;
-      if (isWorkLuckyCapability(capabilityId) || binding.autoVerificationEnrolledAt || reportedCapability.verificationInventory) {
+      if (isWorkLuckyCapability(capabilityId) || requiresAutomaticCapabilityVerification(binding, capabilityId) || reportedCapability.verificationInventory) {
         const accepted = await trustedAcceptance(binding._id, reportedCapability, now);
-        if (!accepted || binding.autoVerificationEnrolledAt && accepted.source !== "automatic") continue;
+        if (!accepted || requiresAutomaticCapabilityVerification(binding, capabilityId) && accepted.source !== "automatic") continue;
         reportedCapability = { ...reportedCapability, trustedAcceptance: true, ...(accepted.source === "automatic" ? {
           models: accepted.models, defaultModel: accepted.defaultModel, contractTests: accepted.contractTests, asrLanguages: accepted.asrLanguages, automaticVerification: true,
           supportedModels: accepted.models.map((model) => model.id), supportedVoices: accepted.models.map((model) => model.voice_id).filter(Boolean),
@@ -1316,7 +1317,8 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     // /report may enroll a legacy binding after this request's initial auth and
     // proof snapshot. The final binding fence must not dispatch one last GCA
     // task after the server has switched that consumer to automatic admission.
-    if (currentBinding.autoVerificationEnrolledAt && (!selectedCapability?.verificationInventory || selectedCapability.trustedAcceptance !== true)) {
+    if (requiresAutomaticCapabilityVerification(currentBinding, selected.order.capabilityId)
+      && (!selectedCapability?.verificationInventory || selectedCapability.trustedAcceptance !== true || selectedCapability.automaticVerification !== true)) {
       return c.json({ task: null, claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: SHARED_NODE_SCHEDULING,
         code: "CAPABILITY_VERIFICATION_PENDING", verification_required: true, next_poll_after_seconds: 30 } });
     }

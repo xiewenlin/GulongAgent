@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import { ObjectId } from "mongodb";
 import { z } from "@hono/zod-openapi";
 import { validateSpecialInlineResult } from "./worklucky-capabilities.js";
+import { CAPABILITY_VERIFICATION_POLICY, requiresAutomaticCapabilityVerification } from "./capability-verification-policy.js";
 
 export const AUTO_VERIFICATION_PROTOCOL = "gulong-auto-verification-v1";
 export const AUTO_VERIFICATION_COLLECTION = "capabilityAutoVerifications";
@@ -222,7 +223,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
     return Boolean(inventory && adapterFor(inventory, record.model)
       && adapter.isVerifiedModel(inventory, record.verifiedModel, record.contractTests) === true);
   }
-  async function report({ binding, reports }) {
+  async function report({ binding, reports, migrationPolicy, automaticCapabilityIds }) {
     const active = await currentBinding(binding);
     await limited(String(active._id), "report", 12);
     assert(Array.isArray(reports) && reports.length > 0 && reports.length <= 64, "VERIFICATION_REPORT_INVALID", "每次须上报 1 至 64 项能力", 400);
@@ -232,11 +233,38 @@ export function createCapabilityAutoVerificationService(dependencies) {
     "VERIFICATION_REPORT_INVALID", "能力不能重复，单节点每次最多上报 256 个模型参数组合", 400);
     const instant = new Date(now());
     const records = await collection();
-    // Once enrolled, this consumer must not regain admission by replaying a
-    // legacy self-reported validated=true flag after an automatic expiry.
-    await (await getCollection("nodeAccountBindings")).updateOne({ _id: active._id, status: "active", revokedAt: null },
-      { $set: { autoVerificationEnrolledAt: instant } });
+    assert(migrationPolicy === undefined || migrationPolicy === CAPABILITY_VERIFICATION_POLICY,
+      "VERIFICATION_POLICY_INVALID", "自动验收迁移策略不正确", 400);
+    assert(automaticCapabilityIds === undefined || migrationPolicy === CAPABILITY_VERIFICATION_POLICY,
+      "VERIFICATION_POLICY_INVALID", "逐能力迁移列表必须使用 capability-v2 策略", 400);
+    const bindings = await getCollection("nodeAccountBindings");
+    if (migrationPolicy === CAPABILITY_VERIFICATION_POLICY) {
+      assert(Array.isArray(automaticCapabilityIds) && automaticCapabilityIds.length <= 64
+        && automaticCapabilityIds.every((id) => typeof id === "string" && CAPABILITY.test(id))
+        && new Set(automaticCapabilityIds).size === automaticCapabilityIds.length,
+      "VERIFICATION_POLICY_INVALID", "请提供不重复的自动迁移能力列表，最多64项", 400);
+      for (const id of automaticCapabilityIds) {
+        const inventory = inventories.find((item) => item.capabilityId === id);
+        assert(inventory && (requiresAutomaticCapabilityVerification(active, id) || inventory.models.every((model) => adapterFor(inventory, model))),
+          "VERIFICATION_CAPABILITY_NOT_MIGRATABLE", "待迁移能力须在完整库存中，且每个模型均须有对应自动验收适配器", 409);
+      }
+      // Never downgrade an already-enrolled v1 binding, including a concurrent
+      // v1 report. Existing v2 sets are extended atomically, never replaced.
+      const enrolled = await bindings.updateOne({ _id: active._id, status: "active", revokedAt: null,
+        $or: [{ autoVerificationPolicy: CAPABILITY_VERIFICATION_POLICY }, { autoVerificationEnrolledAt: null }] },
+      { $set: { autoVerificationEnrolledAt: active.autoVerificationEnrolledAt || instant, autoVerificationPolicy: CAPABILITY_VERIFICATION_POLICY },
+        $addToSet: { autoVerificationCapabilityIds: { $each: automaticCapabilityIds } } });
+      assert(enrolled.matchedCount === 1 || enrolled.modifiedCount === 1,
+        "VERIFICATION_MIGRATION_REVIEW_REQUIRED", "此绑定已采用旧版整体验收策略，不能自动降级；请先完成迁移审计", 409);
+    } else {
+      const enrolled = await bindings.updateOne({ _id: active._id, status: "active", revokedAt: null,
+        autoVerificationPolicy: { $ne: CAPABILITY_VERIFICATION_POLICY } }, { $set: { autoVerificationEnrolledAt: instant } });
+      assert(enrolled.matchedCount === 1 || enrolled.modifiedCount === 1,
+        "VERIFICATION_POLICY_REQUIRED", "此绑定已采用逐能力迁移，请沿用 capability-v2 及完整能力库存", 409);
+    }
+    const enrolledBinding = await currentBinding(binding);
     for (const inventory of inventories) {
+      const automatic = requiresAutomaticCapabilityVerification(enrolledBinding, inventory.capabilityId);
       await records.updateMany({ bindingId: String(active._id), capabilityId: inventory.capabilityId,
         $or: [{ matrixSha256: { $ne: inventory.matrixSha256 } }, { computeGroupId: { $ne: group(active.computeGroupId) } }] },
       { $set: { status: "invalidated", updatedAt: instant, error: { code: "VERIFICATION_MATRIX_CHANGED", message: "模型、制品或分组已变化，等待重新自动验收" } } });
@@ -246,8 +274,10 @@ export function createCapabilityAutoVerificationService(dependencies) {
         await records.updateOne({ _id }, { $setOnInsert: { bindingId: String(active._id), nodeId: active.nodeId, userId: String(active.userId),
           computeGroupId: group(active.computeGroupId), capabilityId: inventory.capabilityId, capabilityVersion: inventory.capabilityVersion,
           artifactSha256: inventory.artifactSha256, matrixSha256: inventory.matrixSha256, model, inventory,
-          status: !inventory.enabled ? "disabled" : adapter ? "pending" : "adapter_required", attempts: 0, createdAt: instant },
-        $set: { reportedAt: instant, updatedAt: instant, inventoryEnabled: inventory.enabled } }, { upsert: true });
+          status: !inventory.enabled ? "disabled" : !automatic ? "migration_deferred" : adapter ? "pending" : "adapter_required", attempts: 0, createdAt: instant,
+          ...(!automatic ? { automaticMigrationEnabled: false } : {}) },
+        $set: { reportedAt: instant, updatedAt: instant, inventoryEnabled: inventory.enabled,
+          ...(automatic ? { automaticMigrationEnabled: true } : {}) } }, { upsert: true });
         if (typeof adapters[inventory.capabilityId]?.isVerifiedModel === "function") {
           const previous = await records.findOne({ _id, status: "active" });
           if (previous && !verifiedAdapterScope(previous, inventory)) {
@@ -256,10 +286,17 @@ export function createCapabilityAutoVerificationService(dependencies) {
           }
         }
         if (!inventory.enabled) await records.updateOne({ _id }, { $set: { status: "disabled", updatedAt: instant } });
-        else if (adapter) await records.updateOne({ _id, status: { $in: ["disabled", "adapter_required", "invalidated"] } }, { $set: { status: "pending", updatedAt: instant } });
+        else if (automatic && adapter) await records.updateOne({ _id, status: { $in: ["disabled", "adapter_required", "invalidated", "migration_deferred"] } }, { $set: { status: "pending", updatedAt: instant } });
       }
     }
-    return { ok: true, protocol: AUTO_VERIFICATION_PROTOCOL, verifications: await list({ bindingId: String(active._id), limit: 256 }) };
+    return { ok: true, protocol: AUTO_VERIFICATION_PROTOCOL, migration: {
+      policy: enrolledBinding.autoVerificationPolicy || "binding-v1",
+      automatic_capability_ids: enrolledBinding.autoVerificationPolicy === CAPABILITY_VERIFICATION_POLICY
+        ? enrolledBinding.autoVerificationCapabilityIds : inventories.map((item) => item.capabilityId),
+      capabilities: inventories.map((item) => ({ capability_id: item.capabilityId,
+        mode: requiresAutomaticCapabilityVerification(enrolledBinding, item.capabilityId) ? "automatic" : "legacy_compatibility",
+        all_models_have_adapter: item.models.every((model) => Boolean(adapterFor(item, model))) })),
+    }, verifications: await list({ bindingId: String(active._id), limit: 256 }) };
   }
   async function list({ bindingId, limit = 100 } = {}) {
     assert(Number.isSafeInteger(limit) && limit > 0 && limit <= 256, "VERIFICATION_QUERY_INVALID", "每次最多查询 256 项自动验收状态", 400);
@@ -322,7 +359,9 @@ export function createCapabilityAutoVerificationService(dependencies) {
     const budgetId = `${active._id}:${instant.toISOString().slice(0, 10)}`;
     const priorBudget = await (await getCollection(BUDGETS)).findOne({ _id: budgetId });
     if ((priorBudget?.count || 0) >= 16) return noChallenge({ ok: true, challenge: null, code: "VERIFICATION_DAILY_BUDGET_EXHAUSTED", retry_after_seconds: 3600 });
-    const selected = candidates.find((item) => (priorBudget?.models?.[item._id] || 0) < 3 && adapterFor(item.inventory, item.model));
+    const selected = candidates.find((item) => item.automaticMigrationEnabled !== false
+      && requiresAutomaticCapabilityVerification(active, item.capabilityId)
+      && (priorBudget?.models?.[item._id] || 0) < 3 && adapterFor(item.inventory, item.model));
     if (!selected) return noChallenge({ ok: true, challenge: null, retry_after_seconds: 60 });
     if (!await lock(`binding:${active._id}`, challengeId, instant, String(active._id))) return noChallenge({ ok: true, challenge: null, retry_after_seconds: 15 });
     let globalSlot = null;
@@ -498,6 +537,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
     const instant = new Date(suppliedNow || now());
     const accepted = await (await collection()).find({ bindingId: String(bindingId), nodeId: binding.nodeId, userId: String(binding.userId),
       computeGroupId: group(binding.computeGroupId), matrixSha256: inventory.matrixSha256, status: "active", inventoryEnabled: true,
+      automaticMigrationEnabled: { $ne: false },
       testedAt: { $lte: instant }, expiresAt: { $gt: instant } }).limit(64).toArray();
     if (!accepted.length) return null;
     const records = accepted.filter((item) => item.verifiedModel && item.contractTests && HASH.test(item.testEvidenceSha256 || "")
@@ -547,7 +587,8 @@ export function registerCapabilityAutoVerificationRoutes(app, dependencies) {
     assert(isObject(payload), "VALIDATION_ERROR", "请提供 JSON 对象", 400);
     return c.json(await action(auth.binding, payload, c));
   });
-  app.post(`${base}/report`, bound((binding, body) => service.report({ binding, reports: body.capabilities })));
+  app.post(`${base}/report`, bound((binding, body) => service.report({ binding, reports: body.capabilities,
+    migrationPolicy: body.migration_policy, automaticCapabilityIds: body.automatic_capability_ids })));
   app.post(`${base}/next`, bound((binding, body) => service.next({ binding, dryRun: body.dry_run ?? false, resources: body.resources,
     requestId: body.request_id, leaseToken: body.lease_token })));
   app.post(`${base}/:id/outputs`, bound((binding, body, c) => service.outputUpload({ binding, challengeId: c.req.param("id"), leaseToken: body.lease_token,
@@ -580,8 +621,13 @@ export function registerCapabilityAutoVerificationRoutes(app, dependencies) {
       current_task_remaining_seconds: z.number().int().min(0), running_task_count: z.number().int().min(0) }).passthrough();
     const manifestSchema = z.object({ lease_token: z.string().min(32).max(256), role: z.enum(["primary_audio", "primary_image", "primary_video"]),
       filename: z.string().min(1).max(240), content_type: z.string().max(100), bytes: z.number().int().positive().max(64 * 1024 * 1024), sha256: artifactSchema });
+    const migrationSchema = z.object({ policy: z.enum(["binding-v1", CAPABILITY_VERIFICATION_POLICY]),
+      automatic_capability_ids: z.array(z.string()), capabilities: z.array(z.object({ capability_id: z.string(),
+        mode: z.enum(["automatic", "legacy_compatibility"]), all_models_have_adapter: z.boolean() })) });
     const requestSchemas = {
-      report: z.object({ capabilities: z.array(inventorySchema).min(1).max(64) }),
+      report: z.object({ capabilities: z.array(inventorySchema).min(1).max(64).describe("完整的结构化安装与共享库存，不能仅上报待迁移的三项能力而丢弃其他能力"),
+        migration_policy: z.literal(CAPABILITY_VERIFICATION_POLICY).optional().describe("新消费者显式使用capability-v2；省略保留旧版绑定级行为，已迁移v2节点不得再省略"),
+        automatic_capability_ids: z.array(z.string().regex(CAPABILITY)).max(64).optional().describe("capability-v2时必填；服务器原子追加的能力迁移范围，不是验收通过列表；清空或遗漏不能撤销已迁移ID") }),
       next: z.object({ dry_run: z.boolean().default(false), resources: resourceSchema.optional(),
         request_id: z.string().regex(REQUEST_ID).optional(), lease_token: z.string().regex(CLIENT_SECRET).optional() }),
       "{id}/outputs": manifestSchema,
@@ -599,11 +645,15 @@ export function registerCapabilityAutoVerificationRoutes(app, dependencies) {
       request: { ...(suffix.startsWith("{id}") ? { params: z.object({ id: z.string().regex(/^gcv_[a-f0-9-]{36}$/) }) } : {}),
         body: { content: { "application/json": { schema: requestSchemas[suffix] } } } },
       responses: { 200: { description: "仅自动真实验收通过的精确模型/维度/功能可开放；next 的 dry_run 不领取、不消耗预算",
-        ...(suffix === "next" ? { content: { "application/json": { schema: z.object({ ok: z.literal(true), protocol: z.string().optional(), challenge: challengeSchema.nullable(),
+        ...(suffix === "report" ? { content: { "application/json": { schema: z.object({ ok: z.literal(true), protocol: z.string(),
+          migration: migrationSchema, verifications: z.array(objectSchema) }) } } }
+          : suffix === "next" ? { content: { "application/json": { schema: z.object({ ok: z.literal(true), protocol: z.string().optional(), challenge: challengeSchema.nullable(),
           request_id: z.string().nullable().optional(), state: z.string().optional(), lease_valid: z.boolean().optional(), recovered: z.boolean().optional(),
           execute_once: z.boolean().optional(), execution_policy: z.string().optional(), retry_after_seconds: z.number().optional(), code: z.string().optional(), queue: z.string().optional() }) } } }
           : suffix.endsWith("outputs") ? { content: { "application/json": { schema: z.object({ output_id: z.string(), object_key: z.string(), url: z.string().url(), method: z.literal("PUT"), headers: z.record(z.string(), z.string()), expires_at: z.iso.datetime() }) } } } : {}) },
-        400: { description: "参数不正确" }, 401: { description: "节点未绑定" }, 403: { description: "跨节点、跨分组或租约无效" }, 409: { description: "状态或实物校验不通过" }, 429: { description: "限流" }, 503: { description: "服务或适配器未就绪，不开放派单" } } });
+        400: { description: "参数不正确" }, 401: { description: "节点未绑定" }, 403: { description: "跨节点、跨分组或租约无效" },
+        409: { description: "状态或实物校验不通过；report: VERIFICATION_CAPABILITY_NOT_MIGRATABLE=新追加能力没有完整适配器，VERIFICATION_MIGRATION_REVIEW_REQUIRED=v1绑定不可降级，VERIFICATION_POLICY_REQUIRED=v2请求须保留策略" },
+        429: { description: "限流" }, 503: { description: "服务或适配器未就绪，不开放派单" } } });
     for (const [suffix, params] of [["by-request/{key}", z.object({ key: z.string().regex(REQUEST_ID) })], ["challenges/{id}", z.object({ id: z.string().regex(/^gcv_[a-f0-9-]{36}$/) })]]) {
       app.openAPIRegistry.registerPath({ method: "get", path: `${base}/${suffix}`, tags: ["Automatic Capability Verification"], summary: "按原请求编号或验收任务恢复安全状态",
         security: [{ accountBinding: [] }], request: { params, headers: z.object({ "X-Gulong-Verification-Lease": z.string().min(32).max(256) }) },

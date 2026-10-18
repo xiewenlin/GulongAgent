@@ -4,7 +4,7 @@ import { apiFetch, localizeErrorMessage } from "../api.js";
 import "./CapabilityConsumersPanel.css";
 
 const ROOT = "/api/admin/capability-consumers";
-const LABELS = { pending: "等待自动验收", queued: "等待自动验收", leased: "正在验收", verifying: "正在核验结果", active: "已通过", failed: "验收未通过", retry_wait: "等待自动重试", adapter_required: "等待节点适配", expired: "等待重新验收", revoked: "已停用" };
+const LABELS = { pending: "等待自动验收", queued: "等待自动验收", leased: "正在验收", verifying: "正在核验结果", active: "已通过", failed: "验收未通过", retry_wait: "等待自动重试", adapter_required: "等待节点适配", migration_deferred: "暂缓自动迁移", disabled: "未启用共享", invalidated: "等待重新验收", expired: "等待重新验收", revoked: "已停用" };
 export function consumerBindingSearchParams(value) {
   const query = String(value || "").trim();
   return new URLSearchParams(query ? /^[a-fA-F0-9]{64}$/.test(query) ? { node_id: query } : { q: query } : {});

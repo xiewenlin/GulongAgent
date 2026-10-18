@@ -51,7 +51,16 @@ function mutate(row, update, inserting = false) {
   for (const [key, value] of Object.entries(update.$set || {})) assign(row, key, value);
   for (const key of Object.keys(update.$unset || {})) assign(row, key, null, true);
   for (const [key, value] of Object.entries(update.$inc || {})) assign(row, key, (nested(row, key) || 0) + value);
-  const supported = new Set(["$setOnInsert", "$set", "$unset", "$inc"]);
+  for (const [key, value] of Object.entries(update.$addToSet || {})) {
+    const existing = nested(row, key);
+    if (existing !== undefined && !Array.isArray(existing)) throw new Error("$addToSet requires an array field");
+    const values = existing || [];
+    for (const item of value && typeof value === "object" && "$each" in value ? value.$each : [value]) {
+      if (!values.some((previous) => equal(previous, item))) values.push(clone(item));
+    }
+    assign(row, key, values);
+  }
+  const supported = new Set(["$setOnInsert", "$set", "$unset", "$inc", "$addToSet"]);
   for (const key of Object.keys(update)) if (!supported.has(key)) throw new Error(`Memory Mongo fixture does not implement ${key}`);
 }
 

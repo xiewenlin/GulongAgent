@@ -398,7 +398,35 @@ npm run build
 
 协议：`gulong-auto-verification-v1`。管理员页面改为“共享模型状态”，仅查询自动状态，不再上传/编辑 JSON 手工新增验收。旧 `POST /api/admin/capability-consumers/acceptances` 经管理员和来源验证后返回 `410 MANUAL_ACCEPTANCE_RETIRED`；已有未过期有效记录保持兼容。
 
-节点首次上报自动库存后，服务端为该绑定登记 `autoVerificationEnrolledAt`：此后不能用旧的自报 `validated=true` 或历史人工记录绕过自动验收到期/模型交集。未升级的既有消费者暂按原合同兼容，不能把这种兼容显示成“已自动验收”。自动通过的图像模型、配音音色同样只使用实际通过的交集。
+旧版请求首次上报后保存绑定级 `autoVerificationEnrolledAt`，仍按原绑定级严格策略处理，不允许静默回退。新消费者使用下面的 `capability-v2` 逐能力策略；不能把未迁移能力的历史兼容显示成“已自动验收”。自动通过的图像模型、配音音色同样只使用实际通过的交集。
+
+### 完整库存与逐能力迁移（capability-v2）
+
+节点必须继续上报完整的已安装、启用和共享选择库存，不通过只报三项来隐去其他能力。首次自动上报使用：
+
+```json
+{
+  "migration_policy": "capability-v2",
+  "automatic_capability_ids": ["gulong_engine.agent_chat", "gulong_engine.embedding", "gulong_engine.music"],
+  "capabilities": [
+    {"capability_id":"gulong_engine.agent_chat","capability_version":"1.0.0","installed":true,"enabled":true,"sharing_opt_in":true,"artifact_sha256":"0000000000000000000000000000000000000000000000000000000000000000","models":[{"id":"actual-chat-model","tools":false,"multimodal":false}]},
+    {"capability_id":"gulong_engine.embedding","capability_version":"1.0.0","installed":true,"enabled":true,"sharing_opt_in":true,"artifact_sha256":"0000000000000000000000000000000000000000000000000000000000000000","models":[{"id":"actual-vector-model","dimension":1024}]},
+    {"capability_id":"gulong_engine.music","capability_version":"1.0.0","installed":true,"enabled":true,"sharing_opt_in":true,"artifact_sha256":"0000000000000000000000000000000000000000000000000000000000000000","models":[{"id":"actual-music-model","max_duration_seconds":300}],"asr_languages":["zh"]},
+    {"capability_id":"gulong_engine.video","capability_version":"1.0.0","installed":true,"enabled":true,"sharing_opt_in":true,"artifact_sha256":"0000000000000000000000000000000000000000000000000000000000000000","models":[{"id":"minimax_h3"}]}
+  ]
+}
+```
+
+示例中的模型名、零摘要及安装选择仅说明数据类型，必须替换为该节点的真实值，并继续保留实际存在的其他能力。`capabilities` 每项仍遵守下述模型/制品合同。`automatic_capability_ids` 为 0–64 个不重复且存在于本次库存的能力 ID，新追加能力的每个模型都必须有实际服务器适配器，否则整个请求在登记迁移前返回 `409 VERIFICATION_CAPABILITY_NOT_MIGRATABLE`。已迁移能力出现未知版本或未适配的新变体时仍接受完整库存、使旧矩阵失效并保持 `adapter_required`，不能因更新被拒而继续使用旧证明。该列表是消费者自动升级的范围选择，不是人工新增验收，也不会批准其模型。
+
+- 服务端原子追加 `autoVerificationCapabilityIds`，保存 `autoVerificationPolicy=capability-v2`；重试、并发上报、列表清空或库存遗漏只能扩展，不能撤销已迁移 ID。
+- 已迁移能力采用自动结果的精确交集；pending、失败、到期、禁用、制品/模型/分组变更均禁止回退到旧 GCA 或客户端 `validated=true`。
+- 未迁移能力记录为 `migration_deferred`，不会领取自动探测，仅保留原有能力版本、验证新鲜度、制品、GCA（若该原合同要求）、产品、算力分组和资源槽位规则。没有旧证明的能力仍不可用；不新建 GCA、不延长旧有效期、不为新制品继承旧证明、不放开原本 `dispatchable=false` 的能力。原生 H3 独立接口也不因另一个能力迁移而被整绑定停用。
+- 图像编辑、SAM/Whisper/MediaPipe 的输入 fixture、统一 video/TTS 等未完整接通时，仍完整上报库存，但不能把文生图通过当作这些功能的验收；只有对应完整适配和实测通过后再追加迁移 ID。
+- 已经是 v1 绑定级策略的节点请求 v2 返回 `409 VERIFICATION_MIGRATION_REVIEW_REQUIRED`，不通过客户端改变策略解除原保护；需要独立迁移审计。v2 节点以后每次 `/report` 都必须沿用策略，省略则返回 `409 VERIFICATION_POLICY_REQUIRED`。
+- 返回 `migration.policy`、累计 `migration.automatic_capability_ids` 和逐能力 `{capability_id,mode,all_models_have_adapter}`。`mode=legacy_compatibility` 不是已验证或已在线；实时鉴权目录才是派单依据。`all_models_have_adapter=true` 也不代表所有参数/输入模式已通过。
+
+只迁移某项能力时，其他能力的有效历史资格不能受影响；领取最后一次绑定复核仍按订单的具体 capability 做迁移检查。迁移前已合法领取的任务可以按原 fenced lease 完成，不得为了迁移取消现有任务、重复执行或写新账务。
 
 自动流程是“真实节点上报 → 空闲时领取受限随机探测 → 调用本次指定模型一次 → 上传实际结果 → 官网校验 → 精确模型自动开放”。不能把所有 `validated`、`contract_tests` 布尔值置为真来代替真实推理；自动验收接口上线也不代表所有节点已安装新消费者或所有模型已经通过。
 

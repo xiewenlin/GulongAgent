@@ -61,7 +61,7 @@ function fixture(suffix = "agent_chat") {
   };
   const resources = () => ({ gpu_state: "idle", gpu_observed_at: new Date().toISOString(), current_task_remaining_seconds: 0,
     running_task_count: 0, estimated_total_seconds: 0, max_concurrent_tasks: 3 });
-  const report = () => call("/api/v1/capability-verifications/report", { capabilities: [inventory] }, true);
+  const report = (options = {}) => call("/api/v1/capability-verifications/report", { capabilities: [inventory], ...options }, true);
   const next = () => call("/api/v1/capability-verifications/next", { resources: resources() }, true);
   const claim = () => call("/api/v1/capability-orders/claim", { node_id: binding.nodeId, node_name: binding.nodeName,
     protocol_version: CAPABILITY_ORDER_PROTOCOL, capabilities: [inventory], resources: resources() }, true);
@@ -328,4 +328,180 @@ test("memory fixture precisely models missing-field $not and dotted increments u
   assert.equal(await collection.findOneAndUpdate({ _id: "budget", "models.abc": { $not: { $gte: 3 } } },
     { $inc: { count: 1, "models.abc": 1 } }, { returnDocument: "after" }), null);
   assert.equal((await collection.findOne({ _id: "budget" })).count, 3);
+});
+
+function historicalAcceptance(f) {
+  const id = `gca_${randomUUID()}`;
+  const tests = { exact_request: true, complete_response: true,
+    ...(f.inventory.capability_id === "gulong_engine.embedding" ? { exact_model_dimension: true } : {}) };
+  f.inventory.validated = true;
+  Object.assign(f.inventory.validation, { acceptance_id: id, contract_tests: tests, tested_at: new Date(Date.now() - 1000).toISOString() });
+  f.collection("capabilityConsumerAcceptances").rows.push({ _id: id, bindingId: String(f.binding._id),
+    capabilityId: f.inventory.capability_id, capabilityVersion: "1.0.0", artifactSha256: "A".repeat(64),
+    testEvidenceSha256: "B".repeat(64), models: structuredClone(f.inventory.models), defaultModel: f.inventory.default_model,
+    contractTests: tests, asrLanguages: [], adminConfirmedRealConsumer: true, status: "active",
+    testedAt: new Date(Date.now() - 1000), expiresAt: new Date(Date.now() + 7 * 86400_000) });
+}
+
+const extraChat = () => ({ capability_id: "gulong_engine.agent_chat", capability_version: "1.0.0", installed: true,
+  enabled: true, sharing_opt_in: true, validated: false, models: [{ id: "separate-chat", tools: false, multimodal: false }],
+  default_model: "separate-chat", validation: { artifact_sha256: "C".repeat(64) } });
+const v2 = (ids, capabilities) => ({ migration_policy: "capability-v2", automatic_capability_ids: ids,
+  ...(capabilities ? { capabilities } : {}) });
+
+test("capability-v2 preserves an unlisted valid historical capability, then migrates it one-way without dropping the full inventory", async () => {
+  const f = fixture("embedding"); historicalAcceptance(f);
+  const chat = extraChat();
+  await f.claim();
+  assert.equal((await f.catalog()).dispatchable, true);
+  const first = await f.report(v2([chat.capability_id], [f.inventory, chat]));
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  assert.deepEqual(f.binding.autoVerificationCapabilityIds, [chat.capability_id]);
+  assert.equal(first.body.migration.capabilities.find((item) => item.capability_id === f.inventory.capability_id).mode, "legacy_compatibility");
+  assert.equal(first.body.verifications.filter((item) => item.capability_id === f.inventory.capability_id).every((item) => item.status === "migration_deferred"), true);
+  const probe = (await f.next()).body.challenge;
+  assert.equal(probe.capability_id, chat.capability_id, "unmigrated embedding cannot receive an automatic challenge");
+  await f.call(`/api/v1/capability-verifications/${probe.id}/result`, { lease_token: probe.lease_token, status: "failed", error: "隔离测试主动结束" }, true);
+  await f.claim();
+  assert.equal((await f.catalog()).dispatchable, true, "an unrelated migration must not stop a valid old GCA");
+  const created = await f.create(f.inventory.models[0].id);
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const leased = await f.claim();
+  assert.equal(leased.body.task.id, created.body.order.id);
+  const migrated = await f.report(v2([f.inventory.capability_id], [f.inventory, chat]));
+  assert.equal(migrated.status, 200, JSON.stringify(migrated.body));
+  assert.deepEqual(new Set(f.binding.autoVerificationCapabilityIds), new Set([chat.capability_id, f.inventory.capability_id]));
+  const omitted = await f.report(v2([], [chat]));
+  assert.equal(omitted.status, 200, JSON.stringify(omitted.body));
+  assert.equal((await f.catalog()).dispatchable, false, "omitting a migrated ID or capability cannot restore old GCA admission");
+  assert.equal((await f.create(f.inventory.models[0].id)).status, 409);
+  const stillOld = await f.claim();
+  assert.equal(stillOld.body.task, null);
+  assert.equal(stillOld.body.claim_plan.code, "CAPABILITY_VERIFICATION_PENDING");
+  assert.equal(f.collection("capabilityConsumerAcceptances").rows[0].status, "active", "no historic evidence is deleted or extended");
+  const finished = await f.call("/api/v1/capability-orders/callback", { order_id: leased.body.task.id,
+    claim_id: leased.body.task.claim_id, event_id: "old-inflight-completed", status: "completed",
+    inline_result: { response: { object: "list", model: leased.body.task.parameters.model,
+      data: [{ object: "embedding", index: 0, embedding: [1, 0, 0] }, { object: "embedding", index: 1, embedding: [0, 1, 0] }],
+      usage: { prompt_tokens: 10, total_tokens: 10 } } } }, true);
+  assert.equal(finished.status, 200, JSON.stringify(finished.body));
+  assert.equal(finished.body.order_status, "completed", "a fenced in-flight task may finish without a new admission");
+  f.assertNoAccounting();
+});
+
+test("full capability-v2 inventory retains unsupported video and SAM while unlisted legacy image keeps its original admission", async () => {
+  const f = fixture();
+  const image = { capability_id: "gulong_engine.image", capability_version: "1", protocol_version: CAPABILITY_ORDER_PROTOCOL,
+    installed: true, enabled: true, sharing_opt_in: true, validated: true, max_concurrent: 3,
+    models: [{ id: "zimage" }], supported_models: ["zimage"], validation: { artifact_sha256: "D".repeat(64), tested_at: new Date().toISOString() } };
+  const other = ["gulong_engine.video", "sam.video_track"].map((id) => ({ ...image, capability_id: id,
+    capability_version: "1.0.0", validated: false, models: [{ id: "installed-but-not-verified" }] }));
+  const reported = await f.report(v2([f.inventory.capability_id], [f.inventory, image, ...other]));
+  assert.equal(reported.status, 200, JSON.stringify(reported.body));
+  for (const capability of [image, ...other]) {
+    assert.ok(reported.body.verifications.some((row) => row.capability_id === capability.capability_id && row.status === "migration_deferred"));
+  }
+  const claim = await f.call("/api/v1/capability-orders/claim", { node_id: f.binding.nodeId, protocol_version: CAPABILITY_ORDER_PROTOCOL,
+    capabilities: [f.inventory, image, ...other], resources: { gpu_state: "idle", gpu_observed_at: new Date().toISOString(),
+      current_task_remaining_seconds: 0, running_task_count: 0, max_concurrent_tasks: 3 } }, true);
+  assert.equal(claim.status, 200, JSON.stringify(claim.body));
+  const catalog = (await f.call("/api/v1/capability-orders/catalog?product=worklucky")).body.capabilities;
+  assert.equal(catalog.find((row) => row.capability_id === image.capability_id).dispatchable, true);
+  assert.equal(catalog.find((row) => row.capability_id === "gulong_engine.video").dispatchable, false);
+  assert.equal(f.collection("capabilityAutoVerifications").rows.filter((row) => row.capabilityId !== f.inventory.capability_id).every((row) => row.status === "migration_deferred"), true);
+  f.assertNoBusinessOrders(); f.assertNoAccounting();
+});
+
+test("capability-v2 policy validation cannot downgrade a v1 binding, select unsupported models or omit its policy on retry", async () => {
+  const old = fixture();
+  await old.report();
+  const rejected = await old.report(v2([old.inventory.capability_id]));
+  assert.equal(rejected.status, 409, JSON.stringify(rejected.body));
+  assert.equal(rejected.body.code, "VERIFICATION_MIGRATION_REVIEW_REQUIRED");
+  assert.equal(old.binding.autoVerificationPolicy, undefined);
+  for (const body of [v2(["sam.video_track"]), v2(["gulong_engine.agent_chat", "gulong_engine.agent_chat"]),
+    { automatic_capability_ids: ["gulong_engine.agent_chat"] }, { migration_policy: "capability-v2" }]) {
+    const f = fixture();
+    const response = await f.report(body);
+    assert.ok([400, 409].includes(response.status), JSON.stringify(response.body));
+    assert.equal(f.binding.autoVerificationEnrolledAt, undefined);
+    assert.equal(f.collection("capabilityAutoVerifications").rows.length, 0);
+    assert.equal(f.collection("capabilityVerificationBudgets").rows.length, 0);
+    f.assertNoBusinessOrders(); f.assertNoAccounting();
+  }
+  const f = fixture();
+  assert.equal((await f.report(v2([f.inventory.capability_id]))).status, 200);
+  const retry = await f.report();
+  assert.equal(retry.status, 409, JSON.stringify(retry.body));
+  assert.equal(retry.body.code, "VERIFICATION_POLICY_REQUIRED");
+  assert.deepEqual(f.binding.autoVerificationCapabilityIds, [f.inventory.capability_id]);
+  f.assertNoBusinessOrders(); f.assertNoAccounting();
+});
+
+test("concurrent capability-v2 reports atomically union scopes and cannot return the node to legacy mode", async () => {
+  const f = fixture("embedding"); const chat = extraChat();
+  const results = await Promise.all([f.report(v2([f.inventory.capability_id], [f.inventory, chat])),
+    f.report(v2([chat.capability_id], [f.inventory, chat]))]);
+  assert.equal(results.every((result) => result.status === 200), true, JSON.stringify(results));
+  assert.deepEqual(new Set(f.binding.autoVerificationCapabilityIds), new Set([f.inventory.capability_id, chat.capability_id]));
+  assert.equal(f.collection("capabilityAutoVerifications").rows.every((row) => row.automaticMigrationEnabled === true && row.status === "pending"), true);
+  assert.equal((await f.report(v2([], [f.inventory, chat]))).status, 200);
+  assert.equal((await f.claim()).body.claim_plan.code, "CAPABILITY_VERIFICATION_PENDING");
+  f.assertNoBusinessOrders(); f.assertNoAccounting();
+});
+
+test("the final claim fence applies a concurrent v2 migration only to the selected capability", async () => {
+  for (const sameCapability of [false, true]) {
+    const f = fixture("embedding"); historicalAcceptance(f); const chat = extraChat();
+    await f.claim();
+    const created = await f.create(f.inventory.models[0].id);
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    let reads = 0, concurrent = null;
+    f.hooks.findOne = async (name, query) => {
+      if (name !== "nodeAccountBindings" || String(query._id) !== String(f.binding._id) || ++reads !== 2) return;
+      f.hooks.findOne = null;
+      concurrent = await f.report(v2([sameCapability ? f.inventory.capability_id : chat.capability_id], [f.inventory, chat]));
+    };
+    const claimed = await f.claim();
+    assert.equal(concurrent?.status, 200, JSON.stringify(concurrent));
+    assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
+    if (sameCapability) {
+      assert.equal(claimed.body.task, null);
+      assert.equal(claimed.body.claim_plan.code, "CAPABILITY_VERIFICATION_PENDING");
+      assert.equal(f.collection("capabilityOrders").rows[0].status, "queued");
+      assert.equal(f.collection("capabilityNodeSlots").rows.flatMap((row) => row.leases || []).length, 0);
+    } else assert.equal(claimed.body.task.id, created.body.order.id, "an unrelated migration cannot block this valid legacy claim");
+    f.assertNoAccounting();
+  }
+});
+
+test("concurrent v1 and v2 enrollment cannot weaken the winning server migration policy", async () => {
+  for (const v2First of [true, false]) {
+    const f = fixture();
+    const actions = [() => f.report(v2([f.inventory.capability_id])), () => f.report()];
+    if (!v2First) actions.reverse();
+    const results = await Promise.all(actions.map((action) => action()));
+    assert.equal(results.filter((result) => result.status === 200).length, 1, JSON.stringify(results));
+    const rejected = results.find((result) => result.status !== 200);
+    assert.equal(rejected.status, 409, JSON.stringify(results));
+    assert.equal(rejected.body.code, f.binding.autoVerificationPolicy === "capability-v2"
+      ? "VERIFICATION_POLICY_REQUIRED" : "VERIFICATION_MIGRATION_REVIEW_REQUIRED");
+    assert.equal((await f.claim()).body.claim_plan.code, "CAPABILITY_VERIFICATION_PENDING");
+    f.assertNoAccounting(); f.assertNoBusinessOrders();
+  }
+});
+
+test("new unsupported variants of an already migrated capability invalidate old automatic proofs without a legacy fallback", async () => {
+  const f = fixture(); historicalAcceptance(f);
+  await f.claim();
+  assert.equal((await f.report(v2([f.inventory.capability_id]))).status, 200);
+  f.inventory.models[0].tools = true;
+  const changed = await f.report(v2([f.inventory.capability_id]));
+  assert.equal(changed.status, 200, JSON.stringify(changed.body));
+  assert.ok(changed.body.verifications.some((row) => row.model.tools === true && row.status === "adapter_required"));
+  assert.ok(changed.body.verifications.some((row) => row.status === "invalidated"));
+  assert.equal((await f.catalog()).dispatchable, false);
+  assert.equal((await f.claim()).body.task, null);
+  assert.equal(f.collection("capabilityConsumerAcceptances").rows[0].status, "active");
+  f.assertNoAccounting(); f.assertNoBusinessOrders();
 });

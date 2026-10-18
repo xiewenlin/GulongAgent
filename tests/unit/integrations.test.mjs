@@ -1548,3 +1548,20 @@ test("WorkLucky documentation retires manual acceptance creation instead of inst
   assert.match(source, /verified_model/);
   assert.doesNotMatch(source, /必须具备管理员登记的可信验收 ID|导入登记 JSON|成功返回201 `\{acceptance|登记返回的UUID/);
 });
+
+test("OpenAPI describes explicit complete-inventory per-capability migration and its server-owned response", async () => {
+  const response = await app.request("http://localhost/api/openapi.json");
+  assert.equal(response.status, 200);
+  const openapi = await response.json();
+  const route = openapi.paths["/api/v1/capability-verifications/report"].post;
+  const request = route.requestBody.content["application/json"].schema.properties;
+  assert.ok(request.migration_policy);
+  assert.equal(JSON.stringify(request.migration_policy).includes("capability-v2"), true);
+  assert.ok(request.automatic_capability_ids);
+  assert.match(request.capabilities.description, /完整/);
+  const migration = route.responses["200"].content["application/json"].schema.properties.migration.properties;
+  assert.ok(migration.policy);
+  assert.ok(migration.automatic_capability_ids);
+  assert.ok(migration.capabilities);
+  assert.match(route.responses["409"].description, /VERIFICATION_MIGRATION_REVIEW_REQUIRED/);
+});
