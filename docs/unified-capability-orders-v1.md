@@ -420,6 +420,8 @@ npm run build
 
 正常领取返回 `state=leased`、`lease_valid=true`、`execute_once=true`，以及 `challenge` 中的 `id/expires_at/capability_id/capability_version/artifact_sha256/model/parameters/budget/compute_group_id/node_id/output_upload_required`。探测租约 15 分钟。客户端必须原样调用 `parameters`，不换模型、不裁切参数、不退回远程付费服务。
 
+验收状态中的 `model` 是原始已安装库存；`verified_model` 才是 `active` 时本次真实通过的模型范围，另有服务端 `contract_tests/asr_languages`。失败或失效时这些通过字段为空。特别是音乐库存的 300 秒上限不等于 12 秒探测后的已验证上限；消费者须使用 `verified_model`，业务目录和派单始终以服务端已通过交集为准。
+
 HTTP 超时不等于请求没创建。必须用原请求编号和原 secret 查询；恢复响应的 `execution_policy=resume_existing_journal_only` 表示只恢复本地既有执行日志，不能把查到的相同 challenge 再推理一次。`preparing/failed/expired/invalidated/not_issued`、`lease_valid=false` 或无法确认原执行状态时不得启动推理，也不得通过换请求编号掩盖未知执行。相同结果重放幂等，不同结果使用同一探测编号返回 `409 VERIFICATION_REPLAY_CONFLICT`。
 
 ### 清单、预算与模型范围

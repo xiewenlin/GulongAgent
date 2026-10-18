@@ -128,6 +128,9 @@ function publicState(record) {
   return { id: record._id, binding_id: record.bindingId, node_id: record.nodeId, capability_id: record.capabilityId,
     capability_version: record.capabilityVersion, artifact_sha256: record.artifactSha256, model: record.model,
     status: record.status, attempts: record.attempts || 0, tested_at: record.testedAt ?? null,
+    verified_model: record.status === "active" ? record.verifiedModel ?? null : null,
+    contract_tests: record.status === "active" ? record.contractTests ?? null : null,
+    asr_languages: record.status === "active" ? record.asrLanguages || [] : [],
     expires_at: record.expiresAt ?? null, next_retry_at: record.nextRetryAt ?? null, next_attempt_at: record.nextRetryAt ?? null,
     error: record.error ?? null, created_at: record.createdAt, updated_at: record.updatedAt };
 }

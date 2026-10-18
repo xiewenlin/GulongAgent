@@ -521,6 +521,9 @@ test("music probe requires actual FLAC plus full original ASR and only certifies
   assert.equal(challenge.parameters.seconds, 12); assert.equal(challenge.output_upload_required, true);
   const result = await submit(f, challenge, { inlineResult: musicEvidence(f, challenge), outputs: [{ output_id: "one-output" }] });
   assert.equal(result.verification.status, "active"); assert.equal(f.hooks.mediaCalls, 1);
+  assert.equal(result.verification.model.max_duration_seconds, 300, "inventory stays distinct from approved range");
+  assert.equal(result.verification.verified_model.max_duration_seconds, 12);
+  assert.equal(result.verification.contract_tests.whole_audio_asr, true);
   const trusted = await f.service.findTrusted({ bindingId: BINDING, report: input });
   assert.equal(trusted.models[0].max_duration_seconds, 12);
   assert.equal(trusted.contractTests.whole_audio_asr, true); assert.deepEqual(trusted.asrLanguages, ["en"]);
