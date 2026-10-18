@@ -39,8 +39,8 @@ WorkLucky 包含在现有 `gulong_engine_monthly` 权益中，不新增用户体
 
 节点使用 `X-Gulong-Account-Binding` 调用以下自动流程，精确请求及恢复合同见[统一能力自动验收](./unified-capability-orders-v1.md#自动共享模型验收2026-10-18)：
 
-1. `POST /api/v1/capability-verifications/report`：上报已安装、启用并明确选择共享的能力、真实制品摘要和完整模型矩阵。上报不是验收通过。
-2. 本地先持久化稳定 `request_id` 和 32 字节随机 `lease_token`，在安全空闲点调用 `POST /api/v1/capability-verifications/next`。每个探测最多一次模型调用，音频最多12秒；与业务任务共用物理执行租约。
+1. `POST /api/v1/capability-verifications/report-v2`：以 `capability-v2` 和自动迁移 ID 列表上报完整库存、真实制品摘要和模型矩阵。上报不是验收通过，未迁移能力不被全绑定停用。
+2. 确认上报返回 `migration.policy=capability-v2` 后，本地先持久化稳定 `request_id` 和 32 字节随机 `lease_token`，在安全空闲点调用 `POST /api/v1/capability-verifications/next`。每个探测最多一次模型调用，音频最多12秒；与业务任务共用物理执行租约。
 3. 严格执行服务器指定模型和参数；媒体通过 `POST /api/v1/capability-verifications/{id}/outputs` 获得短期私有 COS PUT 票据，不把签名地址永久写入日志。
 4. `POST /api/v1/capability-verifications/{id}/result` 回传完整结果及输出编号。官网核验实际对象、摘要、时长、歌词/向量等能力专属证据，才签发有效7天的精确模型记录。
 5. 丢失响应时，使用原绑定令牌及 `X-Gulong-Verification-Lease` 查询 `/by-request/{key}` 或 `/challenges/{id}`，只恢复原本地执行记录，不重跑、换模型或消耗第二次预算。
@@ -52,6 +52,8 @@ agent_chat 每项模型必须明确 `tools` 和 `multimodal`；纯文字通过�
 新消费者首次及后续登记均调用 `/api/v1/capability-verifications/report-v2`，声明 `migration_policy:"capability-v2"` 和 `automatic_capability_ids`，同时保留完整结构化 `capabilities` 库存；不要只报 WorkLucky 三项而丢弃其他已安装能力。旧服务器404、网络未知或响应缺少 `migration.policy=capability-v2` 时停止登记，不能退回旧 `/report` 让旧服务器忽略新字段后整绑定迁移。列表只追加服务器已具备对应适配器、准备自动迁移的能力。服务端原子累计迁移 ID，已迁移能力不能因列表遗漏、清空、重启、失败或到期退回旧 GCA/自报验证；未迁移能力保持原有严格历史校验，不是新增验收，不延长旧记录，也不使新制品继承旧证明。它们在自动状态中显示 `migration_deferred`，不会被领取探测。返回的 `migration.capabilities[].mode=legacy_compatibility` 不代表当前在线或已自动通过。具体合同见[逐能力迁移](./unified-capability-orders-v1.md)。
 
 `autoVerificationEnrolledAt` 仍保留作审计。原 v1 绑定级消费者不能用 v2 请求直接降级，返回 `409 VERIFICATION_MIGRATION_REVIEW_REQUIRED`；已是 v2 的节点省略迁移策略返回 `409 VERIFICATION_POLICY_REQUIRED`。新模型、制品、维度、分组或矩阵变化须遵守其对应校验；所有可用性以实时鉴权目录、组隔离和实际槽位为准。
+
+重试区分两种阶段：`report-v2` 是单调追加的库存登记，网络超时或5xx后可退避并以同一真实库存重试同一专属URL，未收到策略确认前不调用 `next`；404或策略不符时不尝试旧URL。`next` 则可能已经签发一次真实探测，响应丢失只能使用原 `request_id`/secret 查询恢复，不能重新发起模型调用。库存登记重试不消耗推理预算、不产生业务订单。
 
 ## 创建、恢复与取消
 

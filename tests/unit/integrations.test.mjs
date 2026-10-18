@@ -1546,6 +1546,8 @@ test("WorkLucky documentation retires manual acceptance creation instead of inst
   assert.match(source, /capability-verifications\/report/);
   assert.match(source, /X-Gulong-Verification-Lease/);
   assert.match(source, /verified_model/);
+  assert.match(source, /1\. `POST \/api\/v1\/capability-verifications\/report-v2`/);
+  assert.match(source, /库存登记重试不消耗推理预算、不产生业务订单/);
   assert.doesNotMatch(source, /必须具备管理员登记的可信验收 ID|导入登记 JSON|成功返回201 `\{acceptance|登记返回的UUID/);
 });
 
