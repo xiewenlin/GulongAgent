@@ -33,6 +33,7 @@ function matches(row, filter = {}) {
       if (op === "$gt") return candidates.some((item) => scalar(item) > scalar(expected));
       if (op === "$lte") return candidates.some((item) => scalar(item) <= scalar(expected));
       if (op === "$lt") return candidates.some((item) => scalar(item) < scalar(expected));
+      if (op === "$not") return !matches({ value: actual }, { value: expected });
       if (op === "$elemMatch") return Array.isArray(actual) && actual.some((item) => matches(item, expected));
       throw new Error(`Memory Mongo fixture does not implement ${op}`);
     });

@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { compareSharedNodeLoad, normalizeGpuLoadReport } from "./shared-node-scheduler.js";
 
 export const H3_QUEUE_SNAPSHOT_TTL_MS = 3_000;
 export const H3_QUEUE_REFRESH_LEASE_MS = 5_000;
@@ -62,25 +63,25 @@ export function calculateH3ClaimPlan({
   };
 }
 
-export function rankH3LanNodes(nodes = []) {
+export function rankH3LanNodes(nodes = [], now = new Date()) {
   return [...nodes]
     .map((node) => {
       const runningTaskCount = boundedInteger(node?.runningTaskCount, 0, 64, 0);
-      const estimatedTotalSeconds = boundedInteger(node?.estimatedTotalSeconds, 0, 7 * 24 * 60 * 60, 0);
       const maxConcurrentTasks = boundedInteger(node?.capabilities?.maxConcurrentTasks, 1, 8, 1);
+      const resources = normalizeGpuLoadReport(node?.resources || {}, now);
+      const estimate = node?.estimatedTotalSeconds ?? resources.current_task_remaining_seconds;
+      const estimatedTotalSeconds = estimate == null || estimate === Number.POSITIVE_INFINITY ? Number.POSITIVE_INFINITY
+        : boundedInteger(estimate, 0, 31 * 24 * 60 * 60, 0);
       return {
         ...node,
         runningTaskCount,
-        estimatedTotalSeconds,
+        estimatedTotalSeconds: Math.max(estimatedTotalSeconds, resources.current_task_remaining_seconds),
+        gpuState: runningTaskCount > 0 ? "busy" : resources.gpu_state,
         maxConcurrentTasks,
-        availableSlots: Math.max(0, maxConcurrentTasks - runningTaskCount),
+        availableSlots: node.slotBlocked ? 0 : Math.max(0, maxConcurrentTasks - runningTaskCount),
       };
     })
-    .sort((left, right) => (
-      left.estimatedTotalSeconds - right.estimatedTotalSeconds
-      || left.runningTaskCount - right.runningTaskCount
-      || String(left.nodeId || "").localeCompare(String(right.nodeId || ""))
-    ));
+    .sort(compareSharedNodeLoad);
 }
 
 function publicSnapshot(state, now, stale = false) {

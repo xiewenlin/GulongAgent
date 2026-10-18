@@ -3336,7 +3336,7 @@ registerGulongEngineDesktopAuthRoutes(app);
 registerWorkLuckyDesktopAuthRoutes(app);
 registerCapabilityOrderRoutes(app, {
   authenticate: async (c, options) => (await authenticateEnglishDesktop(c)) || (await authenticateGulongEngineDesktop(c)) || authenticateSiteOrDesktopChandler(c, options),
-  requireTrustedMutation,
+  requireTrustedMutation, requireAdmin,
 });
 registerCapabilityConsumerAcceptanceRoutes(app, { getCollection, requireAdmin, requireTrustedMutation });
 registerCapabilityOutputCleanupRoutes(app, { getCollection });

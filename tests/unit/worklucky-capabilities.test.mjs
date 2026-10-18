@@ -51,7 +51,7 @@ test("WorkLucky capabilities are versioned, monthly zero-price and acceptance ga
     assert.equal(item.entitlement, "gulong_engine_monthly");
     assert.equal(item.requiredCapabilityVersion, "1.0.0");
     assert.equal(item.trustedConsumerAcceptanceRequired, true);
-    assert.equal(item.adapterStatus, "consumer_acceptance_required");
+    assert.equal(item.adapterStatus, "automatic_verification_required");
   }
   assert.equal(isWorkLuckyCapability("gulong_engine.video"), false);
   assert.equal(WORKLUCKY_CAPABILITY_DEFINITIONS.find((item) => item.capabilityId === chatId).parametersSchema.properties.request.additionalProperties, true);

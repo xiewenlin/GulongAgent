@@ -54,7 +54,7 @@ const menu = [
   { id: "versions", label: "版本管理", icon: Package },
   { id: "payments", label: "订单管理", icon: ShieldCheck },
   { id: "h3tasks", label: "任务派单", icon: VideoCamera },
-  { id: "capability-consumers", label: "共享能力验收", icon: ShieldCheck },
+  { id: "capability-consumers", label: "共享模型状态", icon: ShieldCheck },
   { id: "worker", label: "威客审核", icon: Briefcase },
   { id: "feedback", label: "用户反馈", icon: ChatCircleText },
 ];

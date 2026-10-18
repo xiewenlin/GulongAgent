@@ -3,6 +3,7 @@ import test from "node:test";
 import { OpenAPIHono } from "@hono/zod-openapi";
 import { ObjectId } from "mongodb";
 import { H3_ACCOUNT_BINDING_HEADER, registerH3SharedRoutes } from "../../server/h3-shared.js";
+import { createCapabilitySlotCoordinator } from "../../server/capability-slots.js";
 
 const GROUP_A = `gug_${"a".repeat(32)}`;
 const GROUP_B = `gug_${"b".repeat(32)}`;
@@ -55,9 +56,11 @@ function update(document, operation, inserting = false) {
   for (const key of Object.keys(operation.$unset || {})) delete document[key];
 }
 function collection(records = []) {
+  const copy = (value) => value instanceof ObjectId ? new ObjectId(value) : value instanceof Date ? new Date(value)
+    : Array.isArray(value) ? value.map(copy) : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, copy(item)])) : value;
   return {
     records,
-    async findOne(filter) { return records.find((record) => matches(record, filter)) || null; },
+    async findOne(filter) { return copy(records.find((record) => matches(record, filter)) || null); },
     find(filter) {
       let rows = records.filter((record) => matches(record, filter));
       return { sort(order) { rows.sort((a, b) => { for (const [key, direction] of Object.entries(order)) { const av = valueAt(a, key); const bv = valueAt(b, key); if (av < bv) return -direction; if (av > bv) return direction; } return 0; }); return this; }, limit(count) { rows = rows.slice(0, count); return this; }, async toArray() { return rows; } };
@@ -78,12 +81,12 @@ function collection(records = []) {
       if (inserting) { record = { _id: filter._id || new ObjectId(), ...filter }; records.push(record); }
       if (!record) return null;
       update(record, operation, inserting);
-      return record;
+      return copy(record);
     },
   };
 }
 
-function fixture({ userGroup = null, nodeGroup = null, taskGroup = userGroup, includeTaskGroup = true, includeTask = true, dependencyGroupReader, userRole = "admin", membershipState = null, outputReceipt = false } = {}) {
+function fixture({ userGroup = null, nodeGroup = null, taskGroup = userGroup, includeTaskGroup = true, includeTask = true, dependencyGroupReader, userRole = "admin", membershipState = null, outputReceipt = false, uploadFailure = false } = {}) {
   const app = new OpenAPIHono();
   const owner = { _id: new ObjectId(), role: userRole, status: "active", email: "requester@example.com", computeGroupId: userGroup };
   const nodeOwner = { _id: new ObjectId(), status: "active", email: "node@example.com" };
@@ -109,7 +112,7 @@ function fixture({ userGroup = null, nodeGroup = null, taskGroup = userGroup, in
     requireTrustedMutation: () => null,
     verifyActivationReceipt: async () => ({ record: { _id: licenseId }, payload: { deviceId: "stable-device-proof" } }),
     queueCoordinator: { snapshot: async () => ({ queuedCount: 1, activeNodeCount: 1, cached: true }), invalidate: async () => {} },
-    createPresignedPutUrl: () => { uploadSignatures++; return "https://cos.example/upload"; },
+    createPresignedPutUrl: () => { uploadSignatures++; if (uploadFailure) throw new Error("temporary COS signing failure"); return "https://cos.example/upload"; },
     createPresignedDownloadUrl: () => "https://cos.example/download",
     headObject: async () => {
       objectInspections++;
@@ -135,6 +138,173 @@ async function authenticatedFixture(options) {
   context.binding.tokenHash = hashOpaqueToken(TOKEN, "h3-account-binding");
   return context;
 }
+
+async function addGlobalH3Node(context, { group = null, state = "idle", remaining = 90, observedAgoMs = 0 } = {}) {
+  const now = new Date();
+  const owner = { _id: new ObjectId(), status: "active", email: "other-node@example.com" };
+  const binding = { _id: new ObjectId(), userId: owner._id, nodeId: "global-other-account-node-0002", nodeName: "全局节点", status: "active", revokedAt: null,
+    computeGroupId: group, lastSeenAt: now, h3ResourcesObservedAt: now,
+    h3Resources: { gpu_state: state, gpu_observed_at: new Date(+now - observedAgoMs).toISOString(), current_task_remaining_seconds: remaining, running_task_count: 0 },
+    capabilities: { maxDurationSeconds: 15, profiles: ["balanced"], samplingSteps: [4], maxImageCount: 9, maxVideoCount: 3, maxAudioCount: 3, maxConcurrentTasks: 4 } };
+  context.collections.get("users").records.push(owner);
+  context.collections.get("nodeAccountBindings").records.push(binding);
+  return binding;
+}
+
+test("H3全局空闲节点优先但不会把跨账号任务或票据交给当前轮询者，5秒后有界回退", async () => {
+  const context = await authenticatedFixture();
+  const peer = await addGlobalH3Node(context);
+  const resources = { gpu_state: "busy", gpu_observed_at: new Date().toISOString(), current_task_remaining_seconds: 10 };
+  const waiting = await context.claim({ resources });
+  assert.equal(waiting.status, 200);
+  const wait = await waiting.json();
+  assert.equal(wait.task, null);
+  assert.equal(wait.claim_plan.queue_reason_code, "PREFERRED_NODE_POLL_WAIT");
+  assert.ok(wait.claim_plan.preferred_node_wait_ms <= 5000);
+  assert.equal(context.task.status, "queued");
+  assert.equal(context.uploadSignatures, 0);
+  assert.equal(JSON.stringify(wait).includes(peer.nodeId), false);
+  context.task.schedulerWaitStartedAt = new Date(Date.now() - 6000);
+  context.binding.nextClaimAt = new Date(0);
+  const fallback = await context.claim({ resources: { ...resources, gpu_observed_at: new Date().toISOString() } });
+  assert.equal(fallback.status, 200);
+  assert.equal((await fallback.json()).task.assigned_node.node_id, context.binding.nodeId);
+  assert.equal(context.uploadSignatures, 1);
+});
+
+test("H3全局显卡空闲比较仍严格隔离用户分组", async () => {
+  const context = await authenticatedFixture({ userGroup: GROUP_A, nodeGroup: GROUP_A });
+  await addGlobalH3Node(context, { group: GROUP_B, remaining: 0 });
+  const response = await context.claim({ resources: { gpu_state: "busy", gpu_observed_at: new Date().toISOString(), current_task_remaining_seconds: 100 } });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).task.assigned_node.node_id, context.binding.nodeId);
+});
+
+test("H3全局已过期显卡状态按unknown处理并回到最短耗时", async () => {
+  const context = await authenticatedFixture();
+  await addGlobalH3Node(context, { observedAgoMs: 31_000, remaining: 100 });
+  const response = await context.claim({ resources: { gpu_state: "busy", gpu_observed_at: new Date().toISOString(), current_task_remaining_seconds: 10 } });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).task.assigned_node.node_id, context.binding.nodeId);
+});
+
+test("H3官网存量活跃任务否定节点虚报的idle与零负载", async () => {
+  const context = await authenticatedFixture();
+  const peer = await addGlobalH3Node(context, { remaining: 0 });
+  context.collections.get("h3SharedTasks").records.push({ ...context.task, _id: new ObjectId(), status: "processing",
+    claimedByNode: { bindingId: peer._id }, claimLeaseUntil: new Date(Date.now() + 60_000), remainingSeconds: 900 });
+  const response = await context.claim({ resources: { gpu_state: "busy", gpu_observed_at: new Date().toISOString(), current_task_remaining_seconds: 10 } });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).task.assigned_node.node_id, context.binding.nodeId);
+});
+
+test("H3全局排序纳入其他统一能力的真实槽位与剩余耗时", async () => {
+  const context = await authenticatedFixture();
+  const peer = await addGlobalH3Node(context, { remaining: 0 });
+  const slots = createCapabilitySlotCoordinator({ getCollection: context.getCollection });
+  await slots.reserve({ bindingId: String(peer._id), nodeId: peer.nodeId, userId: String(peer.userId),
+    capabilityId: "gulong_engine.embedding", claimId: "unified-other-model-work", taskId: "other-capability-task",
+    now: new Date(), expiresAt: new Date(Date.now() + 60_000), estimatedSeconds: 900,
+    maxConcurrentTasks: 4, capabilityMaxConcurrent: 4 });
+  const response = await context.claim({ resources: { gpu_state: "busy", gpu_observed_at: new Date().toISOString(), current_task_remaining_seconds: 10 } });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).task.assigned_node.node_id, context.binding.nodeId);
+});
+
+test("H3显卡资源字段无效时拒绝且不会领取订单", async () => {
+  for (const resources of [{ gpu_state: "fake-idle" }, "not-an-object", [], null]) {
+    const context = await authenticatedFixture();
+    const response = await context.claim({ resources });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).code, "INVALID_GPU_LOAD_REPORT");
+    assert.equal(context.task.status, "queued");
+    assert.equal(context.uploadSignatures, 0);
+  }
+});
+
+function probeReservation(context) {
+  return { bindingId: String(context.binding._id), nodeId: context.binding.nodeId, userId: String(context.binding.userId),
+    capabilityId: "verification.probe", claimId: "gcv-exclusive-physical-slot", taskId: "verification:physical-node",
+    exclusive: true, maxConcurrentTasks: 4, capabilityMaxConcurrent: 4, estimatedSeconds: 12,
+    now: new Date(), expiresAt: new Date(Date.now() + 60_000) };
+}
+
+test("H3新领取与自动探测竞争同一物理CAS槽，任何顺序都不会同时执行", async () => {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const context = await authenticatedFixture();
+    const slots = createCapabilitySlotCoordinator({ getCollection: context.getCollection });
+    const [probe, response] = await Promise.all([slots.reserve(probeReservation(context)), context.claim()]);
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.equal(Boolean(probe) && Boolean(result.task), false);
+    const snapshot = await slots.snapshot({ bindingId: String(context.binding._id) });
+    assert.equal(snapshot.activeCount, 1);
+    assert.ok(probe || result.task);
+  }
+});
+
+test("H3有物理槽后进度续租，失败释放且不改会员零扣费规则", async () => {
+  const context = await authenticatedFixture();
+  const slots = createCapabilitySlotCoordinator({ getCollection: context.getCollection });
+  const claimed = await (await context.claim()).json();
+  assert.ok(claimed.task);
+  assert.equal(context.task.physicalSlotRequired, true);
+  assert.equal(claimed.task.physicalSlotClaimId, undefined);
+  assert.equal(claimed.task.physicalSlotRequired, undefined);
+  const before = await slots.snapshot({ bindingId: String(context.binding._id) });
+  assert.equal(before.activeCount, 1);
+  assert.equal(before.leases[0].taskId, `h3:${context.task._id}`);
+  assert.equal(before.leases[0].capabilityId, "minimax_h3.video_generation");
+  assert.equal((await context.callback({ remaining_seconds: 120 })).status, 200);
+  const renewed = await slots.snapshot({ bindingId: String(context.binding._id) });
+  assert.equal(renewed.activeCount, 1);
+  assert.equal(renewed.leases[0].estimatedSeconds, 120);
+  assert.equal((await context.callback({ status: "failed", error_code: "TEST_EXECUTION_FAILED", error_message: "节点任务失败" })).status, 200);
+  assert.equal((await slots.snapshot({ bindingId: String(context.binding._id) })).activeCount, 0);
+  assert.equal(context.task.chargeStatus, "exempt");
+});
+
+test("H3任务CAS失败以及输出票据失败都精确补偿物理槽", async () => {
+  for (const uploadFailure of [false, true]) {
+    const context = await authenticatedFixture({ uploadFailure });
+    if (!uploadFailure) {
+      const tasks = context.collections.get("h3SharedTasks");
+      const original = tasks.findOneAndUpdate;
+      tasks.findOneAndUpdate = (filter, operation, options) => operation.$set?.status === "claimed" ? null : original(filter, operation, options);
+    }
+    const response = await context.claim();
+    assert.equal(response.status, uploadFailure ? 500 : 200);
+    assert.equal(context.task.status, "queued");
+    const slots = createCapabilitySlotCoordinator({ getCollection: context.getCollection });
+    assert.equal((await slots.snapshot({ bindingId: String(context.binding._id) })).activeCount, 0);
+  }
+});
+
+test("管理员取消运行任务不早放物理槽，节点确认cancelled后才释放", async () => {
+  const context = await authenticatedFixture();
+  await context.claim();
+  const slots = createCapabilitySlotCoordinator({ getCollection: context.getCollection });
+  const cancelled = await context.app.request(`/api/admin/h3/tasks/${context.task._id}/cancel`, { method: "POST" });
+  assert.equal(cancelled.status, 200);
+  assert.equal((await slots.snapshot({ bindingId: String(context.binding._id) })).activeCount, 1);
+  assert.equal((await context.callback({ status: "cancelled" })).status, 200);
+  assert.equal((await slots.snapshot({ bindingId: String(context.binding._id) })).activeCount, 0);
+});
+
+test("新H3物理槽过期拒绝继续运行，旧无槽任务仍按旧合同完成", async () => {
+  const context = await authenticatedFixture();
+  await context.claim();
+  const document = context.collections.get("capabilityNodeSlots").records[0];
+  document.leases[0].expiresAt = new Date(Date.now() - 1_000);
+  const expired = await context.callback();
+  assert.equal(expired.status, 409);
+  assert.equal((await expired.json()).code, "H3_PHYSICAL_SLOT_EXPIRED");
+  assert.equal(context.task.status, "claimed");
+  delete context.task.physicalSlotRequired;
+  delete context.task.physicalSlotClaimId;
+  assert.equal((await context.callback()).status, 200);
+  assert.equal(context.task.status, "processing");
+});
 
 for (const [name, userGroup, nodeGroup, allowed] of [
   ["同组用户与节点", GROUP_A, GROUP_A, true],

@@ -25,7 +25,7 @@ function matches(row, query) {
   });
 }
 function fixture() {
-  const rows = { capabilityOutputCopies: [], capabilityOutputUploads: [], capabilityOrders: [] };
+  const rows = { capabilityOutputCopies: [], capabilityOutputUploads: [], capabilityOrders: [], capabilityVerificationOutputs: [] };
   const deleted = []; const hooks = {};
   const getCollection = async (name) => ({
     find: (query) => { let result = rows[name].filter((row) => matches(row, query)); return { sort() { return this; }, limit(n) { result = result.slice(0, n); return this; }, toArray: async () => result }; },

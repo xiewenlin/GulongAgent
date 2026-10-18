@@ -30,10 +30,10 @@ for (const raw of origins) {
     ["/api/admin/capability-consumers/bindings", "get"],
   ]) assert.ok(document.paths[path]?.[method], `${method} ${path}`);
   assert.ok(document.components.schemas.WorkLuckySharedCapabilityContract);
-  const acceptances = document.paths["/api/admin/capability-consumers/acceptances"].post.requestBody.content["application/json"].schema;
-  const musicAcceptance = acceptances.oneOf.find((item) => item.properties.capability_id.enum?.includes("gulong_engine.music"));
-  assert.ok(musicAcceptance.properties.models.items.required.includes("max_duration_seconds"));
-  assert.deepEqual(musicAcceptance.properties.models.items.properties.max_duration_seconds, { type: "number", minimum: 1, maximum: 600 });
+  assert.ok(document.paths["/api/admin/capability-consumers/acceptances"].post.responses["410"]);
+  for (const suffix of ["report", "next", "{id}/outputs", "{id}/result"]) assert.ok(document.paths[`/api/v1/capability-verifications/${suffix}`].post.requestBody);
+  for (const suffix of ["by-request/{key}", "challenges/{id}"]) assert.ok(document.paths[`/api/v1/capability-verifications/${suffix}`].get);
+  await read("/api/admin/capability-verifications", 401);
   await read("/api/v1/desktop/worklucky/account", 401);
   await read("/api/v1/capability-orders/catalog?product=worklucky", 401);
   await read("/api/admin/capability-consumers/acceptances", 401);

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createCapabilitySlotCoordinator, normalizeCapabilityResources } from "../../server/capability-slots.js";
+import { createCapabilityMemoryCollection } from "../helpers/capability-memory.mjs";
 
 const NOW = new Date("2026-10-17T00:00:00Z");
 const LATER = new Date(NOW.getTime() + 300_000);
@@ -132,4 +133,90 @@ test("normalization prevents negative/invalid resources from manufacturing physi
   assert.equal(normalizeCapabilityResources({ max_concurrent_tasks: "not-a-number" }, 2).max_concurrent_tasks, 2);
   assert.equal(normalizeCapabilityResources({ running_task_count: 1_000_001 }).running_task_count, 1_000_000);
   assert.equal(normalizeCapabilityResources({ running_task_count: 1.5 }).running_task_count, 0);
+});
+
+test("fenced reservation estimates are retained, renewed only for their owner, and never exposed as capacity", async () => {
+  const { coordinator } = fixture();
+  const first = await coordinator.reserve(reservation(1, { estimatedSeconds: 120 }));
+  assert.equal(first.estimatedSeconds, 120);
+  assert.equal(+first.estimateUpdatedAt, +NOW);
+  assert.equal(await coordinator.renew({ ...reservation(1), taskId: "wrong-task", estimatedSeconds: 3 }), null);
+  const renewed = await coordinator.renew({ ...reservation(1), now: new Date(+NOW + 10_000),
+    expiresAt: new Date(+LATER + 10_000), estimatedSeconds: 40 });
+  assert.equal(renewed.estimatedSeconds, 40);
+  assert.equal(+renewed.estimateUpdatedAt, +NOW + 10_000);
+  assert.equal((await coordinator.snapshot({ bindingId: "binding-a", now: NOW })).activeCount, 1);
+});
+
+test("an exclusive verification slot atomically excludes business claims and retains owner idempotency", async () => {
+  const { coordinator } = fixture();
+  const probe = reservation("probe", { capabilityId: "system.verification", taskId: "gcv-probe", claimId: "gcv-probe",
+    exclusive: true, maxConcurrentTasks: 1, capabilityMaxConcurrent: 1 });
+  const held = await coordinator.reserve(probe);
+  assert.equal(held.exclusive, true);
+  assert.deepEqual(await coordinator.reserve(probe), held);
+  assert.equal(await coordinator.reserve(reservation(1, { maxConcurrentTasks: 16 })), null);
+  assert.equal(await coordinator.reserve({ ...probe, taskId: "other-probe", claimId: "other-probe" }), null);
+  assert.equal(await coordinator.release({ ...probe, claimId: "wrong-probe" }), false);
+  assert.equal(await coordinator.release(probe), true);
+  assert.ok(await coordinator.reserve(reservation(1)));
+});
+
+test("a production task atomically blocks an exclusive probe even below the normal slot ceiling", async () => {
+  const { coordinator } = fixture();
+  assert.ok(await coordinator.reserve(reservation(1, { maxConcurrentTasks: 16 })));
+  assert.equal(await coordinator.reserve(reservation("probe", { capabilityId: "system.verification", exclusive: true,
+    maxConcurrentTasks: 16, capabilityMaxConcurrent: 16 })), null);
+});
+
+test("concurrent exclusive probes and business reservations never overlap physical ownership", async () => {
+  for (const probeFirst of [true, false]) {
+    const { coordinator } = fixture();
+    const probe = reservation("probe", { capabilityId: "system.verification", exclusive: true,
+      maxConcurrentTasks: 16, capabilityMaxConcurrent: 16 });
+    const business = Array.from({ length: 20 }, (_, index) => reservation(index, { maxConcurrentTasks: 16,
+      capabilityMaxConcurrent: 16 }));
+    const requests = probeFirst ? [probe, ...business] : [...business, probe];
+    const accepted = (await Promise.all(requests.map((request) => coordinator.reserve(request)))).filter(Boolean);
+    if (accepted.some((lease) => lease.exclusive === true)) {
+      assert.equal(accepted.length, 1);
+      assert.equal(accepted[0].capabilityId, "system.verification");
+    } else assert.ok(accepted.length > 0 && accepted.length <= 16);
+    const state = await coordinator.snapshot({ bindingId: "binding-a", now: NOW });
+    assert.equal(state.activeCount, accepted.length);
+    assert.equal(state.leases.some((lease) => lease.exclusive) && state.leases.length > 1, false);
+  }
+});
+
+test("batch snapshots use one bounded read and aggregate all capability and exclusive probe leases", async () => {
+  const collection = createCapabilityMemoryCollection();
+  let reads = 0;
+  const find = collection.find;
+  collection.find = (filter) => { reads += 1; return find(filter); };
+  const coordinator = createCapabilitySlotCoordinator({ getCollection: async () => collection });
+  await coordinator.reserve(reservation(1));
+  await coordinator.reserve(reservation(2, { capabilityId: "gulong_engine.embedding" }));
+  await coordinator.reserve(reservation("probe", { bindingId: "binding-b", nodeId: "node-b", capabilityId: "system.verification", exclusive: true }));
+  collection.rows.push({ _id: "binding-corrupt", version: 1, leases: [{ bad: true }] });
+  const before = JSON.stringify(collection.rows);
+  const states = await coordinator.snapshots({ bindingIds: ["binding-a", "binding-b", "binding-c", "binding-corrupt", "binding-a"], now: NOW });
+  assert.equal(reads, 1);
+  assert.equal(states.size, 4);
+  assert.equal(states.get("binding-a").activeCount, 2);
+  assert.equal(states.get("binding-a").byCapability["gulong_engine.embedding"], 1);
+  assert.equal(states.get("binding-b").leases[0].exclusive, true);
+  assert.equal(states.get("binding-c").available, true);
+  assert.equal(states.get("binding-c").activeCount, 0);
+  assert.equal(states.get("binding-corrupt").available, false);
+  assert.equal(JSON.stringify(collection.rows), before);
+});
+
+test("batch snapshot limits and identifiers reject unsafe requests before database access", async () => {
+  let reads = 0;
+  const coordinator = createCapabilitySlotCoordinator({ getCollection: async () => { reads += 1; throw new Error("must not read"); } });
+  for (const bindingIds of [undefined, "binding-a", [""], Array.from({ length: 201 }, (_, index) => `binding-${index}`)]) {
+    await assert.rejects(coordinator.snapshots({ bindingIds, now: NOW }), { code: "INVALID_SLOT_SNAPSHOT_REQUEST" });
+  }
+  assert.equal((await coordinator.snapshots({ bindingIds: [], now: NOW })).size, 0);
+  assert.equal(reads, 0);
 });

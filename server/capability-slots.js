@@ -51,6 +51,16 @@ function activeLeases(document, bindingId, now) {
   return result;
 }
 
+function documentSnapshot(document, bindingId, now) {
+  const empty = { available: false, activeCount: 0, byCapability: {}, leases: [] };
+  if (!document) return { ...empty, available: true };
+  const leases = activeLeases(document, bindingId, now);
+  if (!leases) return empty;
+  const byCapability = {};
+  for (const lease of leases) byCapability[lease.capabilityId] = (byCapability[lease.capabilityId] || 0) + 1;
+  return { available: true, activeCount: leases.length, byCapability, leases };
+}
+
 function sameOwner(left, right) {
   return ["bindingId", "nodeId", "userId", "capabilityId", "claimId", "taskId"].every((key) => left[key] === right[key]);
 }
@@ -104,8 +114,13 @@ export function createCapabilitySlotCoordinator({ getCollection, maxRetries = 12
       if (!active) return null;
       const existing = active.find((lease) => lease.claimId === identity.claimId || lease.taskId === identity.taskId);
       if (existing) return sameOwner(existing, identity) ? cloneLease(existing) : null;
+      // Verification holds the same physical admission boundary as production
+      // work. A read-only idle check plus an independent probe lock would race.
+      if (active.some((lease) => lease.exclusive === true) || (input.exclusive === true && active.length > 0)) return null;
       if (active.length >= totalLimit || active.filter((lease) => lease.capabilityId === identity.capabilityId).length >= capabilityLimit) return null;
-      const lease = { ...identity, createdAt: now, updatedAt: now, expiresAt };
+      const lease = { ...identity, estimatedSeconds: boundedInteger(input.estimatedSeconds, 300, 1, 31 * 86400),
+        ...(input.exclusive === true ? { exclusive: true } : {}),
+        estimateUpdatedAt: now, createdAt: now, updatedAt: now, expiresAt };
       if (await compareAndSwap(collection, document, [...active, lease], now)) return cloneLease(lease);
     }
     return null; // Contention never creates a speculative/unreserved claim.
@@ -123,7 +138,9 @@ export function createCapabilitySlotCoordinator({ getCollection, maxRetries = 12
       if (!active) return null;
       const position = active.findIndex((lease) => sameFence(lease, input));
       if (position < 0) return null; // Expired leases cannot be revived by stale workers.
-      const lease = { ...active[position], updatedAt: now, expiresAt: new Date(Math.max(active[position].expiresAt.getTime(), expiresAt.getTime())) };
+      const lease = { ...active[position], updatedAt: now, expiresAt: new Date(Math.max(active[position].expiresAt.getTime(), expiresAt.getTime())),
+        ...(Number.isSafeInteger(input.estimatedSeconds) && input.estimatedSeconds >= 0
+          ? { estimatedSeconds: Math.min(31 * 86400, input.estimatedSeconds), estimateUpdatedAt: now } : {}) };
       const next = [...active];
       next[position] = lease;
       if (await compareAndSwap(collection, document, next, now)) return cloneLease(lease);
@@ -153,13 +170,23 @@ export function createCapabilitySlotCoordinator({ getCollection, maxRetries = 12
     const empty = { available: false, activeCount: 0, byCapability: {}, leases: [] };
     if (!bindingId || !now) return empty;
     const document = await (await getCollection(COLLECTION)).findOne({ _id: bindingId });
-    if (!document) return { ...empty, available: true };
-    const leases = activeLeases(document, bindingId, now);
-    if (!leases) return empty;
-    const byCapability = {};
-    for (const lease of leases) byCapability[lease.capabilityId] = (byCapability[lease.capabilityId] || 0) + 1;
-    return { available: true, activeCount: leases.length, byCapability, leases };
+    return documentSnapshot(document, bindingId, now);
   }
 
-  return { reserve, renew, release, snapshot };
+  /** Bounded global ranking read: one query, no resource or lease mutations. */
+  async function snapshots({ bindingIds, now: rawNow } = {}) {
+    const now = date(rawNow ?? new Date());
+    if (!Array.isArray(bindingIds) || bindingIds.length > 200 || bindingIds.some((value) => !id(value)) || !now) {
+      throw Object.assign(new Error("批量节点槽位查询须提供最多 200 个有效绑定编号和有效时间"),
+        { code: "INVALID_SLOT_SNAPSHOT_REQUEST", status: 400 });
+    }
+    const ids = [...new Set(bindingIds.map(id))];
+    if (!ids.length) return new Map();
+    const documents = await (await getCollection(COLLECTION)).find({ _id: { $in: ids } }).limit(200).toArray();
+    const byId = new Map(documents.filter((document) => ids.includes(String(document._id)))
+      .map((document) => [String(document._id), document]));
+    return new Map(ids.map((bindingId) => [bindingId, documentSnapshot(byId.get(bindingId), bindingId, now)]));
+  }
+
+  return { reserve, renew, release, snapshot, snapshots };
 }

@@ -34,6 +34,7 @@ import {
   toH3WorkerTask,
 } from "../../server/h3-shared.js";
 import { rankH3LanNodes } from "../../server/h3-queue.js";
+import { SHARED_NODE_SCHEDULING } from "../../server/shared-node-scheduler.js";
 
 test("同名节点的轮询令牌优先于旧绑定，其他同名节点不允许含糊派单", () => {
   const userId = new ObjectId();
@@ -419,11 +420,12 @@ test("H3 worker task DTO excludes requester and billing identity", () => {
     claimedByNode: { bindingId: new ObjectId("66c000000000000000000012"), nodeId: "stable-node-worker-0001", nodeName: "渲染节点" },
     dispatchEstimatedTotalSeconds: 900,
     autoCancelAt: new Date("2026-08-27T12:00:00.000Z"),
+    claimLeaseUntil: new Date("2026-08-27T10:45:00.000Z"),
   }, {
     assets: [{ type: "image", download_url: "https://example.invalid/signed" }],
     outputUpload: { url: "https://example.invalid/upload", object_key: "h3/tasks/test/output.mp4" },
   });
-  assert.deepEqual(Object.keys(task), ["id", "orderNo", "model", "prompt", "source_prompt", "original_prompt", "prompt_mode", "prompt_optimization_enabled", "local_prompt_optimization_required", "video_mode", "longform_mode", "segment_duration_seconds", "prompt_list", "aspectRatio", "durationSeconds", "profile", "sampling_steps", "seed", "imageCount", "videoCount", "audioCount", "assets", "assigned_node", "dispatch_estimated_total_seconds", "auto_cancel_at", "output_upload", "progress_callback"]);
+  assert.deepEqual(Object.keys(task), ["id", "orderNo", "model", "prompt", "source_prompt", "original_prompt", "prompt_mode", "prompt_optimization_enabled", "local_prompt_optimization_required", "video_mode", "longform_mode", "segment_duration_seconds", "prompt_list", "aspectRatio", "durationSeconds", "profile", "sampling_steps", "seed", "imageCount", "videoCount", "audioCount", "assets", "assigned_node", "dispatch_estimated_total_seconds", "auto_cancel_at", "claim_lease_expires_at", "output_upload", "progress_callback"]);
   assert.deepEqual(task.assigned_node, { node_id: "stable-node-worker-0001", node_name: "渲染节点", compute_group_id: null });
   assert.equal(task.video_mode, "smart_multiframe");
   assert.equal(task.sampling_steps, 8);
@@ -435,6 +437,10 @@ test("H3 worker task DTO excludes requester and billing identity", () => {
   assert.equal(task.local_prompt_optimization_required, true);
   assert.deepEqual(task.progress_callback.first_required_fields, ["estimated_total_seconds", "compiled_prompt"]);
   assert.equal(task.progress_callback.optimization_status, "optimizing");
+  assert.equal(task.claim_lease_expires_at.toISOString(), "2026-08-27T10:45:00.000Z");
+  assert.equal(task.progress_callback.interval_seconds, 15);
+  assert.equal(task.progress_callback.lease_seconds, 2700);
+  assert.equal(task.progress_callback.on_lease_expired, "stop_task_and_wait_for_redispatch");
   const serialized = JSON.stringify(task);
   assert.doesNotMatch(serialized, /requester|private@example\.com|priceFen|walletLedger|bindingId/);
 });
@@ -836,7 +842,7 @@ test("H3 claim enforces the server poll window before queue and rate-limit datab
   const payload = await response.json();
   assert.equal(payload.task, null);
   assert.equal(payload.claim_plan.throttled, true);
-  assert.equal(payload.claim_plan.scheduling, "fifo_least_estimated_lan_load");
+  assert.equal(payload.claim_plan.scheduling, SHARED_NODE_SCHEDULING);
   assert.ok(payload.claim_plan.poll_after_ms > 0);
   assert.ok(response.headers.get("retry-after"));
   assert.equal(rateLimitWrites, 0);
@@ -905,6 +911,7 @@ test("H3 claim assigns the oldest task to the least-loaded bound LAN node", asyn
     getCollection: async (name) => collections[name] || { find: () => testCursor([]), findOne: async () => null, insertOne: async () => ({}), updateOne: async () => ({}), updateMany: async () => ({}) },
     enforceRateLimit: async () => ({ allowed: true }),
     queueCoordinator: { snapshot: async () => ({ cached: true, queuedCount: 1, activeNodeCount: 2, oldestQueuedAt: task.createdAt, cacheAgeMs: 0 }), invalidate: async () => {} },
+    slotCoordinator: { snapshot: async () => ({ available: true, activeCount: 0, byCapability: {}, leases: [] }), snapshots: async ({ bindingIds }) => new Map(bindingIds.map((bindingId) => [bindingId, { available: true, activeCount: 0, byCapability: {}, leases: [] }])), reserve: async (input) => input, renew: async (input) => input, release: async () => true },
     authenticate: async () => ({ user: { id: userId.toString() } }),
     requireAdmin: async () => ({ user: { id: userId.toString(), role: "admin" } }),
     requireTrustedMutation: () => null,
@@ -923,7 +930,7 @@ test("H3 claim assigns the oldest task to the least-loaded bound LAN node", asyn
   assert.equal(response.status, 200);
   const payload = await response.json();
   assert.deepEqual(payload.task.assigned_node, { node_id: target.nodeId, node_name: target.nodeName, compute_group_id: null });
-  assert.equal(payload.claim_plan.scheduling, "fifo_least_estimated_lan_load");
+  assert.equal(payload.claim_plan.scheduling, SHARED_NODE_SCHEDULING);
   assert.equal(task.claimedByNode.bindingId.toString(), target._id.toString());
   assert.equal(task.claimRequestedByNode.bindingId.toString(), caller._id.toString());
   assert.equal(uploadGrant.issuedToBindingId.toString(), target._id.toString());

@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { ObjectId } from "mongodb";
 import { getCollection as databaseCollection } from "./db.js";
 import { deleteObject } from "./cos.js";
+import { createCapabilityVerificationMedia } from "./capability-verification-media.js";
 
 export const CAPABILITY_OUTPUT_CLEANUP_PATH = "/api/cron/capability-output-cleanup";
 const PUT_LIFETIME_MS = 60 * 60_000;
@@ -100,7 +101,9 @@ export function registerCapabilityOutputCleanupRoutes(app, dependencies = {}) {
     if (!authorized(c.req.header("authorization"), secret)) return c.json({ code: "UNAUTHORIZED", message: "无权执行共享能力输出清理任务" }, 401);
     try {
       const cleanup = await cleanupCapabilityOutputs({ ...dependencies, limit: 50 });
-      return c.json({ ok: true, cleanup, completedAt: new Date().toISOString() });
+      const verificationCleanup = await createCapabilityVerificationMedia({ getCollection: dependencies.getCollection || databaseCollection,
+        removeObject: dependencies.removeObject || deleteObject }).cleanup({ limit: 30 });
+      return c.json({ ok: true, cleanup, verificationCleanup, completedAt: new Date().toISOString() });
     } catch {
       return c.json({ code: "CAPABILITY_OUTPUT_CLEANUP_UNAVAILABLE", message: "共享能力输出清理暂时不可用，请稍后重试" }, 503);
     }

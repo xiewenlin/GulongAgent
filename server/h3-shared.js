@@ -6,6 +6,8 @@ import { enforceRateLimit as databaseRateLimit } from "./rate-limit.js";
 import { fingerprintIp, hashOpaqueToken, normalizeEmail } from "./security.js";
 import { createPresignedDownloadUrl, createPresignedPutUrl, deleteObject, ensureBrowserUploadCors, headObject, sanitizeFilename } from "./cos.js";
 import { calculateH3ClaimPlan, createH3QueueCoordinator, H3_CLAIM_LEASE_MS, H3_LAN_REPORT_MAX_NODES, rankH3LanNodes } from "./h3-queue.js";
+import { boundedGlobalDispatchWait, compareSharedNodeLoad, NODE_REPORT_MAX_AGE_MS, normalizeGpuLoadReport, projectSharedNodeLoad, SHARED_NODE_SCHEDULING } from "./shared-node-scheduler.js";
+import { createCapabilitySlotCoordinator } from "./capability-slots.js";
 import { localizeErrorMessage } from "../shared/error-messages.js";
 import { readGulongEngineEntitlement } from "./english-coach-products.js";
 import { computeGroupFilter, computeGroupsMatch, getUserComputeGroupId as readUserComputeGroupId, normalizeComputeGroupId } from "./compute-groups.js";
@@ -619,6 +621,7 @@ export function toH3WorkerTask(task, { assets = [], outputUpload = null } = {}) 
     assigned_node: task.claimedByNode ? { node_id: task.claimedByNode.nodeId, node_name: task.claimedByNode.nodeName || null, compute_group_id: normalizeComputeGroupId(task.claimedByNode.computeGroupId) } : null,
     dispatch_estimated_total_seconds: Math.max(0, integer(task.dispatchEstimatedTotalSeconds)),
     auto_cancel_at: task.autoCancelAt || null,
+    claim_lease_expires_at: task.claimLeaseUntil || null,
     output_upload: outputUpload,
     progress_callback: {
       method: "POST",
@@ -628,6 +631,9 @@ export function toH3WorkerTask(task, { assets = [], outputUpload = null } = {}) 
       first_status: "started",
       first_required_fields: promptOptimizationEnabled ? ["estimated_total_seconds", "compiled_prompt"] : ["estimated_total_seconds"],
       progress_fields: ["progress", "remaining_seconds"],
+      interval_seconds: 15,
+      lease_seconds: H3_CLAIM_LEASE_MS / 1000,
+      on_lease_expired: "stop_task_and_wait_for_redispatch",
     },
   };
 }
@@ -645,6 +651,7 @@ function workerCallbackTask(task) {
     completedAt: task.completedAt || null,
     failedAt: task.failedAt || null,
     cancelledAt: task.cancelledAt || null,
+    claim_lease_expires_at: task.claimLeaseUntil || null,
   };
 }
 
@@ -1107,7 +1114,7 @@ function normalizeH3NodeCapabilities(capabilities = {}) {
 export function h3NodeCanRunTask(node, task) {
   const capabilities = node?.capabilities || {};
   if (task?.failedGpuNodeIds?.includes(node?.nodeId)) return false;
-  if (!node || node.availableSlots < 1 || !capabilities.profiles?.includes?.(String(task.profile || "").toLowerCase())) return false;
+  if (!node || node.slotBlocked || node.availableSlots < 1 || !capabilities.profiles?.includes?.(String(task.profile || "").toLowerCase())) return false;
   if (!capabilities.samplingSteps?.includes?.(integer(task.samplingSteps, 4))) return false;
   if (integer(task.imageCount) > capabilities.maxImageCount || integer(task.videoCount) > capabilities.maxVideoCount || integer(task.audioCount) > capabilities.maxAudioCount) return false;
   if (task.videoMode === "extended") {
@@ -1173,6 +1180,25 @@ function routeError(c, error) {
   return c.json({ code: error.code || "H3_SHARED_ERROR", message: localizeErrorMessage(error, "共享节点服务暂时不可用") }, error.status || 500);
 }
 
+// Resource telemetry never authorizes a node or changes its group. Legacy
+// top-level load fields remain accepted; only a fresh explicit idle report may
+// gain idle priority, and server assignments will conservatively override it.
+function normalizeH3NodeResources(report = {}, now = new Date()) {
+  if (Object.hasOwn(report, "resources") && (!report.resources || typeof report.resources !== "object" || Array.isArray(report.resources))) {
+    throw Object.assign(new Error("节点资源上报必须是有效对象"), { code: "INVALID_GPU_LOAD_REPORT", status: 400 });
+  }
+  const resources = report.resources && typeof report.resources === "object" && !Array.isArray(report.resources) ? report.resources : report;
+  const normalized = normalizeGpuLoadReport(resources, now);
+  const runningTaskCount = Math.min(64, Math.max(0, integer(resources.running_task_count ?? report.running_task_count)));
+  const legacyRaw = resources.estimated_total_seconds ?? resources.estimated_remaining_seconds ?? report.estimated_total_seconds ?? report.estimated_remaining_seconds;
+  const legacyRemaining = legacyRaw == null ? null : Math.min(7 * 86400, Math.max(0, integer(legacyRaw)));
+  const remaining = Object.hasOwn(resources, "current_task_remaining_seconds")
+    ? normalized.current_task_remaining_seconds : normalized.current_task_remaining_seconds ?? legacyRemaining;
+  return { ...normalized, current_task_remaining_seconds: remaining, running_task_count: runningTaskCount,
+    available: (resources.available ?? report.available) !== false,
+    estimated_total_seconds: remaining === null ? null : Math.max(remaining, legacyRemaining || 0) };
+}
+
 export function registerH3SharedRoutes(app, dependencies) {
   const getCollection = dependencies.getCollection || databaseCollection;
   const getUserComputeGroupId = dependencies.getUserComputeGroupId || ((userId) => readUserComputeGroupId(userId, getCollection));
@@ -1183,8 +1209,20 @@ export function registerH3SharedRoutes(app, dependencies) {
   const removeCosObject = dependencies.deleteObject || deleteObject;
   const ensureUploadCors = dependencies.ensureBrowserUploadCors || ensureBrowserUploadCors;
   const queueCoordinator = dependencies.queueCoordinator || createH3QueueCoordinator({ getCollection, model: H3_SHARED_MODEL });
+  const slots = dependencies.slotCoordinator || createCapabilitySlotCoordinator({ getCollection });
   const notifyOnce = dependencies.notifyUserOnce || null;
   const { authenticate, requireAdmin, requireTrustedMutation, verifyActivationReceipt } = dependencies;
+
+  function physicalSlotIdentity(task) {
+    if (task?.physicalSlotRequired !== true || !task.physicalSlotClaimId || !task.claimedByNode?.bindingId) return null;
+    return { bindingId: idText(task.claimedByNode.bindingId), nodeId: task.claimedByNode.nodeId,
+      userId: idText(task.claimedByNode.userId), capabilityId: "minimax_h3.video_generation",
+      claimId: task.physicalSlotClaimId, taskId: `h3:${task._id}` };
+  }
+  async function releasePhysicalSlot(task) {
+    const identity = physicalSlotIdentity(task);
+    if (identity) await slots.release({ ...identity, now: new Date() });
+  }
 
   async function authenticateBinding(c, { requireNodeId, touch = true } = {}) {
     const raw = String(c.req.header(H3_ACCOUNT_BINDING_HEADER) || "").trim();
@@ -1585,12 +1623,17 @@ export function registerH3SharedRoutes(app, dependencies) {
     const body = await c.req.json().catch(() => ({}));
     const nodeId = String(body.node_id || "").trim();
     const auth = await authenticateBinding(c, { requireNodeId: nodeId, touch: false }); if (auth.error) return auth.error;
-    let reportedCapabilities;
-    try { reportedCapabilities = normalizeH3NodeCapabilities(body.capabilities && typeof body.capabilities === "object" ? body.capabilities : {}); }
-    catch (error) { return routeError(c, error); }
     const now = new Date();
+    let reportedCapabilities;
+    let reportedResources;
+    try {
+      reportedCapabilities = normalizeH3NodeCapabilities(body.capabilities && typeof body.capabilities === "object" ? body.capabilities : {});
+      reportedResources = normalizeH3NodeResources(body, now);
+    }
+    catch (error) { return routeError(c, error); }
     const nodeName = String(body.node_name || auth.binding.nodeName || "").slice(0, 120);
-    const heartbeat = { nodeName, lastSeenAt: now, lastUsedAt: now, queueStatus: body.dry_run === true ? "reachable" : "polling", capabilities: reportedCapabilities, updatedAt: now };
+    const heartbeat = { nodeName, lastSeenAt: now, lastUsedAt: now, queueStatus: body.dry_run === true ? "reachable" : "polling", capabilities: reportedCapabilities,
+      ...(body.dry_run === true ? {} : { h3Resources: reportedResources, h3ResourcesObservedAt: now }), updatedAt: now };
     if (body.dry_run !== true && auth.binding.nextClaimAt && new Date(auth.binding.nextClaimAt) > now) {
       const retryAfterMs = Math.max(250, new Date(auth.binding.nextClaimAt).getTime() - now.getTime());
       if (!auth.binding.lastSeenAt || now.getTime() - new Date(auth.binding.lastSeenAt).getTime() >= 30_000) {
@@ -1602,7 +1645,7 @@ export function registerH3SharedRoutes(app, dependencies) {
         additional_tasks: [],
         claim_plan: {
           ...(auth.binding.lastClaimPlan || {}),
-          scheduling: auth.binding.lastClaimPlan?.scheduling || "fifo_least_estimated_lan_load",
+          scheduling: SHARED_NODE_SCHEDULING,
           throttled: true,
           assigned_count: 0,
           poll_after_ms: retryAfterMs,
@@ -1645,11 +1688,13 @@ export function registerH3SharedRoutes(app, dependencies) {
           if (!/^[A-Za-z0-9._:-]{12,160}$/.test(reportedNodeId) || seenNodeIds.has(reportedNodeId)) throw Object.assign(new Error("局域网节点 ID 无效或重复"), { code: "INVALID_LAN_CLUSTER_REPORT", status: 400 });
           seenNodeIds.add(reportedNodeId);
           const nodeCapabilities = normalizeH3NodeCapabilities(report.capabilities || (reportedNodeId === auth.binding.nodeId ? body.capabilities : {}));
+          const resources = normalizeH3NodeResources(report, now);
           normalizedReports.push({
             nodeId: reportedNodeId,
             nodeName: String(report.node_name || "").trim().slice(0, 120),
-            runningTaskCount: Math.max(0, integer(report.running_task_count)),
-            estimatedTotalSeconds: Math.max(0, integer(report.estimated_total_seconds ?? report.estimated_remaining_seconds)),
+            resources,
+            runningTaskCount: resources.running_task_count,
+            estimatedTotalSeconds: resources.estimated_total_seconds,
             capabilities: nodeCapabilities,
             available: report.available !== false,
           });
@@ -1670,13 +1715,18 @@ export function registerH3SharedRoutes(app, dependencies) {
         binding: resolved.bindings.get(report.nodeId),
         runningTaskCount: report.available ? report.runningTaskCount : report.capabilities.maxConcurrentTasks,
       }));
+      await Promise.all(clusterNodes.map((node) => (getCollection("nodeAccountBindings")).then((bindings) => bindings.updateOne(
+        { _id: node.binding._id, userId: auth.user._id, status: "active", revokedAt: null },
+        { $set: { h3Resources: node.resources, h3ResourcesObservedAt: now, capabilities: node.capabilities, updatedAt: now } },
+      ))));
     } else {
       clusterNodes = [{
         nodeId: auth.binding.nodeId,
         nodeName,
         binding: auth.binding,
-        runningTaskCount: 0,
-        estimatedTotalSeconds: 0,
+        resources: reportedResources,
+        runningTaskCount: reportedResources.running_task_count,
+        estimatedTotalSeconds: reportedResources.estimated_total_seconds,
         capabilities: reportedCapabilities,
         available: true,
       }];
@@ -1709,7 +1759,7 @@ export function registerH3SharedRoutes(app, dependencies) {
           additional_tasks: [],
           claim_plan: {
             ...(current?.lastClaimPlan || {}),
-            scheduling: "fifo_least_estimated_lan_load",
+            scheduling: SHARED_NODE_SCHEDULING,
             lan_protocol: "lan-load-v1",
             cluster_throttled: true,
             assigned_count: 0,
@@ -1719,31 +1769,66 @@ export function registerH3SharedRoutes(app, dependencies) {
       }
       clusterLease = { states, stateId, leaseOwner };
     }
-    const bindingIds = clusterNodes.map((node) => node.binding._id);
+    // A different authenticated account may be a better worker, but its task
+    // and COS tickets are never handed to this dispatcher. Give it one bounded
+    // polling opportunity; the original FIFO task stays unclaimed meanwhile.
+    let globalNodes = [];
+    if (queueSnapshot.queuedCount > 0) {
+      const records = await (await getCollection("nodeAccountBindings")).find({
+        status: "active", revokedAt: null,
+        lastSeenAt: { $gte: new Date(now.getTime() - NODE_REPORT_MAX_AGE_MS) },
+        h3ResourcesObservedAt: { $gte: new Date(now.getTime() - NODE_REPORT_MAX_AGE_MS) },
+      }, { projection: { _id: 1, userId: 1, nodeId: 1, nodeName: 1, computeGroupId: 1, capabilities: 1, h3Resources: 1, h3ResourcesObservedAt: 1, lastSeenAt: 1 } }).sort({ h3ResourcesObservedAt: -1, _id: 1 }).limit(200 - clusterNodes.length).toArray();
+      const localIds = new Set(clusterNodes.map((node) => idText(node.binding._id)));
+      globalNodes = records.filter((binding) => !localIds.has(idText(binding._id)) && binding.status !== "revoked"
+        && new Date(binding.h3ResourcesObservedAt || 0) >= new Date(now.getTime() - NODE_REPORT_MAX_AGE_MS)
+        && new Date(binding.lastSeenAt || 0) >= new Date(now.getTime() - NODE_REPORT_MAX_AGE_MS)
+        && Array.isArray(binding.capabilities?.profiles) && binding.h3Resources?.available !== false)
+        .flatMap((binding) => {
+          try {
+            const resources = normalizeH3NodeResources({ resources: binding.h3Resources }, now);
+            return [{ nodeId: binding.nodeId, nodeName: binding.nodeName, binding, capabilities: binding.capabilities,
+              resources, runningTaskCount: resources.running_task_count, estimatedTotalSeconds: resources.estimated_total_seconds, available: true }];
+          } catch { return []; }
+        });
+    }
+    const bindingIds = [...clusterNodes, ...globalNodes].map((node) => node.binding._id);
     const activeAssignments = await tasks.find({
       status: { $in: ["claimed", "processing"] },
       "claimedByNode.bindingId": { $in: bindingIds },
       claimLeaseUntil: { $gt: now },
-    }).limit(512).toArray();
+    }).limit(1_600).toArray();
     const authoritativeLoad = new Map();
     for (const activeTask of activeAssignments) {
       const bindingId = idText(activeTask.claimedByNode?.bindingId);
       if (!bindingId) continue;
-      const current = authoritativeLoad.get(bindingId) || { runningTaskCount: 0, estimatedTotalSeconds: 0 };
+      const current = authoritativeLoad.get(bindingId) || { runningTaskCount: 0, estimatedTotalSeconds: 0, tasks: [] };
       current.runningTaskCount += 1;
       current.estimatedTotalSeconds += Math.max(0, integer(activeTask.remainingSeconds || activeTask.estimatedTotalSeconds || activeTask.dispatchEstimatedTotalSeconds));
+      current.tasks.push({ taskId: `h3:${activeTask._id}`,
+        estimatedSeconds: Math.max(0, integer(activeTask.remainingSeconds ?? activeTask.estimatedTotalSeconds ?? activeTask.dispatchEstimatedTotalSeconds, 300)),
+        estimateUpdatedAt: activeTask.progressUpdatedAt || activeTask.claimedAt || now });
       authoritativeLoad.set(bindingId, current);
     }
-    clusterNodes = clusterNodes.map((node) => {
+    const physicalSnapshots = await slots.snapshots({ bindingIds: bindingIds.map(idText), now });
+    const withAuthoritativeLoad = (node) => {
       const serverLoad = authoritativeLoad.get(idText(node.binding._id));
-      if (!serverLoad) return node;
+      const snapshot = physicalSnapshots.get(idText(node.binding._id));
+      const trackedTaskIds = new Set((snapshot?.leases || []).map((lease) => lease.taskId));
+      const untrackedNative = (serverLoad?.tasks || []).filter((task) => !trackedTaskIds.has(task.taskId));
+      const projected = projectSharedNodeLoad(node, { ...snapshot,
+        activeCount: (snapshot?.activeCount || 0) + untrackedNative.length,
+        leases: [...(snapshot?.leases || []), ...untrackedNative] }, now);
       return {
-        ...node,
-        runningTaskCount: Math.max(node.runningTaskCount, serverLoad.runningTaskCount),
-        estimatedTotalSeconds: Math.max(node.estimatedTotalSeconds, serverLoad.estimatedTotalSeconds),
+        ...projected,
+        slotBlocked: snapshot?.available !== true || snapshot.leases.some((lease) => lease.exclusive === true),
+        serverNativeTaskCount: serverLoad?.runningTaskCount || 0,
+        runningTaskCount: Math.max(projected.runningTaskCount, serverLoad?.runningTaskCount || 0),
+        estimatedTotalSeconds: Math.max(projected.estimatedTotalSeconds, node.estimatedTotalSeconds ?? Number.POSITIVE_INFINITY, serverLoad?.estimatedTotalSeconds || 0),
       };
-    });
-    clusterNodes = rankH3LanNodes(clusterNodes);
+    };
+    clusterNodes = rankH3LanNodes(clusterNodes.map(withAuthoritativeLoad), now);
+    globalNodes = rankH3LanNodes(globalNodes.map(withAuthoritativeLoad), now);
     const clusterRunningTaskCount = clusterNodes.reduce((sum, node) => sum + node.runningTaskCount, 0);
     const clusterCapacity = clusterNodes.reduce((sum, node) => sum + node.capabilities.maxConcurrentTasks, 0);
     const claimPlan = calculateH3ClaimPlan({
@@ -1754,8 +1839,11 @@ export function registerH3SharedRoutes(app, dependencies) {
       batchCapable: explicitLanReport || reportedCapabilities.batchCapable,
       jitterSeed: clusterId || auth.binding.nodeId,
     });
+    claimPlan.availableSlots = Math.min(claimPlan.availableSlots, clusterNodes.reduce((sum, node) => sum + node.availableSlots, 0));
+    claimPlan.recommendedBatchSize = Math.min(claimPlan.recommendedBatchSize, claimPlan.availableSlots);
     const dispatcherNode = { nodeId: auth.binding.nodeId, nodeName, bindingId: auth.binding._id, userId: auth.user._id, at: now };
     const claimed = [];
+    let globalWaitMs = 0;
     try {
       for (let index = 0; index < claimPlan.recommendedBatchSize; index += 1) {
         const allowedGroups = [...new Set(clusterNodes.map((node) => normalizeComputeGroupId(node.binding.computeGroupId)))];
@@ -1767,18 +1855,58 @@ export function registerH3SharedRoutes(app, dependencies) {
           try { requesterGroupId = await getUserComputeGroupId(candidate.requesterUserId); }
           catch { continue; }
           if (!computeGroupsMatch(candidate.computeGroupId, requesterGroupId)) continue;
-          const eligibleNodes = rankH3LanNodes(clusterNodes).filter((node) => computeGroupsMatch(requesterGroupId, node.binding.computeGroupId) && h3NodeCanRunTask(node, candidate));
+          const eligibleNodes = rankH3LanNodes(clusterNodes, now).filter((node) => computeGroupsMatch(requesterGroupId, node.binding.computeGroupId) && h3NodeCanRunTask(node, candidate));
           if (!eligibleNodes.length) continue;
+          const betterGlobal = globalNodes.filter((node) => computeGroupsMatch(requesterGroupId, node.binding.computeGroupId)
+            && h3NodeCanRunTask(node, candidate) && compareSharedNodeLoad(node, eligibleNodes[0]) < 0);
+          let preferredOutsideCluster = false;
+          for (const node of betterGlobal) {
+            try {
+              if (!await (await getCollection("users")).findOne({ _id: node.binding.userId, status: "active" })) continue;
+              await authorizeTaskComputeGroup(candidate, node.binding, { requireActiveMembership: true });
+              preferredOutsideCluster = true;
+              break;
+            } catch { /* A stale or regrouped binding cannot defer another worker. */ }
+          }
+          if (preferredOutsideCluster) {
+            const wait = boundedGlobalDispatchWait(candidate, now);
+            if (wait.shouldWait) {
+              if (!candidate.schedulerWaitStartedAt) await tasks.updateOne({ _id: candidate._id, status: "queued", schedulerWaitStartedAt: { $exists: false } }, { $set: { schedulerWaitStartedAt: wait.startedAt } });
+              globalWaitMs = Math.max(250, wait.remainingMs);
+              break;
+            }
+          }
           for (const candidateNode of eligibleNodes) {
             let checkedBinding;
             try { checkedBinding = await authorizeTaskComputeGroup(candidate, candidateNode.binding, { requireActiveMembership: true }); }
             catch { continue; }
             const assignedNode = { nodeId: candidateNode.nodeId, nodeName: candidateNode.nodeName || checkedBinding.nodeName || null, bindingId: checkedBinding._id, userId: checkedBinding.userId, computeGroupId: normalizeComputeGroupId(checkedBinding.computeGroupId), at: now, capabilities: candidateNode.capabilities };
-            const claimedTask = await tasks.findOneAndUpdate(
-              { _id: candidate._id, status: "queued", model: H3_SHARED_MODEL, ...computeGroupFilter(requesterGroupId) },
-              { $set: { status: "claimed", progressStage: "claimed", progressUpdatedAt: now, claimedByNode: assignedNode, claimRequestedByNode: dispatcherNode, claimedAt: now, claimLeaseUntil: new Date(now.getTime() + H3_CLAIM_LEASE_MS), updatedAt: now }, $unset: { error: "" } },
-              { returnDocument: "after" },
-            );
+            const snapshot = await slots.snapshot({ bindingId: idText(checkedBinding._id), now });
+            if (!snapshot.available) continue;
+            const trackedNativeTasks = snapshot.byCapability?.["minimax_h3.video_generation"] || 0;
+            const untrackedRunning = Math.max(0, candidateNode.serverNativeTaskCount - trackedNativeTasks,
+              candidateNode.resources.running_task_count - snapshot.activeCount);
+            const totalLimit = Math.max(0, candidateNode.capabilities.maxConcurrentTasks - untrackedRunning);
+            const physicalSlotClaimId = `h3:${candidate._id}:${randomBytes(12).toString("hex")}`;
+            const identity = { bindingId: idText(checkedBinding._id), nodeId: candidateNode.nodeId,
+              userId: idText(checkedBinding.userId), capabilityId: "minimax_h3.video_generation",
+              claimId: physicalSlotClaimId, taskId: `h3:${candidate._id}` };
+            const reservation = await slots.reserve({ ...identity, now,
+              expiresAt: new Date(now.getTime() + H3_CLAIM_LEASE_MS), maxConcurrentTasks: totalLimit,
+              capabilityMaxConcurrent: candidateNode.capabilities.maxConcurrentTasks,
+              estimatedSeconds: Math.max(1, integer(candidate.dispatchEstimatedTotalSeconds || candidate.estimatedTotalSeconds, estimateH3TaskTotalSeconds(candidate))) });
+            if (!reservation) continue;
+            let claimedTask;
+            try {
+              claimedTask = await tasks.findOneAndUpdate(
+                { _id: candidate._id, status: "queued", model: H3_SHARED_MODEL, ...computeGroupFilter(requesterGroupId) },
+                { $set: { status: "claimed", physicalSlotRequired: true, physicalSlotClaimId, progressStage: "claimed", progressUpdatedAt: now, claimedByNode: assignedNode, claimRequestedByNode: dispatcherNode, claimedAt: now, claimLeaseUntil: new Date(now.getTime() + H3_CLAIM_LEASE_MS), updatedAt: now }, $unset: { error: "", schedulerWaitStartedAt: "" } },
+                { returnDocument: "after" },
+              );
+            } finally {
+              // A lost/failed task CAS must not strand the physical reservation.
+              if (!claimedTask) await slots.release({ ...identity, now: new Date() });
+            }
             if (!claimedTask) continue;
             selectedTask = claimedTask;
             selectedNode = clusterNodes.find((node) => node.nodeId === candidateNode.nodeId) || candidateNode;
@@ -1788,9 +1916,10 @@ export function registerH3SharedRoutes(app, dependencies) {
         }
         if (!selectedTask || !selectedNode) break;
         selectedNode.runningTaskCount += 1;
+        selectedNode.gpuState = "busy";
         selectedNode.estimatedTotalSeconds += Math.max(1, integer(selectedTask.dispatchEstimatedTotalSeconds || selectedTask.estimatedTotalSeconds, estimateH3TaskTotalSeconds(selectedTask)));
         const targetAuth = { binding: selectedNode.binding, user: auth.user };
-        const entry = { task: selectedTask, outputUpload: null, selectedNode };
+        const entry = { task: selectedTask, outputUpload: null, selectedNode, physicalSlotIdentity: physicalSlotIdentity(selectedTask) };
         claimed.push(entry);
         entry.outputUpload = await issueOutputUpload(selectedTask, targetAuth, now);
       }
@@ -1800,22 +1929,24 @@ export function registerH3SharedRoutes(app, dependencies) {
         await Promise.allSettled([
           tasks.updateMany(
             { _id: { $in: taskIds }, status: "claimed", "claimRequestedByNode.bindingId": auth.binding._id, claimedAt: now },
-            { $set: { status: "queued", queuedAt: now, updatedAt: new Date(), error: { code: "OUTPUT_UPLOAD_TICKET_FAILED", message: "输出直传票据签发失败" } }, $unset: { claimedByNode: "", claimRequestedByNode: "", claimedAt: "", claimLeaseUntil: "" } },
+            { $set: { status: "queued", queuedAt: now, updatedAt: new Date(), error: { code: "OUTPUT_UPLOAD_TICKET_FAILED", message: "输出直传票据签发失败" } }, $unset: { claimedByNode: "", claimRequestedByNode: "", claimedAt: "", claimLeaseUntil: "", physicalSlotRequired: "", physicalSlotClaimId: "" } },
           ),
           (await getCollection("h3OutputUploads")).updateMany(
             { taskId: { $in: taskIds }, status: "issued", createdAt: now },
             { $set: { status: "expired", expiredAt: new Date(), updatedAt: new Date() }, $unset: { expiresAt: "" } },
           ),
           queueCoordinator.invalidate(),
+          ...claimed.filter((entry) => entry.physicalSlotIdentity).map((entry) => slots.release({ ...entry.physicalSlotIdentity, now: new Date() })),
         ]);
       }
       return routeError(c, error);
     }
     const assignedCount = claimed.length;
-    const pollAfterMs = assignedCount === 0 && claimPlan.recommendedBatchSize > 0 ? Math.max(5_000, claimPlan.pollAfterMs) : claimPlan.pollAfterMs;
+    const pollAfterMs = globalWaitMs || (assignedCount === 0 && claimPlan.recommendedBatchSize > 0 ? Math.max(5_000, claimPlan.pollAfterMs) : claimPlan.pollAfterMs);
     const nextClaimAt = new Date(now.getTime() + pollAfterMs);
     const publicPlan = {
-      scheduling: "fifo_least_estimated_lan_load",
+      scheduling: SHARED_NODE_SCHEDULING,
+      ...(globalWaitMs ? { queue_reason_code: "PREFERRED_NODE_POLL_WAIT", preferred_node_wait_ms: globalWaitMs } : {}),
       lan_protocol: explicitLanReport ? "lan-load-v1" : "legacy-single-node",
       lan_cluster_id_hash: explicitLanReport ? createHash("sha256").update(clusterId).digest("hex") : null,
       reported_node_count: clusterNodes.length,
@@ -1851,7 +1982,7 @@ export function registerH3SharedRoutes(app, dependencies) {
     c.header("Retry-After", String(Math.max(1, Math.ceil(pollAfterMs / 1_000))));
     // Empty polls are routine health traffic, not task events. Persisting one
     // audit per poll exhausted the shared MongoDB quota and blocked login writes.
-    if (assignedCount) await audit(await getCollection("h3TaskAudits"), "claimed", { taskId: claimed[0].task._id, taskIds: claimed.map((entry) => entry.task._id), assignedNodeIds: claimed.map((entry) => entry.selectedNode.nodeId), lanLoad: clusterNodes.map((entry) => ({ nodeId: entry.nodeId, runningTaskCount: entry.runningTaskCount, estimatedTotalSeconds: entry.estimatedTotalSeconds })), actorUserId: auth.user._id, bindingId: auth.binding._id, nodeId: auth.binding.nodeId, capabilities: reportedCapabilities, claimPlan: publicPlan, reportedEmail: String(body.bound_account_email || "").slice(0, 254), reportedUserId: String(body.bound_account_id || "").slice(0, 80) });
+    if (assignedCount) await audit(await getCollection("h3TaskAudits"), "claimed", { taskId: claimed[0].task._id, taskIds: claimed.map((entry) => entry.task._id), assignedNodeIds: claimed.map((entry) => entry.selectedNode.nodeId), lanLoad: clusterNodes.map((entry) => ({ nodeId: entry.nodeId, runningTaskCount: entry.runningTaskCount, estimatedTotalSeconds: entry.estimatedTotalSeconds, gpuState: entry.gpuState })), actorUserId: auth.user._id, bindingId: auth.binding._id, nodeId: auth.binding.nodeId, capabilities: reportedCapabilities, claimPlan: publicPlan, reportedEmail: String(body.bound_account_email || "").slice(0, 254), reportedUserId: String(body.bound_account_id || "").slice(0, 80) });
     const workerTasks = claimed.map(({ task, outputUpload }) => toH3WorkerTask(task, { assets: claimAssets(task.assets), outputUpload }));
     return c.json({ task: workerTasks[0] || null, additional_tasks: workerTasks.slice(1), claim_plan: publicPlan });
   });
@@ -1892,6 +2023,13 @@ export function registerH3SharedRoutes(app, dependencies) {
     if (!["optimizing", "started", "processing", "progress", "completed", "succeeded", "failed", "cancelled"].includes(status)) return c.json({ code: "VALIDATION_ERROR", message: "回调状态不正确" }, 400);
     const eventKey = h3CallbackEventKey(task._id, metadata);
     const now = new Date();
+    if (task.physicalSlotRequired === true && ["claimed", "processing"].includes(task.status)) {
+      const identity = physicalSlotIdentity(task);
+      const remaining = integer(metadata.remaining_seconds ?? metadata.estimated_total_seconds, integer(task.remainingSeconds || task.estimatedTotalSeconds || task.dispatchEstimatedTotalSeconds, 300));
+      if (!identity || !await slots.renew({ ...identity, now, expiresAt: new Date(+now + H3_CLAIM_LEASE_MS), estimatedSeconds: Math.max(0, remaining) })) {
+        return c.json({ code: "H3_PHYSICAL_SLOT_EXPIRED", message: "当前执行节点的任务租约已过期，请立即停止本地任务并等待重新派单" }, 409);
+      }
+    }
     await (await getCollection("h3TaskCallbacks")).updateOne(
       { eventKey },
       { $setOnInsert: { eventKey, taskId: task._id, orderNo: task.orderNo, status, event: String(metadata.event || status), localJobId: String(metadata.local_job_id || "").slice(0, 160), bindingId: auth.binding._id, executorUserId: auth.user._id, metadata, createdAt: now }, $set: { lastReceivedAt: now } },
@@ -1902,6 +2040,7 @@ export function registerH3SharedRoutes(app, dependencies) {
     if (["completed", "succeeded"].includes(status)) heartbeat.lastCompletedAt = now;
     await (await getCollection("nodeAccountBindings")).updateOne({ _id: auth.binding._id, userId: auth.user._id, status: "active" }, { $set: heartbeat });
     if (["completed", "succeeded"].includes(status) && task.status === "completed") {
+      await releasePhysicalSlot(task);
       await ensureH3ConversationMessages({ getCollection, task, now });
       return c.json({ ok: true, idempotent: true, task: workerCallbackTask(task) });
     }
@@ -1987,6 +2126,7 @@ export function registerH3SharedRoutes(app, dependencies) {
       if (task.status === "completed" && !H3_NO_CHARGE_STATUSES.has(task.chargeStatus)) await (await getCollection("h3WalletLedger")).updateOne({ ledgerKey: task.activeChargeKey }, { $set: { status: "settled", settledAt: task.completedAt || now, updatedAt: now } });
       if (task.status === "completed") task = await settleH3Revenue({ getCollection, task, executorUserId: task.assigneeUserId || auth.user._id });
       if (task.status === "completed") await ensureH3ConversationMessages({ getCollection, task, now });
+      if (task.status === "completed") await releasePhysicalSlot(task);
       await (await getCollection("nodeAccountBindings")).updateOne({ _id: auth.binding._id }, { $unset: { nextClaimAt: "" }, $set: { queueStatus: "idle", updatedAt: new Date() } });
       await audit(await getCollection("h3TaskAudits"), completed ? "completed" : "callback_replayed", { taskId: task._id, orderNo: task.orderNo, actorUserId: auth.user._id, bindingId: auth.binding._id, nodeId: auth.binding.nodeId, eventKey });
       return c.json({ ok: true, idempotent: !completed, task: workerCallbackTask(task) });
@@ -1997,12 +2137,14 @@ export function registerH3SharedRoutes(app, dependencies) {
       && integer(task.gpuStartupRedispatches) < H3_GPU_STARTUP_MAX_REDISPATCHES
       && (!task.autoCancelAt || new Date(task.autoCancelAt) > now)) {
       const failedGpuNodeIds = [...new Set([...(Array.isArray(task.failedGpuNodeIds) ? task.failedGpuNodeIds : []), auth.binding.nodeId])].slice(-H3_GPU_STARTUP_MAX_REDISPATCHES);
+      const failedPhysicalSlot = physicalSlotIdentity(task);
       const requeued = await tasks.findOneAndUpdate(
         { _id: task._id, status: { $in: ["claimed", "processing"] }, "claimedByNode.bindingId": auth.binding._id },
-        { $set: { status: "queued", queuedAt: now, progress: 0, progressStage: "gpu_redispatch", progressUpdatedAt: now, failedGpuNodeIds, gpuStartupRedispatches: integer(task.gpuStartupRedispatches) + 1, error: { code: "GPU_NODE_REDISPATCHING", message: H3_GPU_STARTUP_REDISPATCH_MESSAGE }, updatedAt: now }, $unset: { claimedByNode: "", claimRequestedByNode: "", claimedAt: "", claimLeaseUntil: "", executedByNode: "", estimatedTotalSeconds: "", remainingSeconds: "", expectedCompletedAt: "", compiledPrompt: "", promptCompilation: "" } },
+        { $set: { status: "queued", queuedAt: now, progress: 0, progressStage: "gpu_redispatch", progressUpdatedAt: now, failedGpuNodeIds, gpuStartupRedispatches: integer(task.gpuStartupRedispatches) + 1, error: { code: "GPU_NODE_REDISPATCHING", message: H3_GPU_STARTUP_REDISPATCH_MESSAGE }, updatedAt: now }, $unset: { claimedByNode: "", claimRequestedByNode: "", claimedAt: "", claimLeaseUntil: "", executedByNode: "", estimatedTotalSeconds: "", remainingSeconds: "", expectedCompletedAt: "", compiledPrompt: "", promptCompilation: "", physicalSlotRequired: "", physicalSlotClaimId: "" } },
         { returnDocument: "after" },
       );
       if (requeued) {
+        if (failedPhysicalSlot) await slots.release({ ...failedPhysicalSlot, now });
         await Promise.allSettled([
           (await getCollection("h3OutputUploads")).updateMany(
             { taskId: task._id, issuedToBindingId: auth.binding._id, status: "issued" },
@@ -2027,6 +2169,7 @@ export function registerH3SharedRoutes(app, dependencies) {
     );
     task = failed || await tasks.findOne({ _id: task._id });
     if (failed) task = await refundTask({ getCollection, task, reason: task.error?.message, actor: `binding:${auth.binding._id}` });
+    if (["completed", "failed", "cancelled"].includes(task.status)) await releasePhysicalSlot(task);
     await (await getCollection("nodeAccountBindings")).updateOne({ _id: auth.binding._id }, { $unset: { nextClaimAt: "" }, $set: { queueStatus: "idle", updatedAt: new Date() } });
     await audit(await getCollection("h3TaskAudits"), failed ? task.status : "callback_replayed", { taskId: task._id, orderNo: task.orderNo, actorUserId: auth.user._id, bindingId: auth.binding._id, nodeId: auth.binding.nodeId, eventKey });
     return c.json({ ok: true, idempotent: !failed, task: workerCallbackTask(task) });
@@ -2140,7 +2283,8 @@ export function registerH3SharedRoutes(app, dependencies) {
   const earningsDeviceSchema = z.object({ node_id: z.string(), node_name: z.string(), gpu_name: z.string().nullable(), vram_mb: z.number().int(), online: z.boolean(), status: z.enum(["online", "offline"]), queue_status: z.string(), total_earnings_fen: z.number().int(), settled_earnings_fen: z.number().int(), pending_earnings_fen: z.number().int(), average_daily_earnings_fen: z.number().int(), active_days: z.number().int(), completed_task_count: z.number().int(), last_claimed_at: z.string().nullable(), last_callback_at: z.string().nullable(), last_completed_at: z.string().nullable(), app_version: z.string().nullable() });
   const earningsSummarySchema = z.object({ ok: z.literal(true), currency: z.literal("CNY"), account: z.object({ total_earnings_fen: z.number().int(), settled_earnings_fen: z.number().int(), pending_earnings_fen: z.number().int(), average_daily_earnings_fen: z.number().int(), active_days: z.number().int(), device_count: z.number().int() }), current_device: z.object({ node_id: z.string(), node_name: z.string(), total_earnings_fen: z.number().int(), average_daily_earnings_fen: z.number().int(), completed_task_count: z.number().int(), last_completed_at: z.string().nullable() }).nullable(), devices: z.array(earningsDeviceSchema) });
   const h3NodeCapabilitiesSchema = z.object({ max_duration_seconds: z.number().int().min(1).max(H3_MAX_DURATION_SECONDS), profiles: z.array(z.string()).min(1), sampling_steps: z.array(z.union([z.literal(4), z.literal(8), z.literal(20)])).min(1).optional(), longform_v1: z.boolean().optional(), gpu_name: z.string().max(160).optional(), vram_mb: z.number().int().min(0).optional(), max_image_count: z.number().int().min(0).max(9), max_video_count: z.number().int().min(0).max(3), max_audio_count: z.number().int().min(0).max(3), local_prompt_optimization_v1: z.boolean().optional(), batch_claim: z.boolean().optional(), max_concurrent_tasks: z.number().int().min(1).max(8).optional() });
-  const h3LanNodeSchema = z.object({ node_id: z.string().min(12).max(160), node_name: z.string().max(120), running_task_count: z.number().int().min(0).max(64), estimated_total_seconds: z.number().int().min(0).max(7 * 24 * 60 * 60), available: z.boolean().optional(), capabilities: h3NodeCapabilitiesSchema });
+  const h3NodeResourcesSchema = z.object({ running_task_count: z.number().int().min(0).max(64).optional(), estimated_total_seconds: z.number().int().min(0).max(7 * 24 * 60 * 60).optional(), current_task_remaining_seconds: z.number().int().min(0).max(31 * 86400).nullable().optional(), gpu_state: z.enum(["idle", "busy", "unknown"]).optional(), gpu_observed_at: z.iso.datetime().optional() });
+  const h3LanNodeSchema = z.object({ node_id: z.string().min(12).max(160), node_name: z.string().max(120), running_task_count: z.number().int().min(0).max(64), estimated_total_seconds: z.number().int().min(0).max(7 * 24 * 60 * 60), resources: h3NodeResourcesSchema.optional(), available: z.boolean().optional(), capabilities: h3NodeCapabilitiesSchema });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/desktop/account-bindings/verify", tags: ["Desktop Account Binding"], summary: "在已激活桌面端绑定古龙官网账号", description: "先验证 RS256 激活回执，再查询邮箱。未激活或伪造客户端无法利用本接口枚举账号。服务端不会接收或保存原始 MAC。", security: [], request: { body: { required: true, content: { "application/json": { schema: z.object({ email: z.email(), node_id: z.string().min(12).max(160), node_name: z.string().min(1).max(120), app_version: z.string().min(1).max(40), activation_receipt: z.union([z.string(), z.record(z.string(), z.unknown())]) }) } } } }, responses: { 200: { description: "绑定成功；binding_token 只在本次响应返回", content: { "application/json": { schema: bindingSuccessSchema } } }, 403: { description: "激活证明无效", content: { "application/json": { schema: errorSchema } } }, 404: { description: "激活验证通过但邮箱未注册", content: { "application/json": { schema: unknownUserSchema } } }, 429: { description: "请求过于频繁", content: { "application/json": { schema: errorSchema } } } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/desktop/account-bindings/unbind", tags: ["Desktop Account Binding"], summary: "撤销当前节点账号绑定", security: [{ accountBinding: [] }], responses: { 200: { description: "已撤销" }, 401: { description: "绑定令牌无效" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/desktop/earnings/summary", tags: ["Desktop Earnings"], summary: "读取当前绑定账户的 MiniMax H3 节点收益", description: "仅接受 X-Gulong-Account-Binding。可选 node_id 必须属于令牌对应账户，否则返回 403。金额均为人民币整数分。收益只聚合服务端 h3_node_commission 结算流水；平均每天收益=已结算累计收益÷max(1, 从首个成功结算的中国自然日到当前中国自然日的天数)。", security: [{ accountBinding: [] }], request: { query: z.object({ node_id: z.string().optional() }) }, responses: { 200: { description: "账户与设备收益汇总", content: { "application/json": { schema: earningsSummarySchema } } }, 401: { description: "未绑定或绑定令牌失效", content: { "application/json": { schema: errorSchema } } }, 403: { description: "node_id 不属于当前账户", content: { "application/json": { schema: errorSchema } } } } });
@@ -2154,7 +2298,7 @@ export function registerH3SharedRoutes(app, dependencies) {
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}", tags: ["MiniMax H3 Shared Nodes"], summary: "查看共享节点订单详情", description: "输出只包含受控 previewPath/downloadPath 和 24 小时到期状态，不返回 COS objectKey 或永久 URL。", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "订单详情" }, 404: { description: "订单不存在或无权查看" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/h3/tasks/{id}/output", tags: ["MiniMax H3 Shared Nodes"], summary: "鉴权预览或下载 H3 输出视频", description: "仅任务请求用户或管理员可访问。服务端按次签发不超过 5 分钟且不越过 24 小时保留截止时间的 COS GET 地址；disposition=attachment 用于下载。过期返回 410 并触发幂等删除。", request: { params: z.object({ id: z.string() }), query: z.object({ disposition: z.enum(["inline", "attachment"]).optional() }) }, responses: { 302: { description: "跳转到短时 COS 签名地址" }, 404: { description: "视频不存在或无权访问" }, 410: { description: "视频已过期并删除" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/desktop/agent/tools/minimax-h3-shared", tags: ["Desktop Agent Tools"], summary: "读取桌面古龙智能体的 H3 共享节点工具合同", description: "tool.noChargeCreation返回version=1、requestField=require_no_charge、onUnavailable=reject_without_order_or_charge；仅enforced=true时客户端才可开放零扣费创建。使用现有古龙会话或具有 tasks:read 的 API Key。返回 createTask、素材上传 URL、本地提示词处理合同、9图3视频3音频限制、整数分价格与当前余额；不再返回网页 optimizePrompt。管理员响应 wallet.unlimited=true，桌面端不得按余额拦截。桌面创建任务时 source_channel 必须为 desktop_agent。", responses: { 200: { description: "工具合同、本地提示词处理要求、钱包余额与管理员不限额标记", content: { "application/json": { schema: z.object({ tool: z.object({ noChargeCreation: noChargeContractSchema }).passthrough() }).passthrough() } } }, 401: { description: "未认证" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/claim", tags: ["MiniMax H3 Shared Nodes"], summary: "按局域网集群负载原子调度最早等待任务", description: "有分组的非管理员需求用户还须拥有当前有效古龙引擎包月权益，未生效或已过期任务暂不领取；已领取任务回调仍按分组校验，不因运行中到期阻塞结果。用户与执行节点的分组必须严格相同；null 只匹配 null 或历史未设置字段。服务端从 users 和 nodeAccountBindings 读取 computeGroupId，忽略客户端上报分组；先按任务分组筛选，再动态校验用户当前分组，并在原子领取及 COS 票据签发前复查。assigned_node.compute_group_id 返回实际执行节点分组。轮询节点通过 lan_cluster.nodes 上报同一局域网内全部已绑定节点的 running_task_count、estimated_total_seconds 与能力。服务端先验证所有节点均属于当前 binding token 对应账号，再按预计剩余总耗时、运行任务数、node_id 排序，把按 createdAt、_id 最早且能力匹配的任务分配给耗时最少的节点；响应 workerTask.assigned_node 是唯一允许回调的执行节点。老客户端缺少 lan_cluster 时暂按单节点兼容。capabilities 必须上报 max_duration_seconds、profiles、sampling_steps 与素材上限；只有 longform_v1=true 的节点可领取 video_mode=extended。local_prompt_optimization_v1=true 表示节点能够处理用户开启魔法优化的任务。DTO 包含 assigned_node、dispatch_estimated_total_seconds、auto_cancel_at、素材短期下载票据与 output_upload，但不含 requester、价格、钱包流水或内部绑定信息。任务自创建起超过服务端预计总耗时 10 倍仍未完成会自动取消、幂等退款并提醒用户更换视频模型。dry_run=true 绝不领取任务。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "application/json": { schema: z.object({ bound_account_email: z.string().optional(), bound_account_id: z.string().optional(), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: h3NodeCapabilitiesSchema, lan_cluster: z.object({ cluster_id: z.string().min(12).max(160), observed_at: z.iso.datetime(), nodes: z.array(h3LanNodeSchema).min(1).max(H3_LAN_REPORT_MAX_NODES) }).optional() }) } } } }, responses: { 200: { description: "dry_run 返回可达状态；正式领取返回指定执行节点、素材票据、输出票据和动态 claim_plan" }, 400: { description: "节点能力或局域网报告无效/过期" }, 401: { description: "绑定无效" }, 403: { description: "局域网报告包含其他账号或未绑定节点" }, 409: { description: "回调节点不是 assigned_node" }, 429: { description: "未遵循轮询退避或请求频率过高" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/claim", tags: ["MiniMax H3 Shared Nodes"], summary: "按显卡空闲优先和最短剩余耗时原子调度最早等待任务", description: "有分组的非管理员需求用户还须拥有当前有效古龙引擎包月权益，未生效或已过期任务暂不领取；已领取任务回调仍按分组校验，不因运行中到期阻塞结果。用户与执行节点的分组必须严格相同；null 只匹配 null 或历史未设置字段。服务端从 users 和 nodeAccountBindings 读取 computeGroupId，忽略客户端上报分组；先按任务分组筛选，再动态校验用户当前分组，并在原子领取及 COS 票据签发前复查。assigned_node.compute_group_id 返回实际执行节点分组。每次拉单通过 resources 上报 gpu_state=idle|busy|unknown、gpu_observed_at、current_task_remaining_seconds 和 running_task_count；estimated_total_seconds 保持兼容。显卡状态超过30秒、缺时间或缺字段按unknown，未来时间最多容许5秒；官网存量活跃任务覆盖虚假idle和低估负载。lan_cluster.nodes 可分别上报同一局域网内全部已绑定节点的 resources 与能力。服务端先验证LAN节点均属于当前 binding token 对应账号，再按显卡空闲优先、当前任务列表总剩余耗时、运行任务数、node_id排序，每发一单后立即重算；任务按createdAt、_id最早且能力匹配优先。最近3分钟认证上报的全局兼容节点参与比较；更优节点不在当前账号LAN内时仅保留任务等待其自行拉取，CAS偏好等待最多5秒，绝不跨账号下发任务或COS票据。claim_plan.scheduling=fifo_gpu_idle_then_shortest_remaining_v1。响应workerTask.assigned_node是唯一允许回调的执行节点。老客户端缺少resources或lan_cluster时按unknown/单节点兼容。capabilities必须上报max_duration_seconds、profiles、sampling_steps与素材上限；只有longform_v1=true的节点可领取video_mode=extended。local_prompt_optimization_v1=true表示节点能处理用户开启魔法优化的任务。DTO包含assigned_node、dispatch_estimated_total_seconds、auto_cancel_at、素材短期下载票据与output_upload，但不含requester、价格、钱包流水或内部绑定信息。任务自创建起超过服务端预计总耗时10倍仍未完成会自动取消、幂等退款并提醒用户更换视频模型。dry_run=true绝不领取任务或进入生产调度候选池。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "application/json": { schema: z.object({ bound_account_email: z.string().optional(), bound_account_id: z.string().optional(), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: h3NodeCapabilitiesSchema, resources: h3NodeResourcesSchema.optional(), lan_cluster: z.object({ cluster_id: z.string().min(12).max(160), observed_at: z.iso.datetime(), nodes: z.array(h3LanNodeSchema).min(1).max(H3_LAN_REPORT_MAX_NODES) }).optional() }) } } } }, responses: { 200: { description: "dry_run返回可达状态；正式领取返回指定执行节点、素材票据、输出票据和动态claim_plan；更优全局节点短暂等待返回PREFERRED_NODE_POLL_WAIT且不含其他节点身份" }, 400: { description: "节点能力、显卡状态或局域网报告无效/过期" }, 401: { description: "绑定无效" }, 403: { description: "局域网报告包含其他账号或未绑定节点" }, 409: { description: "回调节点不是assigned_node" }, 429: { description: "未遵循轮询退避或请求频率过高" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/h3/tasks/callback", tags: ["MiniMax H3 Shared Nodes"], summary: "执行节点回调可选本地优化、生成进度或结果", description: "所有回调在写入进度、结果、钱包或 COS 回执前，重新读取任务需求用户和实际执行节点的分组；跨组返回 403 COMPUTE_GROUP_MISMATCH，客户端 metadata 不可覆盖分组。multipart/form-data 仅发送 metadata 字段，不得上传 video 文件。仅已领取任务的指定绑定节点可回调；未接单任务返回 409 TASK_NOT_CLAIMED。prompt_optimization_enabled=true 的任务先发送 status=optimizing，成功后以 status=started、compiled_prompt、estimated_total_seconds 上报；false 的任务不得发送 optimizing 或 compiled_prompt，直接以原始 prompt 执行并在 started 中提交 estimated_total_seconds。后续 progress 回调发送 progress（0–99）与可选 remaining_seconds。成功状态还需 video.sha256/bytes/filename/object_key，服务端 HEAD 校验对象归属。GPU 推理内核启动失败时，同一订单最多重派两次，排除已故障节点，原预扣和流水不变；最终失败才幂等退款，且用户不接收原始堆栈。", security: [{ accountBinding: [] }], request: { body: { required: true, content: { "multipart/form-data": { schema: z.object({ metadata: z.string() }) } } } }, responses: { 200: { description: "可选本地优化阶段、生成进度、故障重派或最终结果已幂等处理" }, 400: { description: "回执不完整、缺少必需 compiled_prompt 或在关闭优化时非法提交 compiled_prompt" }, 401: { description: "绑定无效" }, 403: { description: "用户与执行节点分组不匹配，禁止跨分组回调" }, 409: { description: "任务未接单、回调节点不匹配、本地优化、COS 回执、上传票据或结算状态不匹配" }, 413: { description: "禁止把视频文件经 Vercel 中转" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/admin/h3/tasks", tags: ["Administration"], summary: "管理员筛选共享节点任务派单", responses: { 200: { description: "任务列表" }, 403: { description: "需要管理员角色" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/admin/h3/tasks/{id}", tags: ["Administration"], summary: "管理员查看共享节点任务、回调和审计详情", request: { params: z.object({ id: z.string() }) }, responses: { 200: { description: "任务详情、回调和审计时间线" }, 404: { description: "任务不存在" } } });

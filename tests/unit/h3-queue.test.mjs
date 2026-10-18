@@ -1,7 +1,46 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ObjectId } from "mongodb";
-import { calculateH3ClaimPlan, createH3QueueCoordinator } from "../../server/h3-queue.js";
+import { calculateH3ClaimPlan, createH3QueueCoordinator, rankH3LanNodes } from "../../server/h3-queue.js";
+
+test("H3每次派单优先显式空闲显卡，再比较剩余总耗时", () => {
+  const now = new Date("2026-10-18T00:00:00Z");
+  const capabilities = { maxConcurrentTasks: 4 };
+  const busy = { nodeId: "node-a-busy", capabilities, runningTaskCount: 1, estimatedTotalSeconds: 10,
+    resources: { gpu_state: "busy", gpu_observed_at: now.toISOString(), current_task_remaining_seconds: 10 } };
+  const idle = { nodeId: "node-b-idle", capabilities, runningTaskCount: 0, estimatedTotalSeconds: 90,
+    resources: { gpu_state: "idle", gpu_observed_at: now.toISOString(), current_task_remaining_seconds: 90 } };
+  assert.equal(rankH3LanNodes([busy, idle], now)[0].nodeId, idle.nodeId);
+  idle.runningTaskCount = 1;
+  idle.estimatedTotalSeconds += 300;
+  assert.equal(rankH3LanNodes([busy, idle], now)[0].nodeId, busy.nodeId);
+});
+
+test("H3过期、缺失和被活跃任务否定的空闲状态不能取得空闲优先权", () => {
+  const now = new Date("2026-10-18T00:00:00Z");
+  const node = (nodeId, gpu_state, observed, runningTaskCount = 0) => ({ nodeId, capabilities: {}, runningTaskCount, estimatedTotalSeconds: 100,
+    resources: { gpu_state, ...(observed ? { gpu_observed_at: observed } : {}) } });
+  const ranked = rankH3LanNodes([
+    node("stale", "idle", new Date(+now - 31_000).toISOString()),
+    node("missing", "idle"),
+    node("contradicted", "idle", now.toISOString(), 1),
+    node("valid", "idle", now.toISOString()),
+  ], now);
+  assert.equal(ranked[0].nodeId, "valid");
+  assert.equal(ranked.find((item) => item.nodeId === "stale").gpuState, "unknown");
+  assert.equal(ranked.find((item) => item.nodeId === "missing").gpuState, "unknown");
+  assert.equal(ranked.find((item) => item.nodeId === "contradicted").gpuState, "busy");
+});
+
+test("H3缺失剩余耗时不当作零耗时，明确上报0仍可用", () => {
+  const ranked = rankH3LanNodes([
+    { nodeId: "unknown", resources: {} },
+    { nodeId: "measured", resources: { current_task_remaining_seconds: 20 } },
+    { nodeId: "zero", resources: { current_task_remaining_seconds: 0 } },
+  ]);
+  assert.deepEqual(ranked.map((node) => node.nodeId), ["zero", "measured", "unknown"]);
+  assert.equal(ranked[2].estimatedTotalSeconds, Number.POSITIVE_INFINITY);
+});
 
 test("H3 queue assigns a bounded fair batch from queue pressure and node capacity", () => {
   const busyQueue = calculateH3ClaimPlan({ queuedCount: 40, activeNodeCount: 4, maxConcurrentTasks: 8, batchCapable: true, jitterSeed: "node-a" });

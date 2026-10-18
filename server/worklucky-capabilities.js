@@ -20,7 +20,7 @@ function definition(suffix, parametersSchema, options = {}) {
     maxAssets: 0, maxTotalInputBytes: 0, assetRules: [], outputRules: options.outputRules || [],
     defaultEtaSeconds: options.eta || 60, maxRuntimeSeconds: options.runtime || 1800,
     priceFen: 0, entitlement: "gulong_engine_monthly", sharingScope: "gulong_shared",
-    dispatchable: true, adapterStatus: "consumer_acceptance_required", trustedConsumerAcceptanceRequired: true,
+    dispatchable: true, adapterStatus: "automatic_verification_required", trustedConsumerAcceptanceRequired: true,
     commercialUse: "node_operator_responsibility", legacyRoute: null,
   });
 }

@@ -14,7 +14,11 @@ import { computeGroupFilter, computeGroupsMatch, getUserComputeGroupId, normaliz
 import { capabilityProducts, withClientProductFingerprint, clientProductConflicts } from "./worklucky-product.js";
 import { isWorkLuckyCapability, validateSpecialParameters, validateSpecialInlineResult, normalizeSpecialNodeModels, specialNodeMatches, specialAvailability } from "./worklucky-capabilities.js";
 import { createCapabilitySlotCoordinator, normalizeCapabilityResources } from "./capability-slots.js";
+import { SHARED_NODE_SCHEDULING, NODE_REPORT_MAX_AGE_MS, normalizeGpuLoadReport, projectSharedNodeLoad, compareSharedNodeLoad, boundedGlobalDispatchWait } from "./shared-node-scheduler.js";
 import { findTrustedConsumerAcceptance } from "./capability-consumer-acceptance.js";
+import { createCapabilityAutoVerificationService, registerCapabilityAutoVerificationRoutes } from "./capability-auto-verification.js";
+import { createCapabilityVerificationMedia } from "./capability-verification-media.js";
+import { createCapabilityVerificationAdapters } from "./capability-verification-adapters.js";
 import { inspectFlacStream } from "./capability-flac.js";
 
 export const CAPABILITY_ORDER_PROTOCOL = "gulong-capability-orders-v1";
@@ -609,7 +613,29 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
   const requestKey = (ownerId, key) => createHash("sha256").update(`${ownerId}:${key}`).digest("hex");
   const readUserGroup = dependencies.getUserComputeGroupId || ((userId) => getUserComputeGroupId(userId, getCollection));
   const slots = dependencies.slotCoordinator || createCapabilitySlotCoordinator({ getCollection });
-  const trustedAcceptance = dependencies.findTrustedConsumerAcceptance || ((bindingId, report, now) => findTrustedConsumerAcceptance({ getCollection, bindingId, report, now }));
+  const verificationMedia = dependencies.verificationMedia || createCapabilityVerificationMedia({ getCollection });
+  const automaticVerification = dependencies.automaticVerification || createCapabilityAutoVerificationService({
+    getCollection, enforceRateLimit, ...verificationMedia,
+    adapters: createCapabilityVerificationAdapters({ verifyMediaOutputs: verificationMedia.verifyMediaOutputs }),
+    canProbe: async ({ binding, resources, now }) => {
+      const load = normalizeGpuLoadReport(resources, now);
+      if (load.gpu_state !== "idle" || load.current_task_remaining_seconds !== 0 || resources.running_task_count !== 0) return false;
+      const snapshot = await slots.snapshot({ bindingId: binding._id, now });
+      if (!snapshot.available || snapshot.activeCount) return false;
+      const h3Task = await (await getCollection("h3SharedTasks")).findOne({ "claimedByNode.bindingId": binding._id,
+        status: { $in: ["claimed", "processing"] }, claimLeaseUntil: { $gt: now } });
+      return !h3Task;
+    },
+    acquireExecution: async ({ binding, challengeId, expiresAt }) => Boolean(await slots.reserve({
+      bindingId: binding._id, nodeId: binding.nodeId, userId: binding.userId, capabilityId: "system.verification",
+      claimId: challengeId, taskId: challengeId, maxConcurrentTasks: 1, capabilityMaxConcurrent: 1,
+      exclusive: true, estimatedSeconds: 900, now: new Date(), expiresAt,
+    })),
+    releaseExecution: ({ bindingId, challengeId }) => slots.release({ bindingId, claimId: challengeId, taskId: challengeId, now: new Date() }),
+  });
+  const trustedAcceptance = dependencies.findTrustedConsumerAcceptance || (async (bindingId, report, now) =>
+    (await automaticVerification.findTrusted({ bindingId, report: report.verificationInventory || report, now }))
+      || findTrustedConsumerAcceptance({ getCollection, bindingId, report, now }));
   const verifyFlacObject = dependencies.verifyFlacObject || (async (grant) => {
     const response = await fetch(issueDownloadUrl(grant.objectKey, { expires: 120 }), { signal: AbortSignal.timeout(60_000), redirect: "error" });
     if (!response.ok || !response.body) throw new Error("完整音乐文件暂时无法读取");
@@ -624,9 +650,35 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     return snapshot.available && snapshot.leases.some((lease) => lease.claimId === order.claimId && lease.taskId === String(order._id)
       && lease.nodeId === order.assignedNode.nodeId && lease.userId === String(order.assignedNode.userId));
   }
-  async function trustReports(binding, reports, now) {
-    return Promise.all(reports.map(async (report) => !isWorkLuckyCapability(report.capabilityId) ? report
-      : { ...report, trustedAcceptance: Boolean(await trustedAcceptance(binding._id, report, now)) }));
+  async function trustReports(binding, reports, now, lookup = trustedAcceptance) {
+    return Promise.all(reports.map(async (report) => {
+      const accepted = await lookup(binding._id, report, now);
+      if (accepted?.source === "automatic") return { ...report, models: accepted.models, defaultModel: accepted.defaultModel,
+        supportedModels: accepted.models.map((model) => model.id), supportedVoices: accepted.models.map((model) => model.voice_id).filter(Boolean),
+        contractTests: accepted.contractTests, asrLanguages: accepted.asrLanguages, trustedAcceptance: true };
+      if (binding.autoVerificationEnrolledAt) return { ...report, validated: false, trustedAcceptance: false };
+      return isWorkLuckyCapability(report.capabilityId) ? { ...report, trustedAcceptance: Boolean(accepted) } : report;
+    }));
+  }
+
+  async function readyReports(binding, reports, now, lookupAutomatic = (bindingId, report, instant) => automaticVerification.findTrusted({ bindingId, report, now: instant })) {
+    const ready = [];
+    for (const report of reports) {
+      const acceptance = await lookupAutomatic(binding._id, report.verificationInventory || report, now);
+      if (!acceptance) {
+        // Candidate inventory is allowed on the separate verification route,
+        // never promoted by its own validated flag or a pending challenge.
+        if (report.validated !== true || binding.autoVerificationEnrolledAt || report.verificationInventory) continue;
+        ready.push(normalizeCapabilityReport(report, now, { allowLegacyEnglishOrders: true })); continue;
+      }
+      const normalized = normalizeCapabilityReport({ ...report, validated: true, models: acceptance.models,
+        default_model: acceptance.defaultModel, asr_languages: acceptance.asrLanguages,
+        supported_models: acceptance.models.map((model) => model.id), supported_voices: acceptance.models.map((model) => model.voice_id).filter(Boolean),
+        validation: { ...(report.validation || {}), tested_at: acceptance.testedAt, artifact_sha256: acceptance.artifactSha256,
+          contract_tests: acceptance.contractTests } }, now, { allowLegacyEnglishOrders: true });
+      ready.push({ ...normalized, trustedAcceptance: true, verificationInventory: report.verificationInventory || report });
+    }
+    return ready;
   }
 
   async function workerGroupError(c, order, auth) {
@@ -667,14 +719,18 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       if (!reportedCapability) continue;
       const nodeUser = await (await getCollection("users")).findOne({ _id: binding.userId, status: "active" });
       if (!nodeUser) continue;
-      if (isWorkLuckyCapability(capabilityId)) {
-        if (!await trustedAcceptance(binding._id, reportedCapability, now)) continue;
-        reportedCapability = { ...reportedCapability, trustedAcceptance: true };
+      if (isWorkLuckyCapability(capabilityId) || binding.autoVerificationEnrolledAt || reportedCapability.verificationInventory) {
+        const accepted = await trustedAcceptance(binding._id, reportedCapability, now);
+        if (!accepted || binding.autoVerificationEnrolledAt && accepted.source !== "automatic") continue;
+        reportedCapability = { ...reportedCapability, trustedAcceptance: true, ...(accepted.source === "automatic" ? {
+          models: accepted.models, defaultModel: accepted.defaultModel, contractTests: accepted.contractTests, asrLanguages: accepted.asrLanguages,
+          supportedModels: accepted.models.map((model) => model.id), supportedVoices: accepted.models.map((model) => model.voice_id).filter(Boolean),
+        } : {}) };
       }
       const resource = normalizeCapabilityResources(report.resources, reportedCapability.maxConcurrent);
       const snapshot = await slots.snapshot({ bindingId: binding._id, now });
       if (!snapshot.available) continue;
-      const availableSlots = Math.max(0, Math.min(reportedCapability.maxConcurrent - (snapshot.byCapability[capabilityId] || 0),
+      const availableSlots = snapshot.leases.some((lease) => lease.exclusive === true) ? 0 : Math.max(0, Math.min(reportedCapability.maxConcurrent - (snapshot.byCapability[capabilityId] || 0),
         resource.max_concurrent_tasks - resource.running_task_count - snapshot.activeCount));
       if (!capabilityNodeCanRunOrder({ nodeId: report.nodeId, binding, availableSlots: Math.max(1, availableSlots), capabilities: [reportedCapability] },
         { ...(order || { capabilityId, requesterUserId: ownerId, catalogProbe: true,
@@ -746,6 +802,9 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     if (!user) return { error: c.json({ code: "INVALID_ACCOUNT_BINDING", message: "绑定账户已失效" }, 401) };
     return { binding, user };
   }
+
+  registerCapabilityAutoVerificationRoutes(app, { service: automaticVerification, requireBinding: authenticateBinding,
+    requireAdmin: dependencies.requireAdmin || (async (c) => ({ error: c.json({ code: "FORBIDDEN", message: "仅管理员可查询共享模型状态" }, 403) })) });
 
   async function recoverExpired(now = new Date()) {
     const orders = await getCollection("capabilityOrders");
@@ -1077,39 +1136,82 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "节点拉单过于频繁" }, 429);
     if (body.protocol_version !== CAPABILITY_ORDER_PROTOCOL) return c.json({ code: "PROTOCOL_VERSION_UNSUPPORTED", message: `必须使用 ${CAPABILITY_ORDER_PROTOCOL}` }, 400);
     const now = new Date();
+    // Promise caches live for this HTTP request only. Raw and normalized views
+    // of one report share a key; a later request always rechecks revocation.
+    const automaticLookups = new Map(), trustedLookups = new Map();
+    const lookupKey = (bindingId, report) => {
+      const raw = report.verificationInventory || report;
+      const models = raw.models ?? raw.supported_models ?? raw.supportedModels ?? [];
+      const languages = raw.asr_languages ?? raw.asrLanguages ?? [];
+      return JSON.stringify({ binding: String(bindingId), capability: raw.capability_id ?? raw.capabilityId,
+        version: raw.capability_version ?? raw.capabilityVersion ?? raw.specialContractVersion,
+        artifact: String(raw.validation?.artifact_sha256 ?? raw.validation?.artifactSha256 ?? raw.artifact_sha256 ?? raw.artifactSha256 ?? "").toUpperCase(),
+        installed: raw.installed, enabled: raw.enabled, sharing: raw.sharing_opt_in ?? raw.sharingOptIn,
+        models, defaultModel: raw.default_model ?? raw.defaultModel ?? null,
+        languages: Array.isArray(languages) ? [...languages].sort() : languages,
+        acceptanceId: raw.validation?.acceptance_id ?? raw.validation?.acceptanceId ?? null,
+        tests: raw.validation?.contract_tests ?? raw.validation?.contractTests ?? raw.contractTests ?? {},
+      }, (_, value) => value && typeof value === "object" && !Array.isArray(value)
+        ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]])) : value);
+    };
+    const lookupAutomatic = (bindingId, report, instant) => {
+      const raw = report.verificationInventory || report, key = lookupKey(bindingId, raw);
+      if (!automaticLookups.has(key)) automaticLookups.set(key, automaticVerification.findTrusted({ bindingId, report: raw, now: instant }));
+      return automaticLookups.get(key);
+    };
+    const lookupTrusted = (bindingId, report, instant) => {
+      const key = lookupKey(bindingId, report);
+      if (!trustedLookups.has(key)) trustedLookups.set(key, dependencies.findTrustedConsumerAcceptance
+        ? Promise.resolve(dependencies.findTrustedConsumerAcceptance(bindingId, report, instant))
+        : lookupAutomatic(bindingId, report, instant).then((accepted) => accepted || findTrustedConsumerAcceptance({ getCollection, bindingId, report, now: instant })));
+      return trustedLookups.get(key);
+    };
     let ownCapabilities;
-    try { ownCapabilities = (Array.isArray(body.capabilities) ? body.capabilities : []).map((item) => normalizeCapabilityReport(item, now, { allowLegacyEnglishOrders: true })); }
+    try { ownCapabilities = await readyReports(auth.binding, Array.isArray(body.capabilities) ? body.capabilities : [], now, lookupAutomatic); }
     catch (error) { return c.json({ code: error.code || "INVALID_CAPABILITY_REPORT", message: error.message }, error.status || 400); }
-    if (!ownCapabilities.length) return c.json({ code: "CAPABILITY_REPORT_REQUIRED", message: "节点必须上报至少一个已安装、已验证、已启用能力" }, 400);
-    ownCapabilities = await trustReports(auth.binding, ownCapabilities, now);
-    const resources = normalizeCapabilityResources(body.resources, Math.max(...ownCapabilities.map((item) => item.maxConcurrent)));
-    const ownNode = { nodeId, nodeName: String(body.node_name || auth.binding.nodeName || "").slice(0, 120), binding: auth.binding, capabilities: ownCapabilities, runningTaskCount: Math.max(0, integer(resources.running_task_count)), estimatedTotalSeconds: Math.max(0, integer(resources.estimated_total_seconds)), maxConcurrent: Math.min(16, Math.max(1, integer(resources.max_concurrent_tasks, Math.max(...ownCapabilities.map((item) => item.maxConcurrent)))) ) };
+    if (!ownCapabilities.length) return Array.isArray(body.capabilities) && body.capabilities.length
+      ? c.json({ task: null, claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: SHARED_NODE_SCHEDULING,
+        code: "CAPABILITY_VERIFICATION_PENDING", verification_required: true, next_poll_after_seconds: 30 } })
+      : c.json({ code: "CAPABILITY_REPORT_REQUIRED", message: "节点必须上报至少一个已安装能力，并完成自动验收" }, 400);
+    ownCapabilities = await trustReports(auth.binding, ownCapabilities, now, lookupTrusted);
+    let resources;
+    try { resources = { ...normalizeCapabilityResources(body.resources, Math.max(...ownCapabilities.map((item) => item.maxConcurrent))), ...normalizeGpuLoadReport(body.resources, now) }; }
+    catch (error) { return c.json({ code: error.code, message: error.message }, error.status || 400); }
+    const ownNode = { nodeId, nodeName: String(body.node_name || auth.binding.nodeName || "").slice(0, 120), binding: auth.binding, capabilities: ownCapabilities, resources, runningTaskCount: resources.running_task_count, maxConcurrent: resources.max_concurrent_tasks };
     ownNode.availableSlots = Math.max(0, ownNode.maxConcurrent - ownNode.runningTaskCount);
     const nodes = [ownNode];
     const lanReports = Array.isArray(body.lan_cluster?.nodes) ? body.lan_cluster.nodes.slice(0, 64) : [];
+    const lanNodeIds = [...new Set(lanReports.map((report) => String(report.node_id || "").trim()).filter((id) => id && id !== nodeId))];
+    const lanBindings = lanNodeIds.length ? await (await getCollection("nodeAccountBindings")).find({ userId: auth.user._id,
+      nodeId: { $in: lanNodeIds }, status: "active", revokedAt: null }).limit(64).toArray() : [];
+    const lanBindingsByNode = new Map(lanBindings.map((binding) => [binding.nodeId, binding]));
     for (const report of lanReports) {
       const reportNodeId = String(report.node_id || "").trim();
-      if (!reportNodeId || reportNodeId === nodeId) continue;
-      const binding = await (await getCollection("nodeAccountBindings")).findOne({ userId: auth.user._id, nodeId: reportNodeId, status: "active", revokedAt: null });
+      if (!reportNodeId || nodes.some((node) => node.nodeId === reportNodeId)) continue;
+      const binding = lanBindingsByNode.get(reportNodeId);
       if (!binding) return c.json({ code: "LAN_NODE_NOT_OWNED", message: "局域网报告包含未绑定到当前账户的节点" }, 403);
       let capabilities;
-      try { capabilities = (Array.isArray(report.capabilities) ? report.capabilities : []).map((item) => normalizeCapabilityReport(item, now, { allowLegacyEnglishOrders: true })); }
+      try { capabilities = await readyReports(binding, Array.isArray(report.capabilities) ? report.capabilities : [], now, lookupAutomatic); }
       catch (error) { return c.json({ code: error.code || "INVALID_CAPABILITY_REPORT", message: error.message }, error.status || 400); }
-      capabilities = await trustReports(binding, capabilities, now);
-      const reportResources = normalizeCapabilityResources(report.resources, Math.max(1, ...capabilities.map((item) => item.maxConcurrent)));
+      capabilities = await trustReports(binding, capabilities, now, lookupTrusted);
+      let reportResources;
+      try { reportResources = { ...normalizeCapabilityResources(report.resources, Math.max(1, ...capabilities.map((item) => item.maxConcurrent))), ...normalizeGpuLoadReport(report.resources, now) }; }
+      catch (error) { return c.json({ code: error.code, message: error.message }, error.status || 400); }
       const maxConcurrent = Math.min(16, Math.max(1, integer(reportResources.max_concurrent_tasks, Math.max(1, ...capabilities.map((item) => item.maxConcurrent)))));
-      nodes.push({ nodeId: reportNodeId, nodeName: String(report.node_name || binding.nodeName || "").slice(0, 120), binding, capabilities, runningTaskCount: Math.max(0, integer(reportResources.running_task_count)), estimatedTotalSeconds: Math.max(0, integer(reportResources.estimated_total_seconds)), maxConcurrent, availableSlots: Math.max(0, maxConcurrent - Math.max(0, integer(reportResources.running_task_count))) });
-    }
-    for (const node of nodes) {
-      const snapshot = await slots.snapshot({ bindingId: node.binding._id, now });
-      node.availableSlots = snapshot.available ? Math.max(0, node.maxConcurrent - node.runningTaskCount - snapshot.activeCount) : 0;
-      node.activeByCapability = snapshot.byCapability;
+      nodes.push({ nodeId: reportNodeId, nodeName: String(report.node_name || binding.nodeName || "").slice(0, 120), binding, capabilities, resources: reportResources, runningTaskCount: reportResources.running_task_count, maxConcurrent, availableSlots: Math.max(0, maxConcurrent - reportResources.running_task_count) });
     }
     // Dry-run is a connectivity probe, never an advertisement or queue mutation.
     if (body.dry_run === true) return c.json({ ok: true, service: "gulong-capability-orders", protocol_version: CAPABILITY_ORDER_PROTOCOL, queue: "reachable", eligible_capability_ids: ownCapabilities.filter((item) => !isWorkLuckyCapability(item.capabilityId) || item.trustedAcceptance).map((item) => item.capabilityId) });
+    const localSnapshots = await slots.snapshots({ bindingIds: nodes.map((node) => node.binding._id), now });
+    for (const node of nodes) {
+      const snapshot = localSnapshots.get(String(node.binding._id));
+      node.availableSlots = snapshot.available ? Math.max(0, node.maxConcurrent - node.runningTaskCount - snapshot.activeCount) : 0;
+      node.activeByCapability = snapshot.byCapability;
+      Object.assign(node, projectSharedNodeLoad(node, snapshot, now));
+    }
     await (await getCollection("capabilityNodeReports")).updateOne({ bindingId: auth.binding._id }, { $set: { userId: auth.user._id, nodeId, protocolVersion: CAPABILITY_ORDER_PROTOCOL, capabilities: ownCapabilities, resources, reportedAt: now, updatedAt: now }, $setOnInsert: { createdAt: now } }, { upsert: true });
     await recoverExpired(now);
-    nodes.sort((a, b) => a.estimatedTotalSeconds - b.estimatedTotalSeconds || a.runningTaskCount - b.runningTaskCount || a.nodeId.localeCompare(b.nodeId));
+    nodes.sort(compareSharedNodeLoad);
     const capabilityIds = [...new Set(nodes.flatMap((item) => item.capabilities.map((capability) => capability.capabilityId)))];
     const sharedEnglishIds = ownCapabilities.filter((item) => isEnglishCapability(item.capabilityId) && item.sharingOptIn).map((item) => item.capabilityId);
     const sharedGulongIds = ownCapabilities.filter((item) => isGulongEngineCapability(item.capabilityId) && item.sharingOptIn).map((item) => item.capabilityId);
@@ -1118,6 +1220,53 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       ...(sharedGulongIds.length ? [{ capabilityId: { $in: sharedGulongIds }, sharingScope: "gulong_shared" }] : [])] };
     const groupIds = [...new Set(nodes.map((item) => normalizeComputeGroupId(item.binding.computeGroupId)))];
     const candidates = await (await getCollection("capabilityOrders")).find({ ...ownerScope, computeGroupId: { $in: groupIds }, status: "queued", capabilityId: { $in: capabilityIds }, nextEligibleAt: { $lte: now }, autoCancelAt: { $gt: now } }).sort({ createdAt: 1, _id: 1 }).limit(100).toArray();
+    if (!candidates.length || !nodes.some((node) => node.availableSlots > 0)) return c.json({ task: null,
+      claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: SHARED_NODE_SCHEDULING, eligible_capability_ids: capabilityIds } });
+    // Global reports influence preference, not execution authority. A foreign
+    // winner must poll with its own token; it is never inserted into this LAN.
+    const globalNodes = [...nodes];
+    const reportsCollection = await getCollection("capabilityNodeReports");
+    if (typeof reportsCollection.find === "function" && nodes.length < 200) {
+      const freshReports = await reportsCollection.find({ protocolVersion: CAPABILITY_ORDER_PROTOCOL,
+        "capabilities.capabilityId": { $in: capabilityIds }, reportedAt: { $gte: new Date(+now - NODE_REPORT_MAX_AGE_MS), $lte: now } })
+        .sort({ reportedAt: -1 }).limit(200 - nodes.length).toArray();
+      const localNodeIds = new Set(nodes.map((node) => node.nodeId));
+      const remoteReports = freshReports.filter((report) => !localNodeIds.has(report.nodeId));
+      const bindings = remoteReports.length ? await (await getCollection("nodeAccountBindings")).find({
+        _id: { $in: remoteReports.map((report) => report.bindingId) }, status: "active", revokedAt: null }).limit(200).toArray() : [];
+      const bindingsById = new Map(bindings.map((binding) => [String(binding._id), binding]));
+      const compatible = remoteReports.flatMap((report) => {
+        const binding = bindingsById.get(String(report.bindingId));
+        return binding && binding.nodeId === report.nodeId && String(binding.userId) === String(report.userId)
+          && groupIds.includes(normalizeComputeGroupId(binding.computeGroupId)) ? [{ report, binding }] : [];
+      });
+      const activeUsers = compatible.length ? await (await getCollection("users")).find({
+        _id: { $in: [...new Map(compatible.map(({ binding }) => [String(binding.userId), binding.userId])).values()] },
+        status: "active" }).limit(200).toArray() : [];
+      const activeUserIds = new Set(activeUsers.map((user) => String(user._id)));
+      const readyCandidates = compatible.filter(({ binding }) => activeUserIds.has(String(binding.userId)));
+      const snapshots = readyCandidates.length ? await slots.snapshots({ bindingIds: readyCandidates.map(({ binding }) => binding._id), now }) : new Map();
+      for (const { report, binding } of readyCandidates) {
+        let capabilities, reportResources;
+        try {
+          capabilities = await readyReports(binding, report.capabilities.map((item) => ({ ...item,
+            capability_id: item.capabilityId, capability_version: item.capabilityVersion,
+            sharing_opt_in: item.sharingOptIn, supported_models: item.supportedModels,
+            supported_voices: item.supportedVoices })), now, lookupAutomatic);
+          capabilities = await trustReports(binding, capabilities, now, lookupTrusted);
+          reportResources = { ...normalizeCapabilityResources(report.resources, Math.max(1, ...capabilities.map((item) => item.maxConcurrent))),
+            ...normalizeGpuLoadReport(report.resources, now) };
+        } catch { continue; } // A stored stale/malformed report never wins admission.
+        const snapshot = snapshots.get(String(binding._id));
+        if (!snapshot.available) continue;
+        const globalNode = { nodeId: binding.nodeId, binding, capabilities, resources: reportResources,
+          runningTaskCount: reportResources.running_task_count, maxConcurrent: reportResources.max_concurrent_tasks,
+          availableSlots: Math.max(0, reportResources.max_concurrent_tasks - reportResources.running_task_count - snapshot.activeCount),
+          activeByCapability: snapshot.byCapability };
+        globalNodes.push(projectSharedNodeLoad(globalNode, snapshot, now));
+      }
+    }
+    globalNodes.sort(compareSharedNodeLoad);
     let selected = null;
     for (const order of candidates) {
       const computeGroupId = await readUserGroup(order.requesterUserId);
@@ -1135,29 +1284,52 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       }
       // A LAN proxy cannot opt another node into serving unrelated accounts.
       const foreign = String(order.requesterUserId) !== String(auth.user._id);
+      const eligible = (item) => (item.activeByCapability?.[order.capabilityId] || 0) < (item.capabilities.find((cap) => cap.capabilityId === order.capabilityId)?.maxConcurrent || 0)
+        && capabilityNodeCanRunOrder(item, { ...order, computeGroupId });
       const node = nodes.find((item) => (!foreign || item === ownNode)
-        && (item.activeByCapability?.[order.capabilityId] || 0) < (item.capabilities.find((cap) => cap.capabilityId === order.capabilityId)?.maxConcurrent || 0)
-        && capabilityNodeCanRunOrder(item, { ...order, computeGroupId }));
-      if (node) { selected = { order, node }; break; }
+        && eligible(item));
+      if (!node) continue;
+      const globalBest = globalNodes.find(eligible);
+      if (globalBest && globalBest !== node && compareSharedNodeLoad(globalBest, node) < 0) {
+        const wait = boundedGlobalDispatchWait(order, now);
+        if (wait.shouldWait) {
+          // Only the first contender starts the bounded grace period. Repeated
+          // polling/advertisements cannot continually extend it and starve FIFO.
+          await (await getCollection("capabilityOrders")).updateOne({ _id: order._id, status: "queued",
+            schedulerWaitStartedAt: order.schedulerWaitStartedAt ?? null }, { $set: { schedulerWaitStartedAt: wait.startedAt } });
+          return c.json({ task: null, claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL,
+            scheduling: SHARED_NODE_SCHEDULING, waiting_for_preferred_node: true, next_poll_after_seconds: 2 } });
+        }
+      }
+      selected = { order, node }; break;
     }
-    if (!selected) return c.json({ task: null, claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: "same_account_fifo_least_estimated_load", eligible_capability_ids: capabilityIds } });
+    if (!selected) return c.json({ task: null, claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: SHARED_NODE_SCHEDULING, eligible_capability_ids: capabilityIds } });
     const currentBinding = await (await getCollection("nodeAccountBindings")).findOne({ _id: selected.node.binding._id, status: "active", revokedAt: null });
-    if (!currentBinding || !computeGroupsMatch(await readUserGroup(selected.order.requesterUserId), currentBinding.computeGroupId)) return c.json({ task: null, claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: "same_account_fifo_least_estimated_load", group_changed: true } });
+    if (!currentBinding || currentBinding.nodeId !== selected.node.nodeId || String(currentBinding.userId) !== String(selected.node.binding.userId)
+      || !computeGroupsMatch(await readUserGroup(selected.order.requesterUserId), currentBinding.computeGroupId)) return c.json({ task: null, claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: SHARED_NODE_SCHEDULING, group_changed: true } });
     const claimId = randomBytes(18).toString("base64url");
     const claimLeaseUntil = new Date(now.getTime() + CAPABILITY_CLAIM_LEASE_MS);
     const selectedCapability = selected.node.capabilities.find((item) => item.capabilityId === selected.order.capabilityId && (!selected.order.capabilityVersion || item.capabilityVersion === selected.order.capabilityVersion));
+    // /report may enroll a legacy binding after this request's initial auth and
+    // proof snapshot. The final binding fence must not dispatch one last GCA
+    // task after the server has switched that consumer to automatic admission.
+    if (currentBinding.autoVerificationEnrolledAt && (!selectedCapability?.verificationInventory || selectedCapability.trustedAcceptance !== true)) {
+      return c.json({ task: null, claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: SHARED_NODE_SCHEDULING,
+        code: "CAPABILITY_VERIFICATION_PENDING", verification_required: true, next_poll_after_seconds: 30 } });
+    }
     const assignedNode = { nodeId: selected.node.nodeId, nodeName: selected.node.nodeName, bindingId: selected.node.binding._id, userId: selected.node.binding.userId };
     const reservation = await slots.reserve({ ...slotFence({ ...selected.order, assignedNode, claimId }), now, expiresAt: claimLeaseUntil,
-      maxConcurrentTasks: Math.max(0, selected.node.maxConcurrent - selected.node.runningTaskCount), capabilityMaxConcurrent: selectedCapability.maxConcurrent });
-    if (!reservation) return c.json({ task: null, claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: "same_account_fifo_least_estimated_load", slots_busy: true } });
+      estimatedSeconds: Math.max(1, integer(selected.order.etaSeconds || selected.order.estimatedTotalSeconds || CAPABILITY_MAP.get(selected.order.capabilityId)?.defaultEtaSeconds, 300)),
+      maxConcurrentTasks: Math.max(0, selected.node.maxConcurrent - selected.node.resources.running_task_count), capabilityMaxConcurrent: selectedCapability.maxConcurrent });
+    if (!reservation) return c.json({ task: null, claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: SHARED_NODE_SCHEDULING, slots_busy: true } });
     let claimed;
     try {
       claimed = await (await getCollection("capabilityOrders")).findOneAndUpdate({ _id: selected.order._id, ...computeGroupFilter(currentBinding.computeGroupId), status: "queued", nextEligibleAt: { $lte: now } }, { $set: { status: "claimed", stage: "claimed", claimId, slotLeaseRequired: true, claimRequestedByNodeId: auth.binding.nodeId, assignedNode, capabilityVersion: selectedCapability.capabilityVersion, claimedAt: now, claimLeaseUntil, updatedAt: now }, $inc: { attempt: 1 } }, { returnDocument: "after" });
     } finally {
       if (!claimed) await slots.release({ ...slotFence({ ...selected.order, assignedNode, claimId }), now });
     }
-    if (!claimed) return c.json({ task: null, claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: "same_account_fifo_least_estimated_load", race_lost: true } });
-    return c.json({ task: workerOrder(claimed, claimAssets(claimed.assets)), claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: "same_account_fifo_least_estimated_load", selected_node_id: selected.node.nodeId } });
+    if (!claimed) return c.json({ task: null, claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: SHARED_NODE_SCHEDULING, race_lost: true } });
+    return c.json({ task: workerOrder(claimed, claimAssets(claimed.assets)), claim_plan: { protocol_version: CAPABILITY_ORDER_PROTOCOL, scheduling: SHARED_NODE_SCHEDULING, selected_node_id: selected.node.nodeId } });
   });
 
   app.post("/api/v1/capability-orders/:id/outputs/presign", async (c) => {
@@ -1297,7 +1469,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       }
     };
     if (["started", "progress"].includes(status)) {
-      if (order.slotLeaseRequired && !await slots.renew({ ...slotFence(order), now, expiresAt: new Date(now.getTime() + CAPABILITY_CLAIM_LEASE_MS) })) return c.json({ code: "CLAIM_SLOT_EXPIRED", message: "节点执行槽续期失败，请停止任务" }, 409);
+      if (order.slotLeaseRequired && !await slots.renew({ ...slotFence(order), now, estimatedSeconds: etaSeconds, expiresAt: new Date(now.getTime() + CAPABILITY_CLAIM_LEASE_MS) })) return c.json({ code: "CLAIM_SLOT_EXPIRED", message: "节点执行槽续期失败，请停止任务" }, 409);
       if (!await claimEvent()) return finalGroupRejection || c.json({ ok: true, idempotent: true, order_status: (await callbacks.findOne({ orderId: order._id, eventId }))?.resultStatus });
       const updated = await orders.findOneAndUpdate({ _id: order._id, status: { $in: ["claimed", "processing"] }, claimId: order.claimId }, { $set: { status: "processing", lastCallbackEventId: eventId, lastCallbackFingerprint: payloadFingerprint, stage: String(body.stage || "processing").slice(0, 120), progress, elapsedSeconds, etaSeconds, estimatedTotalSeconds: estimatedTotalSeconds || order.estimatedTotalSeconds || null, claimLeaseUntil: new Date(now.getTime() + CAPABILITY_CLAIM_LEASE_MS), updatedAt: now } }, { returnDocument: "after" });
       await callbacks.updateOne({ orderId: order._id, eventId }, { $set: { resultStatus: updated?.status || order.status } });
@@ -1406,7 +1578,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     validation: z.object({ tested_at: z.iso.datetime(), artifact_sha256: z.string().regex(/^[A-Fa-f0-9]{64}$/), runtime_version: z.string().optional(), test_id: z.string().optional(), acceptance_id: z.string().optional(), contract_tests: z.record(z.string(), z.boolean()).optional() }),
   });
   app.openAPIRegistry.registerComponent("schemas", "WorkLuckySharedCapabilityContract", {
-    type: "object", description: "WorkLucky 共享能力 1.0.0：使用 Bearer gge_at_ 会话；新建 JSON 必须 client_product=worklucky、capability_version=1.0.0，查询/恢复必须 ?product=worklucky，取消 JSON 带 client_product。新能力要求与节点 binding、artifact_sha256、models、contract_tests 精确匹配的管理员 acceptance_id。目录 availability.models 为真实模型矩阵，default_model 必须是已验收模型；节点物理容量以 Mongo CAS 原子槽为准。不存在真实模型/维度或未验收不能派单，无远程收费回退。",
+    type: "object", description: "WorkLucky 共享能力 1.0.0：使用 Bearer gge_at_ 会话；新建 JSON 必须 client_product=worklucky、capability_version=1.0.0，查询/恢复必须 ?product=worklucky，取消 JSON 带 client_product。新增能力由自动探测按节点 binding、算力分组、artifact_sha256 与精确模型参数验收；不再要求人工 acceptance_id。已有有效历史记录仅作未升级消费者兼容。目录 availability.models 为真实模型矩阵，default_model 必须是已验收模型；节点物理容量以 Mongo CAS 原子槽为准。不存在真实模型/维度或未验收不能派单，无远程收费回退。",
     properties: {
       agent_chat: { type: "object", description: "capability_id=gulong_engine.agent_chat；parameters={model,request}，request 为完整 OpenAI Chat Completions JSON，model 必须精确相等。inline_result.response 为完整原始响应含 choices/tools/usage，不由官网执行工具。每模型 tools/multimodal 必须单独验收。" },
       embedding: { type: "object", description: "capability_id=gulong_engine.embedding；parameters={model,dimension,request}，request 为完整 OpenAI Embeddings JSON；完整 response.data 索引、顺序、向量维度和 usage 必须保留，不能换模型/裁切/补齐。" },
@@ -1423,7 +1595,11 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/{id}", tags: ["Unified Capability Orders"], summary: "查询订单进度、排队位置、ETA 与短时结果下载票据", responses: { 200: { description: "仅返回本人订单；排队含 queue_position、estimated_wait_seconds、queue_reason_code、queue_message、auto_cancel_at；排队超时返回 cancelled、CAPABILITY_QUEUE_TIMEOUT；执行含 progress、eta_seconds" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders/{id}/cancel", tags: ["Unified Capability Orders"], summary: "幂等取消能力订单", responses: { 200: { description: "取消状态与零费用退款边界" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/{id}/worker-state", tags: ["Unified Capability Orders"], summary: "执行节点轮询取消与租约状态", description: "执行节点每 15 秒轮询；claim_id 必须匹配且只能由 assigned_node 自己的绑定令牌读取。started/progress 回调会把 5 分钟租约重新续满。", security: [{ accountBinding: [] }], request: { query: z.object({ claim_id: z.string().min(8) }) }, responses: { 200: { description: "cancellation_requested、should_stop 与 lease_expires_at" }, 409: { description: "订单未分配或 claim 不匹配" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders/claim", tags: ["Unified Capability Orders"], summary: "按同账户、FIFO 与最短预计负载领取能力订单", description: "节点只能上报 installed=true、validated=true、enabled=true 且 30 天内完成真实推理验证的能力。局域网中所有候选节点都必须绑定同一账户；可指定执行节点，只有指定节点自己的 X-Gulong-Account-Binding 可回调。dry_run=true 不领取。", security: [{ accountBinding: [] }], request: { body: { content: { "application/json": { schema: z.object({ protocol_version: z.literal(CAPABILITY_ORDER_PROTOCOL), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: z.array(reportSchema).min(1), resources: z.object({ running_task_count: z.number().int().min(0), estimated_total_seconds: z.number().int().min(0), max_concurrent_tasks: z.number().int().min(1).max(16) }), lan_cluster: z.object({ cluster_id: z.string(), nodes: z.array(z.object({ node_id: z.string(), node_name: z.string(), capabilities: z.array(reportSchema), resources: z.object({ running_task_count: z.number().int().min(0), estimated_total_seconds: z.number().int().min(0), max_concurrent_tasks: z.number().int().min(1).max(16) }) })) }).optional() }) } } } }, responses: { 200: { description: "最小权限 worker task、素材短时下载票据与输出上传入口" } } });
+  const resourceSchema = z.object({ running_task_count: z.number().int().min(0).max(1_000_000),
+    estimated_total_seconds: z.number().int().min(0).max(2678400), max_concurrent_tasks: z.number().int().min(1).max(16),
+    gpu_state: z.enum(["idle", "busy", "unknown"]).optional(), gpu_observed_at: z.iso.datetime().nullable().optional(),
+    current_task_remaining_seconds: z.number().int().min(0).max(2678400).nullable().optional() });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders/claim", tags: ["Unified Capability Orders"], summary: "按 FIFO、空闲显卡优先与最短剩余负载领取能力订单", description: "节点能力必须 installed=true、validated=true、enabled=true。每次拉单上报 resources.gpu_state=idle|busy|unknown、gpu_observed_at 与 current_task_remaining_seconds（任务列表总剩余秒数）；兼容旧 estimated_total_seconds。显卡状态仅30秒有效，未来偏移最多5秒，缺省/过期为unknown，服务端活跃租约保守视为busy。每单优先兼容的idle节点，否则按总剩余秒数（包含服务端新预留负载）最短分配。全局比较近3分钟已认证节点报告，跨账号优胜节点必须自行拉单，绝不由其他账户LAN代理；当前节点返回task=null及next_poll_after_seconds=2，FIFO订单全局偏好等待最多5秒以防饿死。绑定、分组、模型、自动验收与原子槽位门禁均保留。dry_run=true 不读取/修改队列或发布节点报告。", security: [{ accountBinding: [] }], request: { body: { content: { "application/json": { schema: z.object({ protocol_version: z.literal(CAPABILITY_ORDER_PROTOCOL), node_id: z.string(), node_name: z.string(), dry_run: z.boolean().optional(), capabilities: z.array(reportSchema).min(1), resources: resourceSchema, lan_cluster: z.object({ cluster_id: z.string(), nodes: z.array(z.object({ node_id: z.string(), node_name: z.string(), capabilities: z.array(reportSchema), resources: resourceSchema })) }).optional() }) } } } }, responses: { 200: { description: "最小权限 worker task、素材短时下载票据与输出上传入口，或空任务和有界重试建议" }, 400: { description: "资源状态、时间或剩余耗时格式不正确" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders/{id}/outputs/presign", tags: ["Unified Capability Orders"], summary: "执行节点为一个结果签发 COS 直传票据", description: "返回 output_id、upload_url、method=PUT、headers/required_headers、object_key、expires_at、expires_in_seconds=3600 与 complete_via。role/MIME/单文件大小/数量按目录能力合同强校验。", security: [{ accountBinding: [] }], responses: { 201: { description: "与订单、claim、节点、输出 role、MIME、大小和摘要绑定的完整 PUT 票据" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders/callback", tags: ["Unified Capability Orders"], summary: "幂等回调进度、ETA、失败重试或完成结果", description: "JSON 回调不接收二进制文件。started/progress 每次都把 claim 续租 300 秒；completed 只接受已通过 COS HEAD 校验且符合输出 role 合同的 output_id。gulong_engine.tts 额外从私有 COS 读取最多 32 MiB 的音频内容并校验实际 SHA-256；网络暂不可读返回 503，可用同一 event_id 重试，摘要不符返回 409。文本类能力可使用不超过 64 KB 的 inline_result。event_id 在订单内唯一。", security: [{ accountBinding: [] }], responses: { 200: { description: "事件已幂等处理" }, 409: { description: "claim、执行节点、订单状态或输出回执不匹配" }, 503: { description: "音频内容暂无法校验，可稍后重试" } } });
 }

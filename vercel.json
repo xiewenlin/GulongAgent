@@ -58,6 +58,14 @@
       "destination": "/api/platform?_platform_path=admin/capability-consumers/:path*"
     },
     {
+      "source": "/api/admin/capability-verifications",
+      "destination": "/api/platform?_platform_path=admin/capability-verifications"
+    },
+    {
+      "source": "/api/v1/capability-verifications/:path*",
+      "destination": "/api/platform?_platform_path=v1/capability-verifications/:path*"
+    },
+    {
       "source": "/api/admin/compute-groups",
       "destination": "/api/platform?_platform_path=admin/compute-groups"
     },

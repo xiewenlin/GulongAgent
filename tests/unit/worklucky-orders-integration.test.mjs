@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { ObjectId } from "mongodb";
 import { OpenAPIHono } from "@hono/zod-openapi";
 import { hashOpaqueToken } from "../../server/security.js";
 import { CAPABILITY_ORDER_PROTOCOL, normalizeCapabilityReport, registerCapabilityOrderRoutes } from "../../server/capability-orders.js";
 import { registerCapabilityConsumerAcceptanceRoutes } from "../../server/capability-consumer-acceptance.js";
+import { normalizeSpecialNodeModels } from "../../server/worklucky-capabilities.js";
 
 function clone(value) {
   if (value instanceof Date) return new Date(value);
@@ -203,16 +204,21 @@ function fixture({ physicalLimit = 3, capabilities = ["agent_chat"], requesterGr
     resources: { max_concurrent_tasks: physicalLimit, running_task_count: 0, estimated_total_seconds: 0 }, ...extra,
   }, { "X-Gulong-Account-Binding": token, ...headers });
   const accept = async (targetBinding = binding, targetReports = rawReports) => {
+    // Historical GCA compatibility fixture only. Manual creation is retired;
+    // seed the prior trusted registry directly in this in-memory collection,
+    // never POST to a production or retired administrator endpoint.
     for (const report of targetReports) {
-      const result = await call("/api/admin/capability-consumers/acceptances", {
-        binding_id: String(targetBinding._id), capability_id: report.capability_id, capability_version: report.capability_version,
-        artifact_sha256: report.validation.artifact_sha256, test_evidence_sha256: "B".repeat(64), tested_at: report.validation.tested_at,
-        expires_at: new Date(Date.now() + 7 * 86400_000).toISOString(), models: report.models, default_model: report.default_model,
-        contract_tests: report.validation.contract_tests, admin_confirmed_real_consumer: true,
-        ...(report.asr_languages ? { asr_languages: report.asr_languages } : {}),
+      const acceptanceId = `gca_${randomUUID()}`;
+      const features = normalizeSpecialNodeModels(report.capability_id, report);
+      await (await getCollection("capabilityConsumerAcceptances")).insertOne({
+        _id: acceptanceId, bindingId: String(targetBinding._id), capabilityId: report.capability_id,
+        capabilityVersion: report.capability_version, artifactSha256: report.validation.artifact_sha256,
+        testEvidenceSha256: "B".repeat(64), testedAt: new Date(report.validation.tested_at),
+        expiresAt: new Date(Date.now() + 7 * 86400_000), models: features.models,
+        defaultModel: features.defaultModel, contractTests: features.contractTests,
+        asrLanguages: features.asrLanguages, adminConfirmedRealConsumer: true, status: "active", createdAt: new Date(),
       });
-      assert.equal(result.status, 201, JSON.stringify(result.body));
-      report.validation.acceptance_id = result.body.acceptance.id;
+      report.validation.acceptance_id = acceptanceId;
     }
   };
   const advertise = async () => {
