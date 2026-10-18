@@ -49,7 +49,7 @@ agent_chat 每项模型必须明确 `tools` 和 `multimodal`；纯文字通过�
 
 `GET /api/admin/capability-consumers/bindings` 仍支持有效绑定的 `node_id` 精确匹配及 `q` 名称/节点 ID 关键词，最多50条；`GET /api/admin/capability-verifications?binding_id=...` 查询自动状态。响应不含绑定令牌、租约密钥、邮箱或凭据。GGE 工作会话不能冒充管理员，不允许为验收修改角色或制造会话。
 
-新消费者的首次 `/report` 必须声明 `migration_policy:"capability-v2"` 和 `automatic_capability_ids`，同时保留完整结构化 `capabilities` 库存；不要只报 WorkLucky 三项而丢弃其他已安装能力。列表只追加服务器已具备对应适配器、准备自动迁移的能力。服务端原子累计迁移 ID，已迁移能力不能因列表遗漏、清空、重启、失败或到期退回旧 GCA/自报验证；未迁移能力保持原有严格历史校验，不是新增验收，不延长旧记录，也不使新制品继承旧证明。它们在自动状态中显示 `migration_deferred`，不会被领取探测。返回的 `migration.capabilities[].mode=legacy_compatibility` 不代表当前在线或已自动通过。具体合同见[逐能力迁移](./unified-capability-orders-v1.md)。
+新消费者首次及后续登记均调用 `/api/v1/capability-verifications/report-v2`，声明 `migration_policy:"capability-v2"` 和 `automatic_capability_ids`，同时保留完整结构化 `capabilities` 库存；不要只报 WorkLucky 三项而丢弃其他已安装能力。旧服务器404、网络未知或响应缺少 `migration.policy=capability-v2` 时停止登记，不能退回旧 `/report` 让旧服务器忽略新字段后整绑定迁移。列表只追加服务器已具备对应适配器、准备自动迁移的能力。服务端原子累计迁移 ID，已迁移能力不能因列表遗漏、清空、重启、失败或到期退回旧 GCA/自报验证；未迁移能力保持原有严格历史校验，不是新增验收，不延长旧记录，也不使新制品继承旧证明。它们在自动状态中显示 `migration_deferred`，不会被领取探测。返回的 `migration.capabilities[].mode=legacy_compatibility` 不代表当前在线或已自动通过。具体合同见[逐能力迁移](./unified-capability-orders-v1.md)。
 
 `autoVerificationEnrolledAt` 仍保留作审计。原 v1 绑定级消费者不能用 v2 请求直接降级，返回 `409 VERIFICATION_MIGRATION_REVIEW_REQUIRED`；已是 v2 的节点省略迁移策略返回 `409 VERIFICATION_POLICY_REQUIRED`。新模型、制品、维度、分组或矩阵变化须遵守其对应校验；所有可用性以实时鉴权目录、组隔离和实际槽位为准。
 

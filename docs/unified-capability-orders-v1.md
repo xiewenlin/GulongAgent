@@ -402,7 +402,7 @@ npm run build
 
 ### 完整库存与逐能力迁移（capability-v2）
 
-节点必须继续上报完整的已安装、启用和共享选择库存，不通过只报三项来隐去其他能力。首次自动上报使用：
+节点必须继续上报完整的已安装、启用和共享选择库存，不通过只报三项来隐去其他能力。新消费者首次及后续自动上报均使用专属 `POST /api/v1/capability-verifications/report-v2`，不能回退 `/report`：旧服务器可能忽略新 JSON 字段而误入绑定级迁移，专属 URL 在旧部署只会返回404且不写入。请求：
 
 ```json
 {
@@ -424,6 +424,7 @@ npm run build
 - 未迁移能力记录为 `migration_deferred`，不会领取自动探测，仅保留原有能力版本、验证新鲜度、制品、GCA（若该原合同要求）、产品、算力分组和资源槽位规则。没有旧证明的能力仍不可用；不新建 GCA、不延长旧有效期、不为新制品继承旧证明、不放开原本 `dispatchable=false` 的能力。原生 H3 独立接口也不因另一个能力迁移而被整绑定停用。
 - 图像编辑、SAM/Whisper/MediaPipe 的输入 fixture、统一 video/TTS 等未完整接通时，仍完整上报库存，但不能把文生图通过当作这些功能的验收；只有对应完整适配和实测通过后再追加迁移 ID。
 - 已经是 v1 绑定级策略的节点请求 v2 返回 `409 VERIFICATION_MIGRATION_REVIEW_REQUIRED`，不通过客户端改变策略解除原保护；需要独立迁移审计。v2 节点以后每次 `/report` 都必须沿用策略，省略则返回 `409 VERIFICATION_POLICY_REQUIRED`。
+- 新客户端只调用 `/report-v2`，必须确认响应 `migration.policy=capability-v2`；404、缺少确认或网络未知结果时停止自动登记/恢复原请求，不尝试旧 `/report`。旧 `/report` 保留 v1 行为并兼容显式 v2，但不推荐新消费者使用。已有 v2 节点投入使用后，不应把生产回滚到不识别逐能力策略的旧版本。
 - 返回 `migration.policy`、累计 `migration.automatic_capability_ids` 和逐能力 `{capability_id,mode,all_models_have_adapter}`。`mode=legacy_compatibility` 不是已验证或已在线；实时鉴权目录才是派单依据。`all_models_have_adapter=true` 也不代表所有参数/输入模式已通过。
 
 只迁移某项能力时，其他能力的有效历史资格不能受影响；领取最后一次绑定复核仍按订单的具体 capability 做迁移检查。迁移前已合法领取的任务可以按原 fenced lease 完成，不得为了迁移取消现有任务、重复执行或写新账务。
@@ -437,6 +438,7 @@ npm run build
 | 方法与路径 | 用途 |
 |---|---|
 | `POST /api/v1/capability-verifications/report` | 上报 `{capabilities:[...]}`；每次 1–64 项能力、每能力 1–64 个精确模型、总计最多 256 个模型组合 |
+| `POST /api/v1/capability-verifications/report-v2` | 新消费者专用；完整库存加 `migration_policy`、`automatic_capability_ids`，旧部署404时禁止回退 |
 | `POST /api/v1/capability-verifications/next` | 使用 `{dry_run,resources,request_id,lease_token}` 领取一项随机探测；`dry_run=true` 不领取、不消耗预算 |
 | `GET /api/v1/capability-verifications/by-request/{key}` | 按稳定请求编号恢复同一探测 |
 | `GET /api/v1/capability-verifications/challenges/{id}` | 按 `gcv_...` 编号查询本节点探测 |

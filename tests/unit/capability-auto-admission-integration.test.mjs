@@ -505,3 +505,16 @@ test("new unsupported variants of an already migrated capability invalidate old 
   assert.equal(f.collection("capabilityConsumerAcceptances").rows[0].status, "active");
   f.assertNoAccounting(); f.assertNoBusinessOrders();
 });
+
+test("dedicated report-v2 refuses missing policy before enrollment and cannot fall back to binding-wide v1", async () => {
+  const f = fixture();
+  const wrong = await f.call("/api/v1/capability-verifications/report-v2", { capabilities: [f.inventory] }, true);
+  assert.equal(wrong.status, 400, JSON.stringify(wrong.body));
+  assert.equal(f.binding.autoVerificationEnrolledAt, undefined);
+  const good = await f.call("/api/v1/capability-verifications/report-v2", { ...v2([f.inventory.capability_id]), capabilities: [f.inventory] }, true);
+  assert.equal(good.status, 200, JSON.stringify(good.body));
+  assert.equal(good.body.migration.policy, "capability-v2");
+  assert.deepEqual(f.binding.autoVerificationCapabilityIds, [f.inventory.capability_id]);
+  assert.equal((await f.report()).status, 409);
+  f.assertNoAccounting(); f.assertNoBusinessOrders();
+});

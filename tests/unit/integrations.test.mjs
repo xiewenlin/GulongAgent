@@ -1564,4 +1564,8 @@ test("OpenAPI describes explicit complete-inventory per-capability migration and
   assert.ok(migration.automatic_capability_ids);
   assert.ok(migration.capabilities);
   assert.match(route.responses["409"].description, /VERIFICATION_MIGRATION_REVIEW_REQUIRED/);
+  const dedicated = openapi.paths["/api/v1/capability-verifications/report-v2"].post;
+  assert.deepEqual(dedicated.requestBody.content["application/json"].schema.required.sort(),
+    ["automatic_capability_ids", "capabilities", "migration_policy"]);
+  assert.match(dedicated.summary, /禁止回退/);
 });

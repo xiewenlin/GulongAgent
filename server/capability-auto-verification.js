@@ -589,6 +589,14 @@ export function registerCapabilityAutoVerificationRoutes(app, dependencies) {
   });
   app.post(`${base}/report`, bound((binding, body) => service.report({ binding, reports: body.capabilities,
     migrationPolicy: body.migration_policy, automaticCapabilityIds: body.automatic_capability_ids })));
+  // Old deployments must return 404 rather than ignore v2 fields and enroll
+  // the whole binding. New consumers never fall back from this dedicated URL.
+  app.post(`${base}/report-v2`, bound((binding, body) => {
+    assert(body.migration_policy === CAPABILITY_VERIFICATION_POLICY,
+      "VERIFICATION_POLICY_INVALID", "逐能力上报必须使用 capability-v2 策略", 400);
+    return service.report({ binding, reports: body.capabilities, migrationPolicy: CAPABILITY_VERIFICATION_POLICY,
+      automaticCapabilityIds: body.automatic_capability_ids });
+  }));
   app.post(`${base}/next`, bound((binding, body) => service.next({ binding, dryRun: body.dry_run ?? false, resources: body.resources,
     requestId: body.request_id, leaseToken: body.lease_token })));
   app.post(`${base}/:id/outputs`, bound((binding, body, c) => service.outputUpload({ binding, challengeId: c.req.param("id"), leaseToken: body.lease_token,
@@ -634,18 +642,19 @@ export function registerCapabilityAutoVerificationRoutes(app, dependencies) {
       "{id}/result": z.object({ lease_token: z.string().min(32).max(256), status: z.enum(["completed", "failed"]),
         inline_result: objectSchema.optional(), outputs: z.array(z.object({ output_id: z.string() }).strict()).max(4).optional(), error: z.string().max(1000).optional() }),
     };
+    requestSchemas["report-v2"] = requestSchemas.report.required({ migration_policy: true, automatic_capability_ids: true });
     const challengeSchema = z.object({ id: z.string(), lease_token: z.string().optional(), expires_at: z.iso.datetime(), capability_id: z.string(), capability_version: z.string(),
       artifact_sha256: artifactSchema, model: modelSchema, parameters: objectSchema,
       budget: z.object({ max_inferences: z.literal(1), max_output_tokens: z.number().max(128).optional(), max_audio_seconds: z.number().max(12).optional(),
         max_images: z.number().int().max(1).optional(), max_image_pixels: z.number().int().max(2048 * 2048).optional() }),
       compute_group_id: z.string().nullable(), node_id: z.string(), output_upload_required: z.boolean() });
-    for (const suffix of ["report", "next", "{id}/outputs", "{id}/result"]) app.openAPIRegistry.registerPath({ method: "post", path: `${base}/${suffix}`,
-      tags: ["Automatic Capability Verification"], summary: { report: "上报未验收的已安装模型清单", next: "领取单次随机自动验收探测", "{id}/outputs": "签发本次媒体探测的私有上传票据", "{id}/result": "提交真实探测结果并由服务端自动验收" }[suffix],
+    for (const suffix of ["report", "report-v2", "next", "{id}/outputs", "{id}/result"]) app.openAPIRegistry.registerPath({ method: "post", path: `${base}/${suffix}`,
+      tags: ["Automatic Capability Verification"], summary: { report: "上报未验收的已安装模型清单", "report-v2": "新消费者专用逐能力迁移，旧部署404时禁止回退report", next: "领取单次随机自动验收探测", "{id}/outputs": "签发本次媒体探测的私有上传票据", "{id}/result": "提交真实探测结果并由服务端自动验收" }[suffix],
       security: [{ accountBinding: [] }], description: "使用 X-Gulong-Account-Binding。身份、分组、制品及完整模型矩阵绑定；每节点仅一项探测、全局最多四项；每天最多 16 次，每模型最多 3 次。单探测最多一次模型推理，文字 32 token、音频最多 12 秒；不产生用户订单、钱包流水或分佣。validated=true 不构成验收。失败退避重试，七天到期。音乐必须上传完整 FLAC，服务端流式验证实物摘要/时长并核验整段 ASR 完整歌词。未知适配器保持 adapter_required。",
       request: { ...(suffix.startsWith("{id}") ? { params: z.object({ id: z.string().regex(/^gcv_[a-f0-9-]{36}$/) }) } : {}),
         body: { content: { "application/json": { schema: requestSchemas[suffix] } } } },
       responses: { 200: { description: "仅自动真实验收通过的精确模型/维度/功能可开放；next 的 dry_run 不领取、不消耗预算",
-        ...(suffix === "report" ? { content: { "application/json": { schema: z.object({ ok: z.literal(true), protocol: z.string(),
+        ...(["report", "report-v2"].includes(suffix) ? { content: { "application/json": { schema: z.object({ ok: z.literal(true), protocol: z.string(),
           migration: migrationSchema, verifications: z.array(objectSchema) }) } } }
           : suffix === "next" ? { content: { "application/json": { schema: z.object({ ok: z.literal(true), protocol: z.string().optional(), challenge: challengeSchema.nullable(),
           request_id: z.string().nullable().optional(), state: z.string().optional(), lease_valid: z.boolean().optional(), recovered: z.boolean().optional(),
