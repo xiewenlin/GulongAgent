@@ -27,6 +27,7 @@ for (const raw of origins) {
     ["/api/v1/desktop/worklucky/auth/login", "post"], ["/api/v1/desktop/worklucky/auth/refresh", "post"],
     ["/api/v1/desktop/worklucky/auth/logout", "post"], ["/api/v1/desktop/worklucky/updates", "get"],
     ["/api/admin/capability-consumers/acceptances", "post"], ["/api/cron/capability-output-cleanup", "get"],
+    ["/api/admin/capability-consumers/bindings", "get"],
   ]) assert.ok(document.paths[path]?.[method], `${method} ${path}`);
   assert.ok(document.components.schemas.WorkLuckySharedCapabilityContract);
   const acceptances = document.paths["/api/admin/capability-consumers/acceptances"].post.requestBody.content["application/json"].schema;
@@ -36,6 +37,7 @@ for (const raw of origins) {
   await read("/api/v1/desktop/worklucky/account", 401);
   await read("/api/v1/capability-orders/catalog?product=worklucky", 401);
   await read("/api/admin/capability-consumers/acceptances", 401);
+  await read("/api/admin/capability-consumers/bindings", 401);
   await read("/api/cron/capability-output-cleanup", 401);
   console.log(JSON.stringify({ origin: base.origin, status: "contract_verified", real_inference_tested: false, checks }));
 }

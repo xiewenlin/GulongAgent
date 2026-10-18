@@ -37,6 +37,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, formatMoney, localizedFetch, localizeErrorMessage } from "../api.js";
 import { AdminDashboard } from "./AdminDashboard.jsx";
+import { CapabilityConsumersPanel } from "./CapabilityConsumersPanel.jsx";
 import { useConfirmDialog } from "./ConfirmDialog.jsx";
 import { UserSubscriptionDialog } from "./UserSubscriptionDialog.jsx";
 import { subscriptionOrderName } from "../subscriptions.js";
@@ -53,6 +54,7 @@ const menu = [
   { id: "versions", label: "版本管理", icon: Package },
   { id: "payments", label: "订单管理", icon: ShieldCheck },
   { id: "h3tasks", label: "任务派单", icon: VideoCamera },
+  { id: "capability-consumers", label: "共享能力验收", icon: ShieldCheck },
   { id: "worker", label: "威客审核", icon: Briefcase },
   { id: "feedback", label: "用户反馈", icon: ChatCircleText },
 ];
@@ -1130,6 +1132,6 @@ export function AdminPage({ user, openAuth }) {
   }
   if (!user) return <main id="main-content" className="admin-gate section-shell"><LockKey size={38} /><h1>登录管理员账号</h1><p>管理员后台已接入 Chandler 统一身份，只接受 Chandler 返回的管理员角色。</p><button className="button primary" onClick={() => openAuth("login")}>登录继续</button></main>;
   if (user.role !== "admin") return <main id="main-content" className="admin-gate section-shell"><ShieldCheck size={38} /><h1>当前账号没有后台权限</h1><p>请让 Chandler 平台管理员授予此账号管理员角色后重新登录。</p></main>;
-  return <main id="main-content" className="admin-page"><aside className="admin-sidebar"><div><span>GULONG CONSOLE</span><h1>管理员后台</h1><p>{user.displayName || user.username || user.email}</p></div><nav>{menu.map((item) => { const Icon = item.icon; return <button key={item.id} className={active === item.id ? "active" : ""} onClick={() => selectSection(item.id)}><Icon size={19} weight={active === item.id ? "fill" : "regular"} /> {item.label}</button>; })}</nav><footer><UsersThree size={18} /><span>Chandler 统一账号</span></footer></aside><div className="admin-content">{active === "dashboard" && <AdminDashboard />}{active === "users" && <ChandlerUserManager />}{active === "prices" && <ChandlerPriceManager />}{active === "tokens" && <PearTokenManager />}{active === "activations" && <ActivationCodeManager />}{active === "partners" && <PartnerManager />}{active === "workflows" && <WorkflowManager />}{active === "brain" && <BrainAttachmentManager />}{active === "versions" && <VersionManager />}{active === "payments" && <PaymentManager />}{active === "h3tasks" && <H3TaskManager />}{active === "worker" && <WorkerReviewManager />}{active === "feedback" && <FeedbackManager />}</div></main>;
+  return <main id="main-content" className="admin-page"><aside className="admin-sidebar"><div><span>GULONG CONSOLE</span><h1>管理员后台</h1><p>{user.displayName || user.username || user.email}</p></div><nav>{menu.map((item) => { const Icon = item.icon; return <button key={item.id} className={active === item.id ? "active" : ""} onClick={() => selectSection(item.id)}><Icon size={19} weight={active === item.id ? "fill" : "regular"} /> {item.label}</button>; })}</nav><footer><UsersThree size={18} /><span>Chandler 统一账号</span></footer></aside><div className="admin-content">{active === "dashboard" && <AdminDashboard />}{active === "users" && <ChandlerUserManager />}{active === "prices" && <ChandlerPriceManager />}{active === "tokens" && <PearTokenManager />}{active === "activations" && <ActivationCodeManager />}{active === "partners" && <PartnerManager />}{active === "workflows" && <WorkflowManager />}{active === "brain" && <BrainAttachmentManager />}{active === "versions" && <VersionManager />}{active === "payments" && <PaymentManager />}{active === "h3tasks" && <H3TaskManager />}{active === "capability-consumers" && <CapabilityConsumersPanel />}{active === "worker" && <WorkerReviewManager />}{active === "feedback" && <FeedbackManager />}</div></main>;
 }
 

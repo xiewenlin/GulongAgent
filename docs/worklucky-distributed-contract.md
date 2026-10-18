@@ -33,6 +33,12 @@ WorkLucky 包含在现有 `gulong_engine_monthly` 权益中，不新增用户体
 
 ### 管理员可信验收登记
 
+管理员后台的“共享能力验收”（`/admin?section=capability-consumers`）是同一套 API 的操作入口，不是模型运行器。先按设备名称或匿名 node_id 查找有效绑定，核对实际部署制品和真实推理证据，再导入登记 JSON、勾选核对声明并在站内弹窗确认。页面不会自动生成证据、替换模型、启动推理或把登记成功宣称为节点在线；节点还须携带相同验收 ID 正式上报。
+
+`GET /api/admin/capability-consumers/bindings` 仅管理员可查有效绑定，支持 `node_id` 精确匹配及 `q` 名称/节点 ID 关键词，最多50条。响应不含绑定令牌、令牌摘要、邮箱或凭据。没有网站管理员会话时不能拿普通 GGE 工作会话冒充管理员，不允许为验收修改用户角色或制造会话。
+
+验收列表保留原始 `status`，额外返回按当前服务器时间计算的 `effective_status`；原始 active 但已经超过 `expires_at` 的记录不可派单。登记后的可用性仍须以鉴权目录的实时节点报告、精确用户分组、模型和空闲槽位为准。
+
 只有管理员会话和可信变更来源可以调用 `POST /api/admin/capability-consumers/acceptances`（JSON 上限64 KiB）。它只登记已完成的真实验收，不执行模型，也不生成验收证据。请求公共字段：
 
 ```json

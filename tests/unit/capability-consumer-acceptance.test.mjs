@@ -8,8 +8,13 @@ const NOW = new Date("2026-10-17T12:00:00.000Z");
 const BINDING = new ObjectId();
 const USER = new ObjectId();
 const BASE = "/api/admin/capability-consumers/acceptances";
+const BINDINGS = "/api/admin/capability-consumers/bindings";
 const eq = (left, right) => left instanceof Date || right instanceof Date ? +new Date(left) === +new Date(right) : String(left) === String(right);
-const matches = (record, query) => Object.entries(query).every(([key, value]) => value === null ? record[key] == null : eq(record[key], value));
+const matches = (record, query) => Object.entries(query).every(([key, value]) => {
+  if (key === "$or") return value.some((entry) => matches(record, entry));
+  if (value && typeof value === "object" && "$regex" in value) return typeof record[key] === "string" && new RegExp(value.$regex, value.$options || "").test(record[key]);
+  return value === null ? record[key] == null : eq(record[key], value);
+});
 function clone(value) {
   if (value instanceof ObjectId) return new ObjectId(value);
   if (value instanceof Date) return new Date(value);
@@ -46,9 +51,15 @@ function fixture({ auditFails = false, activationFails = false } = {}) {
     rows[name] ||= [];
     return {
       async findOne(query) { return clone(rows[name].find((record) => matches(record, query)) || null); },
-      find(query) {
+      find(query, options) {
+        if (name === "nodeAccountBindings") hooks.bindingProjection = clone(options?.projection);
         let values = rows[name].filter((record) => matches(record, query));
-        return { sort() { values.sort((a, b) => +b.createdAt - +a.createdAt); return this; }, limit(count) { values = values.slice(0, count); return this; }, async toArray() { return clone(values); } };
+        return { sort(order) { values.sort((a, b) => { for (const [key, direction] of Object.entries(order)) {
+          const left = a[key] instanceof ObjectId ? String(a[key]) : a[key];
+          const right = b[key] instanceof ObjectId ? String(b[key]) : b[key];
+          if (left < right) return -direction;
+          if (left > right) return direction;
+        } return 0; }); return this; }, limit(count) { values = values.slice(0, count); return this; }, async toArray() { return clone(values); } };
       },
       async insertOne(record) {
         if (auditFails && name === "capabilityConsumerAcceptanceAudits") throw new Error("audit storage unavailable");
@@ -76,6 +87,11 @@ function fixture({ auditFails = false, activationFails = false } = {}) {
   return { rows, hooks, getCollection, call, app };
 }
 
+async function readBindings(f, suffix = "") {
+  const response = await f.app.request(`http://localhost${BINDINGS}${suffix}`);
+  return { status: response.status, headers: response.headers, body: await response.json() };
+}
+
 test("acceptance creation and listing always require administrator authentication and mutation origin", async () => {
   const f = fixture();
   f.hooks.authenticated = false;
@@ -97,6 +113,7 @@ test("only explicit administrator confirmation creates a versioned auditable acc
   assert.equal(result.status, 201);
   assert.match(result.body.acceptance.id, /^gca_[a-f0-9-]{36}$/);
   assert.equal(result.body.acceptance.status, "active");
+  assert.equal(result.body.acceptance.effective_status, "active");
   assert.equal(result.headers.get("Cache-Control"), "private, no-store");
   assert.equal(f.rows.capabilityConsumerAcceptanceAudits.length, 1);
   assert.equal(f.rows.capabilityConsumerAcceptanceAudits[0].actorUserId, String(USER));
@@ -213,4 +230,89 @@ test("administrator list filters without exposing binding tokens and registers b
   const paths = f.app.openAPIRegistry.definitions.filter((entry) => entry.type === "route").map((entry) => entry.route);
   assert.ok(paths.some((entry) => entry.path === BASE && entry.method === "get"));
   assert.ok(paths.some((entry) => entry.path === BASE && entry.method === "post"));
+});
+
+test("binding lookup remains administrator-only, read-only and uncached", async () => {
+  const f = fixture();
+  f.hooks.authenticated = false;
+  let result = await readBindings(f);
+  assert.equal(result.status, 401);
+  assert.equal(result.headers.get("Cache-Control"), "private, no-store");
+  f.hooks.authenticated = true; f.hooks.admin = false;
+  assert.equal((await readBindings(f)).status, 403);
+  f.hooks.admin = true; f.hooks.trusted = false;
+  const before = clone(f.rows);
+  result = await readBindings(f);
+  assert.equal(result.status, 200);
+  assert.equal(result.headers.get("Cache-Control"), "private, no-store");
+  assert.deepEqual(f.rows, before);
+});
+
+test("binding lookup returns only five safe fields and excludes inactive or revoked records", async () => {
+  const f = fixture();
+  Object.assign(f.rows.nodeAccountBindings[0], { nodeName: "摄影节点", computeGroupId: "group-a", tokenHash: "fake-test-token-hash",
+    emailSnapshot: "private@example.invalid", credential: "fake-test-credential", updatedAt: NOW });
+  f.rows.nodeAccountBindings.push(
+    { _id: new ObjectId(), userId: USER, nodeId: "revoked-node", status: "revoked", revokedAt: null, updatedAt: NOW },
+    { _id: new ObjectId(), userId: USER, nodeId: "revoked-with-active-status", status: "active", revokedAt: NOW, updatedAt: NOW },
+  );
+  const result = await readBindings(f);
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.bindings, [{ binding_id: String(BINDING), node_id: "node-one", node_name: "摄影节点", user_id: String(USER), compute_group_id: "group-a" }]);
+  const json = JSON.stringify(result.body);
+  for (const forbidden of ["tokenHash", "emailSnapshot", "credential", "fake-test", "private@example.invalid"]) assert.equal(json.includes(forbidden), false);
+  assert.deepEqual(Object.keys(f.hooks.bindingProjection).sort(), ["_id", "computeGroupId", "deviceName", "nodeId", "nodeName", "updatedAt", "userId"].sort());
+});
+
+test("binding lookup supports exact node IDs and literal fuzzy node-name, device-name and ID searches", async () => {
+  const f = fixture();
+  Object.assign(f.rows.nodeAccountBindings[0], { nodeName: "摄影.*节点", deviceName: "工作站甲", updatedAt: NOW });
+  f.rows.nodeAccountBindings.push({ _id: new ObjectId(), userId: USER, nodeId: "OTHER-NODE-ID", nodeName: "other workstation", deviceName: "工作站乙", status: "active", revokedAt: null, updatedAt: new Date(+NOW - 1) });
+  assert.equal((await readBindings(f, "?node_id=node-one")).body.bindings.length, 1);
+  assert.equal((await readBindings(f, "?node_id=NODE-ONE")).body.bindings.length, 0);
+  assert.equal((await readBindings(f, `?q=${encodeURIComponent("摄影")}`)).body.bindings[0].node_id, "node-one");
+  assert.equal((await readBindings(f, `?q=${encodeURIComponent("工作站乙")}`)).body.bindings[0].node_id, "OTHER-NODE-ID");
+  assert.equal((await readBindings(f, "?q=other-node")).body.bindings[0].node_id, "OTHER-NODE-ID");
+  assert.equal((await readBindings(f, "?q=.*")).body.bindings.length, 1, "regex syntax must be searched literally, not executed");
+  assert.equal((await readBindings(f, `?node_id=node-one&q=${encodeURIComponent("乙")}`)).body.bindings.length, 0);
+});
+
+test("binding lookup enforces strict bounded queries and newest-first fifty-record output", async () => {
+  const f = fixture();
+  f.rows.nodeAccountBindings = Array.from({ length: 75 }, (_, index) => ({ _id: new ObjectId(), userId: USER,
+    nodeId: `node-${index}`, deviceName: `设备${index}`, status: "active", revokedAt: null, updatedAt: new Date(+NOW + index) }));
+  const result = await readBindings(f);
+  assert.equal(result.body.bindings.length, 50);
+  assert.equal(result.body.bindings[0].node_id, "node-74");
+  assert.equal(result.body.bindings.at(-1).node_id, "node-25");
+  assert.equal(result.body.bindings[0].node_name, "设备74");
+  assert.equal(result.body.bindings[0].compute_group_id, null);
+  assert.equal((await readBindings(f, "?limit=7")).body.bindings.length, 7);
+  for (const query of ["?limit=51", "?limit=0", "?limit=1.5", "?unknown=value", "?node_id[$ne]=anything", "?q=one&q=two",
+    "?node_id=one&node_id=two", "?q=%20", "?q=%00", "?node_id=bad%20id", `?q=${"x".repeat(101)}`, `?node_id=${"x".repeat(257)}`]) {
+    assert.equal((await readBindings(f, query)).status, 400, query);
+  }
+  const document = f.app.getOpenAPI31Document({ openapi: "3.1.0", info: { title: "test", version: "1" } });
+  const route = document.paths[BINDINGS].get;
+  assert.ok(route);
+  assert.deepEqual(route.security, [{ sessionCookie: [] }]);
+  assert.equal(route.parameters.find((entry) => entry.name === "limit").schema.maximum, 50);
+  assert.equal(route.responses[200].content["application/json"].schema.properties.bindings.items.properties.user_id.type.includes("string"), true);
+});
+
+test("acceptance effective_status derives expiry without mutating stored status or other lifecycle states", async () => {
+  const f = fixture();
+  for (let index = 0; index < 5; index += 1) assert.equal((await f.call(payload())).status, 201);
+  const records = f.rows.capabilityConsumerAcceptances;
+  records[1].expiresAt = NOW;
+  records[2].status = "revoked";
+  records[3].status = "pending_audit"; records[3].expiresAt = new Date(+NOW - 1);
+  records[4].expiresAt = "invalid-legacy-date";
+  const before = clone(records);
+  const result = await f.call();
+  assert.equal(result.status, 200);
+  const statuses = new Map(result.body.acceptances.map((entry) => [entry.id, entry.effective_status]));
+  assert.deepEqual(records.map((entry) => statuses.get(entry._id)), ["active", "expired", "revoked", "pending_audit", "expired"]);
+  assert.equal(result.body.acceptances.find((entry) => entry.id === records[1]._id).status, "active");
+  assert.deepEqual(records, before);
 });
