@@ -20,6 +20,8 @@ const report = () => ({ capability_id: "gulong_engine.tts", capability_version: 
 
 test("Gulong TTS publishes a bounded voice and audio contract without changing other capabilities", () => {
   assert.ok(tts);
+  assert.equal(tts.parametersSchema.properties.model.type, "string");
+  assert.equal(tts.parametersSchema.properties.model.default, undefined);
   assert.equal(tts.requiredCapabilityVersion, "1.0.0");
   assert.equal(tts.priceFen, 0);
   assert.deepEqual(tts.assetRules, []);
@@ -64,7 +66,7 @@ test("TTS catalog stays offline without a real worker and only lists live compat
   const load = async () => (await (await app.request("http://localhost/api/v1/capability-orders/catalog")).json()).capabilities.find((item) => item.capability_id === "gulong_engine.tts");
   const offline = await load();
   assert.equal(offline.dispatchable, false);
-  assert.deepEqual(offline.availability, { verified_node_count: 0, free_slot_count: 0, status: "offline", voice_ids: [] });
+  assert.deepEqual(offline.availability, { verified_node_count: 0, free_slot_count: 0, status: "offline", models: [], voice_ids: [] });
   online = true;
   const ready = await load();
   assert.equal(ready.dispatchable, true);

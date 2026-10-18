@@ -272,3 +272,20 @@ test("unrelated legacy capabilities are not transformed or falsely declared as W
   assert.equal(specialNodeMatches({ capabilityId: "gulong_engine.video" }, {}), true);
   assert.deepEqual(specialAvailability("gulong_engine.video", []), {});
 });
+
+test("native image and TTS availability expose only server-verified exact matrices, never Cartesian model/voice combinations", () => {
+  const raw = { supportedModels: ["guessed-model"], supportedVoices: ["guessed-voice"] };
+  assert.deepEqual(specialAvailability("gulong_engine.image_2k", [raw]), { models: [] });
+  assert.deepEqual(specialAvailability("gulong_engine.tts", [raw]), { models: [] });
+  const reports = [{ trustedAcceptance: true, models: [
+    { id: "tts-a", voice_id: "voice-a", private_runtime_path: "must-not-leak" },
+    { id: "tts-b", voice_id: "voice-b" }, { id: "tts-a", voice_id: "voice-a" },
+    { id: "tts-b" }, { id: "auto", voice_id: "default" }, { id: "tts-c", voice_id: "not a voice" },
+  ] }, { trustedAcceptance: false, models: [{ id: "unverified", voice_id: "voice-c" }] }];
+  assert.deepEqual(specialAvailability("gulong_engine.tts", reports), { models: [
+    { id: "tts-a", voice_id: "voice-a" }, { id: "tts-b", voice_id: "voice-b" },
+  ] });
+  assert.deepEqual(specialAvailability("gulong_engine.image_2k", [{ trustedAcceptance: true,
+    models: [{ id: "qwen_image_2_1", private_path: "ignored" }, { id: "other" }, { id: "qwen_image_2_1" }] }]),
+  { models: [{ id: "qwen_image_2_1" }] });
+});

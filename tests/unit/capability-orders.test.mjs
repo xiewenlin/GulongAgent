@@ -224,7 +224,7 @@ test("native 2K catalog exposes the new contract as offline without an explicit 
   const image = (await response.json()).capabilities.find((item) => item.capability_id === "gulong_engine.image_2k");
   assert.equal(image.required_capability_version, "1.0.0");
   assert.equal(image.dispatchable, false);
-  assert.deepEqual(image.availability, { verified_node_count: 0, free_slot_count: 0, status: "offline" });
+  assert.deepEqual(image.availability, { verified_node_count: 0, free_slot_count: 0, status: "offline", models: [] });
   assert.equal(image.input_assets[0].max_count, 10);
   assert.deepEqual(image.parameters_schema.properties.prompt_enhancement.enum, ["none", "official", "local"]);
 });
@@ -275,7 +275,7 @@ test("native 2K catalog requires the exact version, model, and sharing opt-in fr
     requireTrustedMutation: () => null,
   });
   const load = async () => (await (await app.request("http://localhost/api/v1/capability-orders/catalog")).json()).capabilities.find((item) => item.capability_id === capability.capabilityId);
-  assert.deepEqual((await load()).availability, { verified_node_count: 1, free_slot_count: 1, status: "ready" });
+  assert.deepEqual((await load()).availability, { verified_node_count: 1, free_slot_count: 1, status: "ready", models: [] });
   capability.capabilityVersion = "2.1";
   assert.equal((await load()).dispatchable, false);
   capability.capabilityVersion = "1.0.0";

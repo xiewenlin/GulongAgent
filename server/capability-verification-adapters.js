@@ -44,7 +44,7 @@ function ttsProbe({ inventory, model, nonce }) {
   require(supportsTts(inventory, model), "共享配音模型缺少实际音色编号，不能自动选择默认音色", "VERIFICATION_ADAPTER_REQUIRED");
   return { probeKind: "tts", outputUploadRequired: true,
     budget: { max_inferences: 1, max_output_tokens: 0, max_audio_seconds: 12 },
-    parameters: { text: `Verification ${nonce}.`, voice_id: model.voice_id, language: "en-US", speed: 1, output_format: "wav" } };
+    parameters: { model: model.id, text: `Verification ${nonce}.`, voice_id: model.voice_id, language: "en-US", speed: 1, output_format: "wav" } };
 }
 
 /** A media verifier must read an immutable private COS copy, verify the actual
@@ -85,6 +85,7 @@ export function createCapabilityVerificationAdapters({ verifyMediaOutputs } = {}
     require(supportsTts({ capabilityId: challenge.capabilityId, capabilityVersion: challenge.capabilityVersion }, challenge.model), "该配音模型缺少已上报音色", "VERIFICATION_ADAPTER_REQUIRED");
     require(plain(inlineResult) && inlineResult.voice_id === challenge.model.voice_id
       && challenge.parameters.voice_id === challenge.model.voice_id, "实际配音音色与验收请求不一致", "VERIFICATION_VOICE_MISMATCH");
+    require(challenge.parameters.model === challenge.model.id, "配音请求必须保留本次实际验收的模型编号", "VERIFICATION_MODEL_MISMATCH");
     const output = await verifiedOutput(input, "primary_audio");
     require(output.contentType === "audio/wav" && (!output.actualContentType || output.actualContentType === "audio/wav")
       && output.bytes <= 32 * 1024 * 1024 && Number.isFinite(output.durationSeconds)

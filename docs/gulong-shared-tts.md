@@ -4,7 +4,9 @@
 
 ## 客户端
 
-先用既有古龙账号登录，取得桌面令牌；`GET /api/v1/capability-orders/catalog` 找到 `gulong_engine.tts`。其 `availability.voice_ids` 是最近 3 分钟真实、有效、共享节点支持的声音 ID；离线时为空。读取 `parameters_schema`，其中 `text` 为必填 1–12000 字符，`voice_id` 默认 `default`，`language` 默认 `auto`，`speed` 默认 1，`output_format` 为 `mp3`（默认）或 `wav`。空白文本和声音 ID 会被拒绝。输入素材数必须为零。
+先用既有古龙账号登录，取得桌面令牌；`GET /api/v1/capability-orders/catalog` 找到 `gulong_engine.tts`。新消费者必须按 `availability.models:[{id,voice_id}]` 选择**同一条**已自动验收的模型和音色，不得把不同条目的模型、音色自由组合。矩阵只含服务端已验证且仍在线、绑定与分组有效的交集；未验收或仅有历史扁平上报时为空，不能猜模型或默认音色。`availability.voice_ids` 保留为旧客户端兼容字段，不是模型/音色组合证明。
+
+`parameters_schema.properties.model` 为 1–240 字符的字符串，不设置默认模型。新消费者显式提交 `model` 和对应 `voice_id`；服务端创建及领取均校验精确配对。为兼容旧客户端，未传 model 的原有 voice-only 合同暂时保留，但新客户端不得用它绕过矩阵。`text` 为必填 1–12000 字符，`language` 默认 `auto`，`speed` 默认 1，`output_format` 为 `mp3`（默认）或 `wav`。空白文本和声音 ID 会被拒绝。输入素材数必须为零。
 
 创建：
 
@@ -19,8 +21,9 @@ Authorization: Bearer <古龙桌面访问令牌>
   "capability_version": "1.0.0",
   "source_channel": "desktop_agent",
   "parameters": {
+    "model": "<availability.models 某一条目的原始 id>",
     "text": "欢迎使用古龙。",
-    "voice_id": "default",
+    "voice_id": "<同一条目的 voice_id>",
     "language": "zh-CN",
     "speed": 1,
     "output_format": "mp3"
@@ -32,6 +35,8 @@ Authorization: Bearer <古龙桌面访问令牌>
 返回 `201 {order,idempotent}`，`order.billing.price_fen=0`。同一账号和键重试返回原订单；不同请求体复用同键返回 `409 IDEMPOTENCY_KEY_CONFLICT`。按 `GET /api/v1/capability-orders/by-request/{key}` 恢复、`GET /api/v1/capability-orders/{id}` 轮询；`POST /api/v1/capability-orders/by-request/{key}/cancel` 或 `POST /api/v1/capability-orders/{id}/cancel` 取消。完成后 `order.results[0]` 包含 `role=primary_audio`、`content_type`、`bytes`、大写 `sha256` 和 15 分钟短时 `download_url`；不要持久化该 URL，过期重新查询订单。未登录、非本人、套餐失效均不能读取别人的音频。
 
 ## 节点
+
+当前新消费者采用自动验收合同，详见 [统一能力自动验收](./unified-capability-orders-v1.md)。上报结构化 `models:[{id,voice_id}]`；每个组合单独探测和记录，探测 `parameters` 原样包含模型与音色。下面的扁平上报仅为历史兼容示例，不能产生新的自动验收模型矩阵。
 
 执行端使用既有 `X-Gulong-Account-Binding: gab_...`，以 `POST /api/v1/capability-orders/claim` 上报：
 

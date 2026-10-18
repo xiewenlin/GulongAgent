@@ -62,6 +62,7 @@ export const GULONG_ENGINE_CAPABILITY_DEFINITIONS = Object.freeze([
     eta: 300, runtime: 3600,
   }),
   definition("tts", schema({
+    model: field(1, 240),
     text: field(1, 12000),
     voice_id: { ...field(1, 120), default: "default" },
     language: { type: "string", enum: ["auto", "zh-CN", "en-US", "ja-JP", "ko-KR"], default: "auto" },

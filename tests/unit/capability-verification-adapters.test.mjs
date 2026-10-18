@@ -76,6 +76,7 @@ test("客户端validated布尔、URL、伪造模型及缺少媒体摘要都不�
 test("配音探测必须指定实际voice_id，不隐式选择default，单探测限12秒", () => {
   const context = fixture("gulong_engine.tts", { id: "qwen-tts", voice_id: "real-voice-001" });
   assert.equal(context.adapter.supports(context.inventory, { id: "qwen-tts" }), false);
+  assert.equal(context.probe.parameters.model, "qwen-tts");
   assert.equal(context.probe.parameters.voice_id, "real-voice-001");
   assert.equal(context.probe.parameters.output_format, "wav");
   assert.equal(context.probe.budget.max_audio_seconds, 12);

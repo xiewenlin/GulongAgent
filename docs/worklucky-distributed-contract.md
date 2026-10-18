@@ -25,6 +25,8 @@ WorkLucky 包含在现有 `gulong_engine_monthly` 权益中，不新增用户体
 
 `GET /api/v1/capability-orders/catalog?product=worklucky` 必须鉴权。注册 ID 包含 text、image、image_2k、tts、video、agent_chat、embedding、music，但客户端只能采用条目的实时 `dispatchable`、`price_fen`、`availability`、版本和参数 schema。
 
+`image_2k` 的 `availability.models` 只包含自动验收有效的 `{id:"qwen_image_2_1"}`。`tts` 的矩阵为 `{id,voice_id}`，客户端必须选择同一条目配对并原样提交 `parameters.model` 与 `parameters.voice_id`；不同模型的音色不能交叉拼接，扁平 `voice_ids` 不足以证明组合可用。两者未验收时均返回 `models:[]`，不设隐式模型或声线。
+
 - `availability.verified_node_count` 只计有效绑定、及时上报且实际验证通过的兼容消费者，不计网站注册表中的虚拟节点。
 - `availability.free_slot_count` 是实际可接任务槽位；忙节点不凭空增加空位，过期报告不视为在线。共享消费者的槽位必须由服务器原子预留，不能仅信任重复轮询携带的 `running_task_count=0`。
 - `ready` 表示有兼容空位，`busy` 表示兼容消费者存在但暂无线程空位，`offline` 表示没有可验证消费者。无消费者时拒绝新建，不能创建永不执行的订单。

@@ -175,6 +175,24 @@ export function specialNodeMatches(order, reported = {}) {
 // Call only with fresh, authenticated reports whose acceptance registry entry
 // matches binding + version + artifact SHA + this exact model matrix.
 export function specialAvailability(capabilityId, reports = []) {
+  if (["gulong_engine.image_2k", "gulong_engine.tts"].includes(capabilityId)) {
+    // These matrices come only from server-owned automatic receipts. Flat
+    // supported_models/voices are independent legacy claims, not evidence that
+    // any particular model and voice were tested together.
+    const models = new Map();
+    for (const report of reports) {
+      if (report.trustedAcceptance !== true || !Array.isArray(report.models)) continue;
+      for (const model of report.models) {
+        if (!object(model) || typeof model.id !== "string" || !modelPattern.test(model.id) || model.id.toLowerCase() === "auto") continue;
+        if (capabilityId === "gulong_engine.image_2k") {
+          if (model.id === "qwen_image_2_1") models.set(model.id, { id: model.id });
+        } else if (typeof model.voice_id === "string" && /^[A-Za-z0-9_.:-]{1,120}$/.test(model.voice_id)) {
+          models.set(`${model.id}\0${model.voice_id}`, { id: model.id, voice_id: model.voice_id });
+        }
+      }
+    }
+    return { models: [...models.values()].sort((a, b) => a.id.localeCompare(b.id) || (a.voice_id || "").localeCompare(b.voice_id || "")) };
+  }
   if (!isWorkLuckyCapability(capabilityId)) return {};
   const accepted = reports.filter((report) => report.specialContractVersion === WORKLUCKY_CONTRACT_VERSION && Array.isArray(report.models)
     && (capabilityId !== "gulong_engine.music" || report.trustedAcceptance === true));
