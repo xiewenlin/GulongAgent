@@ -8,7 +8,7 @@ const css = await readFile(new URL("../../src/components/CapabilityConsumersPane
 // Compile only the trusted, source-controlled pure JSON preview functions, not
 // JSX or uploaded data. No browser, build output, files or network requests.
 const prelude = source.slice(source.indexOf("const ROOT"), source.indexOf("function displayTime"));
-const { parseAcceptanceDraft, shown, capabilityName } = new Function(`${prelude.replace("export function parseAcceptanceDraft", "function parseAcceptanceDraft")}\nreturn {parseAcceptanceDraft, shown, capabilityName};`)();
+const { parseAcceptanceDraft, shown, capabilityName, consumerBindingSearchParams } = new Function(`${prelude.replaceAll("export function ", "function ")}\nreturn {parseAcceptanceDraft, shown, capabilityName, consumerBindingSearchParams};`)();
 const binding = { binding_id: "1234567890abcdef12345678", node_id: "test-only-node", node_name: "仅本地解析测试夹具" };
 const body = () => ({
   binding_id: binding.binding_id, capability_id: "gulong_engine.music", capability_version: "1.0.0",
@@ -26,12 +26,41 @@ test("administrator menu opens the consumer acceptance panel through the existin
   assert.match(source, /\/api\/admin\/capability-consumers/);
 });
 
-test("node search omits empty q and uses backend's 100-character keyword bound", () => {
+test("node search sends complete hash IDs exactly and names as bounded fuzzy keywords", () => {
   const load = source.slice(source.indexOf("async function loadBindings"), source.indexOf("async function loadAcceptances"));
-  assert.match(load, /if \(keyword\) params\.set\("q", keyword\)/);
+  assert.match(load, /consumerBindingSearchParams\(nextQuery\)/);
   assert.match(load, /params\.size \? `\?\$\{params\}` : ""/);
   assert.match(source, /id="cc-node-query" maxLength=\{100\}/);
   assert.match(source, /binding_id: binding\.binding_id/);
+  const nodeId = "85254b9d69e4e3307049020c58bab89f2edae70a50817c37ca561194105512d1";
+  assert.equal(consumerBindingSearchParams(` ${nodeId} `).toString(), `node_id=${nodeId}`);
+  assert.equal(consumerBindingSearchParams(" 施富的设备 ").get("q"), "施富的设备");
+  assert.equal(consumerBindingSearchParams("   ").toString(), "");
+  assert.equal(consumerBindingSearchParams("short-node-id").get("q"), "short-node-id");
+});
+
+test("failed binding searches invalidate stale selection and never masquerade as zero matches", async () => {
+  const loadSource = source.slice(source.indexOf("  async function loadBindings"), source.indexOf("  async function loadAcceptances"));
+  const bindingRequest = { current: 1 }, recordRequest = { current: 4 }, draftVersion = { current: 2 }, mounted = { current: true };
+  const state = {}, names = ["setBindingsLoading", "setBindingSearchFailed", "setBindings", "setSelectedBinding", "setAcceptances", "setRecordsLoading", "setConfirmedEvidence", "setAccessDenied", "setNotice"];
+  const apiError = { status: 400, message: "查询参数不正确" };
+  const load = new Function("query", "bindingRequest", "recordRequest", "draftVersion", "mounted", "selectedBinding", "ROOT", "consumerBindingSearchParams", "apiFetch", "failRequest", ...names,
+    `${loadSource}\nreturn loadBindings;`)("", bindingRequest, recordRequest, draftVersion, mounted, binding, "/api/admin/capability-consumers", consumerBindingSearchParams,
+    async () => { throw apiError; }, (error) => { state.error = error; }, ...names.map((name) => (value) => { state[name] = value; }));
+  await load("test");
+  assert.equal(state.setBindingSearchFailed, true);
+  assert.equal(state.setBindingsLoading, false);
+  assert.equal(state.setNotice, null, "a new search clears stale errors from an earlier request");
+  assert.equal(state.setRecordsLoading, false);
+  assert.equal(state.setSelectedBinding, null);
+  assert.equal(state.setConfirmedEvidence, false);
+  assert.deepEqual(state.setBindings, []);
+  assert.deepEqual(state.setAcceptances, []);
+  assert.equal(state.error, apiError);
+  assert.equal(recordRequest.current, 5);
+  assert.equal(draftVersion.current, 3);
+  assert.ok(source.indexOf('bindingSearchFailed ? <p className="cc-empty" role="alert">') < source.indexOf("没有找到匹配节点"));
+  assert.match(source, /目前无法判断是否存在匹配节点/);
 });
 
 test("preview validates the selected binding and preserves the submitted evidence without manufacturing fields", () => {

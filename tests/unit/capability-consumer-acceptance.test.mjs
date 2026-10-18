@@ -300,6 +300,30 @@ test("binding lookup enforces strict bounded queries and newest-first fifty-reco
   assert.equal(route.responses[200].content["application/json"].schema.properties.bindings.items.properties.user_id.type.includes("string"), true);
 });
 
+test("deployed route captures do not become binding-search or acceptance-list filters", async () => {
+  const f = fixture();
+  const nodeId = "85254b9d69e4e3307049020c58bab89f2edae70a50817c37ca561194105512d1";
+  f.rows.nodeAccountBindings[0].nodeId = nodeId;
+  const route = "admin/capability-consumers/bindings";
+  for (const capture of [`_platform_path=${route}`, "path=bindings", `route=${route}`, "route=admin&route=capability-consumers&route=bindings"]) {
+    for (const filter of [`node_id=${nodeId}`, `q=${nodeId}`]) {
+      const result = await readBindings(f, `?${filter}&${capture}`);
+      assert.equal(result.status, 200, capture);
+      assert.equal(result.body.bindings[0].binding_id, String(BINDING));
+    }
+  }
+  await f.call(payload());
+  const listed = await f.call(undefined, `?binding_id=${BINDING}&_platform_path=admin/capability-consumers/acceptances&path=acceptances`);
+  assert.equal(listed.status, 200);
+  assert.equal(listed.body.acceptances.length, 1);
+  for (const capture of ["path=other", "route=other", "_platform_path=admin/users", "path=bindings&path=bindings", `q=${nodeId}&q=other`]) {
+    assert.equal((await readBindings(f, `?node_id=${nodeId}&${capture}`)).status, 400, capture);
+  }
+  assert.equal((await f.call(undefined, `?binding_id=${BINDING}&binding_id=${BINDING}`)).status, 400);
+  f.hooks.admin = false;
+  assert.equal((await readBindings(f, `?node_id=${nodeId}&path=bindings`)).status, 403);
+});
+
 test("acceptance effective_status derives expiry without mutating stored status or other lifecycle states", async () => {
   const f = fixture();
   for (let index = 0; index < 5; index += 1) assert.equal((await f.call(payload())).status, 201);

@@ -24,6 +24,13 @@ const validModelId = (value) => typeof value === "string" && /^[A-Za-z0-9_./:@+-
 const shown = (value, fallback = "未提供") => ["string", "number", "boolean"].includes(typeof value) ? String(value) : fallback;
 const capabilityName = (id) => typeof id === "string" && Object.hasOwn(CAPABILITIES, id) ? CAPABILITIES[id] : "未知能力";
 
+export function consumerBindingSearchParams(query) {
+  const keyword = String(query).trim();
+  const params = new URLSearchParams();
+  if (keyword) params.set(/^[a-f0-9]{64}$/i.test(keyword) ? "node_id" : "q", keyword);
+  return params;
+}
+
 function secretOrUnsafeField(value) {
   const pending = [{ value, depth: 0 }];
   let visited = 0;
@@ -115,6 +122,7 @@ export function CapabilityConsumersPanel() {
   const [filename, setFilename] = useState("");
   const [confirmedEvidence, setConfirmedEvidence] = useState(false);
   const [bindingsLoading, setBindingsLoading] = useState(false);
+  const [bindingSearchFailed, setBindingSearchFailed] = useState(false);
   const [recordsLoading, setRecordsLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [fileLoading, setFileLoading] = useState(false);
@@ -139,10 +147,10 @@ export function CapabilityConsumersPanel() {
   async function loadBindings(nextQuery = query) {
     const request = ++bindingRequest.current;
     setBindingsLoading(true);
+    setBindingSearchFailed(false);
+    setNotice(null);
     try {
-      const keyword = String(nextQuery).trim();
-      const params = new URLSearchParams();
-      if (keyword) params.set("q", keyword);
+      const params = consumerBindingSearchParams(nextQuery);
       const result = await apiFetch(`${ROOT}/bindings${params.size ? `?${params}` : ""}`);
       if (!mounted.current || request !== bindingRequest.current) return;
       const rows = Array.isArray(result.bindings) ? result.bindings : [];
@@ -150,7 +158,13 @@ export function CapabilityConsumersPanel() {
       if (selectedBinding && !rows.some((row) => row.binding_id === selectedBinding.binding_id)) {
         draftVersion.current += 1; setSelectedBinding(null); setAcceptances([]); setConfirmedEvidence(false); recordRequest.current += 1;
       }
-    } catch (error) { if (mounted.current && request === bindingRequest.current) failRequest(error, "节点搜索失败，请稍后重试。"); }
+    } catch (error) {
+      if (mounted.current && request === bindingRequest.current) {
+        setBindingSearchFailed(true); setBindings([]); setSelectedBinding(null); setAcceptances([]); setRecordsLoading(false); setConfirmedEvidence(false);
+        draftVersion.current += 1; recordRequest.current += 1;
+        failRequest(error, "节点搜索失败，请稍后重试。");
+      }
+    }
     finally { if (mounted.current && request === bindingRequest.current) setBindingsLoading(false); }
   }
 
@@ -239,7 +253,7 @@ export function CapabilityConsumersPanel() {
     {notice && <div className={`cc-notice ${notice.tone}`} role={notice.tone === "error" ? "alert" : "status"}>{notice.tone === "success" ? <CheckCircle size={21} /> : <WarningCircle size={21} />}<span>{notice.text}</span></div>}
     <section className="cc-card"><header className="cc-section-heading"><span>01</span><div><h3>选择实际部署节点</h3><p>仅搜索有效的账号绑定；支持节点 ID 或设备名称关键词。</p></div></header>
       <form className="cc-search" onSubmit={(event) => { event.preventDefault(); loadBindings(); }}><label htmlFor="cc-node-query">节点 ID / 设备名称<input id="cc-node-query" maxLength={100} value={query} disabled={submitting || accessDenied} onChange={(event) => setQuery(event.target.value)} placeholder="输入节点名称或 node_id 关键词" /></label><button className="button secondary" type="submit" disabled={bindingsLoading || submitting || accessDenied}><MagnifyingGlass size={18} />{bindingsLoading ? "正在搜索" : "搜索节点"}</button></form>
-      {accessDenied ? <p className="cc-empty">请重新登录管理员账号后返回此页面。</p> : bindingsLoading ? <p className="cc-empty" role="status">正在读取节点绑定…</p> : bindings.length ? <div className="cc-binding-list" role="listbox" aria-label="选择共享计算节点">{bindings.map((binding) => <button className={`cc-binding ${selectedBinding?.binding_id === binding.binding_id ? "selected" : ""}`} type="button" role="option" aria-selected={selectedBinding?.binding_id === binding.binding_id} key={binding.binding_id} disabled={submitting} onClick={() => chooseBinding(binding)}><span><strong>{binding.node_name || "未命名节点"}</strong><small>节点 ID</small><code>{binding.node_id}</code></span><CheckCircle size={21} weight={selectedBinding?.binding_id === binding.binding_id ? "fill" : "regular"} /></button>)}</div> : <p className="cc-empty">没有找到匹配节点。请确认设备已绑定官网账号，或更换关键词后重新搜索。</p>}
+      {accessDenied ? <p className="cc-empty">请重新登录管理员账号后返回此页面。</p> : bindingsLoading ? <p className="cc-empty" role="status">正在读取节点绑定…</p> : bindingSearchFailed ? <p className="cc-empty" role="alert">节点查询失败，请根据上方错误提示重试；目前无法判断是否存在匹配节点。</p> : bindings.length ? <div className="cc-binding-list" role="listbox" aria-label="选择共享计算节点">{bindings.map((binding) => <button className={`cc-binding ${selectedBinding?.binding_id === binding.binding_id ? "selected" : ""}`} type="button" role="option" aria-selected={selectedBinding?.binding_id === binding.binding_id} key={binding.binding_id} disabled={submitting} onClick={() => chooseBinding(binding)}><span><strong>{binding.node_name || "未命名节点"}</strong><small>节点 ID</small><code>{binding.node_id}</code></span><CheckCircle size={21} weight={selectedBinding?.binding_id === binding.binding_id ? "fill" : "regular"} /></button>)}</div> : <p className="cc-empty">没有找到匹配节点。请确认设备已绑定官网账号，或更换关键词后重新搜索。</p>}
       {selectedBinding && <div className="cc-selected"><div><small>当前绑定编号</small><code>{selectedBinding.binding_id}</code></div><div><small>所属账户 ID</small><code>{selectedBinding.user_id || "未提供"}</code></div><div><small>算力分组 ID</small><code>{selectedBinding.compute_group_id || "未设置分组"}</code></div></div>}
     </section>
     <form className="cc-card" onSubmit={submitRegistration}><header className="cc-section-heading"><span>02</span><div><h3>核对并登记真实验收</h3><p>仅导入不含密钥的登记 JSON。请勿上传令牌、密码、.env 或 PEM 文件；原始证据由管理员自行保管核对。</p></div></header>

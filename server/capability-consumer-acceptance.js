@@ -107,6 +107,27 @@ async function boundedJson(c) {
   } catch { return { value: null }; }
 }
 
+// Vercel dynamic files/rewrites can carry route captures alongside the real
+// search parameters. They are transport metadata, not database filters. Accept
+// only captures that exactly describe the route already selected by Hono;
+// arbitrary/duplicate business filters still fail the strict query schemas.
+function consumerListQuery(request) {
+  const query = { ...request.query() };
+  const entries = request.queries();
+  const route = request.path.replace(/^\/api\//, "");
+  const leaf = route.split("/").at(-1);
+  let invalid = false;
+  for (const [key, values] of Object.entries(entries)) {
+    if (["_platform_path", "path", "route"].includes(key)) {
+      const exact = values.length === 1 && (values[0] === route || (key === "path" && values[0] === leaf));
+      const segments = key === "route" && values.length <= 4 && values.join("/") === route;
+      if (!exact && !segments) invalid = true;
+      delete query[key];
+    } else if (values.length !== 1) invalid = true;
+  }
+  return { query, invalid };
+}
+
 /** Administrator-only attestation registry. This never manufactures a live consumer or a test result. */
 export function registerCapabilityConsumerAcceptanceRoutes(app, dependencies) {
   const { getCollection, requireAdmin, requireTrustedMutation, openapi = true } = dependencies;
@@ -126,9 +147,9 @@ export function registerCapabilityConsumerAcceptanceRoutes(app, dependencies) {
   }).strict();
   app.get(bindingsPath, async (c) => {
     const auth = await requireAdmin(c); if (auth.error) return auth.error;
-    const repeated = Object.values(c.req.queries()).some((values) => values.length !== 1);
-    const parsed = bindingQuerySchema.safeParse(c.req.query());
-    if (repeated || !parsed.success) return c.json({ code: "VALIDATION_ERROR", message: "节点绑定筛选条件不正确：节点 ID 最多 256 字、关键词最多 100 字，每次最多查询 50 条" }, 400);
+    const search = consumerListQuery(c.req);
+    const parsed = bindingQuerySchema.safeParse(search.query);
+    if (search.invalid || !parsed.success) return c.json({ code: "VALIDATION_ERROR", message: "节点绑定筛选条件不正确：节点 ID 最多 256 字、关键词最多 100 字，每次最多查询 50 条" }, 400);
     const input = parsed.data;
     const keyword = input.q?.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const filter = { status: "active", revokedAt: null,
@@ -146,12 +167,13 @@ export function registerCapabilityConsumerAcceptanceRoutes(app, dependencies) {
 
   app.get(path, async (c) => {
     const auth = await requireAdmin(c); if (auth.error) return auth.error;
+    const search = consumerListQuery(c.req);
     const parsed = z.object({
       binding_id: bindingIdSchema.optional(), capability_id: capabilitySchema.optional(),
       status: z.enum(["active", "pending_audit", "revoked", "expired"]).optional(),
       limit: z.coerce.number().int().min(1).max(100).default(50),
-    }).strict().safeParse(c.req.query());
-    if (!parsed.success) return c.json({ code: "VALIDATION_ERROR", message: "验收列表筛选条件不正确" }, 400);
+    }).strict().safeParse(search.query);
+    if (search.invalid || !parsed.success) return c.json({ code: "VALIDATION_ERROR", message: "验收列表筛选条件不正确" }, 400);
     const input = parsed.data;
     const filter = { ...(input.binding_id ? { bindingId: input.binding_id.toLowerCase() } : {}),
       ...(input.capability_id ? { capabilityId: input.capability_id } : {}), ...(input.status ? { status: input.status } : {}) };
