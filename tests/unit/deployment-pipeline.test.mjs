@@ -9,6 +9,14 @@ const parityScriptUrl = new URL("../../scripts/verify-production-parity.mjs", im
 const vercelUrl = new URL("../../vercel.json", import.meta.url);
 const appUrl = new URL("../../src/App.jsx", import.meta.url);
 
+test("realtime proxy keeps legacy Caddy compatibility and relies on the bounded application media timeout", async () => {
+  const source = await readFile(caddyUrl, "utf8");
+  assert.match(source, /handle \/api\/v1\/digital-live\/realtime\/\*[\s\S]*?flush_interval -1/);
+  assert.doesNotMatch(source, /\bstream_timeout\b/);
+  const relay = await readFile(new URL("../../server/digital-live-media-relay.js", import.meta.url), "utf8");
+  assert.match(relay, /timeoutMs = 60_000/);
+});
+
 test("production workflow gates both hosting targets behind tests and an immutable build", async () => {
   const source = await readFile(workflowUrl, "utf8");
 

@@ -21,7 +21,6 @@ https://111.229.70.235 {
 	handle /api/v1/digital-live/realtime/* {
 		reverse_proxy 127.0.0.1:8787 {
 			flush_interval -1
-			stream_timeout 65s
 		}
 	}
 
