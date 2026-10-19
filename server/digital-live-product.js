@@ -62,6 +62,7 @@ export function digitalLiveConfig(monthlyPriceFen) {
       text_component: DIGITAL_LIVE_TEXT_COMPONENT, text_model: DIGITAL_LIVE_TEXT_MODEL, allowed_text_models: [...DIGITAL_LIVE_TEXT_MODELS],
       image_family: "Qwen-Image", idempotency: "Idempotency-Key or identical client_request_id; persist before sending" },
     realtime: { status: "integration_required", session_url: null, interrupt_url: null, media_transport: null,
+      control_contract_url: "/api/v1/digital-live/realtime/config",
       reason: "当前仅有异步共享订单；连续实时音视频、会话型流式传输、打断及背压尚未接通" },
     avatar: { status: "integration_required", dispatchable: false }, highlights: { status: "integration_required", dispatchable: false } };
 }

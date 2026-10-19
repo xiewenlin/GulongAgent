@@ -100,6 +100,11 @@ export async function ensureIndexes() {
         },
       };
       await Promise.all([
+        db.collection("digitalLiveRealtimeSessions").createIndex({ ownerId: 1, clientProduct: 1, clientRequestId: 1 }, { unique: true, name: "uniq_digital_live_realtime_request" }),
+        db.collection("digitalLiveRealtimeSessions").createIndex({ bindingId: 1, state: 1, workerLeaseUntil: 1 }, { name: "digital_live_realtime_worker" }),
+        db.collection("digitalLiveRealtimeSessions").createIndex({ purgeAt: 1 }, { expireAfterSeconds: 0, name: "ttl_digital_live_realtime_session" }),
+        db.collection("digitalLiveRealtimeTickets").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0, name: "ttl_digital_live_realtime_ticket" }),
+        db.collection("digitalLiveRealtimeNodes").createIndex({ computeGroupId: 1, reportedAt: -1 }, { name: "digital_live_realtime_group" }),
         db.collection("computeGroups").createIndex({ id: 1 }, { unique: true, name: "uniq_compute_group_id" }),
         db.collection("computeGroups").createIndex({ nameNormalized: 1 }, { unique: true, name: "uniq_compute_group_name" }),
         db.collection("users").createIndex({ computeGroupId: 1 }, { name: "users_compute_group" }),

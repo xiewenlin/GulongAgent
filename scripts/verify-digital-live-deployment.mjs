@@ -19,6 +19,11 @@ export async function verifyDigitalLiveDeployment(origin, read = fetch) {
   assert.equal(config.capability_orders.text_component, "qwen38-27b-uncensored");
   assert.equal(config.capability_orders.text_model, "qwen38-27b-uncensored-q4-k-m"); assert.equal(config.capability_orders.paid_fallback, false);
   assert.equal(config.realtime.status, "integration_required"); assert.equal(config.realtime.session_url, null);
+  assert.equal(config.realtime.control_contract_url, "/api/v1/digital-live/realtime/config");
+  const realtime = await get(config.realtime.control_contract_url, 200);
+  assert.equal(realtime.schema_version, "digital-live-realtime-v1"); assert.equal(realtime.dispatchable, false);
+  assert.equal(realtime.acceptance, "adapter_required"); assert.equal(realtime.transport, "http-fmp4-mse-v1");
+  assert.equal(realtime.gateway_origin, "https://111.229.70.235"); assert.equal(realtime.billing.wallet_charge, false);
   assert.equal(config.avatar.dispatchable, false); assert.equal(config.highlights.dispatchable, false);
   const spec = await get("/api/openapi.json", 200);
   const component = spec.components.schemas.DigitalLiveSharedCapabilityContract;
@@ -29,6 +34,10 @@ export async function verifyDigitalLiveDeployment(origin, read = fetch) {
   assert.equal(config.subscription.monthly_price_fen, fee.const ?? fee.enum?.[0]);
   assert.ok(spec.paths["/api/v1/capability-orders/by-request/{key}/cancel"].post);
   assert.ok(spec.paths["/api/v1/capability-assets/by-request/{key}"].get);
+  assert.ok(spec.components.schemas.DigitalLiveRealtimeCreate);
+  assert.ok(spec.paths["/api/v1/digital-live/realtime/sessions/{id}/turns"].post);
+  assert.ok(spec.paths["/api/v1/digital-live/realtime/sessions/{id}/events"].get);
+  await get(realtime.catalog_url, 401);
   await get("/api/v1/desktop/digital-live/config?product=worklucky", 400);
   await get("/api/v1/desktop/gulong-engine/account", 401);
   await get("/api/v1/capability-orders/catalog?product=digital_live", 401);

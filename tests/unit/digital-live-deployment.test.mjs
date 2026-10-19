@@ -19,10 +19,10 @@ test("digital-live deployment verifier is GET-only and cannot stand in for real 
   const result = await verifyDigitalLiveDeployment("https://www.sologle.com", async (url, options) => {
     assert.equal(options.method, undefined); assert.equal(options.body, undefined); assert.equal(options.headers, undefined);
     calls.push(String(url));
-    if (url.pathname === "/api/openapi.json" || url.pathname === "/api/v1/desktop/digital-live/config") return app.request(String(url));
+    if (url.pathname === "/api/openapi.json" || url.pathname === "/api/v1/desktop/digital-live/config" || url.pathname === "/api/v1/digital-live/realtime/config") return app.request(String(url));
     return new Response(JSON.stringify({ code: "UNAUTHORIZED", message: "请先登录" }), { status: 401, headers: { "Content-Type": "application/json" } });
   });
-  assert.equal(result.real_inference_tested, false); assert.equal(result.real_user_login_tested, false); assert.equal(calls.length, 7);
+  assert.equal(result.real_inference_tested, false); assert.equal(result.real_user_login_tested, false); assert.equal(calls.length, 9);
   await assert.rejects(() => verifyDigitalLiveDeployment("http://www.sologle.com"));
   const source = readFileSync(new URL("../../scripts/verify-digital-live-deployment.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(source, /\bmethod\s*:/); assert.doesNotMatch(source, /\bbody\s*:/); assert.doesNotMatch(source, /\bauthorization\s*:/i);

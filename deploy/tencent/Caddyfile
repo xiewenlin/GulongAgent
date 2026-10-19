@@ -18,6 +18,13 @@ https://111.229.70.235 {
 	tls /etc/caddy/certs/gulong-ip-fullchain.pem /etc/caddy/certs/gulong-ip-privkey.pem
 	encode zstd gzip
 
+	handle /api/v1/digital-live/realtime/* {
+		reverse_proxy 127.0.0.1:8787 {
+			flush_interval -1
+			stream_timeout 65s
+		}
+	}
+
 	handle /api/* {
 		reverse_proxy 127.0.0.1:8787
 	}
