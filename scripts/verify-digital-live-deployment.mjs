@@ -16,7 +16,8 @@ export async function verifyDigitalLiveDeployment(origin, read = fetch) {
   assert.equal(config.schema_version, "digital-live-product-v1"); assert.equal(config.product, "digital_live");
   assert.equal(config.subscription.required_capability, "digital_live.use"); assert.equal(config.subscription.included_in_plan, true);
   assert.equal(config.subscription.separate_purchase, false); assert.equal(config.capability_orders.product, "digital_live");
-  assert.equal(config.capability_orders.text_model, "qwen38-27b-uncensored"); assert.equal(config.capability_orders.paid_fallback, false);
+  assert.equal(config.capability_orders.text_component, "qwen38-27b-uncensored");
+  assert.equal(config.capability_orders.text_model, "qwen38-27b-uncensored-q4-k-m"); assert.equal(config.capability_orders.paid_fallback, false);
   assert.equal(config.realtime.status, "integration_required"); assert.equal(config.realtime.session_url, null);
   assert.equal(config.avatar.dispatchable, false); assert.equal(config.highlights.dispatchable, false);
   const spec = await get("/api/openapi.json", 200);

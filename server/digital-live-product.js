@@ -1,5 +1,7 @@
 export const DIGITAL_LIVE_PRODUCT_ID = "digital_live";
-export const DIGITAL_LIVE_TEXT_MODEL = "qwen38-27b-uncensored";
+export const DIGITAL_LIVE_TEXT_COMPONENT = "qwen38-27b-uncensored";
+export const DIGITAL_LIVE_TEXT_MODEL = "qwen38-27b-uncensored-q4-k-m";
+export const DIGITAL_LIVE_TEXT_MODELS = Object.freeze([DIGITAL_LIVE_TEXT_MODEL, DIGITAL_LIVE_TEXT_COMPONENT]);
 export const DIGITAL_LIVE_CAPABILITY_IDS = Object.freeze([
   "gulong_engine.agent_chat", "qwen_image_2_1.text_to_image", "qwen_image_2_1.multi_image_edit",
   "gulong_engine.image_2k", "whisper.transcribe", "gulong_engine.tts",
@@ -7,7 +9,7 @@ export const DIGITAL_LIVE_CAPABILITY_IDS = Object.freeze([
 export const isDigitalLiveCapability = (id) => DIGITAL_LIVE_CAPABILITY_IDS.includes(id);
 export function digitalLiveModelAllowed(capabilityId, model) {
   if (!model || typeof model.id !== "string") return false;
-  if (capabilityId === "gulong_engine.agent_chat") return model.id === DIGITAL_LIVE_TEXT_MODEL;
+  if (capabilityId === "gulong_engine.agent_chat") return DIGITAL_LIVE_TEXT_MODELS.includes(model.id);
   if (capabilityId.startsWith("qwen_image_2_1.")) return ["qwen-image21-uc", "qwen_image_2_1"].includes(model.id);
   if (capabilityId === "gulong_engine.image_2k") return model.id === "qwen_image_2_1";
   if (capabilityId === "whisper.transcribe") return model.id === "whisper-large-v3-turbo";
@@ -32,8 +34,8 @@ export function digitalLiveAvailability(capabilityId, reports) {
 }
 export function digitalLiveParameterError(capabilityId, parameters, raw = parameters) {
   if (!isDigitalLiveCapability(capabilityId)) return "数字直播尚未接通该能力，请从本产品的真实能力目录选择";
-  if (capabilityId === "gulong_engine.agent_chat" && (parameters.model !== DIGITAL_LIVE_TEXT_MODEL || parameters.request?.model !== DIGITAL_LIVE_TEXT_MODEL)) {
-    return "数字直播文本模型必须精确选择 qwen38-27b-uncensored，不会自动替换为其他模型";
+  if (capabilityId === "gulong_engine.agent_chat" && (!DIGITAL_LIVE_TEXT_MODELS.includes(parameters.model) || parameters.request?.model !== parameters.model)) {
+    return "数字直播必须选择目录中已实测的 Qwen38 27B 实际模型编号，且两处模型编号一致；不会自动替换模型";
   }
   if (capabilityId === "gulong_engine.image_2k" && parameters.model !== "qwen_image_2_1") return "数字直播图像仅支持已实测的 Qwen-Image 模型";
   if (capabilityId === "gulong_engine.tts" && (typeof raw?.model !== "string" || !raw.model.trim() || typeof raw?.voice_id !== "string" || !raw.voice_id.trim())) {
@@ -57,7 +59,8 @@ export function digitalLiveConfig(monthlyPriceFen) {
     auth: { login: "/api/v1/desktop/gulong-engine/auth/login", refresh: "/api/v1/desktop/gulong-engine/auth/refresh", logout: "/api/v1/desktop/gulong-engine/auth/logout", account: "/api/v1/desktop/gulong-engine/account" },
     capability_orders: { product: DIGITAL_LIVE_PRODUCT_ID, catalog: "/api/v1/capability-orders/catalog?product=digital_live", create: "/api/v1/capability-orders",
       capability_ids: [...DIGITAL_LIVE_CAPABILITY_IDS], pricing: "zero_price_shared_only", paid_fallback: false, availability_source: "authenticated_catalog",
-      text_model: DIGITAL_LIVE_TEXT_MODEL, image_family: "Qwen-Image", idempotency: "Idempotency-Key or identical client_request_id; persist before sending" },
+      text_component: DIGITAL_LIVE_TEXT_COMPONENT, text_model: DIGITAL_LIVE_TEXT_MODEL, allowed_text_models: [...DIGITAL_LIVE_TEXT_MODELS],
+      image_family: "Qwen-Image", idempotency: "Idempotency-Key or identical client_request_id; persist before sending" },
     realtime: { status: "integration_required", session_url: null, interrupt_url: null, media_transport: null,
       reason: "当前仅有异步共享订单；连续实时音视频、会话型流式传输、打断及背压尚未接通" },
     avatar: { status: "integration_required", dispatchable: false }, highlights: { status: "integration_required", dispatchable: false } };

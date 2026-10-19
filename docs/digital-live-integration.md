@@ -23,14 +23,14 @@ API base固定使用 `https://www.sologle.com`。腾讯云相同源码端点为 
 
 | 能力ID | 合同/模型策略 |
 |---|---|
-| `gulong_engine.agent_chat` | 1.0.0；模型必须精确 `qwen38-27b-uncensored`，完整OpenAI request/response，不替换成Qwen3-1.7B |
+| `gulong_engine.agent_chat` | 1.0.0；逻辑组件 `qwen38-27b-uncensored`，本机实际 `/v1/models` ID 为 `qwen38-27b-uncensored-q4-k-m`，按真实ID独立探测并完整保留OpenAI request/response，不替换成Qwen3-1.7B |
 | `qwen_image_2_1.text_to_image` | 2.1；Qwen-Image真实组件ID `qwen-image21-uc`或既有`qwen_image_2_1`，只按实测模型行/参数范围 |
 | `qwen_image_2_1.multi_image_edit` | 2.1；Qwen-Image原生参考编辑，按`native_profiles`精确范围 |
 | `gulong_engine.image_2k` | 1.0.0；`qwen_image_2_1`独立原生2K验证范围，不从512²资格放大 |
 | `whisper.transcribe` | `large-v3-turbo-whisper.cpp`；真实`whisper-large-v3-turbo`，原生全段JSON及毫秒offset |
 | `gulong_engine.tts` | 1.0.0；真实已自动验证的同一`model/voice_id`组合，不能因36个本地角色素材存在就宣称36种远程音色已就绪 |
 
-所有候选必须真实自动验收、明确同意共享、当前在线、同算力分组及原子物理槽位匹配。目录只计入上述精确模型；其他Qwen在线不算指定27B模型可用。`availability.models/native_profiles`是原子已验证组合，不能合并不同节点的tools和multimodal标志造出未验证组合。未验证、离线或没有兼容精确参数时不建单（409 CAPABILITY_NO_COMPATIBLE_NODE），不回退到付费供应商。
+所有候选必须真实自动验收、明确同意共享、当前在线、同算力分组及原子物理槽位匹配。目录只计入上述精确模型；其他Qwen在线不算指定27B模型可用。无后缀ID仅在自身被实际报告、独立探测通过时允许，不把量化ID的资格复制为逻辑别名，也不由官网改写客户原始请求。`availability.models/native_profiles`是原子已验证组合，不能合并不同节点的tools和multimodal标志造出未验证组合。未验证、离线或没有兼容精确参数时不建单（409 CAPABILITY_NO_COMPATIBLE_NODE），不回退到付费供应商。
 
 原生Qwen参数schema不接受`model`字段：模型选择从目录整行匹配并作客户端审计，不强塞parameters。请求的能力ID已经固定原生模型路线。其他能力同样使用目录公开的真实schema和完整输入输出role。
 
@@ -46,8 +46,8 @@ API base固定使用 `https://www.sologle.com`。腾讯云相同源码端点为 
   "capability_version":"1.0.0",
   "source_channel":"desktop_agent",
   "parameters":{
-    "model":"qwen38-27b-uncensored",
-    "request":{"model":"qwen38-27b-uncensored","messages":[{"role":"user","content":"你好"}],"stream":false,"max_tokens":32}
+    "model":"qwen38-27b-uncensored-q4-k-m",
+    "request":{"model":"qwen38-27b-uncensored-q4-k-m","messages":[{"role":"user","content":"你好"}],"stream":false,"max_tokens":32}
   },
   "assets":[]
 }

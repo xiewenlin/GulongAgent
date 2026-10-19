@@ -93,6 +93,16 @@ test("the catalog counts only the exact requested automatically proved model, no
   assert.equal(atomic.models.length, 2); assert.equal(atomic.models.some((model) => model.tools && model.multimodal), false);
 });
 
+test("a real quantized runtime proof never approves the logical component alias or rewrites the OpenAI request", async () => {
+  const f = fixture();
+  const alias = { ...f.body, parameters: { model: "qwen38-27b-uncensored", request: { ...f.body.parameters.request, model: "qwen38-27b-uncensored" } } };
+  const result = await f.call("/api/v1/capability-orders", alias);
+  assert.equal(result.status, 409); assert.equal(result.body.code, "CAPABILITY_NO_COMPATIBLE_NODE");
+  assert.equal(f.collection("capabilityOrders").rows.length, 0); f.noAccounting();
+  const mismatch = await f.call("/api/v1/capability-orders", { ...f.body, parameters: { ...f.body.parameters, request: { ...f.body.parameters.request, model: "qwen38-27b-uncensored" } } });
+  assert.equal(mismatch.status, 400, "the underlying whole-request contract rejects conflicting model fields before product admission");
+});
+
 test("digital-live native image and ASR filters never accept another model family and TTS must preserve a real model/voice pair", () => {
   const accepted = (capabilityId, models) => digitalLiveReport({ capabilityId, models, automaticVerification: true, trustedAcceptance: true });
   assert.deepEqual(accepted("qwen_image_2_1.text_to_image", [{ id: "zimage" }, { id: "qwen-image21-uc", width: 512 }]).models, [{ id: "qwen-image21-uc", width: 512 }]);

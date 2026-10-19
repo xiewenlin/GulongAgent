@@ -1805,7 +1805,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     type: "object", description: "数字直播为独立digital_live产品，包含在有效gulong_engine_monthly中，不增加SKU/费用。GGE auth/login和account在active时返回digital_live.use；相同GGE身份不是WorkLucky产品别名。订单client_product=digital_live，查询/恢复?product=digital_live，取消JSON沿用产品。价格0分、charge_status=exempt、不扣钱包、不分佣，无付费回退。仅真实自动验收/已授权共享/同组/原子物理槽的节点可以派单；纯软件权益不证明模型已在线。",
     properties: {
       capability_ids: { type: "array", items: { type: "string", enum: [...DIGITAL_LIVE_CAPABILITY_IDS] } },
-      model_policy: { type: "object", description: "文本精确qwen38-27b-uncensored，缺少该已实测模型时不替换为Qwen3-1.7B。图像固定Qwen-Image原生精确模型/范围；ASR及TTS只按本产品真实目录中的精确模型和同一音色组合。未验收或有其他模型但无指定模型时目录节点数为0且不下单。" },
+      model_policy: { type: "object", description: "文本限定qwen38-27b-uncensored组件，当前实际runtime编号qwen38-27b-uncensored-q4-k-m，必须原样选择真实目录模型ID。无后缀ID只有自身独立报告/探测通过才可用，不是量化ID的别名证明；不重写请求，不降至Qwen3-1.7B。图像固定Qwen-Image精确范围；ASR/TTS只按真实模型及同一音色组合。未验收或无指定模型时目录节点数0且不下单。" },
       request_identity: { type: "object", description: "首次发送前持久化8–160位ASCII原请求键。Idempotency-Key或JSON client_request_id均可；同时存在必须完全一致。订单回显client_request_id，按原键GET by-request及取消墓碑，不换键重复执行。账号+产品隔离，不能与WorkLucky/无产品订单跨读、取消或复用。" },
       realtime: { type: "object", description: "integration_required：没有会话型连续音视频、流式媒体、打断/背压、远程avatar或高光专用消费者；不能将异步claim/callback/轮询冒充实时。" },
     },
