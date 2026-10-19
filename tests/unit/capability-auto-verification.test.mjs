@@ -45,6 +45,18 @@ function matches(record, query) {
     return equal(actual, expected);
   });
 }
+// MongoDB rejects overlapping update paths before matching/upserting, including
+// $setOnInsert on an existing row. Do not silently accept a production code-40
+// ConflictingUpdateOperators error in this in-memory fixture.
+function validateMongoUpdatePaths(update) {
+  const paths = [];
+  for (const fields of Object.values(update)) for (const path of Object.keys(fields)) {
+    const conflict = paths.find((other) => path === other || path.startsWith(`${other}.`) || other.startsWith(`${path}.`));
+    if (conflict) throw Object.assign(new Error(`Updating the path '${path}' would create a conflict at '${conflict}'`),
+      { code: 40, codeName: "ConflictingUpdateOperators" });
+    paths.push(path);
+  }
+}
 function apply(record, update, inserted = false) {
   if (inserted) for (const [key, value] of Object.entries(update.$setOnInsert || {})) set(record, key, value);
   for (const [key, value] of Object.entries(update.$set || {})) set(record, key, value);
@@ -65,14 +77,15 @@ function fixture(options = {}) {
         return { sort(order) { found.sort((a, b) => { for (const [key, direction] of Object.entries(order)) { if (get(a, key) < get(b, key)) return -direction; if (get(a, key) > get(b, key)) return direction; } return 0; }); return this; }, limit(limit) { found = found.slice(0, limit); return this; }, async toArray() { return copy(found); } };
       },
       async updateOne(query, update, config = {}) {
+        validateMongoUpdatePaths(update);
         if (name === "capabilityVerificationChallenges" && hooks.snapshotFails && update.$set?.parameters) throw new Error("snapshot database unavailable");
         let record = rows[name].find((item) => matches(item, query)); let inserted = false;
         if (!record && config.upsert) { record = { _id: query._id }; rows[name].push(record); inserted = true; }
         if (record) apply(record, update, inserted);
         return { modifiedCount: record ? 1 : 0 };
       },
-      async updateMany(query, update) { const found = rows[name].filter((item) => matches(item, query)); found.forEach((item) => apply(item, update)); return { modifiedCount: found.length }; },
-      async findOneAndUpdate(query, update) { const record = rows[name].find((item) => matches(item, query)); if (!record) return null; apply(record, update); return copy(record); },
+      async updateMany(query, update) { validateMongoUpdatePaths(update); const found = rows[name].filter((item) => matches(item, query)); found.forEach((item) => apply(item, update)); return { modifiedCount: found.length }; },
+      async findOneAndUpdate(query, update) { validateMongoUpdatePaths(update); const record = rows[name].find((item) => matches(item, query)); if (!record) return null; apply(record, update); return copy(record); },
       async insertOne(record) { if (name === "capabilityVerificationAudits" && hooks.auditFails) throw new Error("offline audit");
         if (rows[name].some((item) => equal(item._id, record._id))) throw Object.assign(new Error("test duplicate key"), { code: 11000 });
         rows[name].push(copy(record)); return { insertedId: record._id }; },
@@ -366,6 +379,52 @@ test("random pure text challenge returns exact model and bounded no-charge reque
 });
 
 const clientSecret = (byte = 1) => Buffer.alloc(32, byte).toString("base64url");
+
+test("MongoDB update conflicts are rejected even for existing or unmatched rows before any mutation", async () => {
+  const f = fixture(); const records = await f.getCollection("memoryConflictRegression");
+  await records.insertOne({ _id: "existing", createdAt: NOW });
+  const before = copy(f.rows);
+  for (const id of ["existing", "missing"]) for (const update of [
+    { $set: { createdAt: f.now() }, $setOnInsert: { createdAt: f.now() } },
+    { $set: { nested: {} }, $setOnInsert: { "nested.createdAt": f.now() } },
+  ]) {
+    await assert.rejects(() => records.updateOne({ _id: id }, update, { upsert: true }),
+      (error) => error.code === 40 && error.codeName === "ConflictingUpdateOperators");
+    await assert.rejects(() => records.updateMany({ _id: id }, update), (error) => error.code === 40);
+    await assert.rejects(() => records.findOneAndUpdate({ _id: id }, update), (error) => error.code === 40);
+  }
+  assert.deepEqual(f.rows, before);
+});
+
+test("controlled snapshot preserves original request creation time with disjoint MongoDB update paths", async () => {
+  const f = fixture(); await f.service.report({ binding: f.binding, reports: [inventory()] });
+  f.advance(60_000);
+  const requestTime = new Date(f.now()); const requestId = "created-at-controlled"; const leaseToken = clientSecret();
+  const response = await f.service.next({ binding: f.binding, requestId, leaseToken });
+  assert.equal(response.state, "leased"); assert.equal(response.lease_valid, true);
+  const journal = f.rows.capabilityVerificationChallenges[0];
+  assert.equal(+journal.createdAt, +requestTime);
+  assert.equal(+f.rows[AUTO_VERIFICATION_COLLECTION][0].createdAt, +NOW, "inventory timestamp remains separate");
+  f.advance(10_000);
+  const recovered = await f.service.next({ binding: f.binding, requestId, leaseToken });
+  assert.equal(recovered.challenge.id, response.challenge.id);
+  assert.equal(+journal.createdAt, +requestTime);
+  assert.equal(f.rows.capabilityVerificationChallenges.length, 1);
+  assert.equal(f.rows.capabilityVerificationBudgets[0].count, 1);
+  assert.equal(f.hooks.acquired.length, 1);
+  assert.equal(f.rows.wallets, undefined); assert.equal(f.rows.capabilityOrders, undefined);
+});
+
+test("legacy snapshot upsert initializes only its own creation time without copying the inventory timestamp", async () => {
+  const f = fixture(); await f.service.report({ binding: f.binding, reports: [inventory()] });
+  f.advance(60_000);
+  const response = await f.service.next({ binding: f.binding });
+  assert.ok(response.challenge);
+  assert.equal(+f.rows.capabilityVerificationChallenges[0].createdAt, +f.now());
+  assert.equal(+f.rows[AUTO_VERIFICATION_COLLECTION][0].createdAt, +NOW);
+  assert.equal(f.rows.capabilityVerificationChallenges.length, 1);
+  assert.equal(f.rows.capabilityVerificationBudgets[0].count, 1);
+});
 
 test("controlled request replays the same challenge before busy checking without spending another budget", async () => {
   const f = fixture(); await f.service.report({ binding: f.binding, reports: [inventory()] });

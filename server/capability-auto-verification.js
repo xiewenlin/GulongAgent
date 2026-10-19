@@ -443,7 +443,9 @@ export function createCapabilityAutoVerificationService(dependencies) {
           requestId: controlled ? requestId : null, outputUploadRequired: probe.outputUploadRequired === true || probe.probeKind === "music", updatedAt: instant },
           $unset: { resultFingerprint: "", error: "" }, $inc: { attempts: 1 } }, { returnDocument: "after" }));
       if (!updated) { await releaseLocks({ _id: challengeId }); return noChallenge({ ok: true, challenge: null, retry_after_seconds: 15 }); }
-      const { _id: featureId, requestId: snapshotRequestId, ...snapshot } = updated;
+      // The inventory/model creation time is not the request journal's time.
+      // Keep createdAt insert-only: MongoDB rejects it in both $set and $setOnInsert.
+      const { _id: featureId, requestId: snapshotRequestId, createdAt: _inventoryCreatedAt, ...snapshot } = updated;
       await requestRecords.updateOne({ _id: associationId }, { $set: { ...snapshot, ...(controlled ? { requestId: snapshotRequestId } : {}), featureId, updatedAt: instant },
         $setOnInsert: { createdAt: instant } }, { upsert: true });
       return { ok: true, protocol: AUTO_VERIFICATION_PROTOCOL, ...(controlled ? { request_id: requestId } : {}), state: "leased", lease_valid: true,
