@@ -627,6 +627,10 @@ export async function ensureIndexes() {
           { unique: true, name: "uniq_capability_asset_object" },
         ),
         db.collection("capabilityAssetUploads").createIndex(
+          { assetRequestKey: 1 },
+          { unique: true, partialFilterExpression: { assetRequestKey: { $type: "string" } }, name: "uniq_capability_asset_request" },
+        ),
+        db.collection("capabilityAssetUploads").createIndex(
           { ownerId: 1, status: 1, createdAt: -1 },
           { name: "capability_assets_by_owner" },
         ),

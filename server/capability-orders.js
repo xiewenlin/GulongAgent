@@ -4,7 +4,7 @@ import { z } from "@hono/zod-openapi";
 import { getCollection as databaseCollection } from "./db.js";
 import { enforceRateLimit as databaseRateLimit } from "./rate-limit.js";
 import { fingerprintIp, hashOpaqueToken } from "./security.js";
-import { copyObject, createPresignedDownloadUrl, createPresignedPutUrl, deleteObject, ensureBrowserUploadCors, headObject, sanitizeFilename } from "./cos.js";
+import { copyObject, createPresignedDownloadUrl, createPresignedPutUrl, deleteObject, ensureBrowserUploadCors, headObject, sanitizeFilename, assertSingleWriteUploads } from "./cos.js";
 import { localizeErrorMessage } from "../shared/error-messages.js";
 import { readEnglishEntitlement, readGulongEngineEntitlement } from "./english-coach-products.js";
 import { ENGLISH_CAPABILITY_DEFINITIONS, englishNodeSharesCapability, englishWorkerOwnsClaim, isEnglishCapability, validateEnglishInlineResult } from "./english-coach-capabilities.js";
@@ -651,6 +651,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
   const removeCosObject = dependencies.deleteObject || deleteObject;
   const publishCosObject = dependencies.copyObject || copyObject;
   const ensureUploadCors = dependencies.ensureBrowserUploadCors || ensureBrowserUploadCors;
+  const requireSingleWriteUploads = dependencies.assertSingleWriteUploads || assertSingleWriteUploads;
   const { authenticate, requireTrustedMutation } = dependencies;
   const englishEntitlement = dependencies.readEnglishEntitlement || ((ownerId, now) => readEnglishEntitlement(ownerId, now, getCollection));
   const gulongEntitlement = dependencies.readGulongEngineEntitlement || ((ownerId, now) => readGulongEngineEntitlement(ownerId, now, getCollection));
@@ -870,7 +871,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     await orders.updateMany({ status: "queued", autoCancelAt: { $lte: now } }, { $set: { status: "cancelled", stage: "cancelled", cancelReason: "queue_timeout", error: { code: "CAPABILITY_QUEUE_TIMEOUT", message: "排队截止前没有兼容节点完成任务，订单已自动结束。请稍后重试。" }, cancelledAt: now, updatedAt: now } });
   }
 
-  async function ownedAssets(ownerId, refs, capability) {
+  async function ownedAssets(ownerId, refs, capability, clientProduct) {
     if (!refs.length) return [];
     if (refs.some((item) => !ObjectId.isValid(item.asset_id))) throw Object.assign(new Error("输入素材引用无效"), { code: "ASSET_NOT_READY", status: 409 });
     const ids = refs.map((item) => new ObjectId(item.asset_id));
@@ -879,6 +880,9 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const assets = refs.map((ref) => {
       const record = byId.get(ref.asset_id);
       if (!record) throw Object.assign(new Error("输入素材尚未完成校验或不属于当前账户"), { code: "ASSET_NOT_READY", status: 409 });
+      if (record.clientProduct && (clientProductConflicts(record, clientProduct) || record.capabilityId !== capability.capabilityId || record.assetRole !== ref.role)) {
+        throw Object.assign(new Error("素材属于其他产品、能力或输入角色，不能跨用途复用"), { code: "ASSET_SCOPE_MISMATCH", status: 409 });
+      }
       return { assetId: record._id.toString(), role: String(ref.role || "input").slice(0, 80), filename: record.filename, contentType: record.contentType, bytes: record.bytes, sha256: record.sha256, objectKey: record.objectKey };
     });
     return assets;
@@ -893,7 +897,8 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const query = c.req.queries("product");
     const bodyProduct = body?.client_product;
     if ((query && (query.length !== 1 || !["worklucky", "gulong_engine"].includes(query[0])))
-      || (bodyProduct !== undefined && !["worklucky", "gulong_engine"].includes(bodyProduct))) {
+      || (bodyProduct !== undefined && !["worklucky", "gulong_engine"].includes(bodyProduct))
+      || (bodyProduct !== undefined && query?.[0] && bodyProduct !== query[0])) {
       return { error: c.json({ code: "PRODUCT_CAPABILITY_MISMATCH", message: "产品参数不正确，仅支持 WorkLucky、古龙引擎或不指定产品" }, 400) };
     }
     const clientProduct = bodyProduct ?? query?.[0];
@@ -903,6 +908,71 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     return { clientProduct };
   }
   const productScopeConflict = (c) => c.json({ code: "IDEMPOTENCY_KEY_CONFLICT", message: "该请求属于其他客户端产品，不能跨产品读取、取消或复用" }, 409);
+
+  const assetRequestPattern = /^[A-Za-z0-9][A-Za-z0-9_.:-]{7,159}$/;
+  const assetRequestKey = (ownerId, key) => createHash("sha256").update(`capability-asset:${ownerId}:${key}`).digest("hex");
+  const assetReceipt = (asset) => ({ asset_id: String(asset._id), filename: asset.filename, content_type: asset.contentType, bytes: asset.bytes, sha256: asset.sha256 });
+  const assetHeadMatches = (asset, head) => objectBytes(head) === asset.bytes
+    && objectHeader(head, "x-cos-meta-sha256").toUpperCase() === asset.sha256
+    && objectHeader(head, "x-cos-meta-bytes") === String(asset.bytes)
+    && objectHeader(head, "x-cos-meta-owner-id") === String(asset.ownerId)
+    && objectHeader(head, "x-cos-meta-capability-asset-id") === String(asset._id)
+    && (!asset.assetRequestKey || objectHeader(head, "content-type").split(";")[0].trim().toLowerCase() === asset.contentType);
+  function assetPutTicket(asset) {
+    const remaining = Math.floor((+new Date(asset.expiresAt) - Date.now()) / 1000);
+    if (remaining < 1) return null;
+    const headers = { "Content-Type": asset.contentType, "x-cos-meta-sha256": asset.sha256, "x-cos-meta-bytes": String(asset.bytes),
+      "x-cos-meta-owner-id": String(asset.ownerId), "x-cos-meta-capability-asset-id": String(asset._id), "x-cos-forbid-overwrite": "true" };
+    return { asset_id: String(asset._id), upload_url: issueUploadUrl(asset.objectKey, { expires: Math.min(3600, remaining), headers }),
+      method: "PUT", headers, object_key: asset.objectKey, expires_at: new Date(asset.expiresAt).toISOString() };
+  }
+  async function recoverAsset(c, asset, { created = false } = {}) {
+    const common = { asset_id: String(asset._id), asset: assetReceipt(asset), client_product: asset.clientProduct,
+      capability_id: asset.capabilityId, role: asset.assetRole, idempotent: !created, can_upload: false, can_complete: false };
+    c.header("Cache-Control", "private, no-store, max-age=0");
+    if (asset.status === "ready") return c.json({ ...common, stage: "ready" }, created ? 201 : 200);
+    if (asset.status !== "uploading") return c.json({ ...common, stage: "rejected", code: "ASSET_RECEIPT_MISMATCH", message: "该素材已被拒绝，不能重新签发上传凭据" }, 409);
+    if (!Number.isFinite(+new Date(asset.expiresAt)) || +new Date(asset.expiresAt) <= Date.now()) {
+      return c.json({ ...common, stage: "expired", code: "ASSET_UPLOAD_EXPIRED", message: "原素材上传授权已过期，请勿自动换编号重传" }, 410);
+    }
+    if (!created) {
+      let head, missing = false;
+      try { head = await inspectCosObject(asset.objectKey); }
+      catch (error) {
+        if (error?.statusCode !== 404 && error?.status !== 404 && error?.code !== "NoSuchKey") {
+          return c.json({ ...common, stage: "unknown", code: "ASSET_RECOVERY_UNAVAILABLE", message: "暂时无法确认原素材状态，请只重试查询，不要重复上传" }, 503);
+        }
+        missing = true;
+      }
+      if (head) {
+        if (!assetHeadMatches(asset, head)) return c.json({ ...common, stage: "mismatch", code: "ASSET_RECEIPT_MISMATCH", message: "原素材对象与清单不一致，禁止重传覆盖" }, 409);
+        return c.json({ ...common, stage: "uploaded", can_complete: true });
+      }
+      if (!missing) return c.json({ ...common, stage: "unknown", code: "ASSET_RECOVERY_UNAVAILABLE", message: "原素材状态未确认，请只重试查询" }, 503);
+    }
+    try { await requireSingleWriteUploads(); await ensureUploadCors(); }
+    catch (error) { return c.json({ ...common, stage: "unknown", code: error.code || "ASSET_RECOVERY_UNAVAILABLE",
+      message: error.status === 409 ? "当前存储桶不支持防覆盖续传，请联系管理员，勿重复上传" : "暂时无法核对防覆盖策略，请只重试查询" }, error.status === 409 ? 409 : 503); }
+    const ticket = assetPutTicket(asset);
+    if (!ticket) return c.json({ ...common, stage: "expired", code: "ASSET_UPLOAD_EXPIRED", message: "原素材上传授权已过期" }, 410);
+    return c.json({ ...common, ...ticket, stage: "awaiting_upload", can_upload: true }, created ? 201 : 200);
+  }
+
+  app.get("/api/v1/capability-assets/by-request/:key", async (c) => {
+    c.header("Cache-Control", "private, no-store, max-age=0");
+    const auth = await authenticate(c); if (auth.error) return auth.error;
+    if (auth.kind === "desktop-english") return c.json({ code: "GULONG_ENGINE_CAPABILITY_ONLY", message: "英语教练凭据不能查询其他产品的可恢复素材" }, 403);
+    const product = requestedClientProduct(c, auth); if (product.error) return product.error;
+    const key = c.req.param("key");
+    if (!assetRequestPattern.test(key)) return c.json({ code: "VALIDATION_ERROR", message: "素材请求编号格式不正确" }, 400);
+    const rate = await enforceRateLimit(`capability-asset-recovery:${auth.user.id}`, { limit: 120, windowMs: 60_000 });
+    if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "素材状态查询过于频繁，请稍后重试" }, 429);
+    c.header("Cache-Control", "private, no-store, max-age=0");
+    const asset = await (await getCollection("capabilityAssetUploads")).findOne({ ownerId: new ObjectId(auth.user.id), assetRequestKey: assetRequestKey(auth.user.id, key) });
+    if (!asset) return c.json({ code: "ASSET_NOT_FOUND", message: "尚无该素材请求" }, 404);
+    if (clientProductConflicts(asset, product.clientProduct)) return productScopeConflict(c);
+    return recoverAsset(c, asset);
+  });
 
   app.get("/api/v1/capability-orders/catalog", async (c) => {
     const auth = await authenticate(c); if (auth.error) return auth.error;
@@ -920,15 +990,27 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
   });
 
   app.post("/api/v1/capability-assets/presign", async (c) => {
+    c.header("Cache-Control", "private, no-store, max-age=0");
     const rejected = requireTrustedMutation(c); if (rejected) return rejected;
     const auth = await authenticate(c); if (auth.error) return auth.error;
     const rate = await enforceRateLimit(`capability-asset:${auth.user.id}`, { limit: 60, windowMs: 10 * 60_000 });
     if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "素材上传请求过于频繁" }, 429);
     const body = await boundedRequestJson(c);
+    const product = requestedClientProduct(c, auth, body); if (product.error) return product.error;
+    const clientProduct = product.clientProduct;
     const filename = sanitizeFilename(body.filename, "asset.bin");
     const contentType = String(body.content_type || "application/octet-stream").trim().toLowerCase();
     const bytes = integer(body.bytes, -1);
     const sha256 = String(body.sha256 || "").trim().toUpperCase();
+    const hasRequestKey = body.request_key !== undefined;
+    const purpose = CAPABILITY_MAP.get(body.capability_id);
+    const inputRule = purpose?.assetRules.find((rule) => rule.role === body.role && rule.mimeTypes.includes(contentType) && bytes > 0 && bytes <= rule.maxBytes);
+    if (hasRequestKey && (!clientProduct || typeof body.request_key !== "string" || !assetRequestPattern.test(body.request_key)
+      || typeof body.filename !== "string" || !body.filename.trim() || body.filename.length > 400 || typeof body.content_type !== "string"
+      || !Number.isSafeInteger(body.bytes) || typeof body.sha256 !== "string"
+      || !purpose?.dispatchable || !capabilityProducts(body.capability_id).includes(clientProduct) || !inputRule)) {
+      return c.json({ code: "CAPABILITY_ASSET_REQUEST_INVALID", message: "可恢复素材必须包含正确的原请求编号、产品、能力、角色及素材清单" }, 400);
+    }
     if (auth.kind === "desktop-english") {
       const rejected = await requireEnglish(c, auth.user.id); if (rejected) return rejected;
       return c.json({ code: "CAPABILITY_LOCAL_ONLY", message: "英语教练录音已在桌面端本地处理，不再上传新素材" }, 409);
@@ -943,40 +1025,75 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       }
     }
     if (bytes < 1 || bytes > CAPABILITY_MAX_ASSET_BYTES || !/^[A-F0-9]{64}$/.test(sha256) || !/^(image|audio|video)\/[a-z0-9.+-]+$/i.test(contentType)) return c.json({ code: "VALIDATION_ERROR", message: "素材类型、大小或 SHA-256 不正确" }, 400);
-    await ensureUploadCors();
     const ownerId = new ObjectId(auth.user.id);
+    const uploads = await getCollection("capabilityAssetUploads");
+    const requestIdentity = hasRequestKey ? assetRequestKey(ownerId, body.request_key) : null;
+    const manifestFingerprint = hasRequestKey ? requestFingerprint({ filename, contentType, bytes, sha256, capabilityId: purpose.capabilityId, role: body.role, clientProduct }) : null;
+    if (requestIdentity) {
+      const existing = await uploads.findOne({ ownerId, assetRequestKey: requestIdentity });
+      if (existing) {
+        if (clientProductConflicts(existing, clientProduct) || existing.assetManifestFingerprint !== manifestFingerprint) return c.json({ code: "IDEMPOTENCY_KEY_CONFLICT", message: "同一素材请求编号不能跨产品或更改清单" }, 409);
+        return recoverAsset(c, existing);
+      }
+      if (auth.kind !== "desktop-gulong-engine" && auth.user.role !== "admin") { const rejected = await requireGulong(c, ownerId); if (rejected) return rejected; }
+    }
+    await ensureUploadCors();
     const uploadId = new ObjectId();
     const objectKey = `capability-orders/${ownerId}/inputs/${uploadId}-${filename}`;
     const now = new Date();
     const expiresAt = new Date(now.getTime() + 60 * 60_000);
     const headers = { "Content-Type": contentType, "x-cos-meta-sha256": sha256, "x-cos-meta-bytes": String(bytes), "x-cos-meta-owner-id": ownerId.toString(), "x-cos-meta-capability-asset-id": uploadId.toString() };
-    await (await getCollection("capabilityAssetUploads")).insertOne({ _id: uploadId, ownerId, filename, contentType, bytes, sha256, objectKey, status: "uploading", createdAt: now, updatedAt: now, expiresAt });
+    const record = { _id: uploadId, ownerId, filename, contentType, bytes, sha256, objectKey, status: "uploading", createdAt: now, updatedAt: now, expiresAt,
+      ...(requestIdentity ? { assetRequestKey: requestIdentity, assetManifestFingerprint: manifestFingerprint, clientProduct, capabilityId: purpose.capabilityId, assetRole: body.role } : {}) };
+    try { await uploads.insertOne(record); }
+    catch (error) {
+      if (!requestIdentity || error?.code !== 11000) throw error;
+      const winner = await uploads.findOne({ ownerId, assetRequestKey: requestIdentity });
+      if (!winner || clientProductConflicts(winner, clientProduct) || winner.assetManifestFingerprint !== manifestFingerprint) return c.json({ code: "IDEMPOTENCY_KEY_CONFLICT", message: "并发素材请求清单冲突" }, 409);
+      return recoverAsset(c, winner);
+    }
+    if (requestIdentity) return recoverAsset(c, record, { created: true });
     return c.json({ asset_id: uploadId.toString(), upload_url: issueUploadUrl(objectKey, { expires: 3600, headers }), method: "PUT", headers, object_key: objectKey, expires_at: expiresAt.toISOString() }, 201);
   });
 
   app.post("/api/v1/capability-assets/:id/complete", async (c) => {
+    c.header("Cache-Control", "private, no-store, max-age=0");
     const rejected = requireTrustedMutation(c); if (rejected) return rejected;
     const auth = await authenticate(c); if (auth.error) return auth.error;
+    const product = requestedClientProduct(c, auth); if (product.error) return product.error;
+    const rate = await enforceRateLimit(`capability-asset-complete:${auth.user.id}`, { limit: 120, windowMs: 10 * 60_000 });
+    if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "素材校验请求过于频繁，请稍后重试" }, 429);
     if (!ObjectId.isValid(c.req.param("id"))) return c.json({ code: "ASSET_NOT_FOUND", message: "素材不存在" }, 404);
     const uploads = await getCollection("capabilityAssetUploads");
     const ready = await uploads.findOne({ _id: new ObjectId(c.req.param("id")), ownerId: new ObjectId(auth.user.id), status: "ready" });
-    if (ready) return c.json({ asset: { asset_id: ready._id.toString(), filename: ready.filename, content_type: ready.contentType, bytes: ready.bytes, sha256: ready.sha256 }, idempotent: true });
+    if (ready) {
+      if (ready.clientProduct && clientProductConflicts(ready, product.clientProduct)) return productScopeConflict(c);
+      return c.json({ asset: assetReceipt(ready), idempotent: true });
+    }
     const asset = await uploads.findOne({ _id: new ObjectId(c.req.param("id")), ownerId: new ObjectId(auth.user.id), status: "uploading", expiresAt: { $gt: new Date() } });
     if (!asset) return c.json({ code: "ASSET_NOT_FOUND", message: "素材不存在、已完成或已过期" }, 404);
+    if (asset.clientProduct && clientProductConflicts(asset, product.clientProduct)) return productScopeConflict(c);
     let head;
-    try { head = await inspectCosObject(asset.objectKey); } catch { return c.json({ code: "ASSET_OBJECT_NOT_FOUND", message: "COS 中尚未找到素材" }, 409); }
-    const valid = objectBytes(head) === asset.bytes
-      && objectHeader(head, "x-cos-meta-sha256").toUpperCase() === asset.sha256
-      && objectHeader(head, "x-cos-meta-bytes") === String(asset.bytes)
-      && objectHeader(head, "x-cos-meta-owner-id") === asset.ownerId.toString()
-      && objectHeader(head, "x-cos-meta-capability-asset-id") === asset._id.toString();
+    try { head = await inspectCosObject(asset.objectKey); }
+    catch (error) {
+      if (asset.assetRequestKey && error?.statusCode !== 404 && error?.status !== 404 && error?.code !== "NoSuchKey") {
+        return c.json({ code: "ASSET_RECOVERY_UNAVAILABLE", message: "原素材状态暂时无法确认，请按原请求编号查询，勿重复上传" }, 503);
+      }
+      return c.json({ code: "ASSET_OBJECT_NOT_FOUND", message: "COS 中尚未找到素材" }, 409);
+    }
+    const valid = assetHeadMatches(asset, head);
     if (!valid) {
       await Promise.allSettled([removeCosObject(asset.objectKey), uploads.updateOne({ _id: asset._id }, { $set: { status: "rejected", updatedAt: new Date() } })]);
       return c.json({ code: "ASSET_RECEIPT_MISMATCH", message: "素材大小、摘要或归属校验失败" }, 409);
     }
     const now = new Date();
-    await uploads.updateOne({ _id: asset._id, status: "uploading" }, { $set: { status: "ready", completedAt: now, updatedAt: now }, $unset: { expiresAt: "" } });
-    return c.json({ asset: { asset_id: asset._id.toString(), filename: asset.filename, content_type: asset.contentType, bytes: asset.bytes, sha256: asset.sha256 } });
+    const completed = await uploads.updateOne({ _id: asset._id, status: "uploading", expiresAt: { $gt: now } }, { $set: { status: "ready", completedAt: now, updatedAt: now }, $unset: { expiresAt: "" } });
+    if (completed.modifiedCount !== 1) {
+      const current = await uploads.findOne({ _id: asset._id, ownerId: asset.ownerId, status: "ready" });
+      if (current) return c.json({ asset: assetReceipt(current), idempotent: true });
+      return c.json({ code: "ASSET_STATE_CONFLICT", message: "原素材状态已变化，请重新查询原素材请求" }, 409);
+    }
+    return c.json({ asset: assetReceipt(asset), idempotent: false });
   });
 
   app.post("/api/v1/capability-orders", async (c) => {
@@ -1005,7 +1122,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const ownerId = new ObjectId(auth.user.id);
     let assets;
     try {
-      assets = await ownedAssets(ownerId, Array.isArray(body.assets) ? body.assets.slice(0, 32) : [], capability);
+      assets = await ownedAssets(ownerId, Array.isArray(body.assets) ? body.assets.slice(0, 32) : [], capability, clientProduct);
       validateCapabilityInput(capability, parameters, assets);
     } catch (error) { return c.json({ code: error.code || "VALIDATION_ERROR", message: error.message }, error.status || 400); }
     const preferredNodeId = String(body.preferred_node_id || "").trim() || null;
@@ -1655,8 +1772,18 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     },
   });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/catalog", tags: ["Unified Capability Orders"], summary: "读取官网统一能力目录", description: "english_coach.* 已全部转为 local_only。gulong_engine.* 的 dispatchable 根据近 3 分钟真实上报、有效绑定、30 天内推理验证与共享授权动态计算；availability 返回 verified_node_count、free_slot_count、status=ready|busy|offline|adapter_required。busy 表示有兼容节点但暂无线程空位，仍可排队；offline 不接受新任务。gulong_engine.tts 还要求 1.0.0 合同；新消费者必须读取 availability.models=[{id,voice_id}] 并选择同一条已自动验收的精确模型/音色，不能把不同条目的模型和音色交叉组合。availability.voice_ids 仅为旧版扁平兼容字段，不证明模型/音色交集。大展宏图原生 2K 使用独立 gulong_engine.image_2k、required_capability_version=1.0.0；新消费者的 availability.models 仅在对应自动验收有效时包含 {id:qwen_image_2_1}。tts/image_2k 未验收矩阵均为 []，不能从固定 schema 或客户端自报猜测可用模型。旧 qwen_image_2_1.* 报告不视为兼容。gulong_engine.video 在消费适配完成前始终 adapter_required；收费 /api/h3/tasks 独立。目录不缓存，不保证随后创建时可用性不变。", responses: { 200: { description: "能力合同与实时节点可用性" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-assets/presign", tags: ["Unified Capability Orders"], summary: "签发能力订单输入素材 COS 直传票据", description: "JSON={filename,content_type,bytes,sha256,capability_id?}。古龙引擎桌面会话可以指定原生六能力的精确capability_id，以目录MIME/大小边界上传其参考图、源视频或ASR音频；并非开放未实现的统一视频能力。英语教练新录音已在桌面端本地处理，英语桌面凭据调用返回409 CAPABILITY_LOCAL_ONLY；已签发旧票据可按原合同完成校验。", responses: { 201: { description: "账号专属短时 PUT 票据" }, 409: { description: "英语教练新录音已改为本地处理" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-assets/{id}/complete", tags: ["Unified Capability Orders"], summary: "校验能力订单输入素材大小、摘要与归属", responses: { 200: { description: "返回安全 asset_id" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-assets/presign", tags: ["Unified Capability Orders"], summary: "幂等签发能力订单输入素材 COS 直传票据", description: "JSON基础字段filename/content_type/bytes/sha256。新客户端同时提供request_key（每素材稳定8–160位ASCII编号）、client_product=gulong_engine|worklucky、capability_id及role，完整清单绑定唯一asset_id。同键改清单/跨产品409；重放只恢复原素材，不创建第二对象。新票据签名包含x-cos-forbid-overwrite=true，版本桶或存储状态未知时不签PUT。失去响应先GET原请求；只有明确awaiting_upload才能向同一object_key续传，原1小时期限不延期。古龙引擎桌面会话可以指定原生六能力的精确capability_id，以目录MIME/大小边界上传其参考图、源视频或ASR音频；并非开放未实现的统一视频能力。旧无请求键素材保留旧合同。英语教练新录音仍local_only。", responses: { 201: { description: "新建原素材意图及账号专属防覆盖PUT票据" }, 200: { description: "同一原请求的当前阶段与凭据；已有对象不重签PUT" }, 409: { description: "清单冲突、不可恢复状态或存储不支持防覆盖" }, 503: { description: "存储状态未知，只能查询，不得重传" } } });
+  const recoverableAssetSchema = z.object({
+    asset_id: z.string(), asset: z.object({ asset_id: z.string(), filename: z.string(), content_type: z.string(), bytes: z.number().int(), sha256: z.string() }),
+    client_product: z.enum(["gulong_engine", "worklucky"]), capability_id: z.string(), role: z.string(), idempotent: z.boolean(),
+    stage: z.enum(["awaiting_upload", "uploaded", "ready", "expired", "unknown", "mismatch", "rejected"]), can_upload: z.boolean(), can_complete: z.boolean(),
+    upload_url: z.string().optional(), method: z.literal("PUT").optional(), headers: z.record(z.string(), z.string()).optional(),
+    object_key: z.string().optional(), expires_at: z.iso.datetime().optional(), code: z.string().optional(), message: z.string().optional(),
+  });
+  app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-assets/by-request/{key}", tags: ["Unified Capability Orders"],
+    summary: "按账号、产品和原素材编号只读恢复上传阶段", description: "不创建新素材、不变更阶段、不自动complete。ready只返原receipt；uploaded表示COS HEAD清单全匹配，只能POST原id/complete；awaiting_upload仅在COS明确404、防覆盖策略与CORS核对通过时签同对象PUT（不延长原1小时）；未知503、错清单409、过期410都不发PUT。恢复接口本身不上传或触发推理。账号及product必须精确匹配，不向其他账户泄露记录。", request: { params: z.object({ key: z.string().regex(assetRequestPattern) }), query: z.object({ product: z.enum(["gulong_engine", "worklucky"]) }) },
+    responses: { 200: { description: "原素材及精确阶段，private/no-store", content: { "application/json": { schema: recoverableAssetSchema } } }, 401: { description: "未登录" }, 404: { description: "本账户尚无该素材请求" }, 409: { description: "产品/清单/存储策略冲突，无PUT" }, 410: { description: "原上传期限已过，不重发PUT" }, 503: { description: "状态未知，只查询，不上传" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-assets/{id}/complete", tags: ["Unified Capability Orders"], summary: "幂等校验原素材大小、摘要与归属", description: "新产品标记素材必须?product=worklucky或gulong_engine；同账号同产品重复完成返回同asset receipt和idempotent=true，ready状态不重签PUT。HEAD未知时新素材返回503，先GET原request_key查询，不能重复上传。旧未标记素材无需product，保持兼容。", responses: { 200: { description: "原asset receipt，无新上传/订单/记账" }, 409: { description: "产品/清单或状态CAS冲突" }, 503: { description: "存储状态暂不可确认" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders", tags: ["Unified Capability Orders"], summary: "幂等创建同账户本地能力订单", description: "english_coach.* 新任务已改为本地处理，返回 409 CAPABILITY_LOCAL_ONLY；旧订单仍可读取或取消。BIN、模型配件和 runtime 不是独立能力。收费 minimax_h3.video_generation 继续使用 /api/h3/tasks；零价 gulong_engine.video 在消费者完成真实验收前返回 409 CAPABILITY_ADAPTER_REQUIRED。gulong_engine.text/image/image_2k/tts 若无实时兼容节点返回 409 CAPABILITY_NO_COMPATIBLE_NODE，不创建订单；已创建的旧订单不受此创建门禁影响。tts 需要有效古龙引擎包月和 capability_version=1.0.0；parameters 提交 text(1–12000 字符)、voice_id(目录 availability.voice_ids 中的 ID)、language、speed、output_format=mp3|wav；不上传输入素材，primary_audio 直传 COS，完成回调验证对象内容 SHA-256。image_2k 需要有效古龙引擎包月、capability_version=1.0.0；parameters 提交 model=qwen_image_2_1、task=text_to_image|multi_image_edit、prompt、width/height(官方七种 2K 尺寸)、generation_mode=standard|fast_lora_6、steps(快速模式必须6)、prompt_enhancement=none|official|local；assets 按输入数组顺序传 0 或 1–10 张 reference_image。v1 本地能力订单价格为 0 分，不扣钱包且无分佣。", responses: { 201: { description: "订单已入队，含 queue_position、auto_cancel_at、queue_reason_code、queue_message" }, 403: { description: "古龙引擎包月权益未生效" }, 409: { description: "本地处理、无兼容节点、版本不符、幂等冲突、适配未验收或旧 H3 接口" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/{id}", tags: ["Unified Capability Orders"], summary: "查询订单进度、排队位置、ETA 与短时结果下载票据", responses: { 200: { description: "仅返回本人订单；排队含 queue_position、estimated_wait_seconds、queue_reason_code、queue_message、auto_cancel_at；排队超时返回 cancelled、CAPABILITY_QUEUE_TIMEOUT；执行含 progress、eta_seconds" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders/{id}/cancel", tags: ["Unified Capability Orders"], summary: "幂等取消能力订单", responses: { 200: { description: "取消状态与零费用退款边界" } } });

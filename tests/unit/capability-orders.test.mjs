@@ -192,6 +192,7 @@ test("OpenAPI publishes the versioned create, claim, output and callback contrac
   for (const [path, method] of [
     ["/api/v1/capability-orders/catalog", "get"],
     ["/api/v1/capability-assets/presign", "post"],
+    ["/api/v1/capability-assets/by-request/{key}", "get"],
     ["/api/v1/capability-assets/{id}/complete", "post"],
     ["/api/v1/capability-orders", "post"],
     ["/api/v1/capability-orders/{id}", "get"],

@@ -139,6 +139,21 @@ export async function headObject(key) {
   return getClient().headObject(objectParams(key));
 }
 
+// COS ignores x-cos-forbid-overwrite on versioned buckets. Never silently
+// promise a write-once recovery grant when that storage guarantee is absent.
+export function singleWriteBucketReady(result) {
+  const configuration = result?.VersioningConfiguration;
+  return Boolean(configuration && typeof configuration === "object" && !Array.isArray(configuration) && !configuration.Status);
+}
+export async function assertSingleWriteUploads() {
+  let result;
+  try { result = await getClient().getBucketVersioning(bucketParams()); }
+  catch { throw Object.assign(new Error("暂时无法核对存储桶的防覆盖能力，请只重试查询"), { code: "ASSET_STORAGE_STATUS_UNAVAILABLE", status: 503 }); }
+  if (!singleWriteBucketReady(result)) {
+    throw Object.assign(new Error("当前存储桶版本策略不支持安全续传，请联系管理员处理，勿重复上传"), { code: "ASSET_WRITE_ONCE_UNAVAILABLE", status: 409 });
+  }
+}
+
 export async function deleteObject(key) {
   if (!key) return;
   await getClient().deleteObject(objectParams(key));

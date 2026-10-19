@@ -114,6 +114,54 @@ MiniMax H3 视频继续使用 `/api/h3/tasks`、`/api/h3/tasks/claim` 与 `/api/
 
 官网 HEAD 核对大小、SHA-256、账户和素材编号后才把 `asset_id` 标为可用。
 
+### 素材丢响应恢复（新客户端）
+
+新客户端在首次联网前，持久化业务原请求编号与每份素材独立的 `request_key`、产品、能力、角色、完整文件名/MIME/字节/SHA及本地上传阶段。素材请求键为8–160个ASCII字母数字或`_.:-`，首字符字母数字；一个业务有多素材时每份键不同，重启/网络未知后仍用原键，不能自动换键。
+
+```json
+{
+  "request_key":"task-1234:attachment-1",
+  "client_product":"worklucky",
+  "capability_id":"qwen_image_2_1.multi_image_edit",
+  "role":"reference_image",
+  "filename":"source.png","content_type":"image/png","bytes":123456,
+  "sha256":"文件的64位SHA256"
+}
+```
+
+将上述JSON发给 `POST /api/v1/capability-assets/presign`。服务端按账号+原键唯一存储完整规范化清单与产品/能力/角色；同键改清单或跨产品返回409，不创建第二素材。首次201和同请求恢复200使用同一个asset_id/object_key，原1小时上传期限不延期。旧不带request_key的票据保留旧行为，不能追溯编造可恢复编号。
+
+发生presign、PUT或complete响应未知时，只调用：
+
+`GET /api/v1/capability-assets/by-request/{request_key}?product=worklucky`
+
+古龙引擎客户端使用同值`gulong_engine`。Bearer为原登录账户的gge访问令牌（官网会话同样受账号隔离），不允许英语教练窄凭据查询。返回字段：
+
+```json
+{
+  "asset_id":"原素材ID",
+  "asset":{"asset_id":"原素材ID","filename":"source.png","content_type":"image/png","bytes":123456,"sha256":"大写SHA256"},
+  "client_product":"worklucky","capability_id":"qwen_image_2_1.multi_image_edit","role":"reference_image",
+  "idempotent":true,"stage":"uploaded","can_upload":false,"can_complete":true
+}
+```
+
+| HTTP / stage | 客户端允许的下一步 |
+|---|---|
+| 200 `awaiting_upload` | COS明确404、存储防覆盖与CORS已核对。响应额外有原asset_id对应的`upload_url/method/headers/object_key/expires_at`；只向原对象PUT原完整字节，所有headers必须保留 |
+| 200 `uploaded` | HEAD大小、MIME、摘要元数据、owner及asset ID完整一致；不含PUT。只POST原asset_id的complete |
+| 200 `ready` | 原完成回执；不含PUT，不重传。沿用原业务Idempotency-Key下单，或GET已取得的原订单 |
+| 404 | 本账户尚无该键；可重发同一完整清单的原presign POST，唯一索引合并并发，不改键/不直接PUT |
+| 409 `mismatch/rejected` 或产品冲突 | 停止覆盖和重传，保留原日志供处理 |
+| 410 `expired` | 原授权已过期，不续期、不自动创建新素材/新任务 |
+| 503 `unknown` | 状态尚不明确；只退避重试同一GET，不发PUT、complete或新业务任务 |
+
+GET不改变素材状态，不删除对象，不创建业务订单，不扣款/分佣。并发同键只生成一个素材意图。已标记产品的素材在完成、下单引用时继续匹配产品、能力和角色，不能拿WorkLucky素材给其他产品或其他输入用途。其他账号查询返回404，不泄露清单或凭据。
+
+新素材完成使用 `POST /api/v1/capability-assets/{asset_id}/complete?product=worklucky`（或gulong_engine），成功 `{asset:{...},idempotent:false}`；重复完成同回执且`idempotent:true`。CAS状态已变化时不得虚假返回成功。即使包月之后到期，原GET/完成回执仍可恢复；新业务订单必须重新通过当前权益门禁。旧未标记素材complete不带product即可。
+
+防覆盖PUT签名固定包含`x-cos-forbid-overwrite:true`，并在签发前只读核对COS版本策略。腾讯云明确说明版本控制开启时此header无效；因此当前实现对Enabled、Suspended或读取失败都不发新防覆盖凭据，不能为了续传擅自关闭桶版本控制。桶配置未知/无`cos:GetBucketVersioning`权限会得到503，联系管理员核对，不能绕过。参见[腾讯云PUT Object合同](https://cloud.tencent.com/document/product/436/7749)。PUT遇到对象已存在冲突时应GET原请求，不能删原对象再重传。短期URL/令牌不写入持久日志。
+
 ### 创建订单
 
 `POST /api/v1/capability-orders`
