@@ -55,6 +55,7 @@ const rejects = (operation, code) => assert.rejects(operation, (error) => error.
 test("production realtime contract remains non-dispatchable and async proofs cannot open it", async () => {
   const config = realtimeConfig(); assert.equal(config.dispatchable, false); assert.equal(config.status, "integration_required");
   assert.equal(config.acceptance, "adapter_required"); assert.equal(config.transport, "http-fmp4-mse-v1");
+  assert.equal(config.remote_asr.dispatchable, false); assert.deepEqual(config.remote_asr.status_values, ["integration_required", "available"]);
   const f = fixture({ accepted: false });
   const reported = await f.report(); assert.equal(reported.dispatchable, false);
   await rejects(f.create(), "REALTIME_INTEGRATION_REQUIRED");
@@ -338,6 +339,15 @@ test("remote ASR requires its own exact proved model and original utterance iden
   assert.equal((await g.service.workerState(g.binding, next, g.lease)).input_audio.model, "paraformer-zh");
   assert.equal((await g.service.asrByRequest(g.owner, next, asrRequest().request_id)).state, "awaiting_audio");
   await rejects(g.service.beginAsr(g.owner, next, { ...asrRequest(), history: [{ role: "user", content: "changed" }] }), "REALTIME_IDEMPOTENCY_CONFLICT");
+});
+test("ASR catalog admission is explicit and uses exact proved combinations, not the installed model name", async () => {
+  const f = fixture({ withAsr: true }); await f.report();
+  const open = await f.service.catalog(f.owner);
+  assert.deepEqual(open.remote_asr, { status: "available", dispatchable: true });
+  assert.equal(open.providers[0].asr_dispatchable, true); assert.equal(open.providers[0].proof.realtime_asr_verified, true);
+  f.proofOverride({ contractTests: { actual_provider: true, continuous_fmp4: true, played_drain: true, interrupt_generation: true, exclusive_gpu: true } });
+  const closed = await f.service.catalog(f.owner);
+  assert.deepEqual(closed.remote_asr, { status: "integration_required", dispatchable: false }); assert.deepEqual(closed.providers, []);
 });
 test("ASR input ticket is one-use, waits for node reader and forbids re-upload after input begins", async () => {
   const f = fixture({ withAsr: true }), { id } = await f.ready(), body = asrRequest(); await f.service.beginAsr(f.owner, id, body);

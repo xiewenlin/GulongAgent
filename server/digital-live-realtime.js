@@ -55,7 +55,8 @@ export function realtimeConfig() {
     catalog_url: `${DIGITAL_LIVE_REALTIME_ROOT}/providers`,
     media_credentials: "one_use_30_second_header_ticket", worker_lease_seconds: 15, client_heartbeat_seconds: 5,
     max_session_seconds: 1800, max_pending_sentences: 3, billing: { price_fen: 0, wallet_charge: false, commission: false },
-    remote_asr: { status: "integration_required", create_path: "/sessions/{id}/asr/utterances", input_transport: "bounded-pcm16-mono-16k-v1",
+    remote_asr: { status: "integration_required", dispatchable: false, status_values: ["integration_required", "available"],
+      availability_source: "authenticated_exact_provider_catalog", create_path: "/sessions/{id}/asr/utterances", input_transport: "bounded-pcm16-mono-16k-v1",
       max_utterance_seconds: 20, max_input_bytes: 640000, content_type: DIGITAL_LIVE_PCM_MIME, persistence: "digest_only_no_audio", requires_separate_real_asr_proof: true },
     reason: "会话控制与有界媒体网关已实现；连续实时节点验证器及真实节点尚未验收，暂不开放派发" };
 }
@@ -195,14 +196,18 @@ export function createDigitalLiveRealtimeService({ getCollection = databaseColle
         const key = digest({ provider, artifact: node.artifactSha256 });
         const previous = profiles.get(key);
         profiles.set(key, { providers: provider, capability_version: DIGITAL_LIVE_REALTIME_VERSION, artifact_sha256: node.artifactSha256,
-          proof: { source: "automatic", tested_at: proof.testedAt, expires_at: proof.expiresAt, test_evidence_sha256: proof.testEvidenceSha256 },
+          proof: { source: "automatic", tested_at: proof.testedAt, expires_at: proof.expiresAt, test_evidence_sha256: proof.testEvidenceSha256,
+            realtime_asr_verified: Boolean(provider.asr_model && proof.contractTests?.realtime_asr === true) },
           availability: { verified_node_count: (previous?.availability.verified_node_count || 0) + 1,
             free_slot_count: (previous?.availability.free_slot_count || 0) + (idle ? 1 : 0) },
-          dispatchable: idle || previous?.dispatchable === true });
+          dispatchable: idle || previous?.dispatchable === true,
+          asr_dispatchable: Boolean(provider.asr_model && proof.contractTests?.realtime_asr === true && (idle || previous?.asr_dispatchable)) });
       }
     }
     const providers = [...profiles.values()];
+    const asrReady = providers.some((row) => row.asr_dispatchable);
     return { schema_version: DIGITAL_LIVE_REALTIME_VERSION, product: "digital_live", providers,
+      remote_asr: { status: asrReady ? "available" : "integration_required", dispatchable: asrReady },
       dispatchable: providers.some((row) => row.dispatchable), acceptance: providers.length ? "automatic_verified" : DIGITAL_LIVE_REALTIME_ACCEPTANCE,
       billing: { price_fen: 0, wallet_charge: false, commission: false }, checked_at: clock() };
   }
@@ -263,6 +268,7 @@ export function createDigitalLiveRealtimeService({ getCollection = databaseColle
     const parsed = turnSchema.safeParse(raw);
     demand(parsed.success, "REALTIME_TURN_INVALID", "请提供原轮次请求编号、用户文本和有限对话历史", 400);
     const body = parsed.data, s = await owned(ownerId, id), hash = digest(body);
+    await currentNodePermit(s);
     demand(body.generation === s.generation, "REALTIME_GENERATION_MISMATCH", "会话代次已变化，请查询原会话");
     const previous = (s.turnKeys || []).find((item) => item.turn_id === body.turn_id || item.request_id === body.request_id);
     if (previous) { demand(previous.hash === hash, "REALTIME_IDEMPOTENCY_CONFLICT", "原轮次编号已对应不同输入"); return view(s); }
@@ -299,6 +305,7 @@ export function createDigitalLiveRealtimeService({ getCollection = databaseColle
     demand(parsed.success, "REALTIME_ASR_REQUEST_INVALID", "请提供原语音请求编号、轮次、语句编号和有限历史", 400);
     const s = await owned(ownerId, id), body = parsed.data, hash = digest(body);
     demand(s.providers.asr_model, "REALTIME_ASR_INTEGRATION_REQUIRED", "所选实时组合尚未通过远程语音识别验收", 503);
+    await currentNodePermit(s);
     demand(body.generation === s.generation, "REALTIME_GENERATION_MISMATCH", "语音输入代次已变化");
     const previous = (s.asrKeys || []).find((item) => item.request_id === body.request_id || item.utterance_id === body.utterance_id);
     if (previous) { demand(previous.hash === hash, "REALTIME_IDEMPOTENCY_CONFLICT", "原语音请求已对应其他参数"); return view(s); }

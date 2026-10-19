@@ -25,6 +25,7 @@ export async function verifyDigitalLiveDeployment(origin, read = fetch) {
   assert.equal(realtime.acceptance, "adapter_required"); assert.equal(realtime.transport, "http-fmp4-mse-v1");
   assert.equal(realtime.gateway_origin, "https://111.229.70.235"); assert.equal(realtime.billing.wallet_charge, false);
   assert.equal(realtime.remote_asr.status, "integration_required"); assert.equal(realtime.remote_asr.max_input_bytes, 640000);
+  assert.equal(realtime.remote_asr.dispatchable, false); assert.deepEqual(realtime.remote_asr.status_values, ["integration_required", "available"]);
   assert.equal(config.avatar.dispatchable, false); assert.equal(config.highlights.dispatchable, false);
   const spec = await get("/api/openapi.json", 200);
   const component = spec.components.schemas.DigitalLiveSharedCapabilityContract;

@@ -105,7 +105,9 @@ worker-state的 `turn` 包含原user_text/history、request_id/turn_id、context
 
 ## 远程真人语音输入（源码已接，真实ASR仍未开放）
 
-只有实际provider行含 `asr_model` 且同一真实组合证明的 `realtime_asr` 独立通过才可使用；库存不能自动取得该字段权限。config.remote_asr明确integration_required。仅文字turn+视频通过不能称为真人连续语音完整链路。
+只有实际provider行含 `asr_model` 且同一真实组合证明的 `realtime_asr` 独立通过才可使用；库存不能自动取得该字段权限。config.remote_asr当前明确 `status=integration_required,dispatchable=false`，公开状态枚举固定 `integration_required|available`，授权来源为 `authenticated_exact_provider_catalog`。受鉴权 `/providers` 返回同名remote_asr状态/布尔及逐行 `asr_dispatchable`、`proof.realtime_asr_verified`，仅精确模型、角色、音色、摘要及真正实时ASR证明与空闲节点相符才available/true。未知状态一律不可用，不猜ready/available。
+
+目录free_slot_count用于**新会话**；已有会话所持独占物理槽不能导致会话内ASR被误禁用。已建会话的turn/ASR创建依其原provider及自有lease、当前权威组/账号权益/有效精确证明重新检查，不再预订新槽。当前生产所有真实组合仍未验收，目录为空。仅文字turn+视频通过不能称为真人连续语音完整链路。
 
 1. 客户端 `POST /sessions/{id}/asr/utterances`：`{generation,request_id,turn_id,utterance_id,history}`，稳定原键，不传模型或音频JSON。仅上一轮已真实排空时开始，最多16项/4096字节历史；同键不同内容409。`GET /sessions/{id}/asr/by-request/{request_id}` 查询原语句，未知不能重录重投。
 2. worker-state.input_audio含utterance_id/request_id/turn_id、实际ASR model、state、固定content_type、max_bytes、input摘要及read_path。指定节点先带绑定/原实时lease `GET /sessions/{id}/input-audio/{generation}/{utterance_id}`，常驻网关建立有界读取连接后持久记录reader_ready。

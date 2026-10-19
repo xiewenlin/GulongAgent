@@ -93,7 +93,7 @@ export function createDigitalLiveCandidateVerification({ getCollection, now = ()
       probe: record.mode === "media" ? { turns: record.turns, interrupt_after_turn: 5, expected_model: record.providers.text_model,
         context_tokens: 8192, media_transport: "http-fmp4-mse-v1", required_independent_playback_witness: true }
         : { task: "transcribe", expected_model: record.providers.asr_model, full_source_required: true,
-          inputs: withInputs && record.state === "issued" && record.leaseExpiresAt > clock()
+          inputs: withInputs && record.state === "issued" && !record.stoppedAt && record.leaseExpiresAt > clock()
             ? await issueInputs({ binding, challenge: { bindingId: record.bindingId, nodeId: record.nodeId, probeInputs: [WHISPER_AUDIO_FIXTURE], leaseExpiresAt: record.leaseExpiresAt } }) : [] },
       media: media.map(({ sequence, state, bytes, sha256 }) => ({ sequence, state, bytes: bytes || null, sha256: sha256 || null })),
       reason_code: record.reasonCode || null };
