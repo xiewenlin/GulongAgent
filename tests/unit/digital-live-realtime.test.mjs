@@ -495,3 +495,14 @@ test("HTTP PCM intake sends binary only to its bound reader and forwards final t
   const state = await (await app.request(`${ROOT}/sessions/${id}`)).json();
   assert.equal(state.session.active_turn.request_id, body.request_id); assert.equal(state.session.active_asr.input_sha256, digest.sha256);
 });
+test("legal coalesced PCM network reads are sliced rather than rejected as oversized producer frames", async () => {
+  const pcm = Buffer.alloc(640000, 7), relay = createDigitalLiveMediaRelay({ format: "pcm16", maxBytes: 640000, maxChunkBytes: 64 * 1024 });
+  const p = { ...permit, mimeType: DIGITAL_LIVE_PCM_MIME }, read = new Response(relay.open(p)).arrayBuffer();
+  const result = await relay.write(p, bodyStream(pcm, pcm.length));
+  assert.equal(result.bytes, pcm.length); assert.deepEqual(Buffer.from(await read), pcm);
+});
+test("fMP4 network coalescing preserves byte order and framing while internal slices stay bounded", async () => {
+  const relay = createDigitalLiveMediaRelay({ maxChunkBytes: 16 }), bytes = fmp4(), read = new Response(relay.open(permit)).arrayBuffer();
+  const result = await relay.write(permit, bodyStream(bytes, bytes.length));
+  assert.equal(result.bytes, bytes.length); assert.deepEqual(Buffer.from(await read), bytes);
+});

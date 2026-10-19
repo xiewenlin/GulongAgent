@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
  * Tencent process. A deployment/disconnect cancels only the owning session. */
 export function createDigitalLiveMediaRelay({ maxStreams = 8, maxBytes = 16 * 1024 * 1024, maxChunkBytes = 256 * 1024,
   timeoutMs = 60_000, writeTimeoutMs = 5000, format = "fmp4", onSent = async () => {}, onFailed = async () => {} } = {}) {
+  if (!Number.isSafeInteger(maxChunkBytes) || maxChunkBytes < 1) throw new TypeError("Invalid bounded relay chunk size");
   const streams = new Map();
   const keyOf = (p) => `${p.sessionId}:${p.generation}:${p.sequence}`;
   const error = (code, message, status = 409) => Object.assign(new Error(message), { code, status });
@@ -81,22 +82,27 @@ export function createDigitalLiveMediaRelay({ maxStreams = 8, maxBytes = 16 * 10
       for (;;) {
         if (signal?.aborted || entry.closed) throw error("REALTIME_MEDIA_DISCONNECTED", "媒体传输已取消");
         const result = await reader.read(); if (result.done) break;
-        const chunk = result.value; bytes += chunk?.byteLength || 0;
-        if (!(chunk instanceof Uint8Array) || chunk.byteLength > maxChunkBytes || bytes > maxBytes) throw error("REALTIME_MEDIA_LIMIT", "媒体分片或总大小超过安全上限", 413);
-        hash.update(chunk); framing?.push(chunk);
-        if (!checked) {
-          const next = new Uint8Array(header.length + chunk.length); next.set(header); next.set(chunk, header.length); header = next;
-          if (header.length < 12) continue;
-          const type = new TextDecoder().decode(header.subarray(4, 8));
-          if (type !== "ftyp") throw error("REALTIME_FMP4_INVALID", "每句媒体必须从独立的 fMP4 初始化片段开始", 400);
-          checked = true;
+        const wire = result.value; bytes += wire?.byteLength || 0;
+        if (!(wire instanceof Uint8Array) || bytes > maxBytes) throw error("REALTIME_MEDIA_LIMIT", "媒体总大小超过安全上限", 413);
+        // HTTP/read chunk boundaries are not producer frame boundaries. Split
+        // legitimate coalesced network reads into bounded processing slices.
+        for (let offset = 0; offset < wire.byteLength; offset += maxChunkBytes) {
+          const chunk = wire.subarray(offset, offset + maxChunkBytes);
+          hash.update(chunk); framing?.push(chunk);
+          if (!checked) {
+            const next = new Uint8Array(header.length + chunk.length); next.set(header); next.set(chunk, header.length); header = next;
+            if (header.length < 12) continue;
+            const type = new TextDecoder().decode(header.subarray(4, 8));
+            if (type !== "ftyp") throw error("REALTIME_FMP4_INVALID", "每句媒体必须从独立的 fMP4 初始化片段开始", 400);
+            checked = true;
+          }
+          let timeout;
+          try { await Promise.race([entry.writer.write(header.length ? header : chunk), new Promise((_, reject) => {
+            timeout = setTimeout(() => reject(error("REALTIME_BACKPRESSURE_TIMEOUT", "客户端未及时读取媒体，已取消本会话")), writeTimeoutMs);
+            timeout.unref?.();
+          })]); } finally { clearTimeout(timeout); }
+          header = new Uint8Array(0);
         }
-        let timeout;
-        try { await Promise.race([entry.writer.write(header.length ? header : chunk), new Promise((_, reject) => {
-          timeout = setTimeout(() => reject(error("REALTIME_BACKPRESSURE_TIMEOUT", "客户端未及时读取媒体，已取消本会话")), writeTimeoutMs);
-          timeout.unref?.();
-        })]); } finally { clearTimeout(timeout); }
-        header = new Uint8Array(0);
       }
       if (!checked || !bytes) throw error("REALTIME_FMP4_INVALID", "媒体初始化片段不完整", 400);
       framing?.finish();

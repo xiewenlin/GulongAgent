@@ -93,7 +93,7 @@ worker-state的 `turn` 包含原user_text/history、request_id/turn_id、context
 
 节点同一时刻 `PUT /sessions/{id}/media/{generation}/{sequence}` 到腾讯网关，带绑定/租约Header，Content-Type与providers.mime_type精确一致。HTTP body为FFmpeg正在输出的二进制fMP4：每句ftyp+moov初始化（包含edts/edit-list可以正常透传），随后moof/mdat；不是完整MP4落盘后拆包，不是JSON/base64。worker-state队列中有 `media_reader_ready`，节点应等该项true后启动对应编码输出；读取连接未建立时409 `REALTIME_MEDIA_READER_REQUIRED`且未接纳任何字节，不能因此重建模型turn。传输已开始/未知的PUT不自动重放。每句独立init允许客户端同轮同一个MediaSource/SourceBuffer用timestampOffset接续；实际AAC/帧边界可能有量化尾差，客户端按实际播放范围确认，不只用声明秒数。
 
-网关最多8个流，单句16MiB/60秒、单传输chunk256KiB；只保留小型有界流缓冲、完整fMP4 box边界检查，不把完整媒体写数据库/COS或缓存。每2秒重核执行租约/权益/分组/代次；5秒未释放写背压、断线、格式/大小/序号不符，取消原会话，不能阻塞其他流。没有用户确认不视为drained。
+网关最多8个流，单句16MiB/60秒、内部处理片最多256KiB；HTTP读取边界不等于编码片边界，合法合并网络chunk在总大小预算内拆分处理，不按其大小误拒绝。只保留小型有界流缓冲、完整fMP4 box边界检查，不把完整媒体写数据库/COS或缓存。每2秒重核执行租约/权益/分组/代次；5秒未释放写背压、断线、格式/大小/序号不符，取消原会话，不能阻塞其他流。没有用户确认不视为drained。
 
 媒体已发送状态在Mongo持久记录。网关进程/部署重启不尝试恢复旧实时字节或转发到别的实例；客户端按原会话查询取消状态，节点必须观察15秒lease，重新开播需要新会话。控制状态保留7天后TTL；媒体ticket到期删除。不会将预签名URL或长期令牌持久写进消息。
 
@@ -110,7 +110,7 @@ worker-state的 `turn` 包含原user_text/history、request_id/turn_id、context
 1. 客户端 `POST /sessions/{id}/asr/utterances`：`{generation,request_id,turn_id,utterance_id,history}`，稳定原键，不传模型或音频JSON。仅上一轮已真实排空时开始，最多16项/4096字节历史；同键不同内容409。`GET /sessions/{id}/asr/by-request/{request_id}` 查询原语句，未知不能重录重投。
 2. worker-state.input_audio含utterance_id/request_id/turn_id、实际ASR model、state、固定content_type、max_bytes、input摘要及read_path。指定节点先带绑定/原实时lease `GET /sessions/{id}/input-audio/{generation}/{utterance_id}`，常驻网关建立有界读取连接后持久记录reader_ready。
 3. 客户端 `POST /sessions/{id}/asr/input-ticket`：`{generation,utterance_id,origin}`，返回一次 `DigitalLiveInput dli_...` header票据、input_url、method=PUT、期限和格式。URL不含票据，最长30秒且不超节点lease。必须等active_asr.reader_ready；输入开始后不再签新票据。
-4. 客户端向腾讯input_url PUT二进制，Header `Authorization: DigitalLiveInput dli_...`、原Origin、`Content-Type: audio/pcm; rate=16000; channels=1; format=s16le`。单声道16k/s16le、每段最多20秒/640000字节，建议100ms=3200字节采集块，网络合并允许64KiB。以EOF为这段明确端点，传输最多25秒、背压5秒；不是HTTP1浏览器在说话中必然持续发送的保证。原生代理应有界采集/上传，不Base64、不WebSpeech、不持久录音。
+4. 客户端向腾讯input_url PUT二进制，Header `Authorization: DigitalLiveInput dli_...`、原Origin、`Content-Type: audio/pcm; rate=16000; channels=1; format=s16le`。单声道16k/s16le、每段最多20秒/640000字节，建议100ms=3200字节采集块；较大的合法网络合并读取会自动拆为最多64KiB的内部处理片，不假设TCP/HTTP保持上传帧边界。以EOF为这段明确端点，传输最多25秒、背压5秒；不是HTTP1浏览器在说话中必然持续发送的保证。原生代理应有界采集/上传，不Base64、不WebSpeech、不持久录音。
 5. 网关完整统计bytes/SHA256，仅保存摘要，不保存音频。节点 `worker-events` 用原event_id/event_sequence/generation/providers/utterance_id/turn_id，`event:"asr_partial",text` 产生 `asr.partial`；`event:"asr_final",text,input_sha256,input_bytes` 必须与网关完整输入一致才接收。旧代次、旧语句、未收齐或摘要不符均拒绝。
 6. **ASR final原子派生同一原request_id/turn_id的activeTurn**，由原指定节点接着跑27B。客户端不得再次调用普通live.send或POST /turns，否则会重复执行。`asr.final` 和active_asr查询包含generation/media_generation、原request_id/turn_id、input_sha256/input_bytes及event_cursor_start；客户端核对自己同一PCM摘要后，只查/附着原轮次。PUT回包丢失且状态receiving/unknown时不盲重传；input_received=true时只等原识别结果。取消或中断推进原session generation并关闭输入，不能让旧final恢复新轮次。
 
