@@ -88,7 +88,12 @@ export function createScopedDesktopAuth(dependencies = {}) {
           || typeof body.password !== "string" || !body.password || body.password.length > 1024 || body.password.includes("\0")) throw invalid();
         const accountRate = await rateLimit(`${scope}:identifier:${digest(identifier.toLowerCase())}`, { limit: 20, windowMs: 10 * 60_000 });
         if (!accountRate.allowed) throw Object.assign(new Error("请求过于频繁"), { status: 429 });
-        return c.json(await sessions.issue(await verify(identifier, body.password)));
+        const user = await verify(identifier, body.password);
+        const summary = dependencies.loginAccountSummary === true ? {
+          user: { id: String(user._id), display_name: String(user.displayName || user.username || user.name || "古龙用户"), email: String(user.email || "") },
+          entitlement: await entitlement(user._id), checked_at: new Date().toISOString(),
+        } : {};
+        return c.json({ ...await sessions.issue(user), ...summary });
       } catch (error) { return fail(c, error, true); }
     });
     app.post(`${root}/auth/refresh`, async (c) => {

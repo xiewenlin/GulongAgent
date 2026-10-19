@@ -73,7 +73,7 @@ export function registerWorkLuckyDesktopRoutes(app, { createAuth, readEntitlemen
     }
     await next();
   });
-  const auth = createAuth({ root: WORKLUCKY_ROOT, readEntitlement: async (...args) => workLuckyEntitlement(await readEntitlement(...args)) });
+  const auth = createAuth({ root: WORKLUCKY_ROOT, loginAccountSummary: false, readEntitlement: async (...args) => workLuckyEntitlement(await readEntitlement(...args)) });
   auth.register(app);
   const publicReply = (c, value) => {
     c.header("Cache-Control", "no-store, max-age=0");

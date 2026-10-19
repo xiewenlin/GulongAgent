@@ -1,4 +1,5 @@
 import { NATIVE_SHARED_CAPABILITY_IDS } from "./native-shared-capability-ids.js";
+import { isDigitalLiveCapability } from "./digital-live-product.js";
 // WorkLucky is included in the existing subscription, never a second billing SKU.
 export const WORKLUCKY_PRODUCT_ID = "worklucky";
 export const WORKLUCKY_ROOT = "/api/v1/desktop/worklucky";
@@ -48,7 +49,8 @@ export function workLuckyUpdates() {
 }
 
 export function capabilityProducts(capabilityId) {
-  return WORKLUCKY_CAPABILITY_IDS.includes(capabilityId) ? ["gulong_engine", WORKLUCKY_PRODUCT_ID] : [];
+  return [...(WORKLUCKY_CAPABILITY_IDS.includes(capabilityId) ? ["gulong_engine", WORKLUCKY_PRODUCT_ID] : []),
+    ...(isDigitalLiveCapability(capabilityId) ? ["digital_live"] : [])];
 }
 
 // Keep legacy fingerprints byte-for-byte unchanged when the optional marker

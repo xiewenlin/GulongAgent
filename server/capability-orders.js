@@ -6,7 +6,8 @@ import { enforceRateLimit as databaseRateLimit } from "./rate-limit.js";
 import { fingerprintIp, hashOpaqueToken } from "./security.js";
 import { copyObject, createPresignedDownloadUrl, createPresignedPutUrl, deleteObject, ensureBrowserUploadCors, headObject, sanitizeFilename, assertSingleWriteUploads } from "./cos.js";
 import { localizeErrorMessage } from "../shared/error-messages.js";
-import { readEnglishEntitlement, readGulongEngineEntitlement } from "./english-coach-products.js";
+import { readEnglishEntitlement, readGulongEngineEntitlement, GULONG_ENGINE_MONTHLY_PRICE_FEN } from "./english-coach-products.js";
+import { DIGITAL_LIVE_PRODUCT_ID, DIGITAL_LIVE_CAPABILITY_IDS, digitalLiveConfig, digitalLiveParameterError, digitalLiveNodeMatchesOrder, digitalLiveReport, digitalLiveAvailability } from "./digital-live-product.js";
 import { ENGLISH_CAPABILITY_DEFINITIONS, englishNodeSharesCapability, englishWorkerOwnsClaim, isEnglishCapability, validateEnglishInlineResult } from "./english-coach-capabilities.js";
 import { GULONG_ENGINE_CAPABILITY_DEFINITIONS, gulongEngineNodeSharesCapability, gulongEngineUploadAllowed, isGulongEngineCapability, validateGulongEngineInlineResult } from "./gulong-engine-capabilities.js";
 import { computeGroupFilter, computeGroupsMatch, getUserComputeGroupId, normalizeComputeGroupId } from "./compute-groups.js";
@@ -520,6 +521,7 @@ export function capabilityNodeCanRunOrder(node, order) {
     && item.installed && item.validated && item.enabled
     && automaticImageNodeMatchesOrder(item, order)
     && automaticNativeNodeMatchesOrder(item, order)
+    && digitalLiveNodeMatchesOrder(item, order)
     && (!isWorkLuckyCapability(order.capabilityId) || (item.trustedAcceptance === true && (order.catalogProbe === true || specialNodeMatches(order, item))))
     && (order.capabilityId !== "gulong_engine.tts" || !order.parameters?.voice_id || item.supportedVoices?.includes(order.parameters.voice_id))
     && (order.capabilityId !== "gulong_engine.tts" || !order.parameters?.model || (item.trustedAcceptance === true
@@ -589,6 +591,7 @@ function publicOrder(order, issueDownloadUrl, queue = null) {
     order_no: order.orderNo,
     protocol_version: order.protocolVersion,
     client_product: order.clientProduct || null,
+    ...(order.clientProduct === DIGITAL_LIVE_PRODUCT_ID ? { client_request_id: order.clientRequestId || null } : {}),
     capability_id: order.capabilityId,
     capability_version: order.capabilityVersion || null,
     status: order.status,
@@ -622,6 +625,7 @@ function workerOrder(order, assets) {
   const capability = CAPABILITY_MAP.get(order.capabilityId);
   return {
     id: order._id.toString(),
+    client_product: order.clientProduct || null,
     order_no: order.orderNo,
     protocol_version: order.protocolVersion,
     capability_id: order.capabilityId,
@@ -739,7 +743,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     return null;
   }
 
-  async function gulongAvailability(capabilityId, ownerId, { order = null, nativeShared = false, now = new Date() } = {}) {
+  async function gulongAvailability(capabilityId, ownerId, { order = null, nativeShared = false, clientProduct = null, now = new Date() } = {}) {
     const capability = CAPABILITY_MAP.get(capabilityId);
     if (!capability?.dispatchable) return { verified_node_count: 0, free_slot_count: 0, status: "adapter_required" };
     const reports = await (await getCollection("capabilityNodeReports"))
@@ -775,13 +779,17 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
           supportedModels: accepted.models.map((model) => model.id), supportedVoices: accepted.models.map((model) => model.voice_id).filter(Boolean),
         } : {}) };
       }
+      if ((order?.clientProduct || clientProduct) === DIGITAL_LIVE_PRODUCT_ID) {
+        reportedCapability = digitalLiveReport(reportedCapability);
+        if (!reportedCapability) continue;
+      }
       const resource = normalizeCapabilityResources(report.resources, reportedCapability.maxConcurrent);
       const snapshot = await slots.snapshot({ bindingId: binding._id, now });
       if (!snapshot.available) continue;
       const availableSlots = snapshot.leases.some((lease) => lease.exclusive === true) ? 0 : Math.max(0, Math.min(reportedCapability.maxConcurrent - (snapshot.byCapability[capabilityId] || 0),
         resource.max_concurrent_tasks - resource.running_task_count - snapshot.activeCount));
       if (!capabilityNodeCanRunOrder({ nodeId: report.nodeId, binding, availableSlots: Math.max(1, availableSlots), capabilities: [reportedCapability] },
-        { ...(order || { capabilityId, requesterUserId: ownerId, catalogProbe: true,
+        { ...(order || { capabilityId, requesterUserId: ownerId, catalogProbe: true, clientProduct,
           sharingScope: isEnglishCapability(capabilityId) ? "english_shared" : isGulongEngineCapability(capabilityId) || nativeShared && isNativeSharedCapability(capabilityId) ? "gulong_shared" : null,
           capabilityVersion: capability.requiredCapabilityVersion || null,
           parameters: capabilityId === "gulong_engine.image_2k" ? { model: "qwen_image_2_1" } : {} }), computeGroupId })) continue;
@@ -793,6 +801,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     return { verified_node_count: nodeCount, free_slot_count: freeSlots, status: freeSlots ? "ready" : nodeCount ? "busy" : "offline",
       ...specialAvailability(capabilityId, acceptedReports),
       ...nativeVerificationAvailability(capabilityId, acceptedReports),
+      ...((order?.clientProduct || clientProduct) === DIGITAL_LIVE_PRODUCT_ID ? digitalLiveAvailability(capabilityId, acceptedReports) : {}),
       ...(capabilityId === "gulong_engine.tts" ? { voice_ids: [...voiceIds].sort() } : {}) };
   }
 
@@ -896,10 +905,10 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
   function requestedClientProduct(c, auth, body) {
     const query = c.req.queries("product");
     const bodyProduct = body?.client_product;
-    if ((query && (query.length !== 1 || !["worklucky", "gulong_engine"].includes(query[0])))
-      || (bodyProduct !== undefined && !["worklucky", "gulong_engine"].includes(bodyProduct))
+    if ((query && (query.length !== 1 || !["worklucky", "gulong_engine", DIGITAL_LIVE_PRODUCT_ID].includes(query[0])))
+      || (bodyProduct !== undefined && !["worklucky", "gulong_engine", DIGITAL_LIVE_PRODUCT_ID].includes(bodyProduct))
       || (bodyProduct !== undefined && query?.[0] && bodyProduct !== query[0])) {
-      return { error: c.json({ code: "PRODUCT_CAPABILITY_MISMATCH", message: "产品参数不正确，仅支持 WorkLucky、古龙引擎或不指定产品" }, 400) };
+      return { error: c.json({ code: "PRODUCT_CAPABILITY_MISMATCH", message: "产品参数不正确，请使用 WorkLucky、古龙引擎或数字直播的独立标记" }, 400) };
     }
     const clientProduct = bodyProduct ?? query?.[0];
     if (clientProduct && auth.kind === "desktop-english") {
@@ -974,6 +983,12 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     return recoverAsset(c, asset);
   });
 
+  app.get("/api/v1/desktop/digital-live/config", (c) => {
+    c.header("Cache-Control", "private, no-store, max-age=0");
+    const products = c.req.queries("product");
+    if (products && (products.length !== 1 || products[0] !== DIGITAL_LIVE_PRODUCT_ID)) return c.json({ code: "PRODUCT_CAPABILITY_MISMATCH", message: "请使用数字直播产品入口" }, 400);
+    return c.json(digitalLiveConfig(GULONG_ENGINE_MONTHLY_PRICE_FEN));
+  });
   app.get("/api/v1/capability-orders/catalog", async (c) => {
     const auth = await authenticate(c); if (auth.error) return auth.error;
     const product = requestedClientProduct(c, auth); if (product.error) return product.error;
@@ -983,7 +998,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const requestedProduct = product.clientProduct;
     const capabilities = definitions.map(publicDefinition).filter((item) => !requestedProduct || item.products.includes(requestedProduct));
     for (const item of capabilities.filter((entry) => !entry.legacy_route)) {
-      item.availability = await gulongAvailability(item.capability_id, auth.user.id, { nativeShared: Boolean(requestedProduct) || auth.kind === "desktop-gulong-engine" });
+      item.availability = await gulongAvailability(item.capability_id, auth.user.id, { nativeShared: Boolean(requestedProduct) || auth.kind === "desktop-gulong-engine", clientProduct: requestedProduct });
       item.dispatchable = item.dispatchable && item.availability.verified_node_count > 0;
     }
     return c.json({ protocol_version: CAPABILITY_ORDER_PROTOCOL, ...(requestedProduct ? { product: requestedProduct } : {}), capabilities });
@@ -1102,7 +1117,14 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const rate = await enforceRateLimit(`capability-create:${auth.user.id}`, { limit: 30, windowMs: 10 * 60_000 });
     if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "能力订单创建过于频繁" }, 429);
     const body = await boundedRequestJson(c, 1024 * 1024 + 128 * 1024);
-    const rawKey = String(c.req.header("Idempotency-Key") || body.idempotency_key || "").trim();
+    const headerKey = c.req.header("Idempotency-Key"), selectedProduct = body.client_product || c.req.query("product");
+    if (selectedProduct === DIGITAL_LIVE_PRODUCT_ID) {
+      const keys = [headerKey, body.idempotency_key, body.client_request_id].filter((value) => value !== undefined);
+      if (keys.some((key) => typeof key !== "string" || !/^[A-Za-z0-9._:-]{8,160}$/.test(key)) || new Set(keys).size > 1) {
+        return c.json({ code: "IDEMPOTENCY_KEY_CONFLICT", message: "数字直播原请求编号格式不正确或与幂等请求头不一致" }, 400);
+      }
+    }
+    const rawKey = String(headerKey || body.idempotency_key || (selectedProduct === DIGITAL_LIVE_PRODUCT_ID ? body.client_request_id : "") || "").trim();
     if (rawKey.length < 8 || rawKey.length > 160) return c.json({ code: "IDEMPOTENCY_KEY_REQUIRED", message: "请提供 8–160 字符的 Idempotency-Key" }, 400);
     const capabilityId = String(body.capability_id || "").trim().toLowerCase();
     if (auth.kind === "desktop-english" && !isEnglishCapability(capabilityId)) return c.json({ code: "ENGLISH_CAPABILITY_ONLY", message: "英语教练凭据仅可用于英语学习能力" }, 403);
@@ -1110,6 +1132,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const capability = CAPABILITY_MAP.get(capabilityId);
     const product = requestedClientProduct(c, auth, body); if (product.error) return product.error;
     const clientProduct = product.clientProduct;
+    if (clientProduct === DIGITAL_LIVE_PRODUCT_ID && !/^[A-Za-z0-9._:-]{8,160}$/.test(rawKey)) return c.json({ code: "IDEMPOTENCY_KEY_CONFLICT", message: "数字直播需要可恢复的8至160位原请求编号" }, 400);
     if (clientProduct && !capabilityProducts(capabilityId).includes(clientProduct)) return c.json({ code: "PRODUCT_CAPABILITY_MISMATCH", message: "产品与共享能力不匹配" }, 400);
     if (!capability) return c.json({ code: "UNKNOWN_CAPABILITY", message: "该能力未注册到官网统一订单目录" }, 400);
     if (capability.legacyRoute) return c.json({ code: "USE_LEGACY_H3_API", message: "MiniMax H3 视频任务继续使用现有 /api/h3/tasks 合同", legacy_route: capability.legacyRoute }, 409);
@@ -1119,6 +1142,8 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     let parameters;
     try { parameters = normalizeCapabilityParameters(body.parameters || {}, capability); }
     catch (error) { return c.json({ code: error.code || "INVALID_CAPABILITY_PARAMETERS", message: error.message }, error.status || 400); }
+    const digitalError = clientProduct === DIGITAL_LIVE_PRODUCT_ID ? digitalLiveParameterError(capabilityId, parameters, body.parameters) : null;
+    if (digitalError) return c.json({ code: "DIGITAL_LIVE_MODEL_UNAVAILABLE", message: digitalError }, 409);
     const ownerId = new ObjectId(auth.user.id);
     let assets;
     try {
@@ -1149,7 +1174,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     if ((sharedGulongRequest || computeGroupId !== null) && auth.user.role !== "admin") { const rejected = await requireGulong(c, ownerId); if (rejected) return rejected; }
     if (sharedGulongRequest) {
       const availability = await gulongAvailability(capabilityId, ownerId, {
-        order: { capabilityId, requesterUserId: ownerId, computeGroupId, sharingScope: "gulong_shared", preferredNodeId, capabilityVersion: requestedCapabilityVersion, parameters, assets },
+        order: { capabilityId, requesterUserId: ownerId, computeGroupId, sharingScope: "gulong_shared", clientProduct, preferredNodeId, capabilityVersion: requestedCapabilityVersion, parameters, assets },
       });
       if (!availability.verified_node_count) return c.json({ code: "CAPABILITY_NO_COMPATIBLE_NODE", message: capabilityId === "gulong_engine.music"
         ? "当前没有已验收节点支持所选音乐模型及时长，请根据目录中的模型时长上限调整后重试；系统不会自动截短。"
@@ -1166,6 +1191,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       computeGroupId,
       sourceChannel: body.source_channel === "desktop_agent" ? "desktop_agent" : "website",
       ...(clientProduct ? { clientProduct } : {}),
+      ...(clientProduct === DIGITAL_LIVE_PRODUCT_ID ? { clientRequestId: rawKey } : {}),
       capabilityId,
       ...(isEnglishCapability(capabilityId) ? { sharingScope: "english_shared", entitlementPlan: "english_coach_monthly" } : {}),
       ...(sharedGulongRequest ? { sharingScope: "gulong_shared", entitlementPlan: "gulong_engine_monthly" } : {}),
@@ -1224,6 +1250,9 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const body = await boundedRequestJson(c);
     const product = requestedClientProduct(c, auth, body); if (product.error) return product.error;
     const clientProduct = product.clientProduct;
+    if (clientProduct === DIGITAL_LIVE_PRODUCT_ID && body.client_request_id !== undefined && body.client_request_id !== key) {
+      return c.json({ code: "IDEMPOTENCY_KEY_CONFLICT", message: "取消时必须使用同一个原请求编号" }, 400);
+    }
     const rate = await enforceRateLimit(`capability-cancel-request:${auth.user.id}`, { limit: 60, windowMs: 10 * 60_000 });
     if (!rate.allowed) return c.json({ code: "RATE_LIMITED", message: "取消请求过于频繁" }, 429);
     const ownerId = new ObjectId(auth.user.id);
@@ -1232,6 +1261,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const now = new Date();
     const tombstone = { _id: new ObjectId(), orderNo: `CAPC${Date.now()}${randomBytes(5).toString("hex").toUpperCase()}`, protocolVersion: CAPABILITY_ORDER_PROTOCOL,
       requesterUserId: ownerId, idempotencyKey, ...(clientProduct ? { clientProduct } : {}), cancellationTombstone: true, capabilityId: null, status: "cancelled", stage: "cancelled",
+      ...(clientProduct === DIGITAL_LIVE_PRODUCT_ID ? { clientRequestId: key } : {}),
       cancelReason: "requester_cancelled_before_create", priceFen: 0, chargeStatus: "exempt", refundStatus: "not_applicable", assets: [],
       createdAt: now, updatedAt: now, cancelledAt: now };
     try { await orders.updateOne({ idempotencyKey }, { $setOnInsert: tombstone }, { upsert: true }); }
@@ -1771,17 +1801,28 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       verification: { type: "object", description: "专属report-v2完整库存+逐能力迁移。Qwen原生合同2.1/Music3合同3/SAM3.1-object-multiplex/Whisperlarge-v3-turbo-whisper.cpp/MediaPipe0.10.14-pose-full，只认精确适配版本与真实模型编号。固定input_assets短期GET、完整摘要；output_requirements指定全部实物输出。探测最多一次推理，音乐一次整段ASR，不创建业务或钱包记录。" },
     },
   });
+  app.openAPIRegistry.registerComponent("schemas", "DigitalLiveSharedCapabilityContract", {
+    type: "object", description: "数字直播为独立digital_live产品，包含在有效gulong_engine_monthly中，不增加SKU/费用。GGE auth/login和account在active时返回digital_live.use；相同GGE身份不是WorkLucky产品别名。订单client_product=digital_live，查询/恢复?product=digital_live，取消JSON沿用产品。价格0分、charge_status=exempt、不扣钱包、不分佣，无付费回退。仅真实自动验收/已授权共享/同组/原子物理槽的节点可以派单；纯软件权益不证明模型已在线。",
+    properties: {
+      capability_ids: { type: "array", items: { type: "string", enum: [...DIGITAL_LIVE_CAPABILITY_IDS] } },
+      model_policy: { type: "object", description: "文本精确qwen38-27b-uncensored，缺少该已实测模型时不替换为Qwen3-1.7B。图像固定Qwen-Image原生精确模型/范围；ASR及TTS只按本产品真实目录中的精确模型和同一音色组合。未验收或有其他模型但无指定模型时目录节点数为0且不下单。" },
+      request_identity: { type: "object", description: "首次发送前持久化8–160位ASCII原请求键。Idempotency-Key或JSON client_request_id均可；同时存在必须完全一致。订单回显client_request_id，按原键GET by-request及取消墓碑，不换键重复执行。账号+产品隔离，不能与WorkLucky/无产品订单跨读、取消或复用。" },
+      realtime: { type: "object", description: "integration_required：没有会话型连续音视频、流式媒体、打断/背压、远程avatar或高光专用消费者；不能将异步claim/callback/轮询冒充实时。" },
+    },
+  });
+  app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/desktop/digital-live/config", tags: ["Digital Live Desktop"], summary: "读取数字直播包含权益、独立订单与实时缺口合同", security: [],
+    description: "返回digital-live-product-v1及现有包月权威价格，不单独收费；认证复用/api/v1/desktop/gulong-engine。候选能力不等于已验收节点，必须再读鉴权目录。realtime/avatar/highlights明确integration_required，未提供虚假流式URL。", responses: { 200: { description: "不缓存的独立产品配置" }, 400: { description: "产品参数不匹配" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/catalog", tags: ["Unified Capability Orders"], summary: "读取官网统一能力目录", description: "english_coach.* 已全部转为 local_only。gulong_engine.* 的 dispatchable 根据近 3 分钟真实上报、有效绑定、30 天内推理验证与共享授权动态计算；availability 返回 verified_node_count、free_slot_count、status=ready|busy|offline|adapter_required。busy 表示有兼容节点但暂无线程空位，仍可排队；offline 不接受新任务。gulong_engine.tts 还要求 1.0.0 合同；新消费者必须读取 availability.models=[{id,voice_id}] 并选择同一条已自动验收的精确模型/音色，不能把不同条目的模型和音色交叉组合。availability.voice_ids 仅为旧版扁平兼容字段，不证明模型/音色交集。大展宏图原生 2K 使用独立 gulong_engine.image_2k、required_capability_version=1.0.0；新消费者的 availability.models 仅在对应自动验收有效时包含 {id:qwen_image_2_1}。tts/image_2k 未验收矩阵均为 []，不能从固定 schema 或客户端自报猜测可用模型。旧 qwen_image_2_1.* 报告不视为兼容。gulong_engine.video 在消费适配完成前始终 adapter_required；收费 /api/h3/tasks 独立。目录不缓存，不保证随后创建时可用性不变。", responses: { 200: { description: "能力合同与实时节点可用性" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-assets/presign", tags: ["Unified Capability Orders"], summary: "幂等签发能力订单输入素材 COS 直传票据", description: "JSON基础字段filename/content_type/bytes/sha256。新客户端同时提供request_key（每素材稳定8–160位ASCII编号）、client_product=gulong_engine|worklucky、capability_id及role，完整清单绑定唯一asset_id。同键改清单/跨产品409；重放只恢复原素材，不创建第二对象。新票据签名包含x-cos-forbid-overwrite=true，版本桶或存储状态未知时不签PUT。失去响应先GET原请求；只有明确awaiting_upload才能向同一object_key续传，原1小时期限不延期。古龙引擎桌面会话可以指定原生六能力的精确capability_id，以目录MIME/大小边界上传其参考图、源视频或ASR音频；并非开放未实现的统一视频能力。旧无请求键素材保留旧合同。英语教练新录音仍local_only。", responses: { 201: { description: "新建原素材意图及账号专属防覆盖PUT票据" }, 200: { description: "同一原请求的当前阶段与凭据；已有对象不重签PUT" }, 409: { description: "清单冲突、不可恢复状态或存储不支持防覆盖" }, 503: { description: "存储状态未知，只能查询，不得重传" } } });
   const recoverableAssetSchema = z.object({
     asset_id: z.string(), asset: z.object({ asset_id: z.string(), filename: z.string(), content_type: z.string(), bytes: z.number().int(), sha256: z.string() }),
-    client_product: z.enum(["gulong_engine", "worklucky"]), capability_id: z.string(), role: z.string(), idempotent: z.boolean(),
+    client_product: z.enum(["gulong_engine", "worklucky", "digital_live"]), capability_id: z.string(), role: z.string(), idempotent: z.boolean(),
     stage: z.enum(["awaiting_upload", "uploaded", "ready", "expired", "unknown", "mismatch", "rejected"]), can_upload: z.boolean(), can_complete: z.boolean(),
     upload_url: z.string().optional(), method: z.literal("PUT").optional(), headers: z.record(z.string(), z.string()).optional(),
     object_key: z.string().optional(), expires_at: z.iso.datetime().optional(), code: z.string().optional(), message: z.string().optional(),
   });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-assets/by-request/{key}", tags: ["Unified Capability Orders"],
-    summary: "按账号、产品和原素材编号只读恢复上传阶段", description: "不创建新素材、不变更阶段、不自动complete。ready只返原receipt；uploaded表示COS HEAD清单全匹配，只能POST原id/complete；awaiting_upload仅在COS明确404、防覆盖策略与CORS核对通过时签同对象PUT（不延长原1小时）；未知503、错清单409、过期410都不发PUT。恢复接口本身不上传或触发推理。账号及product必须精确匹配，不向其他账户泄露记录。", request: { params: z.object({ key: z.string().regex(assetRequestPattern) }), query: z.object({ product: z.enum(["gulong_engine", "worklucky"]) }) },
+    summary: "按账号、产品和原素材编号只读恢复上传阶段", description: "不创建新素材、不变更阶段、不自动complete。ready只返原receipt；uploaded表示COS HEAD清单全匹配，只能POST原id/complete；awaiting_upload仅在COS明确404、防覆盖策略与CORS核对通过时签同对象PUT（不延长原1小时）；未知503、错清单409、过期410都不发PUT。恢复接口本身不上传或触发推理。账号及product必须精确匹配，不向其他账户泄露记录。", request: { params: z.object({ key: z.string().regex(assetRequestPattern) }), query: z.object({ product: z.enum(["gulong_engine", "worklucky", "digital_live"]) }) },
     responses: { 200: { description: "原素材及精确阶段，private/no-store", content: { "application/json": { schema: recoverableAssetSchema } } }, 401: { description: "未登录" }, 404: { description: "本账户尚无该素材请求" }, 409: { description: "产品/清单/存储策略冲突，无PUT" }, 410: { description: "原上传期限已过，不重发PUT" }, 503: { description: "状态未知，只查询，不上传" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-assets/{id}/complete", tags: ["Unified Capability Orders"], summary: "幂等校验原素材大小、摘要与归属", description: "新产品标记素材必须?product=worklucky或gulong_engine；同账号同产品重复完成返回同asset receipt和idempotent=true，ready状态不重签PUT。HEAD未知时新素材返回503，先GET原request_key查询，不能重复上传。旧未标记素材无需product，保持兼容。", responses: { 200: { description: "原asset receipt，无新上传/订单/记账" }, 409: { description: "产品/清单或状态CAS冲突" }, 503: { description: "存储状态暂不可确认" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders", tags: ["Unified Capability Orders"], summary: "幂等创建同账户本地能力订单", description: "english_coach.* 新任务已改为本地处理，返回 409 CAPABILITY_LOCAL_ONLY；旧订单仍可读取或取消。BIN、模型配件和 runtime 不是独立能力。收费 minimax_h3.video_generation 继续使用 /api/h3/tasks；零价 gulong_engine.video 在消费者完成真实验收前返回 409 CAPABILITY_ADAPTER_REQUIRED。gulong_engine.text/image/image_2k/tts 若无实时兼容节点返回 409 CAPABILITY_NO_COMPATIBLE_NODE，不创建订单；已创建的旧订单不受此创建门禁影响。tts 需要有效古龙引擎包月和 capability_version=1.0.0；parameters 提交 text(1–12000 字符)、voice_id(目录 availability.voice_ids 中的 ID)、language、speed、output_format=mp3|wav；不上传输入素材，primary_audio 直传 COS，完成回调验证对象内容 SHA-256。image_2k 需要有效古龙引擎包月、capability_version=1.0.0；parameters 提交 model=qwen_image_2_1、task=text_to_image|multi_image_edit、prompt、width/height(官方七种 2K 尺寸)、generation_mode=standard|fast_lora_6、steps(快速模式必须6)、prompt_enhancement=none|official|local；assets 按输入数组顺序传 0 或 1–10 张 reference_image。v1 本地能力订单价格为 0 分，不扣钱包且无分佣。", responses: { 201: { description: "订单已入队，含 queue_position、auto_cancel_at、queue_reason_code、queue_message" }, 403: { description: "古龙引擎包月权益未生效" }, 409: { description: "本地处理、无兼容节点、版本不符、幂等冲突、适配未验收或旧 H3 接口" } } });

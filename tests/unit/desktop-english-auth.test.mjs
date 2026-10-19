@@ -4,6 +4,7 @@ import { Hono } from "hono";
 import { createEnglishSessionStore, createGulongEngineSessionStore } from "../../server/desktop-english-sessions.js";
 import { createEnglishDesktopAuth, ENGLISH_DESKTOP_ROOT as root } from "../../server/desktop-english-auth.js";
 import { createGulongEngineDesktopAuth, GULONG_ENGINE_DESKTOP_ROOT as greenRoot } from "../../server/desktop-gulong-auth.js";
+import { gulongEngineEntitlement } from "../../server/english-coach-products.js";
 
 function fixture(green = false) {
   let time = Date.parse("2026-09-24T00:00:00Z");
@@ -119,4 +120,19 @@ test("green desktop auth issues isolated gge tokens and reads only its independe
   assert.equal(rotated.status, 200);
   assert.match((await rotated.json()).access_token, /^gge_at_/);
   assert.equal((await green.app.request(`${greenRoot}/account`, { headers: { Authorization: `Bearer ${tokens.access_token}` } })).status, 401);
+});
+
+test("GGE login and account return authoritative digital-live use only while the existing monthly product is active", async () => {
+  let instant = new Date("2026-10-19T00:00:00Z");
+  const subscription = { products: { gulong_engine_monthly: { enabled: true, currentPeriodStart: "2026-10-01T00:00:00Z", currentPeriodEnd: "2026-11-01T00:00:00Z" } } };
+  const f = routes({ readEntitlement: async () => gulongEngineEntitlement(subscription, instant) }, true);
+  const login = await f.post("login", { identifier: "Demo", password: "dummy-test-only" });
+  assert.equal(login.status, 200);
+  const data = await login.json(); assert.equal(data.user.id, f.user._id); assert.equal(data.entitlement.active, true);
+  assert.ok(data.entitlement.capabilities.includes("digital_live.use")); assert.equal(data.entitlement.monthly_price_fen, 99900);
+  assert.ok(data.entitlement.included_products.includes("digital_live")); assert.equal(JSON.stringify(data).includes("dummy-test-only"), false);
+  instant = new Date("2026-11-02T00:00:00Z");
+  const expired = await f.app.request(`${greenRoot}/account`, { headers: { Authorization: `Bearer ${data.access_token}` } });
+  assert.equal(expired.status, 200); const view = await expired.json(); assert.equal(view.entitlement.active, false);
+  assert.equal(view.entitlement.capabilities.includes("digital_live.use"), false);
 });

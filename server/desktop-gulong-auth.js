@@ -12,6 +12,7 @@ export function createGulongEngineDesktopAuth(dependencies = {}) {
     tokenPrefix: "gge",
     scope: "gulong-engine-desktop",
     authKind: "desktop-gulong-engine",
+    loginAccountSummary: true,
     sessions: dependencies.sessions || createGulongEngineSessionStore({ getCollection }),
     readEntitlement: dependencies.readEntitlement || readGulongEngineEntitlement,
     ...dependencies,

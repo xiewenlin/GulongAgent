@@ -8687,15 +8687,19 @@ app.openAPIRegistry.registerPath({
 
 const GulongEngineEntitlementResponse = z.object({
   product: z.literal("gulong_engine"), plan_id: z.literal(GULONG_ENGINE_PLAN_ID), active: z.boolean(),
+  included_products: z.array(z.enum(["gulong_engine", "worklucky", "digital_live"])),
   status: z.enum(["inactive", "scheduled", "active", "expired"]),
   starts_at: z.coerce.date().nullable(), expires_at: z.coerce.date().nullable(),
   capabilities: z.array(z.string()), monthly_price_fen: z.literal(GULONG_ENGINE_MONTHLY_PRICE_FEN),
+});
+const GulongDesktopLoginResponse = EnglishDesktopTokenResponse.extend({
+  user: z.object({ id: z.string(), display_name: z.string(), email: z.string() }), entitlement: GulongEngineEntitlementResponse, checked_at: z.iso.datetime(),
 });
 app.openAPIRegistry.registerPath({
   method: "post", path: "/api/v1/desktop/gulong-engine/auth/login", tags: ["Gulong Engine Desktop"],
   summary: "官网用户名或邮箱密码登录古龙绿色版", security: [],
   request: { body: { required: true, content: { "application/json": { schema: z.object({ identifier: z.string(), password: z.string() }) } } } },
-  responses: { 200: { description: "独立作用域的短期访问和刷新令牌；不返回 Chandler 或 PearAPI 凭据", content: { "application/json": { schema: EnglishDesktopTokenResponse } } }, 401: { description: "凭据无效" }, 429: { description: "尝试过于频繁" } },
+  responses: { 200: { description: "共享GGE短期会话及账号/权威包月权益，生效时包含digital_live.use；不返回Chandler或PearAPI凭据", content: { "application/json": { schema: GulongDesktopLoginResponse } } }, 401: { description: "凭据无效" }, 429: { description: "尝试过于频繁" } },
 });
 app.openAPIRegistry.registerPath({
   method: "post", path: "/api/v1/desktop/gulong-engine/auth/refresh", tags: ["Gulong Engine Desktop"],

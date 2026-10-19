@@ -171,3 +171,13 @@ test("legacy unkeyed uploads retain their old receipt even when an old client se
   assert.equal(replay.status, 200); assert.deepEqual(replay.body.asset, completed.body.asset);
   assert.equal((await f.query()).status, 404, "legacy assets do not invent a retrospective recovery key");
 });
+
+test("digital-live assets use their own product scope instead of WorkLucky recovery credentials", async () => {
+  const f = fixture(), initial = await f.presign({ client_product: "digital_live" });
+  assert.equal(initial.status, 201); assert.equal(initial.body.client_product, "digital_live");
+  assert.equal((await f.query("digital_live")).body.asset_id, initial.body.asset_id);
+  assert.equal((await f.query("worklucky")).status, 409);
+  f.uploaded(f.records[0]);
+  const completed = await f.call(`/api/v1/capability-assets/${initial.body.asset_id}/complete?product=digital_live`, {});
+  assert.equal(completed.status, 200); assert.equal((await f.query("digital_live")).body.stage, "ready");
+});
