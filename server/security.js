@@ -272,8 +272,15 @@ async function authenticateApiKey(raw, requiredScopes) {
 }
 
 export async function authenticate(c, { required = true, scopes = [] } = {}) {
-  await ensureIndexes();
   const authorization = c.req.header("authorization") || "";
+  const raw = getCookie(c, SESSION_COOKIE);
+  // Missing site credentials are not a database operation. In particular, an
+  // anonymous request or a delegated desktop bearer must not run every index
+  // migration before it can return 401/null or reach its own authenticator.
+  if (!raw && !authorization.startsWith("Bearer gla_live_")) {
+    return required ? { error: c.json({ code: "UNAUTHORIZED", message: "请先登录或提供有效 API Key" }, 401) } : null;
+  }
+  await ensureIndexes();
   if (authorization.startsWith("Bearer ")) {
     const apiAuth = await authenticateApiKey(authorization.slice(7).trim(), scopes);
     if (apiAuth?.forbidden) {
@@ -282,7 +289,6 @@ export async function authenticate(c, { required = true, scopes = [] } = {}) {
     if (apiAuth) return apiAuth;
   }
 
-  const raw = getCookie(c, SESSION_COOKIE);
   if (raw) {
     const session = await (await getCollection("sessions")).findOne({
       tokenHash: hashOpaqueToken(raw, "session"),
