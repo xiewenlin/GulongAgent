@@ -132,11 +132,15 @@ worker-state的 `turn` 包含原user_text/history、request_id/turn_id、context
 
 当前上述源码/内存HTTP测试是协议与边界证据，未创建真实挑战、未请求模型。真实消费者和独立神经/播放观察器仍须交付并真实验收，不能宣称真人直播已全链路打通。
 
-## 播放器见证合同（OpenAPI 2.14.0）
+## 播放器见证合同（OpenAPI 2.14.1）
 
 实现：`server/digital-live-witness.js`。版本 `digital-live-playback-witness-v1`；原挑战新增独立随机 `nonce`。本节接口仍使用前述ROOT。GGE持有人必须是原挑战节点绑定的同一账号，有效 `digital_live.use`，且当前权威分组一致；管理员也不能绕过分组或替别的账号查询。节点原绑定/制品/精确providers仍须有效。无需向数字直播客户端交付节点密钥。
 
 ### 短票、取流与未知结果
+
+- GGE Bearer `GET /verifications/pending?consumer_artifact_sha256=<当前EXE的64位小写SHA256>` 自动发现原账号挑战；SDK自己计算真实制品摘要，不要求用户手填ID/hash/token。不接受user_id/group等越权筛选。仅原账号、权威同组、未过期、未停止、当前绑定/精确节点制品有效的media挑战，按创建时间先后最多10项，受限扫描最多20条。只读查询不创建probe、不花预算、不预约GPU、不签票、不写激活证明；没有挑战时等节点在自然空闲点按原有next合同发起，不由GET自动触发推理。建议每10秒至多查一次。
+- 发现返回 `DigitalLiveWitnessDiscovery`：`{protocol,scope:"own_account_current_group",status:"challenges_available"|"waiting_for_node_challenge",dispatchable:false,server_time,retry_after_seconds:10,registrations:{consumer:"registered"|"unregistered",runtime_observer_count,playback_observer_count},challenges:[{id,nonce,mode:"media",state:"issued"|"adapter_required",witness_phase:"not_started"|"resume_only",created_at,lease_expires_at,provider_sha256,node_artifact_sha256,providers,witness_ticket_path,witness_state_path,pending_requests:[{request_id,purpose,sequence,consumed,expires_at}]}]}`。路径仅相对官网ROOT，不含任何长期密钥、节点绑定ID、用户邮箱或私钥。
+- `not_started`才可使用新的本地持久原键领取首次用途票据；`resume_only`表示原消费者已有票据收据，必须按pending_requests与本机日志恢复原键，不能为已有用途换键重取。消费者制品改变、已由其他消费者附着、媒体已在无见证时开始/丢弃的挑战不伪装可重新播放。registration计数仅反映受审身份登记，不表示真实运行就绪；当前两类观察器计数均0。发现不是派单开放接口。
 
 - GGE Bearer `POST /verifications/{id}/witness-tickets`：`{request_id,consumer_artifact_sha256,purpose,sequence?,origin}`。purpose=`media|interrupt_media|report`；仅media包含sequence=1..10。request_id沿用稳定8–160位ASCII原键；consumer摘要是实际测量版二进制小写SHA256，不是旧候选的借用hash。
 - 首次返回 `{protocol,idempotent:false,ticket,header,expires_at,witness_id,consumer_registration,challenge,interrupt_probe,url}`。`challenge`含原id/nonce/provider_sha256/node_artifact_sha256/providers/turns，不含账号/绑定/租约秘密。未登记的消费者仍可收集测量，但 `consumer_registration=unregistered` 不能激活。一次ticket最长60秒、不超挑战租约，仅存hash，严格绑定原账号/挑战/用途/序号/消费者/Origin；不能放URL。
@@ -189,3 +193,5 @@ observations恰好十项、顺序1..10，上例仅展示一项结构，不是可
 - 服务端须同时拿到受认可消费者、原candidate adapter_required、全部真实网关及播放对应证据、两个独立有效签名、原节点停止回执、当前绑定/分组/制品未变，才幂等写 `digitalLiveRealtimeProofs`，最长24小时。原candidate result仍不改active；新实时目录读独立proof，每次都重验整个签名/摘要链，已撤销注册立即失效。没有独立ASR证明时 `realtime_asr=false`，不能借媒体证明开放ASR。
 
 上述签名验证/准入链代码与非GPU回归已接，不代表真实观察器、真实消费者和神经推理验收已完成。注册表为空必须保持关闭，不能把测试私钥或虚构模型证明配置到生产。
+
+交付归属与未完成项：官网任务负责本文控制、发现、证据核对/proof准入及独立受控playback观察器的后续交付；**目前没有已实现/可注册的playback观察器制品、真实观测入口或可供SDK使用的受控新通道**。普通数字直播客户端fresh-video/RVFC/played/Abort测量只是不可信输入，不承担可信签名身份。真正playback观察器需要独立受控渲染/观测边界，核对原挑战同一媒体字节、真实解码呈现/ended及活动fetch打断，并验证消费者制品身份；不能只给JSON盖签名。本期没有安装或伪造这种制品。runtime实际模型、时序、owned进程停止和独占观测开发合同已交给H3归属会话在九项任务自然安全检查点接续，尚未回传受控制品/真实观测入口。二者均明确integration_required。只有实际制品验证哈希、独立公钥、运行入口及真实探测通过后，才由官网受审源码发布登记；普通客户端永不持观察器私钥。

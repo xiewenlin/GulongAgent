@@ -259,3 +259,50 @@ test("HTTP witness schema is exposed but unauthenticated tickets and Vercel medi
   assert.ok(doc.paths["/api/v1/digital-live/realtime/verifications/{verificationId}/witness-report"]);
   assert.ok(doc.components.schemas.DigitalLivePlaybackWitness);
 });
+test("GGE discovery finds only its own current-group challenge without budget, ticket, slot or admission writes", async () => {
+  const f = await fixture(), query = { consumer_artifact_sha256: "c".repeat(64) };
+  const tables = ["digitalLiveRealtimeVerifications", "capabilityVerificationBudgets", "capabilityNodeSlots", "digitalLiveRealtimeWitnessTickets", "digitalLiveRealtimeProofs"];
+  const before = await Promise.all(tables.map(async (name) => JSON.stringify((await f.getCollection(name)).rows)));
+  const result = await f.witness.pending(f.owner, query);
+  assert.equal(result.status, "challenges_available"); assert.equal(result.challenges.length, 1);
+  assert.equal(result.challenges[0].id, f.challenge.id); assert.equal(result.challenges[0].nonce, f.challenge.nonce);
+  assert.equal(result.challenges[0].witness_phase, "not_started"); assert.equal(result.registrations.consumer, "unregistered");
+  assert.equal(result.registrations.runtime_observer_count + result.registrations.playback_observer_count, 0);
+  assert.equal(JSON.stringify(result).includes(f.lease), false); assert.equal(JSON.stringify(result).includes(String(f.binding._id)), false);
+  assert.equal(JSON.stringify(result).includes(f.owner), false);
+  assert.deepEqual(await Promise.all(tables.map(async (name) => JSON.stringify((await f.getCollection(name)).rows))), before);
+  assert.equal((await f.witness.pending(String(new ObjectId()), query)).challenges.length, 0);
+  f.setGroup("wrong-group"); assert.equal((await f.witness.pending(f.owner, query)).challenges.length, 0);
+});
+test("discovery excludes expired, stopped, changed-artifact and un-witnessed already-discarded streams", async () => {
+  const query = { consumer_artifact_sha256: "c".repeat(64) };
+  for (const mutation of [
+    async (f) => f.advance(900001),
+    async (f) => f.verification.stopped(f.binding, f.challenge.id, f.lease, { owned_worker_stopped: true }),
+    async (f) => (await f.getCollection("digitalLiveRealtimeNodes")).updateOne({ _id: String(f.binding._id) }, { $set: { artifactSha256: "f".repeat(64) } }),
+    async (f) => f.verification.collect(f.binding, f.challenge.id, f.lease, 1, stream(media), providers.mime_type),
+  ]) { const f = await fixture(); await mutation(f); assert.equal((await f.witness.pending(f.owner, query)).status, "waiting_for_node_challenge"); }
+});
+test("discovery preserves the original consumer and exposes only non-secret request recovery metadata", async () => {
+  const f = await fixture(); await f.witness.issue(f.owner, f.challenge.id, f.body());
+  const result = await f.witness.pending(f.owner, { consumer_artifact_sha256: "c".repeat(64) });
+  assert.equal(result.challenges[0].witness_phase, "resume_only");
+  assert.deepEqual(Object.keys(result.challenges[0].pending_requests[0]).sort(), ["consumed", "expires_at", "purpose", "request_id", "sequence"]);
+  assert.equal(result.challenges[0].pending_requests[0].request_id, f.body().request_id);
+  assert.equal((await f.witness.pending(f.owner, { consumer_artifact_sha256: "d".repeat(64) })).challenges.length, 0);
+  await fails(f.witness.pending(f.owner, { consumer_artifact_sha256: "c".repeat(64), user_id: "foreign" }), "REALTIME_WITNESS_REQUEST_INVALID");
+  f.setActive(false); await fails(f.witness.pending(f.owner, { consumer_artifact_sha256: "c".repeat(64) }), "DIGITAL_LIVE_SUBSCRIPTION_REQUIRED");
+});
+test("discovery has a typed OpenAPI schema and HTTP route is GGE-protected, not the node credential endpoint", async () => {
+  const f = await fixture(), app = new OpenAPIHono(), path = "/api/v1/digital-live/realtime/verifications/pending";
+  registerDigitalLiveRealtimeRoutes(app, { getCollection: f.getCollection, witness: f.witness, enforceRateLimit: async () => ({ allowed: true }),
+    authenticate: async (c) => c.req.header("Authorization") === "Bearer memory-only-test" ? { user: { id: f.owner } }
+      : { error: c.json({ code: "AUTH_REQUIRED" }, 401) }, requireTrustedMutation: () => null });
+  assert.equal((await app.request(`${path}?consumer_artifact_sha256=${"c".repeat(64)}`)).status, 401);
+  const result = await app.request(`${path}?consumer_artifact_sha256=${"c".repeat(64)}`, { headers: { Authorization: "Bearer memory-only-test" } });
+  assert.equal(result.status, 200); assert.match(result.headers.get("Cache-Control"), /no-store/);
+  assert.equal((await result.json()).challenges[0].id, f.challenge.id);
+  const doc = app.getOpenAPIDocument({ openapi: "3.1.0", info: { title: "memory only", version: "1" } });
+  assert.ok(doc.paths[path].get.parameters.some((p) => p.name === "consumer_artifact_sha256" && p.required));
+  assert.ok(doc.components.schemas.DigitalLiveWitnessDiscovery);
+});

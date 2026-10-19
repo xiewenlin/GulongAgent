@@ -46,7 +46,20 @@ const attestationSchema = z.object({ protocol: z.literal(DIGITAL_LIVE_ATTESTATIO
   provider_sha256: hash, node_artifact_sha256: hash, consumer_artifact_sha256: hash, wire_sha256: hash, report_sha256: hash,
   observed_at: z.string().datetime(), expires_at: z.string().datetime(), payload: z.union([runtimePayload, playbackPayload]),
   signature: z.string().regex(/^[A-Za-z0-9_-]{86}$/) }).strict().refine((b) => (b.role === "runtime" ? runtimePayload : playbackPayload).safeParse(b.payload).success);
-export const digitalLiveWitnessSchemas = Object.freeze({ ticket: ticketSchema, report: reportSchema, attestation: attestationSchema });
+const discoveryQuery = z.object({ consumer_artifact_sha256: hash }).strict();
+const discoveryResponse = z.object({ protocol: z.literal(DIGITAL_LIVE_WITNESS_VERSION), scope: z.literal("own_account_current_group"),
+  status: z.enum(["challenges_available", "waiting_for_node_challenge"]), dispatchable: z.literal(false), server_time: z.string().datetime(),
+  retry_after_seconds: z.literal(10), registrations: z.object({ consumer: z.enum(["registered", "unregistered"]),
+    runtime_observer_count: z.number().int().min(0), playback_observer_count: z.number().int().min(0) }).strict(),
+  challenges: z.array(z.object({ id: z.string(), nonce: z.string().regex(/^[a-f0-9]{16}$/), mode: z.literal("media"),
+    state: z.enum(["issued", "adapter_required"]), witness_phase: z.enum(["not_started", "resume_only"]),
+    created_at: z.string().datetime(), lease_expires_at: z.string().datetime(), provider_sha256: hash, node_artifact_sha256: hash,
+    providers: z.record(z.string(), z.unknown()), witness_ticket_path: z.string(), witness_state_path: z.string(),
+    pending_requests: z.array(z.object({ request_id: z.string(), purpose: z.enum(["media", "interrupt_media", "report"]),
+      sequence: ordinal.nullable(), consumed: z.boolean(), expires_at: z.string().datetime() }).strict()).max(12),
+  }).strict()).max(10) }).strict();
+export const digitalLiveWitnessSchemas = Object.freeze({ ticket: ticketSchema, report: reportSchema, attestation: attestationSchema,
+  discoveryQuery, discovery: discoveryResponse });
 const registered = (entries, identity, now) => entries.find((entry) => identity(entry) && entry.revoked !== true
   && new Date(entry.not_before) <= now && new Date(entry.expires_at) > now);
 function signatureIdentity(envelope, registry, instant) {
@@ -142,6 +155,46 @@ export function createDigitalLiveWitnessService({ getCollection, now = () => new
       "DIGITAL_LIVE_SUBSCRIPTION_REQUIRED", "需要当前账号有效的古龙引擎包月数字直播权益", 403);
     demand(computeGroupsMatch(await readGroup(ownerId), record.computeGroupId), "COMPUTE_GROUP_MISMATCH", "用户与验收节点分组不一致", 403);
     await current(record, options); return record;
+  }
+  async function pending(ownerId, raw) {
+    const parsed = discoveryQuery.safeParse(raw);
+    demand(parsed.success, "REALTIME_WITNESS_REQUEST_INVALID", "请提供当前客户端实际制品的64位小写摘要，不能指定其他账号或分组", 400);
+    const entitlement = await readEntitlement(ownerId, clock());
+    demand(await isOwnerActive(ownerId) && entitlement?.active === true && entitlement.capabilities?.includes("digital_live.use"),
+      "DIGITAL_LIVE_SUBSCRIPTION_REQUIRED", "需要当前账号有效的古龙引擎包月数字直播权益", 403);
+    const group = await readGroup(ownerId), instant = clock(), artifact = parsed.data.consumer_artifact_sha256;
+    // Bounded indexed owner-only scan. Discovery never creates probes, spends a
+    // budget, reserves a physical lease, signs a ticket or changes admission.
+    const candidates = await (await table(RECORDS)).find({ userId: String(ownerId), computeGroupId: group || null, mode: "media", nonce: { $exists: true },
+      state: { $in: ["issued", "adapter_required"] }, stoppedAt: { $exists: false }, leaseExpiresAt: { $gt: instant } })
+      .sort({ createdAt: 1, id: 1 }).limit(20).toArray();
+    const challenges = [];
+    for (const record of candidates) {
+      if (!computeGroupsMatch(group, record.computeGroupId)) continue;
+      try { await current(record); }
+      catch (error) {
+        if (["REALTIME_WITNESS_CHALLENGE_UNAVAILABLE", "REALTIME_WITNESS_BINDING_CHANGED"].includes(error.code)) continue;
+        throw error;
+      }
+      const tickets = await table(TICKETS);
+      if (await tickets.findOne({ challengeId: record.id, consumer_artifact_sha256: { $ne: artifact } })) continue;
+      const receipts = await tickets.find({ challengeId: record.id, ownerId: String(ownerId), consumer_artifact_sha256: artifact }).sort({ createdAt: 1 }).limit(12).toArray();
+      // A stream already discarded without this witness cannot be replayed.
+      if (!receipts.length && await (await table(MEDIA)).findOne({ challengeId: record.id })) continue;
+      challenges.push({ id: record.id, nonce: record.nonce, mode: "media", state: record.state,
+        witness_phase: receipts.length ? "resume_only" : "not_started", created_at: new Date(record.createdAt).toISOString(),
+        lease_expires_at: new Date(record.leaseExpiresAt).toISOString(), provider_sha256: record.providerSha256,
+        node_artifact_sha256: record.artifactSha256, providers: record.providers,
+        witness_ticket_path: `${ROOT}/verifications/${record.id}/witness-tickets`, witness_state_path: `${ROOT}/verifications/${record.id}/witness-state`,
+        pending_requests: receipts.map((r) => ({ request_id: r.request_id, purpose: r.purpose, sequence: r.sequence || null,
+          consumed: Boolean(r.consumedAt), expires_at: new Date(r.expiresAt).toISOString() })) });
+      if (challenges.length === 10) break;
+    }
+    return { protocol: DIGITAL_LIVE_WITNESS_VERSION, scope: "own_account_current_group", status: challenges.length ? "challenges_available" : "waiting_for_node_challenge",
+      dispatchable: false, server_time: instant.toISOString(), retry_after_seconds: 10,
+      registrations: { consumer: registered(registry.consumers, (c) => c.artifact_sha256 === artifact, instant) ? "registered" : "unregistered",
+        runtime_observer_count: registry.observers.filter((entry) => entry.role === "runtime" && registered([entry], () => true, instant)).length,
+        playback_observer_count: registry.observers.filter((entry) => entry.role === "playback" && registered([entry], () => true, instant)).length }, challenges };
   }
   async function issue(ownerId, id, raw) {
     const parsed = ticketSchema.safeParse(raw);
@@ -279,7 +332,7 @@ export function createDigitalLiveWitnessService({ getCollection, now = () => new
     }
     return { activated: true, dispatchable: !record.providers.asr_model, proof_expires_at: result.expiresAt, realtime_asr: false };
   }
-  return { issue, open, report, state, attest, reconcile,
+  return { pending, issue, open, report, state, attest, reconcile,
     async writeInterrupt(record, stream) {
       demand(stream?.getReader, "REALTIME_WITNESS_MEDIA_INVALID", "打断探针必须提供有界二进制流", 400);
       demand(relay.hasReader({ sessionId: record.id, generation: 1, sequence: 11 }), "REALTIME_WITNESS_READER_REQUIRED", "请先连接原打断探针的见证读取端");

@@ -106,6 +106,7 @@ export async function ensureIndexes() {
         db.collection("digitalLiveRealtimeTickets").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0, name: "ttl_digital_live_realtime_ticket" }),
         db.collection("digitalLiveRealtimeNodes").createIndex({ computeGroupId: 1, reportedAt: -1 }, { name: "digital_live_realtime_group" }),
         db.collection("digitalLiveRealtimeVerifications").createIndex({ id: 1 }, { unique: true, name: "uniq_digital_live_verification" }),
+        db.collection("digitalLiveRealtimeVerifications").createIndex({ userId: 1, computeGroupId: 1, mode: 1, state: 1, leaseExpiresAt: 1, createdAt: 1 }, { name: "digital_live_own_pending_challenges" }),
         db.collection("digitalLiveRealtimeVerifications").createIndex({ purgeAt: 1 }, { expireAfterSeconds: 0, name: "ttl_digital_live_verification" }),
         db.collection("digitalLiveRealtimeVerificationMedia").createIndex({ purgeAt: 1 }, { expireAfterSeconds: 0, name: "ttl_digital_live_verification_media" }),
         db.collection("digitalLiveRealtimeWitnessTickets").createIndex({ slot: 1 }, { unique: true, name: "uniq_digital_live_witness_slot" }),

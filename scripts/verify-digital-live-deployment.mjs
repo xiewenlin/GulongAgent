@@ -42,6 +42,8 @@ export async function verifyDigitalLiveDeployment(origin, read = fetch) {
   assert.ok(spec.paths["/api/v1/digital-live/realtime/sessions/{id}/asr/utterances"].post);
   assert.ok(spec.paths["/api/v1/digital-live/realtime/verifications/next"].post);
   assert.ok(spec.components.schemas.DigitalLivePlaybackWitness);
+  assert.ok(spec.components.schemas.DigitalLiveWitnessDiscovery);
+  assert.ok(spec.paths["/api/v1/digital-live/realtime/verifications/pending"].get);
   for (const [method, path] of [["post", "witness-tickets"], ["get", "witness-state"], ["post", "witness-report"],
     ["get", "witness-interrupt-media"], ["post", "attestations"]]) {
     assert.ok(spec.paths[`/api/v1/digital-live/realtime/verifications/{verificationId}/${path}`]?.[method]);

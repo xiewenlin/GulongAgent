@@ -102,6 +102,7 @@ export function registerDigitalLiveRealtimeRoutes(app, dependencies) {
     return c.json({ session: await service.claim(auth.binding, body.lease_token) });
   }, "node"));
   const verificationLease = (c) => c.req.header("X-Gulong-Realtime-Verification-Lease");
+  app.get(`${ROOT}/verifications/pending`, safe(async (c, auth) => c.json(await witness.pending(auth.user.id, c.req.query()))));
   app.post(`${ROOT}/verifications/next`, safe(async (c, auth) => c.json(await verification.next(auth.binding, await jsonBody(c))), "node"));
   app.get(`${ROOT}/verifications/by-request/:key`, safe(async (c, auth) => c.json(await verification.byRequest(auth.binding, c.req.param("key"), verificationLease(c))), "node"));
   app.get(`${ROOT}/verifications/:verificationId`, safe(async (c, auth) => c.json(await verification.get(auth.binding, c.req.param("verificationId"), verificationLease(c))), "node"));
@@ -261,6 +262,7 @@ export function registerDigitalLiveRealtimeRoutes(app, dependencies) {
     ["post", `${ROOT}/nodes/report`, "使用绑定身份登记精确实时provider清单，仅候选"],
     ["post", `${ROOT}/nodes/claim`, "指定节点以原租约密钥幂等领取实时会话"],
     ["post", `${ROOT}/verifications/next`, "同节点原键领取有界候选真实挑战；与九项共享全站四槽/每日预算，dry_run无副作用"],
+    ["get", `${ROOT}/verifications/pending`, "GGE本人、同组、未过期挑战只读发现；不新建验收/不签票/不扩展其他账号"],
     ["get", `${ROOT}/verifications/by-request/{key}`, "按原请求恢复候选挑战，严禁新键重跑"],
     ["get", `${ROOT}/verifications/{verificationId}`, "查询原挑战及网关实际媒体摘要；不是激活证明"],
     ["post", `${ROOT}/verifications/{verificationId}/result`, "有界声明与服务端字节证据分离验证；当前绝不写active证明"],
@@ -291,14 +293,17 @@ export function registerDigitalLiveRealtimeRoutes(app, dependencies) {
     ["put", `${ROOT}/sessions/{id}/media/{generation}/{sequence}`, "指定节点带绑定与租约向腾讯网关流式写入媒体，禁止Vercel内存配对"],
   ]) app.openAPIRegistry?.registerPath({ method, path, tags: ["Digital Live Realtime"], summary,
     description: "digital-live-realtime-v1；现有digital_live.use权益，所有金额0分且无钱包/分佣；生产尚无实时验证器，候选清单不能派发。详见docs/digital-live-realtime-v1.md。节点worker-state每秒读取，客户端每5秒heartbeat，worker租约15秒，media独立30秒一次性header票据。仅腾讯常驻进程配对媒体流。",
-    ...(bodies[path] ? { request: { body: { required: true, content: { "application/json": { schema: bodies[path] } } } } } : {}),
+    ...(path.endsWith("/verifications/pending") ? { request: { query: digitalLiveWitnessSchemas.discoveryQuery }, security: [{ gulongEngineDesktopBearer: [] }, { sessionCookie: [] }] }
+      : bodies[path] ? { request: { body: { required: true, content: { "application/json": { schema: bodies[path] } } } } } : {}),
     ...(path.includes("/witness-") ? { security: path.endsWith("/witness-tickets") || path.endsWith("/witness-state")
       ? [{ gulongEngineDesktopBearer: [] }, { sessionCookie: [] }] : [{ digitalLiveWitnessTicket: [] }] }
       : method === "get" && path.includes("/media/") ? { security: [{ digitalLiveMediaTicket: [] }] } : {}),
-    responses: { 200: { description: "按归属及代次返回会话状态/有界媒体流；不代表真实节点已验收" },
+    responses: { 200: { description: "按归属及代次返回会话状态/有界媒体流；不代表真实节点已验收",
+      ...(path.endsWith("/verifications/pending") ? { content: { "application/json": { schema: digitalLiveWitnessSchemas.discovery } } } : {}) },
       401: { description: "身份或一次媒体票据无效" }, 403: { description: "无权益/分组不符/来源不符" },
       409: { description: "原键/代次/序号/物理租约冲突" }, 503: { description: "REALTIME_INTEGRATION_REQUIRED：无自动实测连续实时节点" } } });
   app.openAPIRegistry?.register("DigitalLivePlaybackWitness", digitalLiveWitnessSchemas.report);
+  app.openAPIRegistry?.register("DigitalLiveWitnessDiscovery", digitalLiveWitnessSchemas.discovery);
   app.openAPIRegistry?.registerComponent("securitySchemes", "digitalLiveWitnessTicket", { type: "apiKey", in: "header", name: "Authorization",
     description: `${DIGITAL_LIVE_WITNESS_VERSION}；DigitalLiveWitness dlw_...，60秒一次且绑定用途/Origin/nonce，不放URL` });
   return { service, relay, audioRelay, verification, witness };
