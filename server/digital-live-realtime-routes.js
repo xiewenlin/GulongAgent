@@ -82,6 +82,8 @@ export function registerDigitalLiveRealtimeRoutes(app, dependencies) {
       const auth = await dependencies.authenticate(c, { required: false });
       if (auth?.error) return auth.error;
       if (!auth?.user?.id) return c.json(config);
+      const rate = await rateLimit(`digital-live-realtime:config:${auth.user.id}`, { limit: 60, windowMs: 60_000 });
+      if (!rate.allowed) return c.json({ code: "REALTIME_RATE_LIMITED", message: "实时配置查询过于频繁，请稍后重试" }, 429);
       const catalog = await service.catalog(auth.user.id);
       return c.json({ ...config, status: catalog.dispatchable ? "available" : "integration_required", dispatchable: catalog.dispatchable,
         acceptance: catalog.acceptance, remote_asr: { ...config.remote_asr, ...catalog.remote_asr } });
