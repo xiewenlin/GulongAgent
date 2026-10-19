@@ -8,6 +8,11 @@ $fixtureStage = Join-Path $fixtureRoot 'staging'
 $fixtureCurrent = Join-Path $fixtureRoot 'current\probe-fixtures'
 $fixtureFfmpeg = 'D:\program\MiniMaxH3\tools\ffmpeg\bin\ffmpeg.exe'
 $fixtureFfprobe = 'D:\program\MiniMaxH3\tools\ffmpeg\bin\ffprobe.exe'
+$fixtureExpectedHashes = @{
+  'nasa-pose-source.jpg' = 'bf68496dd810ed43df4ef8a68008b22fada9800b56eb90e6bf7cc8d15c39ae7d'
+  'jfk.flac' = '63a4b1e4c1dc655ac70961ffbf518acd249df237e5a0152faae9a4a836949715'
+  'pose-16frames.mp4' = '3a2af643f2723ed16b0240a8d4e416b256d499320f143233a50ad89a6dfcd293'
+}
 function Assert-FixturePath([string]$value) {
   if ([string]::IsNullOrWhiteSpace($value)) { throw 'Empty fixture output path' }
   if (![IO.Path]::IsPathFullyQualified($value) -or $value -match '(^|[\\/])\.\.([\\/]|$)') { throw 'Fixture output must be absolute and contain no traversal' }
@@ -65,9 +70,11 @@ $fixtureClient.Timeout = [TimeSpan]::FromSeconds(45)
 try {
   if (Test-Path -LiteralPath $fixtureCurrent) {
     $state = Get-Content -LiteralPath (Join-Path $fixtureCurrent 'FIXTURES_CURRENT.json') -Raw | ConvertFrom-Json
-    if ($state.schema -ne 'gulong-probe-source-fixtures-v1' -or $state.recipe -ne 'nasa-pose-jfk-16frames-v1') { throw 'Unknown retained fixture payload; preserve for owner inspection' }
+    if ($state.schema -ne 'gulong-probe-source-fixtures-v1' -or $state.recipe -ne 'nasa-pose-jfk-16frames-v1' -or @($state.files).Count -ne 3 -or
+        @($state.files.name | Select-Object -Unique).Count -ne 3) { throw 'Unknown retained fixture payload; preserve for owner inspection' }
     foreach ($entry in $state.files) {
-      if ((Get-FileHash -LiteralPath (Assert-FixturePath (Join-Path $fixtureCurrent $entry.name)) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $entry.sha256) { throw 'Retained fixture source hash mismatch; preserve evidence' }
+      if (!$fixtureExpectedHashes.ContainsKey($entry.name) -or $entry.sha256 -ne $fixtureExpectedHashes[$entry.name] -or
+          (Get-FileHash -LiteralPath (Assert-FixturePath (Join-Path $fixtureCurrent $entry.name)) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $entry.sha256) { throw 'Retained fixture source hash mismatch; preserve evidence' }
     }
     [pscustomobject]@{status='reused-verified-current';root=$fixtureCurrent;files=$state.files.Count;bytes=($state.files | Measure-Object bytes -Sum).Sum} | ConvertTo-Json
     return
@@ -79,6 +86,9 @@ try {
   New-Item -ItemType Directory -Path $fixtureStage | Out-Null
   Fetch-Fixture 'https://www.nasa.gov/wp-content/uploads/2023/03/iss067e147098.jpg?w=1024' 'nasa-pose-source.jpg' 127056
   Fetch-Fixture 'https://raw.githubusercontent.com/openai/whisper/86098128c0b4f24f0e2aa2994de830614b474227/tests/jfk.flac' 'jfk.flac' 1152693
+  foreach ($sourceName in @('nasa-pose-source.jpg','jfk.flac')) {
+    if ((Get-FileHash -LiteralPath (Join-Path $fixtureStage $sourceName) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $fixtureExpectedHashes[$sourceName]) { throw 'Fixture upstream content identity changed; preserve failed evidence and do not promote' }
+  }
   # One still image repeated for a short full-frame plumbing probe; not a
   # benchmark or a claim of motion-quality/dynamic tracking validation.
   & $fixtureFfmpeg -hide_banner -loglevel error -nostdin -n -threads 1 -loop 1 -i (Join-Path $fixtureStage 'nasa-pose-source.jpg') -t 2 -vf 'scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=white,fps=8' -an -c:v libx264 -threads 1 -pix_fmt yuv420p -movflags +faststart (Join-Path $fixtureStage 'pose-16frames.mp4')
@@ -88,6 +98,7 @@ try {
   if ($LASTEXITCODE -or @($video.streams).Count -ne 1 -or $video.streams[0].nb_read_frames -ne '16' -or [double]$video.format.duration -ne 2 -or
       @($audio.streams).Count -ne 1 -or $audio.streams[0].codec_type -ne 'audio' -or [double]$audio.format.duration -gt 12) { throw 'Fixture media metadata is not the bounded expected input' }
   $files = @(Get-ChildItem -LiteralPath $fixtureStage -File | ForEach-Object { Read-FixtureIdentity $_.FullName })
+  foreach ($entry in $files) { if ($entry.sha256 -ne $fixtureExpectedHashes[$entry.name]) { throw 'Fixture encoded content identity changed; do not promote unverified payload' } }
   if (($files | Measure-Object bytes -Sum).Sum -gt 8MB) { throw 'Fixture preparation exceeded the eight-megabyte payload budget' }
   $state = [ordered]@{schema='gulong-probe-source-fixtures-v1';owner='/root:gulong-website';controlledRoot=$fixtureRoot;recipe='nasa-pose-jfk-16frames-v1';status='source-assets-prepared-not-model-verified';payloadBytes=($files | Measure-Object bytes -Sum).Sum;files=$files;video=$video;audio=$audio;createdAt=[DateTime]::UtcNow.ToString('o');model_requests=0;service_changes=0}
   Write-NewFixture (Join-Path $fixtureStage 'FIXTURES_CURRENT.json') ([Text.Encoding]::UTF8.GetBytes(($state | ConvertTo-Json -Depth 10)))

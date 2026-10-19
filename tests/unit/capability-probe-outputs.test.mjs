@@ -84,4 +84,8 @@ test("production fixture assets match their registered source hashes and retain 
   }
   const source = readFileSync(new URL("../../server/probe-fixtures/README.md", import.meta.url), "utf8");
   assert.match(source, /not motion-quality/); assert.match(source, /Copyright \(c\) 2022 OpenAI/);
+  const preparer = readFileSync(new URL("../../scripts/prepare-probe-fixtures.ps1", import.meta.url), "utf8");
+  for (const fixture of CAPABILITY_PROBE_FIXTURES) assert.ok(preparer.includes(fixture.descriptor.sha256));
+  assert.match(preparer, /IsPathFullyQualified/); assert.match(preparer, /ValidatePathsOnly/);
+  assert.match(preparer, /ReadWrite,\[IO\.FileShare\]::None/); assert.match(preparer, /Single staging slot is occupied/);
 });
