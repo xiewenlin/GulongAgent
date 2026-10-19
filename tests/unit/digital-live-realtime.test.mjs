@@ -4,10 +4,12 @@ import { randomBytes } from "node:crypto";
 import { ObjectId } from "mongodb";
 import { OpenAPIHono } from "@hono/zod-openapi";
 import { createCapabilityMemoryCollection } from "../helpers/capability-memory.mjs";
-import { createDigitalLiveRealtimeService, realtimeConfig, realtimeProviderFingerprint, DIGITAL_LIVE_REALTIME_ROOT as ROOT } from "../../server/digital-live-realtime.js";
+import { createDigitalLiveRealtimeService, realtimeConfig, realtimeProviderFingerprint, DIGITAL_LIVE_PCM_MIME, DIGITAL_LIVE_REALTIME_ROOT as ROOT } from "../../server/digital-live-realtime.js";
 import { createDigitalLiveMediaRelay } from "../../server/digital-live-media-relay.js";
 import { registerDigitalLiveRealtimeRoutes } from "../../server/digital-live-realtime-routes.js";
 import { hashOpaqueToken } from "../../server/security.js";
+import { createDigitalLiveCandidateVerification } from "../../server/digital-live-verification.js";
+import { WHISPER_AUDIO_FIXTURE } from "../../server/capability-probe-fixtures.js";
 
 // In-memory proofs are deliberate test doubles. These tests make no model,
 // GPU, COS or production account calls and do not grant real node admission.
@@ -15,9 +17,10 @@ const providers = { text_model: "qwen38-27b-uncensored-q4-k-m", tts_model: "qwen
   avatar_model: "musetalk-1.5-stream", character_id: "c01林晚晴", voice_id: "c01",
   character_image_sha256: "1".repeat(64), voice_audio_sha256: "2".repeat(64),
   mime_type: 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"' };
-function fixture({ accepted = true, active = true } = {}) {
+function fixture({ accepted = true, active = true, withAsr = false } = {}) {
   const tables = new Map(), owner = String(new ObjectId());
   const binding = { _id: new ObjectId(), userId: new ObjectId(), nodeId: "memory-only-realtime-node", status: "active", revokedAt: null, computeGroupId: null };
+  const selectedProviders = withAsr ? { ...providers, asr_model: "paraformer-zh" } : providers;
   const getCollection = async (name) => { if (!tables.has(name)) tables.set(name, createCapabilityMemoryCollection()); return tables.get(name); };
   tables.set("nodeAccountBindings", createCapabilityMemoryCollection([binding]));
   let instant = Date.parse("2026-10-19T08:00:00Z"), group = null, approved = accepted, entitled = active, invalidated = [], proofOverrides = {};
@@ -30,20 +33,20 @@ function fixture({ accepted = true, active = true } = {}) {
       bindingId: node.bindingId, nodeId: node.nodeId, userId: node.executorUserId, computeGroupId: node.computeGroupId, testEvidenceSha256: "b".repeat(64),
       providerSha256: realtimeProviderFingerprint(provider),
       testedAt: new Date(instant - 1000), expiresAt: new Date(instant + 60_000),
-      contractTests: { actual_provider: true, continuous_fmp4: true, played_drain: true, interrupt_generation: true, exclusive_gpu: true },
+      contractTests: { actual_provider: true, continuous_fmp4: true, played_drain: true, interrupt_generation: true, exclusive_gpu: true, ...(withAsr ? { realtime_asr: true } : {}) },
       ...proofOverrides,
     } : null, onInvalidate: (id) => invalidated.push(id) };
   const service = createDigitalLiveRealtimeService(options);
-  const request = { client_product: "digital_live", client_request_id: "memory-realtime-original-key", providers };
+  const request = { client_product: "digital_live", client_request_id: "memory-realtime-original-key", providers: selectedProviders };
   const lease = randomBytes(32).toString("base64url");
   const report = () => service.report(binding, { capability_version: "digital-live-realtime-v1", transport: "http-fmp4-mse-v1",
-    artifact_sha256: "a".repeat(64), providers: [providers], sharing_opt_in: true,
+    artifact_sha256: "a".repeat(64), providers: [selectedProviders], sharing_opt_in: true,
     resources: { gpu_state: "idle", gpu_observed_at: new Date(instant).toISOString(), current_task_remaining_seconds: 0, running_task_count: 0 } });
   const create = async () => { await report(); return service.create(owner, request, request.client_request_id); };
   const ready = async () => { const created = await create(); const task = await service.claim(binding, lease); return { id: created.session.id, task }; };
   const enqueue = (id, sequence = 1) => service.mutate(owner, id, "enqueue", { generation: 1, sequence, turn_id: `memory-turn-${sequence}`, text: `真实接口测试替身 ${sequence}` });
-  const event = (id, event, generation = 1) => service.workerEvent(binding, id, lease, { generation, event, providers });
-  return { service, owner, binding, request, lease, getCollection, options, create, ready, enqueue, event, report, invalidated,
+  const event = (id, event, generation = 1) => service.workerEvent(binding, id, lease, { generation, event, providers: selectedProviders });
+  return { service, owner, binding, request, lease, getCollection, options, create, ready, enqueue, event, report, invalidated, providers: selectedProviders,
     advance: (ms) => { instant += ms; }, group: (g) => { group = g; }, approve: (v) => { approved = v; }, entitlement: (v) => { entitled = v; },
     proofOverride: (values) => { proofOverrides = values; } };
 }
@@ -169,7 +172,8 @@ test("fMP4 relay streams the exact original bytes across arbitrary boundaries wi
   const stream = relay.open(permit), bytes = fmp4();
   const read = new Response(stream).arrayBuffer(); const result = await relay.write(permit, bodyStream(bytes));
   assert.equal(result.bytes, bytes.length); assert.deepEqual(Buffer.from(await read), bytes);
-  assert.deepEqual(sent, [[permit.sessionId, 1, 1]]); assert.equal(relay.activeCount(), 0);
+  assert.deepEqual(sent[0].slice(0, 3), [permit.sessionId, 1, 1]);
+  assert.deepEqual(sent[0][3], { bytes: bytes.length, sha256: result.sha256 }); assert.equal(relay.activeCount(), 0);
 });
 test("relay rejects missing readers, duplicate writes, foreign formats and incomplete MP4", async () => {
   const relay = createDigitalLiveMediaRelay(); await rejects(relay.write(permit, bodyStream(fmp4())), "REALTIME_MEDIA_READER_REQUIRED");
@@ -324,4 +328,170 @@ test("bounded event cursors expire instead of accumulating an unlimited token hi
   await rejects(f.service.events(f.owner, id, 0), "REALTIME_CURSOR_EXPIRED");
   const snapshot = await f.service.get(f.owner, id); assert.equal(snapshot.active_turn.text_snapshot.length, 130);
   assert.equal((await f.service.events(f.owner, id, 3)).events.length, 128);
+});
+
+const asrRequest = () => ({ generation: 1, request_id: "memory-asr-request-1", turn_id: "memory-asr-turn-1", utterance_id: "memory-utterance-1", history: [] });
+test("remote ASR requires its own exact proved model and original utterance identity", async () => {
+  const f = fixture(), { id } = await f.ready(); await rejects(f.service.beginAsr(f.owner, id, asrRequest()), "REALTIME_ASR_INTEGRATION_REQUIRED");
+  const g = fixture({ withAsr: true }), { id: next } = await g.ready();
+  await g.service.beginAsr(g.owner, next, asrRequest()); await g.service.beginAsr(g.owner, next, asrRequest());
+  assert.equal((await g.service.workerState(g.binding, next, g.lease)).input_audio.model, "paraformer-zh");
+  assert.equal((await g.service.asrByRequest(g.owner, next, asrRequest().request_id)).state, "awaiting_audio");
+  await rejects(g.service.beginAsr(g.owner, next, { ...asrRequest(), history: [{ role: "user", content: "changed" }] }), "REALTIME_IDEMPOTENCY_CONFLICT");
+});
+test("ASR input ticket is one-use, waits for node reader and forbids re-upload after input begins", async () => {
+  const f = fixture({ withAsr: true }), { id } = await f.ready(), body = asrRequest(); await f.service.beginAsr(f.owner, id, body);
+  const ticketBody = { generation: 1, utterance_id: body.utterance_id, origin: "https://www.sologle.com" };
+  const ticket = await f.service.inputTicket(f.owner, id, ticketBody);
+  await rejects(f.service.consumeInputTicket(id, 1, body.utterance_id, ticket.ticket, ticketBody.origin), "REALTIME_ASR_READER_REQUIRED");
+  await f.service.audioReaderReady(id, 1, body.utterance_id);
+  await f.service.consumeInputTicket(id, 1, body.utterance_id, ticket.ticket, ticketBody.origin);
+  await rejects(f.service.inputTicket(f.owner, id, ticketBody), "REALTIME_ASR_INPUT_UNCERTAIN");
+  await rejects(f.service.consumeInputTicket(id, 1, body.utterance_id, ticket.ticket, ticketBody.origin), "REALTIME_INPUT_TICKET_INVALID");
+});
+test("whole ASR digest binds partial/final to the same original turn and final never executes twice", async () => {
+  const f = fixture({ withAsr: true }), { id } = await f.ready(), body = asrRequest(); await f.service.beginAsr(f.owner, id, body);
+  await f.service.audioReaderReady(id, 1, body.utterance_id);
+  const ticket = await f.service.inputTicket(f.owner, id, { generation: 1, utterance_id: body.utterance_id, origin: "https://www.sologle.com" });
+  await f.service.consumeInputTicket(id, 1, body.utterance_id, ticket.ticket, "https://www.sologle.com");
+  const base = { generation: 1, providers: f.providers, utterance_id: body.utterance_id, turn_id: body.turn_id, text: "你好" };
+  await f.service.workerEvent(f.binding, id, f.lease, { ...base, event: "asr_partial", event_id: "memory-asr-event-1", event_sequence: 1 });
+  const final = { ...base, event: "asr_final", event_id: "memory-asr-event-2", event_sequence: 2, input_sha256: "a".repeat(64), input_bytes: 3200 };
+  await rejects(f.service.workerEvent(f.binding, id, f.lease, final), "REALTIME_ASR_INPUT_UNCERTAIN");
+  await f.service.audioReceived(id, 1, body.utterance_id, { sha256: final.input_sha256, bytes: 3200 });
+  await f.service.workerEvent(f.binding, id, f.lease, final); await f.service.workerEvent(f.binding, id, f.lease, final);
+  const worker = await f.service.workerState(f.binding, id, f.lease);
+  assert.equal(worker.turn.request_id, body.request_id); assert.equal(worker.turn.user_text, "你好"); assert.equal(worker.turn.context_tokens, 8192);
+  const events = await f.service.events(f.owner, id, 0); assert.equal(events.events.filter((e) => e.type === "asr.final").length, 1);
+  const finalEvent = events.events.find((e) => e.type === "asr.final");
+  assert.equal(finalEvent.input_sha256, final.input_sha256); assert.equal(finalEvent.input_bytes, 3200);
+  const snapshot = await f.service.get(f.owner, id);
+  assert.equal(snapshot.active_asr.input_sha256, final.input_sha256); assert.equal(snapshot.active_asr.input_bytes, 3200);
+  assert.equal(snapshot.active_asr.request_id, body.request_id); assert.equal(snapshot.active_asr.event_cursor_start, finalEvent.cursor);
+});
+test("PCM input relays original binary bytes/digest without storage or base64 and rejects incomplete samples", async () => {
+  const received = [], relay = createDigitalLiveMediaRelay({ format: "pcm16", maxBytes: 640000, onSent: (...args) => received.push(args) });
+  const permit = { sessionId: "memory-voice", generation: 1, sequence: "utterance-1", mimeType: DIGITAL_LIVE_PCM_MIME }, pcm = Buffer.alloc(3200, 4);
+  const output = new Response(relay.open(permit)).arrayBuffer(), result = await relay.write(permit, bodyStream(pcm, 113));
+  assert.deepEqual(Buffer.from(await output), pcm); assert.equal(result.sha256.length, 64); assert.equal(received[0][3].bytes, 3200);
+  const badRead = new Response(relay.open(permit)).arrayBuffer().catch(() => null);
+  await rejects(relay.write(permit, bodyStream(Buffer.alloc(3))), "REALTIME_PCM_INVALID"); await badRead;
+});
+test("ASR final after generation interruption cannot revive a transcript or dispatch a model turn", async () => {
+  const f = fixture({ withAsr: true }), { id } = await f.ready(), body = asrRequest(); await f.service.beginAsr(f.owner, id, body);
+  await f.service.mutate(f.owner, id, "interrupt", { generation: 1, request_id: "memory-asr-interrupt" });
+  await rejects(f.service.audioReceived(id, 1, body.utterance_id, { bytes: 3200, sha256: "a".repeat(64) }), "REALTIME_GENERATION_MISMATCH");
+  assert.equal((await f.service.get(f.owner, id)).active_turn, null);
+});
+
+async function candidateFixture(withAsr = false) {
+  const f = fixture({ withAsr }); await f.report();
+  await (await f.getCollection("users")).insertOne({ _id: f.binding.userId, status: "active" });
+  let fixtureCalls = 0;
+  const verification = createDigitalLiveCandidateVerification({ getCollection: f.getCollection, now: f.options.now,
+    issueInputs: async () => { fixtureCalls += 1; return [{ fixture_id: WHISPER_AUDIO_FIXTURE.fixture_id, sha256: WHISPER_AUDIO_FIXTURE.sha256,
+      download_url: "https://fixture.invalid/not-a-real-object" }]; } });
+  const body = { request_id: "memory-candidate-original", lease_token: randomBytes(32).toString("base64url"),
+    provider_sha256: realtimeProviderFingerprint(f.providers), mode: withAsr ? "asr" : "media", dry_run: false };
+  return { ...f, verification, body, fixtureCalls: () => fixtureCalls };
+}
+const candidateClaims = (f) => ({ actual_provider_sha256: f.body.provider_sha256, completed_turns: 10,
+  played_sequences: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], ended: true, interrupt: { before_generation: 1, after_generation: 2, stopped_ms: 20 } });
+test("candidate dry-run is authenticated reachability only and issues no challenge, budget or physical lease", async () => {
+  const f = await candidateFixture(), result = await f.verification.next(f.binding, { dry_run: true });
+  assert.equal(result.challenge, null); assert.equal(result.activated, false);
+  for (const name of ["digitalLiveRealtimeVerifications", "capabilityNodeSlots", "capabilityVerificationBudgets"]) assert.equal((await f.getCollection(name)).rows.length, 0);
+});
+test("candidate challenge uses original request and caller-held secret, bounded prompts and shared exclusive slots", async () => {
+  const f = await candidateFixture(), one = await f.verification.next(f.binding, f.body), repeat = await f.verification.next(f.binding, f.body);
+  assert.equal(one.challenge.id, repeat.challenge.id); assert.equal(one.challenge.activated, false); assert.equal(one.challenge.probe.turns.length, 10);
+  assert.equal(one.challenge.budget.max_output_tokens_per_turn, 32);
+  const recovered = await f.verification.byRequest(f.binding, f.body.request_id, f.body.lease_token); assert.equal(recovered.id, one.challenge.id);
+  await rejects(f.verification.get(f.binding, recovered.id, "z".repeat(43)), "REALTIME_VERIFICATION_LEASE_INVALID");
+  assert.equal((await f.getCollection("capabilityNodeSlots")).rows[0].leases[0].exclusive, true);
+  assert.equal(JSON.stringify(recovered).includes(f.body.lease_token), false);
+  assert.equal((await f.getCollection("digitalLiveRealtimeVerifications")).rows[0].leaseTokenHash.length, 64);
+});
+test("client success claims without actual gateway media never become an active realtime proof", async () => {
+  const f = await candidateFixture(), { challenge } = await f.verification.next(f.binding, f.body);
+  const result = await f.verification.submit(f.binding, challenge.id, f.body.lease_token, candidateClaims(f));
+  assert.equal(result.state, "awaiting_runtime_witness"); assert.equal(result.activated, false);
+  assert.equal((await f.getCollection("capabilityAutoVerifications")).rows.length, 0);
+  const repeated = await f.verification.submit(f.binding, challenge.id, f.body.lease_token, candidateClaims(f)); assert.equal(repeated.id, challenge.id);
+  assert.equal((await f.getCollection("capabilityNodeSlots")).rows[0].leases.length, 1, "result is not stopped ACK");
+  await f.verification.stopped(f.binding, challenge.id, f.body.lease_token, { owned_worker_stopped: true });
+  assert.equal((await f.getCollection("capabilityNodeSlots")).rows[0].leases.length, 0);
+});
+test("ten actual bounded wire streams retain hashes only and still require real neural/playback validation", async () => {
+  const f = await candidateFixture(), { challenge } = await f.verification.next(f.binding, f.body);
+  for (let sequence = 1; sequence <= 10; sequence += 1) await f.verification.collect(f.binding, challenge.id, f.body.lease_token, sequence,
+    bodyStream(fmp4()), providers.mime_type);
+  await rejects(f.verification.collect(f.binding, challenge.id, f.body.lease_token, 1, bodyStream(fmp4()), providers.mime_type), "REALTIME_VERIFICATION_MEDIA_UNCERTAIN");
+  const rows = (await f.getCollection("digitalLiveRealtimeVerificationMedia")).rows;
+  assert.equal(rows.length, 10); assert.equal(rows.every((row) => row.state === "received" && row.bytes === fmp4().length && row.sha256.length === 64), true);
+  assert.equal(rows.some((row) => "body" in row || "audio" in row || "base64" in row), false);
+  const result = await f.verification.submit(f.binding, challenge.id, f.body.lease_token, candidateClaims(f));
+  assert.equal(result.state, "adapter_required"); assert.equal(result.activated, false); assert.equal((await f.getCollection("capabilityAutoVerifications")).rows.length, 0);
+});
+test("candidate media and recovery reject foreign bindings, changed groups and expired leases", async () => {
+  const f = await candidateFixture(), { challenge } = await f.verification.next(f.binding, f.body);
+  await rejects(f.verification.get({ ...f.binding, _id: new ObjectId() }, challenge.id, f.body.lease_token), "REALTIME_VERIFICATION_NOT_FOUND");
+  await rejects(f.verification.get({ ...f.binding, computeGroupId: "another" }, challenge.id, f.body.lease_token), "COMPUTE_GROUP_MISMATCH");
+  f.advance(901000);
+  await rejects(f.verification.collect(f.binding, challenge.id, f.body.lease_token, 1, bodyStream(fmp4()), providers.mime_type), "REALTIME_VERIFICATION_EXPIRED");
+  assert.equal((await f.verification.get(f.binding, challenge.id, f.body.lease_token)).lease_valid, false);
+});
+test("candidate budgets remain two daily and share the existing total node verification budget", async () => {
+  const f = await candidateFixture();
+  for (let n = 1; n <= 2; n += 1) {
+    const { challenge } = await f.verification.next(f.binding, { ...f.body, request_id: `memory-candidate-${n}` });
+    await f.verification.stopped(f.binding, challenge.id, f.body.lease_token, { owned_worker_stopped: true });
+  }
+  await rejects(f.verification.next(f.binding, { ...f.body, request_id: "memory-candidate-3" }), "REALTIME_VERIFICATION_BUDGET_EXHAUSTED");
+  assert.equal((await f.getCollection("capabilityVerificationBudgets")).rows[0].count, 2);
+});
+test("ASR candidate issues only the server-fixed full audio fixture and a transcript claim is never activation", async () => {
+  const f = await candidateFixture(true), { challenge } = await f.verification.next(f.binding, f.body);
+  assert.equal(f.fixtureCalls(), 1); assert.equal(challenge.probe.inputs[0].sha256, WHISPER_AUDIO_FIXTURE.sha256);
+  const result = await f.verification.submit(f.binding, challenge.id, f.body.lease_token, { ...candidateClaims(f), completed_turns: 1,
+    asr: { fixture_sha256: WHISPER_AUDIO_FIXTURE.sha256, transcript: "And so my fellow Americans, ask not what your country can do for you. Ask what you can do for your country." } });
+  assert.equal(result.activated, false); assert.equal(result.state, "adapter_required");
+  assert.equal((await f.getCollection("capabilityAutoVerifications")).rows.length, 0);
+});
+test("realtime candidates share the same four global automatic-probe slots across different nodes", async () => {
+  const f = await candidateFixture();
+  for (let n = 1; n <= 5; n += 1) {
+    const binding = { ...f.binding, _id: new ObjectId(), userId: new ObjectId(), nodeId: `memory-global-${n}` };
+    await (await f.getCollection("nodeAccountBindings")).insertOne(binding);
+    await (await f.getCollection("users")).insertOne({ _id: binding.userId, status: "active" });
+    await f.service.report(binding, { capability_version: "digital-live-realtime-v1", transport: "http-fmp4-mse-v1", artifact_sha256: "a".repeat(64),
+      providers: [providers], sharing_opt_in: true, resources: { gpu_state: "idle", gpu_observed_at: f.options.now().toISOString(),
+        current_task_remaining_seconds: 0, running_task_count: 0 } });
+    const call = f.verification.next(binding, { ...f.body, request_id: `memory-global-probe-${n}` });
+    if (n <= 4) assert.equal((await call).challenge.lease_valid, true); else await rejects(call, "REALTIME_VERIFICATION_GLOBAL_BUSY");
+  }
+  const locks = (await f.getCollection("capabilityVerificationLeases")).rows;
+  assert.equal(locks.filter((row) => row._id.startsWith("global:") && row.leaseUntil > f.options.now()).length, 4);
+});
+test("HTTP PCM intake sends binary only to its bound reader and forwards final to the original turn once", async () => {
+  const f = fixture({ withAsr: true }), { id } = await f.ready(), app = new OpenAPIHono(), body = asrRequest(), token = `gab_${"P".repeat(48)}`;
+  await (await f.getCollection("nodeAccountBindings")).updateOne({ _id: f.binding._id }, { $set: { tokenHash: hashOpaqueToken(token, "h3-account-binding") } });
+  await (await f.getCollection("users")).insertOne({ _id: f.binding.userId, status: "active" });
+  registerDigitalLiveRealtimeRoutes(app, { service: f.service, getCollection: f.getCollection, mediaEnabled: () => true,
+    authenticate: async () => ({ kind: "desktop-gulong-engine", user: { id: f.owner } }), requireTrustedMutation: () => null,
+    enforceRateLimit: async () => ({ allowed: true }) });
+  const post = (path, data, headers = {}) => app.request(path, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(data) });
+  assert.equal((await post(`${ROOT}/sessions/${id}/asr/utterances`, body)).status, 200);
+  const nodeHeaders = { "X-Gulong-Account-Binding": token, "X-Gulong-Realtime-Lease": f.lease };
+  const reading = await app.request(`${ROOT}/sessions/${id}/input-audio/1/${body.utterance_id}`, { headers: nodeHeaders });
+  const input = reading.arrayBuffer();
+  const ticket = await (await post(`${ROOT}/sessions/${id}/asr/input-ticket`, { generation: 1, utterance_id: body.utterance_id, origin: "https://www.sologle.com" })).json();
+  const pcm = Buffer.alloc(3200, 9), uploaded = await app.request(new URL(ticket.input_url).pathname, { method: "PUT",
+    headers: { Authorization: `DigitalLiveInput ${ticket.ticket}`, Origin: "https://www.sologle.com", "Content-Type": DIGITAL_LIVE_PCM_MIME }, body: pcm });
+  assert.equal(uploaded.status, 200); assert.deepEqual(Buffer.from(await input), pcm); const digest = await uploaded.json();
+  const callback = { generation: 1, event: "asr_final", event_sequence: 1, event_id: "memory-final-asr-event", providers: f.providers,
+    turn_id: body.turn_id, utterance_id: body.utterance_id, text: "你好", input_sha256: digest.sha256, input_bytes: digest.bytes };
+  assert.equal((await post(`${ROOT}/sessions/${id}/worker-events`, callback, nodeHeaders)).status, 200);
+  const state = await (await app.request(`${ROOT}/sessions/${id}`)).json();
+  assert.equal(state.session.active_turn.request_id, body.request_id); assert.equal(state.session.active_asr.input_sha256, digest.sha256);
 });

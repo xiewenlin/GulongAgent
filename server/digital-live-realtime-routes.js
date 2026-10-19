@@ -2,8 +2,9 @@ import { z } from "@hono/zod-openapi";
 import { getCollection as databaseCollection } from "./db.js";
 import { enforceRateLimit as databaseRateLimit } from "./rate-limit.js";
 import { hashOpaqueToken, fingerprintIp } from "./security.js";
-import { createDigitalLiveRealtimeService, realtimeConfig, digitalLiveRealtimeSchemas, DIGITAL_LIVE_REALTIME_ROOT as ROOT } from "./digital-live-realtime.js";
+import { createDigitalLiveRealtimeService, realtimeConfig, digitalLiveRealtimeSchemas, DIGITAL_LIVE_PCM_MIME, DIGITAL_LIVE_REALTIME_ROOT as ROOT } from "./digital-live-realtime.js";
 import { createDigitalLiveMediaRelay } from "./digital-live-media-relay.js";
+import { createDigitalLiveCandidateVerification, digitalLiveVerificationSchemas } from "./digital-live-verification.js";
 
 let persistentMediaRuntime = false;
 // Only the persistent Node entry point enables media pairing. Importing this
@@ -29,9 +30,12 @@ export function registerDigitalLiveRealtimeRoutes(app, dependencies) {
     onSent: (id, generation, sequence) => service.mediaSent(id, generation, sequence),
     onFailed: (id) => service.mediaFailed(id),
   });
+  const audioRelay = dependencies.audioRelay || createDigitalLiveMediaRelay({ format: "pcm16", maxBytes: 640000, maxChunkBytes: 64 * 1024, timeoutMs: 25_000,
+    onSent: (id, generation, utterance, metadata) => service.audioReceived(id, generation, utterance, metadata), onFailed: (id) => service.mediaFailed(id) });
   service = dependencies.service || createDigitalLiveRealtimeService({ getCollection, ...dependencies.serviceOptions,
-    onInvalidate: (id) => relay.invalidate(id) });
+    onInvalidate: (id) => { relay.invalidate(id); audioRelay.invalidate(id); } });
   const mediaEnabled = dependencies.mediaEnabled || (() => persistentMediaRuntime);
+  const verification = dependencies.verification || createDigitalLiveCandidateVerification({ getCollection, ...dependencies.verificationOptions });
   async function nodeAuth(c) {
     const raw = c.req.header("X-Gulong-Account-Binding") || "";
     if (!/^gab_[A-Za-z0-9_-]{40,196}$/.test(raw)) return { error: c.json({ code: "ACCOUNT_BINDING_REQUIRED", message: "请先在已激活的桌面节点绑定官网账号" }, 401) };
@@ -75,6 +79,18 @@ export function registerDigitalLiveRealtimeRoutes(app, dependencies) {
     if (body.dry_run === true) return c.json({ ok: true, service: "digital-live-realtime", queue: "reachable", session: null });
     return c.json({ session: await service.claim(auth.binding, body.lease_token) });
   }, "node"));
+  const verificationLease = (c) => c.req.header("X-Gulong-Realtime-Verification-Lease");
+  app.post(`${ROOT}/verifications/next`, safe(async (c, auth) => c.json(await verification.next(auth.binding, await jsonBody(c))), "node"));
+  app.get(`${ROOT}/verifications/by-request/:key`, safe(async (c, auth) => c.json(await verification.byRequest(auth.binding, c.req.param("key"), verificationLease(c))), "node"));
+  app.get(`${ROOT}/verifications/:verificationId`, safe(async (c, auth) => c.json(await verification.get(auth.binding, c.req.param("verificationId"), verificationLease(c))), "node"));
+  app.post(`${ROOT}/verifications/:verificationId/result`, safe(async (c, auth) => c.json(await verification.submit(auth.binding,
+    c.req.param("verificationId"), verificationLease(c), await jsonBody(c))), "node"));
+  app.post(`${ROOT}/verifications/:verificationId/stopped`, safe(async (c, auth) => c.json(await verification.stopped(auth.binding,
+    c.req.param("verificationId"), verificationLease(c), await jsonBody(c))), "node"));
+  app.put(`${ROOT}/verifications/:verificationId/media/:sequence`, safe(async (c, auth) => {
+    const rejected = gatewayGuard(c); if (rejected) return rejected;
+    return c.json(await verification.collect(auth.binding, c.req.param("verificationId"), verificationLease(c), Number(c.req.param("sequence")), c.req.raw.body, c.req.header("Content-Type")));
+  }, "node"));
   app.post(`${ROOT}/sessions`, safe(async (c, auth) => {
     const result = await service.create(auth.user.id, await jsonBody(c), c.req.header("Idempotency-Key"));
     return c.json(result, result.idempotent ? 200 : 201);
@@ -85,6 +101,9 @@ export function registerDigitalLiveRealtimeRoutes(app, dependencies) {
   app.post(`${sessionPath}/turns`, safe(async (c, auth) => c.json({ session: await service.turn(auth.user.id, c.req.param("id"), await jsonBody(c)) }), "user", true));
   app.get(`${sessionPath}/turns/by-request/:key`, safe(async (c, auth) => c.json({ turn: await service.turnByRequest(auth.user.id, c.req.param("id"), c.req.param("key")) })));
   app.get(`${sessionPath}/events`, safe(async (c, auth) => c.json(await service.events(auth.user.id, c.req.param("id"), Number(c.req.query("after") || 0)))));
+  app.post(`${sessionPath}/asr/utterances`, safe(async (c, auth) => c.json({ session: await service.beginAsr(auth.user.id, c.req.param("id"), await jsonBody(c)) }), "user", true));
+  app.get(`${sessionPath}/asr/by-request/:key`, safe(async (c, auth) => c.json(await service.asrByRequest(auth.user.id, c.req.param("id"), c.req.param("key")))));
+  app.post(`${sessionPath}/asr/input-ticket`, safe(async (c, auth) => c.json(await service.inputTicket(auth.user.id, c.req.param("id"), await jsonBody(c))), "user", true));
   for (const action of ["played", "interrupt", "cancel", "heartbeat"]) app.post(`${sessionPath}/${action}`,
     safe(async (c, auth) => c.json({ session: await service.mutate(auth.user.id, c.req.param("id"), action, await jsonBody(c)) }), "user", true));
   app.post(`${sessionPath}/media-ticket`, safe(async (c, auth) => c.json(await service.ticket(auth.user.id, c.req.param("id"), await jsonBody(c))), "user", true));
@@ -120,6 +139,32 @@ export function registerDigitalLiveRealtimeRoutes(app, dependencies) {
     };
     return c.json(await relay.write(permit, c.req.raw.body, c.req.raw.signal));
   }, "node"));
+  const audioPath = `${sessionPath}/input-audio/:generation/:utterance`;
+  app.options(audioPath, (c) => {
+    const origin = c.req.header("Origin");
+    if (!["https://www.sologle.com", "https://sologle.com", "https://111.229.70.235", "http://tauri.localhost", "tauri://localhost"].includes(origin)) return c.body(null, 403);
+    c.header("Access-Control-Allow-Origin", origin); c.header("Vary", "Origin"); c.header("Access-Control-Allow-Methods", "PUT, OPTIONS");
+    c.header("Access-Control-Allow-Headers", "Authorization, Content-Type"); return c.body(null, 204);
+  });
+  app.get(audioPath, safe(async (c, auth) => {
+    const rejected = gatewayGuard(c); if (rejected) return rejected;
+    const id = c.req.param("id"), generation = Number(c.req.param("generation")), utterance = c.req.param("utterance");
+    const permit = await service.audioReadPermit(auth.binding, id, c.req.header("X-Gulong-Realtime-Lease"), generation, utterance);
+    permit.validate = async () => { const current = await service.workerState(auth.binding, id, c.req.header("X-Gulong-Realtime-Lease"));
+      if (current.generation !== generation || current.input_audio?.utterance_id !== utterance) throw Object.assign(new Error("原语音代次已失效"), { code: "REALTIME_GENERATION_MISMATCH", status: 409 }); };
+    const stream = audioRelay.open(permit);
+    try { await service.audioReaderReady(id, generation, utterance); }
+    catch (error) { audioRelay.invalidate(id); throw error; }
+    return new Response(stream, { headers: { "Content-Type": DIGITAL_LIVE_PCM_MIME, "Cache-Control": "private, no-store, no-transform", "X-Accel-Buffering": "no" } });
+  }, "node"));
+  app.put(audioPath, safe(async (c) => {
+    const rejected = gatewayGuard(c); if (rejected) return rejected;
+    if (c.req.header("Content-Type") !== DIGITAL_LIVE_PCM_MIME) return c.json({ code: "REALTIME_PCM_INVALID", message: "仅支持16k单声道有符号小端PCM16" }, 400);
+    const permit = await service.consumeInputTicket(c.req.param("id"), Number(c.req.param("generation")), c.req.param("utterance"),
+      (c.req.header("Authorization") || "").replace(/^DigitalLiveInput /, ""), c.req.header("Origin") || "");
+    const result = await audioRelay.write(permit, c.req.raw.body, c.req.raw.signal);
+    c.header("Access-Control-Allow-Origin", c.req.header("Origin")); c.header("Vary", "Origin"); return c.json(result);
+  }, "ticket"));
   const configSchema = z.object({ schema_version: z.literal("digital-live-realtime-v1"), status: z.literal("integration_required"),
     dispatchable: z.literal(false), acceptance: z.literal("adapter_required"), transport: z.literal("http-fmp4-mse-v1") }).passthrough();
   app.openAPIRegistry?.register("DigitalLiveRealtimeContract", configSchema);
@@ -130,17 +175,23 @@ export function registerDigitalLiveRealtimeRoutes(app, dependencies) {
   const generation = z.number().int().positive(), sequence = z.number().int().positive(), key = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{7,159}$/);
   const bodies = {
     [`${ROOT}/nodes/report`]: digitalLiveRealtimeSchemas.report,
+    [`${ROOT}/verifications/next`]: digitalLiveVerificationSchemas.next,
+    [`${ROOT}/verifications/{verificationId}/result`]: digitalLiveVerificationSchemas.result,
+    [`${ROOT}/verifications/{verificationId}/stopped`]: z.object({ owned_worker_stopped: z.literal(true) }),
     [`${ROOT}/nodes/claim`]: z.object({ lease_token: z.string().regex(/^[A-Za-z0-9_-]{43}$/), dry_run: z.boolean().optional() }),
     [`${ROOT}/sessions`]: digitalLiveRealtimeSchemas.create,
     [`${ROOT}/sessions/{id}/turns`]: digitalLiveRealtimeSchemas.turn,
+    [`${ROOT}/sessions/{id}/asr/utterances`]: digitalLiveRealtimeSchemas.asr,
+    [`${ROOT}/sessions/{id}/asr/input-ticket`]: z.object({ generation, utterance_id: key, origin: z.string().max(100) }),
     [`${ROOT}/sessions/{id}/played`]: z.object({ generation, sequence, turn_id: key }),
     [`${ROOT}/sessions/{id}/interrupt`]: z.object({ generation, request_id: key }),
     [`${ROOT}/sessions/{id}/media-ticket`]: z.object({ generation, sequence, turn_id: key, media_generation: generation, turn_sequence: sequence,
       origin: z.enum(["https://www.sologle.com", "https://sologle.com", "https://111.229.70.235", "tauri://localhost", "http://tauri.localhost"]) }),
-    [`${ROOT}/sessions/{id}/worker-events`]: z.object({ generation, event: z.enum(["heartbeat", "interrupted", "stopped", "text_delta", "media_announcement", "turn_finished"]), providers: digitalLiveRealtimeSchemas.providers,
+    [`${ROOT}/sessions/{id}/worker-events`]: z.object({ generation, event: z.enum(["heartbeat", "interrupted", "stopped", "text_delta", "media_announcement", "turn_finished", "asr_partial", "asr_final"]), providers: digitalLiveRealtimeSchemas.providers,
       event_id: key.optional(), event_sequence: sequence.optional(), turn_id: key.optional(), media_generation: generation.optional(),
       delta: z.string().max(4096).optional(), sequence: sequence.optional(), turn_sequence: sequence.optional(), text: z.string().max(2000).optional(),
       duration_seconds: z.number().positive().max(60).optional(), timestamp_offset: z.number().min(0).max(1800).optional(), mime_type: z.string().max(120).optional(),
+      utterance_id: key.optional(), input_sha256: z.string().regex(/^[a-f0-9]{64}$/).optional(), input_bytes: z.number().int().positive().max(640000).optional(),
       final_sequence: sequence.optional() }),
   };
   for (const [method, path, summary] of [
@@ -148,6 +199,12 @@ export function registerDigitalLiveRealtimeRoutes(app, dependencies) {
     ["get", `${ROOT}/providers`, "按本人权益/分组及完整角色ID/音色/摘要筛选真实已验证provider；未有验证器返回空数组"],
     ["post", `${ROOT}/nodes/report`, "使用绑定身份登记精确实时provider清单，仅候选"],
     ["post", `${ROOT}/nodes/claim`, "指定节点以原租约密钥幂等领取实时会话"],
+    ["post", `${ROOT}/verifications/next`, "同节点原键领取有界候选真实挑战；与九项共享全站四槽/每日预算，dry_run无副作用"],
+    ["get", `${ROOT}/verifications/by-request/{key}`, "按原请求恢复候选挑战，严禁新键重跑"],
+    ["get", `${ROOT}/verifications/{verificationId}`, "查询原挑战及网关实际媒体摘要；不是激活证明"],
+    ["post", `${ROOT}/verifications/{verificationId}/result`, "有界声明与服务端字节证据分离验证；当前绝不写active证明"],
+    ["post", `${ROOT}/verifications/{verificationId}/stopped`, "owned worker停止后幂等释放原物理租约"],
+    ["put", `${ROOT}/verifications/{verificationId}/media/{sequence}`, "腾讯网关完整流式收取并丢弃固定验收媒体，仅存服务端摘要"],
     ["post", `${ROOT}/sessions`, "同账户与产品原键创建零费用会话；无真实实时证明时503"],
     ["get", `${ROOT}/sessions/by-request/{key}`, "原键恢复会话；跨账户404"],
     ["post", `${ROOT}/sessions/by-request/{key}/cancel`, "原键取消及取消前建单墓碑"],
@@ -155,6 +212,11 @@ export function registerDigitalLiveRealtimeRoutes(app, dependencies) {
     ["post", `${ROOT}/sessions/{id}/turns`, "用户原文创建完整节点对话轮次；固定27B、8192上下文，不要求客户端本地先跑LLM"],
     ["get", `${ROOT}/sessions/{id}/turns/by-request/{key}`, "原轮次请求键查询；未知结果不重复执行模型"],
     ["get", `${ROOT}/sessions/{id}/events`, "按after游标读取最多128条有界文字/媒体/结束事件，过期游标409后查原会话快照"],
+    ["post", `${ROOT}/sessions/{id}/asr/utterances`, "有界远程PCM语句入口；要求独立真实ASR证明且按原语音/轮次键幂等"],
+    ["get", `${ROOT}/sessions/{id}/asr/by-request/{key}`, "查询原语音上传/识别状态，未知不得重新录音或重传"],
+    ["post", `${ROOT}/sessions/{id}/asr/input-ticket`, "签发同代次同语句一次输入票据，输入开始后不再签新票据"],
+    ["get", `${ROOT}/sessions/{id}/input-audio/{generation}/{utterance}`, "绑定节点先建立PCM读取连接；不包含账号长期凭据/持久录音"],
+    ["put", `${ROOT}/sessions/{id}/input-audio/{generation}/{utterance}`, "一次DigitalLiveInput header票据有界直通PCM，最多20秒/640000字节"],
     ...["played", "interrupt", "cancel", "heartbeat", "media-ticket", "worker-events"].map((action) => ["post", `${ROOT}/sessions/{id}/${action}`, `实时会话${action}，校验代次/归属/租约`]),
     ["get", `${ROOT}/sessions/{id}/worker-state`, "仅绑定执行节点查询有界句队列及打断状态；无用户隐私字段"],
     ["get", `${ROOT}/sessions/{id}/media/{generation}/{sequence}`, "腾讯常驻网关一次性header票据流式读取H264/AAC fMP4"],
@@ -166,5 +228,5 @@ export function registerDigitalLiveRealtimeRoutes(app, dependencies) {
     responses: { 200: { description: "按归属及代次返回会话状态/有界媒体流；不代表真实节点已验收" },
       401: { description: "身份或一次媒体票据无效" }, 403: { description: "无权益/分组不符/来源不符" },
       409: { description: "原键/代次/序号/物理租约冲突" }, 503: { description: "REALTIME_INTEGRATION_REQUIRED：无自动实测连续实时节点" } } });
-  return { service, relay };
+  return { service, relay, audioRelay, verification };
 }

@@ -24,6 +24,7 @@ export async function verifyDigitalLiveDeployment(origin, read = fetch) {
   assert.equal(realtime.schema_version, "digital-live-realtime-v1"); assert.equal(realtime.dispatchable, false);
   assert.equal(realtime.acceptance, "adapter_required"); assert.equal(realtime.transport, "http-fmp4-mse-v1");
   assert.equal(realtime.gateway_origin, "https://111.229.70.235"); assert.equal(realtime.billing.wallet_charge, false);
+  assert.equal(realtime.remote_asr.status, "integration_required"); assert.equal(realtime.remote_asr.max_input_bytes, 640000);
   assert.equal(config.avatar.dispatchable, false); assert.equal(config.highlights.dispatchable, false);
   const spec = await get("/api/openapi.json", 200);
   const component = spec.components.schemas.DigitalLiveSharedCapabilityContract;
@@ -37,6 +38,8 @@ export async function verifyDigitalLiveDeployment(origin, read = fetch) {
   assert.ok(spec.components.schemas.DigitalLiveRealtimeCreate);
   assert.ok(spec.paths["/api/v1/digital-live/realtime/sessions/{id}/turns"].post);
   assert.ok(spec.paths["/api/v1/digital-live/realtime/sessions/{id}/events"].get);
+  assert.ok(spec.paths["/api/v1/digital-live/realtime/sessions/{id}/asr/utterances"].post);
+  assert.ok(spec.paths["/api/v1/digital-live/realtime/verifications/next"].post);
   await get(realtime.catalog_url, 401);
   await get("/api/v1/desktop/digital-live/config?product=worklucky", 400);
   await get("/api/v1/desktop/gulong-engine/account", 401);

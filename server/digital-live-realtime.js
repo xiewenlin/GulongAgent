@@ -30,6 +30,7 @@ const providerSchema = z.object({
   text_model: z.literal(DIGITAL_LIVE_TEXT_MODEL), tts_model: z.string().regex(ID), avatar_model: z.string().regex(ID),
   character_id: z.string().regex(/^[\p{L}\p{N}_. -]{1,80}$/u).refine((value) => value.trim() === value), voice_id: z.string().regex(ID),
   character_image_sha256: z.string().regex(HASH), voice_audio_sha256: z.string().regex(HASH),
+  asr_model: z.string().regex(ID).optional(),
   mime_type: z.string().max(120).regex(/^video\/mp4; codecs="avc1\.[A-Fa-f0-9]{6}, ?mp4a\.40\.2"$/),
 }).strict();
 const startSchema = z.object({ client_product: z.literal("digital_live"), client_request_id: z.string().regex(KEY),
@@ -37,11 +38,13 @@ const startSchema = z.object({ client_product: z.literal("digital_live"), client
 const turnSchema = z.object({ generation: z.number().int().positive(), request_id: z.string().regex(KEY), turn_id: z.string().regex(KEY),
   user_text: z.string().min(1).max(4000), history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(4000) }).strict()).max(16).default([]),
 }).strict();
+const asrSchema = turnSchema.omit({ user_text: true }).extend({ utterance_id: z.string().regex(KEY) });
+export const DIGITAL_LIVE_PCM_MIME = "audio/pcm; rate=16000; channels=1; format=s16le";
 const reportSchema = z.object({ capability_version: z.literal(DIGITAL_LIVE_REALTIME_VERSION),
   transport: z.literal(DIGITAL_LIVE_MEDIA_TRANSPORT), artifact_sha256: z.string().regex(HASH),
   providers: z.array(providerSchema).min(1).max(36), sharing_opt_in: z.boolean(), resources: z.record(z.string(), z.unknown()),
 }).strict();
-export const digitalLiveRealtimeSchemas = Object.freeze({ providers: providerSchema, create: startSchema, report: reportSchema, turn: turnSchema });
+export const digitalLiveRealtimeSchemas = Object.freeze({ providers: providerSchema, create: startSchema, report: reportSchema, turn: turnSchema, asr: asrSchema });
 export const realtimeProviderFingerprint = (provider) => digest(providerSchema.parse(provider));
 const origins = new Set(["https://www.sologle.com", "https://sologle.com", DIGITAL_LIVE_GATEWAY_ORIGIN, "tauri://localhost", "http://tauri.localhost"]);
 export function realtimeSessionId(ownerId, requestKey) { return `dls_${digest(`digital_live:${ownerId}:${requestKey}`).slice(0, 40)}`; }
@@ -52,7 +55,8 @@ export function realtimeConfig() {
     catalog_url: `${DIGITAL_LIVE_REALTIME_ROOT}/providers`,
     media_credentials: "one_use_30_second_header_ticket", worker_lease_seconds: 15, client_heartbeat_seconds: 5,
     max_session_seconds: 1800, max_pending_sentences: 3, billing: { price_fen: 0, wallet_charge: false, commission: false },
-    remote_asr: { status: "integration_required", input_url: null, input_transport: null },
+    remote_asr: { status: "integration_required", create_path: "/sessions/{id}/asr/utterances", input_transport: "bounded-pcm16-mono-16k-v1",
+      max_utterance_seconds: 20, max_input_bytes: 640000, content_type: DIGITAL_LIVE_PCM_MIME, persistence: "digest_only_no_audio", requires_separate_real_asr_proof: true },
     reason: "会话控制与有界媒体网关已实现；连续实时节点验证器及真实节点尚未验收，暂不开放派发" };
 }
 
@@ -83,13 +87,24 @@ export function createDigitalLiveRealtimeService({ getCollection = databaseColle
       && new Date(proof.testedAt) <= clock() && new Date(proof.expiresAt) > clock()
       && new Date(proof.expiresAt) - new Date(proof.testedAt) <= 7 * 86400_000
       && ["actual_provider", "continuous_fmp4", "played_drain", "interrupt_generation", "exclusive_gpu"].every((key) => proof.contractTests?.[key] === true)
+      && (!provider.asr_model || proof.contractTests?.realtime_asr === true)
       ? proof : null;
   }
   async function liveBinding(s) {
     const b = await (await collection("nodeAccountBindings")).findOne({ _id: s.bindingObjectId, status: "active", revokedAt: null });
-    demand(b && b.nodeId === s.nodeId && String(b.userId) === s.executorUserId && computeGroupsMatch(b.computeGroupId, s.computeGroupId),
+    demand(b && b.nodeId === s.nodeId && String(b.userId) === s.executorUserId && computeGroupsMatch(b.computeGroupId, s.computeGroupId)
+      && await isOwnerActive(s.executorUserId),
       "REALTIME_NODE_UNAVAILABLE", "实时节点绑定或分组已变化，请结束本会话", 409);
     return b;
+  }
+  async function currentNodePermit(s) {
+    await liveBinding(s);
+    const node = await (await collection(NODES)).findOne({ _id: s.bindingId });
+    demand(node?.sharingOptIn === true && node.artifactSha256 === s.artifactSha256 && await proofFor(node, s.providers),
+      "REALTIME_INTEGRATION_REQUIRED", "实时模型证明或共享授权已变化，请停止本会话", 503);
+    const snapshot = await slots.snapshot({ bindingId: s.bindingId, now: clock() });
+    demand(snapshot.available && snapshot.leases.some((lease) => lease.claimId === s._id && lease.taskId === s._id && lease.exclusive === true),
+      "REALTIME_LEASE_EXPIRED", "实时物理执行租约已失效，请停止本会话");
   }
   async function patch(s, values) {
     const saved = unwrap(await (await collection(SESSIONS)).findOneAndUpdate({ _id: s._id, revision: s.revision },
@@ -136,6 +151,11 @@ export function createDigitalLiveRealtimeService({ getCollection = databaseColle
       media_generation: s.mediaGeneration || 0, event_cursor: s.eventCursor || 0,
       active_turn: s.activeTurn ? { turn_id: s.activeTurn.turn_id, request_id: s.activeTurn.request_id, media_generation: s.activeTurn.media_generation,
         state: s.activeTurn.state, text_snapshot: s.activeTurn.assistant_text || "", context_tokens: 8192 } : null,
+      active_asr: s.activeAsr ? { utterance_id: s.activeAsr.utterance_id, request_id: s.activeAsr.request_id, turn_id: s.activeAsr.turn_id,
+        state: s.activeAsr.state, reader_ready: Boolean(s.activeAsr.readerReadyAt), partial_text: s.activeAsr.partial_text || "",
+        final_text: s.activeAsr.final_text || "", input_received: Boolean(s.activeAsr.input), input_sha256: s.activeAsr.input?.sha256 || null,
+        input_bytes: s.activeAsr.input?.bytes || null, generation: s.activeAsr.generation, media_generation: s.activeAsr.media_generation || null,
+        event_cursor_start: s.activeAsr.turnEventCursor || s.activeAsr.startEventCursor, model: s.providers.asr_model } : null,
       cancellation_pending: s.state === "cancelling", cancel_reason: s.cancelReason || null,
       billing: { price_fen: 0, charge_status: "exempt", commission_fen: 0 } };
   }
@@ -218,7 +238,7 @@ export function createDigitalLiveRealtimeService({ getCollection = databaseColle
       providers: body.providers, computeGroupId, bindingId: selected.bindingId, bindingObjectId: selected.bindingObjectId,
       nodeId: selected.nodeId, executorUserId: selected.executorUserId, artifactSha256: selected.artifactSha256,
       revision: 0, state: "allocating", generation: 1, mediaGeneration: 0, lastSequence: 0, playedSequence: 0, queue: [], sentenceKeys: [], nodeFinished: false,
-      turnKeys: [], eventCursor: 0, nodeEventSequence: 0, eventKeys: [], events: [], activeTurn: null,
+      turnKeys: [], asrKeys: [], eventCursor: 0, nodeEventSequence: 0, eventKeys: [], events: [], activeTurn: null, activeAsr: null,
       clientSeenAt: instant, workerLeaseUntil: new Date(+instant + LEASE_MS), expiresAt: new Date(+instant + MAX_SESSION_MS),
       purgeAt: new Date(+instant + 7 * 86400_000), createdAt: instant, updatedAt: instant };
     try { await (await collection(SESSIONS)).insertOne(s); }
@@ -274,6 +294,81 @@ export function createDigitalLiveRealtimeService({ getCollection = databaseColle
     return { session_id: id, generation: s.generation, media_generation: s.mediaGeneration || 0,
       events: (s.events || []).filter((item) => item.cursor > after), next_cursor: s.eventCursor || 0 };
   }
+  async function beginAsr(ownerId, id, raw) {
+    const parsed = asrSchema.safeParse(raw);
+    demand(parsed.success, "REALTIME_ASR_REQUEST_INVALID", "请提供原语音请求编号、轮次、语句编号和有限历史", 400);
+    const s = await owned(ownerId, id), body = parsed.data, hash = digest(body);
+    demand(s.providers.asr_model, "REALTIME_ASR_INTEGRATION_REQUIRED", "所选实时组合尚未通过远程语音识别验收", 503);
+    demand(body.generation === s.generation, "REALTIME_GENERATION_MISMATCH", "语音输入代次已变化");
+    const previous = (s.asrKeys || []).find((item) => item.request_id === body.request_id || item.utterance_id === body.utterance_id);
+    if (previous) { demand(previous.hash === hash, "REALTIME_IDEMPOTENCY_CONFLICT", "原语音请求已对应其他参数"); return view(s); }
+    demand(["idle", "ready"].includes(s.state) && !s.queue.length && (!s.activeTurn || s.activeTurn.state === "finished"),
+      "REALTIME_TURN_BUSY", "请等待上一轮真实播放结束或明确打断", 429);
+    demand((s.asrKeys || []).length < 128 && (s.turnKeys || []).length < 128 && !(s.turnKeys || []).some((item) => item.request_id === body.request_id || item.turn_id === body.turn_id),
+      "REALTIME_IDEMPOTENCY_CONFLICT", "语音轮次编号已使用或达到会话上限");
+    demand(body.history.reduce((sum, item) => sum + Buffer.byteLength(item.content) + 32, 0) <= 4096,
+      "REALTIME_CONTEXT_LIMIT", "语音对话历史超过安全预算，请缩短历史", 413);
+    const activeAsr = { ...body, state: "awaiting_audio", startEventCursor: (s.eventCursor || 0) + 1,
+      readerReadyAt: null, inputStartedAt: null, input: null, partial_text: "", final_text: "" };
+    return view(await patch(s, eventPatch(s, { type: "asr.accepted", utterance_id: body.utterance_id, turn_id: body.turn_id },
+      { state: "listening", activeAsr, nodeFinished: false, asrKeys: [...(s.asrKeys || []), { request_id: body.request_id, utterance_id: body.utterance_id, hash }] })));
+  }
+  async function asrByRequest(ownerId, id, key) {
+    demand(KEY.test(key), "REALTIME_REQUEST_INVALID", "语音请求编号格式不正确", 400);
+    const s = await owned(ownerId, id, { allowTerminal: true }), record = (s.asrKeys || []).find((item) => item.request_id === key);
+    demand(record, "REALTIME_ASR_NOT_FOUND", "原语音请求不存在", 404);
+    return { request_id: key, utterance_id: record.utterance_id,
+      state: s.activeAsr?.request_id === key ? s.activeAsr.state : "superseded", session: view(s) };
+  }
+  async function inputTicket(ownerId, id, body) {
+    const s = await owned(ownerId, id), a = s.activeAsr;
+    demand(a && a.state === "awaiting_audio" && !a.inputStartedAt && body.generation === s.generation && body.utterance_id === a.utterance_id,
+      "REALTIME_ASR_INPUT_UNCERTAIN", "语音输入已开始或不属于当前语句；请先查原状态，不要重传");
+    demand(origins.has(body.origin), "REALTIME_ORIGIN_INVALID", "语音输入来源未被允许", 403);
+    const secret = `dli_${freshSecret()}`, expiresAt = new Date(Math.min(+clock() + 30_000, +new Date(s.workerLeaseUntil)));
+    await (await collection(TICKETS)).insertOne({ _id: digest(secret), purpose: "input_audio", sessionId: id, ownerId: String(ownerId),
+      generation: s.generation, utteranceId: a.utterance_id, origin: body.origin, expiresAt, usedAt: null });
+    await patch(s, { activeAsr: { ...a, ticketHash: digest(secret) } });
+    return { ticket: secret, expires_at: expiresAt, method: "PUT", authorization_scheme: "DigitalLiveInput", generation: s.generation,
+      utterance_id: a.utterance_id, content_type: DIGITAL_LIVE_PCM_MIME, max_bytes: 640000, sample_rate: 16000, channels: 1, format: "s16le",
+      input_url: `${gatewayOrigin}${DIGITAL_LIVE_REALTIME_ROOT}/sessions/${id}/input-audio/${s.generation}/${a.utterance_id}` };
+  }
+  async function consumeInputTicket(id, generation, utterance, secret, origin) {
+    demand(/^dli_[A-Za-z0-9_-]{43}$/.test(secret || ""), "REALTIME_INPUT_TICKET_INVALID", "语音输入票据无效", 401);
+    const tickets = await collection(TICKETS), record = await tickets.findOne({ _id: digest(secret), purpose: "input_audio", sessionId: id,
+      generation, utteranceId: utterance, origin, usedAt: null, expiresAt: { $gt: clock() } });
+    demand(record, "REALTIME_INPUT_TICKET_INVALID", "语音输入票据已使用、到期或来源不匹配", 401);
+    const s = await owned(record.ownerId, id), a = s.activeAsr;
+    await currentNodePermit(s);
+    demand(s.generation === generation && a?.utterance_id === utterance && !a.inputStartedAt && a.state === "awaiting_audio"
+      && a.ticketHash === digest(secret) && a.readerReadyAt, "REALTIME_ASR_READER_REQUIRED", "节点尚未准备读取，或原语音输入已开始；请查询原状态");
+    const claimed = await tickets.updateOne({ _id: record._id, usedAt: null, expiresAt: { $gt: clock() } }, { $set: { usedAt: clock() } });
+    demand(claimed.modifiedCount === 1, "REALTIME_INPUT_TICKET_INVALID", "语音输入票据已使用", 401);
+    await patch(s, { activeAsr: { ...a, state: "receiving", inputStartedAt: clock() } });
+    return { sessionId: id, generation, sequence: utterance, mimeType: DIGITAL_LIVE_PCM_MIME };
+  }
+  async function audioReadPermit(binding, id, secret, generation, utterance) {
+    const s = await worker(binding, id, secret), a = s.activeAsr;
+    demand(s.state === "listening" && s.generation === generation && a?.utterance_id === utterance && !a.input,
+      "REALTIME_ASR_INPUT_UNCERTAIN", "原语音输入已结束或代次不符");
+    return { sessionId: id, generation, sequence: utterance, mimeType: DIGITAL_LIVE_PCM_MIME };
+  }
+  async function audioReaderReady(id, generation, utterance) {
+    const s = await read(id);
+    demand(s.generation === generation && s.activeAsr?.utterance_id === utterance && s.state === "listening", "REALTIME_GENERATION_MISMATCH", "语音输入代次已变化");
+    await patch(s, { activeAsr: { ...s.activeAsr, readerReadyAt: clock() } });
+  }
+  async function audioReceived(id, generation, utterance, metadata) {
+    demand(Number.isSafeInteger(metadata.bytes) && metadata.bytes > 0 && metadata.bytes <= 640000 && metadata.bytes % 2 === 0 && HASH.test(metadata.sha256),
+      "REALTIME_PCM_INVALID", "语音输入大小或摘要不符合PCM16安全上限", 400);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const s = await read(id), a = s.activeAsr;
+      demand(s.generation === generation && a?.utterance_id === utterance && s.state === "listening", "REALTIME_GENERATION_MISMATCH", "旧语音输入已失效");
+      if (a.input) { demand(a.input.bytes === metadata.bytes && a.input.sha256 === metadata.sha256, "REALTIME_ASR_INPUT_UNCERTAIN", "原语音输入已对应其他内容"); return; }
+      try { await patch(s, { activeAsr: { ...a, state: "recognizing", input: metadata } }); return; }
+      catch (error) { if (error.code !== "REALTIME_STATE_CONFLICT" || attempt === 3) throw error; }
+    }
+  }
   async function byRequest(ownerId, key) { demand(KEY.test(key), "REALTIME_REQUEST_INVALID", "请求编号格式不正确", 400); return get(ownerId, realtimeSessionId(ownerId, key)); }
   async function cancelByRequest(ownerId, key) {
     demand(KEY.test(key), "REALTIME_REQUEST_INVALID", "请求编号格式不正确", 400);
@@ -295,7 +390,7 @@ export function createDigitalLiveRealtimeService({ getCollection = databaseColle
       }
       demand(body.generation === s.generation, "REALTIME_GENERATION_MISMATCH", "会话已切换代次，请丢弃旧媒体并重新查询");
       const next = await patch(s, { generation: s.generation + 1, state: "interrupting", queue: [], lastSequence: 0, playedSequence: 0,
-        sentenceKeys: [], activeTurn: null, mediaGeneration: (s.mediaGeneration || 0) + 1,
+        sentenceKeys: [], activeTurn: null, activeAsr: null, mediaGeneration: (s.mediaGeneration || 0) + 1,
         lastInterruptKey: body.request_id, lastInterruptGeneration: body.generation, nodeFinished: false }); onInvalidate(id); return view(next);
     }
     demand(body.generation === s.generation, "REALTIME_GENERATION_MISMATCH", "会话已切换代次，请丢弃旧媒体并重新查询");
@@ -335,18 +430,16 @@ export function createDigitalLiveRealtimeService({ getCollection = databaseColle
       try { await entitled(s.ownerId);
         demand(computeGroupsMatch(await readGroup(s.ownerId), s.computeGroupId), "COMPUTE_GROUP_MISMATCH", "实时会话分组已变化", 403);
       } catch (error) { await invalidate(s, "authorization_changed"); throw error; }
-      const node = await (await collection(NODES)).findOne({ _id: s.bindingId });
-      demand(node?.sharingOptIn === true && node.artifactSha256 === s.artifactSha256 && await proofFor(node, s.providers),
-        "REALTIME_INTEGRATION_REQUIRED", "实时模型证明或共享授权已变化，请停止本会话", 503);
-      const snapshot = await slots.snapshot({ bindingId: s.bindingId, now: clock() });
-      demand(snapshot.available && snapshot.leases.some((lease) => lease.claimId === id && lease.taskId === id && lease.exclusive === true),
-        "REALTIME_LEASE_EXPIRED", "实时物理执行租约已失效，请停止本会话");
+      await currentNodePermit(s);
     }
     return s;
   }
   function workerView(s) { return { id: s._id, generation: s.generation, state: s.state, providers: s.providers,
     transport: DIGITAL_LIVE_MEDIA_TRANSPORT, worker_lease_expires_at: s.workerLeaseUntil, expires_at: s.expiresAt,
     media_generation: s.mediaGeneration || 0, last_event_sequence: s.nodeEventSequence || 0,
+    input_audio: s.activeAsr ? { utterance_id: s.activeAsr.utterance_id, request_id: s.activeAsr.request_id, turn_id: s.activeAsr.turn_id,
+      state: s.activeAsr.state, model: s.providers.asr_model, content_type: DIGITAL_LIVE_PCM_MIME, max_bytes: 640000,
+      input: s.activeAsr.input, read_path: `${DIGITAL_LIVE_REALTIME_ROOT}/sessions/${s._id}/input-audio/${s.generation}/${s.activeAsr.utterance_id}` } : null,
     turn: s.activeTurn ? { turn_id: s.activeTurn.turn_id, request_id: s.activeTurn.request_id, user_text: s.activeTurn.user_text,
       history: s.activeTurn.history, context_tokens: 8192, max_output_tokens: 1024, media_generation: s.activeTurn.media_generation, state: s.activeTurn.state } : null,
     queue: s.queue.map(({ turn_id, sequence, text, state, media_generation, turn_sequence, duration_seconds, timestamp_offset }) =>
@@ -370,20 +463,44 @@ export function createDigitalLiveRealtimeService({ getCollection = databaseColle
     const s = await worker(binding, id, secret, { allowEnded: body.event === "stopped" });
     demand(body.generation === s.generation, "REALTIME_GENERATION_MISMATCH", "旧代次事件不能恢复会话");
     demand(JSON.stringify(providerSchema.parse(body.providers)) === JSON.stringify(s.providers), "REALTIME_PROVIDER_MISMATCH", "必须回传实际使用的精确模型、角色和音色；禁止小模型替代");
-    if (["text_delta", "media_announcement", "turn_finished"].includes(body.event)) {
+    if (["text_delta", "media_announcement", "turn_finished", "asr_partial", "asr_final"].includes(body.event)) {
       demand(!terminal(s.state) && !["cancelling", "interrupting"].includes(s.state), "REALTIME_SESSION_ENDED", "会话已停止接收流式事件");
       demand(KEY.test(body.event_id || "") && Number.isSafeInteger(body.event_sequence) && body.event_sequence > 0,
         "REALTIME_EVENT_INVALID", "流式事件须使用持久原事件编号与连续事件序号", 400);
       const hash = digest(body), old = (s.eventKeys || []).find((item) => item.id === body.event_id || item.sequence === body.event_sequence);
       if (old) { demand(old.hash === hash, "REALTIME_IDEMPOTENCY_CONFLICT", "原流式事件编号已对应其他内容"); return workerView(s); }
       demand(body.event_sequence === (s.nodeEventSequence || 0) + 1, "REALTIME_EVENT_SEQUENCE_CONFLICT", "节点事件序号必须按原会话连续递增");
-      const current = s.activeTurn;
-      demand(current?.turn_id === body.turn_id && current.state === "generating" && body.media_generation === current.media_generation,
+      const current = s.activeTurn, audio = s.activeAsr, asr = body.event.startsWith("asr_");
+      if (!asr) demand(current?.turn_id === body.turn_id && current.state === "generating" && body.media_generation === current.media_generation,
         "REALTIME_TURN_MISMATCH", "流式事件不是当前生成轮次或媒体代次");
       const values = { nodeEventSequence: body.event_sequence,
         eventKeys: [...(s.eventKeys || []), { id: body.event_id, sequence: body.event_sequence, hash }].slice(-128) };
       let event;
-      if (body.event === "text_delta") {
+      if (asr) {
+        demand(s.state === "listening" && audio?.utterance_id === body.utterance_id && audio.turn_id === body.turn_id && audio.inputStartedAt
+          && s.providers.asr_model && typeof body.text === "string" && body.text.trim() && body.text.length <= 2000,
+          "REALTIME_ASR_EVENT_INVALID", "语音事件必须对应当前语句、轮次和实际ASR模型", 400);
+        if (body.event === "asr_partial") {
+          values.activeAsr = { ...audio, partial_text: body.text };
+          event = { type: "asr.partial", utterance_id: audio.utterance_id, turn_id: audio.turn_id, text: body.text, model: s.providers.asr_model };
+        } else {
+          demand(audio.input && audio.input.sha256 === body.input_sha256 && audio.input.bytes === body.input_bytes,
+            "REALTIME_ASR_INPUT_UNCERTAIN", "完整ASR结果必须对应网关已收齐的同一份语音输入");
+          demand(Buffer.byteLength(body.text) + audio.history.reduce((sum, item) => sum + Buffer.byteLength(item.content) + 32, 0) <= 6144,
+            "REALTIME_CONTEXT_LIMIT", "识别结果及历史超过对话预算，未启动LLM", 413);
+          const turnBody = { generation: s.generation, request_id: audio.request_id, turn_id: audio.turn_id, user_text: body.text, history: audio.history };
+          values.activeTurn = { ...turnBody, media_generation: (s.mediaGeneration || 0) + 1, context_tokens: 8192, max_output_tokens: 1024,
+            state: "generating", assistant_text: "", media_count: 0, last_timestamp_offset: -1 };
+          values.activeAsr = { ...audio, state: "final", final_text: body.text, partial_text: "", media_generation: values.activeTurn.media_generation,
+            turnEventCursor: (s.eventCursor || 0) + 1 };
+          values.mediaGeneration = values.activeTurn.media_generation; values.state = "rendering"; values.nodeFinished = false;
+          values.turnKeys = [...(s.turnKeys || []), { request_id: audio.request_id, turn_id: audio.turn_id, generation: s.generation,
+            media_generation: values.mediaGeneration, hash: digest(turnBody) }];
+          event = { type: "asr.final", utterance_id: audio.utterance_id, turn_id: audio.turn_id, request_id: audio.request_id,
+            text: body.text, model: s.providers.asr_model, media_generation: values.mediaGeneration,
+            input_sha256: audio.input.sha256, input_bytes: audio.input.bytes, event_cursor_start: (s.eventCursor || 0) + 1 };
+        }
+      } else if (body.event === "text_delta") {
         demand(typeof body.delta === "string" && body.delta.length > 0 && Buffer.byteLength(body.delta) <= 4096
           && Buffer.byteLength(current.assistant_text + body.delta) <= 16 * 1024, "REALTIME_TEXT_LIMIT", "文字增量或整轮文本超过安全上限", 413);
         values.activeTurn = { ...current, assistant_text: current.assistant_text + body.delta };
@@ -454,7 +571,7 @@ export function createDigitalLiveRealtimeService({ getCollection = databaseColle
     const tickets = await collection(TICKETS), record = await tickets.findOne({ _id: digest(secret), sessionId: id, product: "digital_live",
       generation, sequence, origin, usedAt: null, expiresAt: { $gt: clock() } });
     demand(record, "REALTIME_MEDIA_TICKET_INVALID", "媒体票据已使用、到期或来源不匹配", 401);
-    const s = await owned(record.ownerId, id); await liveBinding(s);
+    const s = await owned(record.ownerId, id); await currentNodePermit(s);
     demand(s.generation === generation && s.queue.some((item) => item.sequence === sequence), "REALTIME_GENERATION_MISMATCH", "旧代次媒体已失效");
     const claimed = await tickets.updateOne({ _id: record._id, usedAt: null, expiresAt: { $gt: clock() } }, { $set: { usedAt: clock() } });
     demand(claimed.modifiedCount === 1, "REALTIME_MEDIA_TICKET_INVALID", "媒体票据已被使用", 401);
@@ -467,11 +584,17 @@ export function createDigitalLiveRealtimeService({ getCollection = databaseColle
     return { sessionId: id, generation, sequence, mimeType: s.providers.mime_type };
   }
   async function mediaSent(id, generation, sequence) {
-    const s = await read(id);
-    demand(s.generation === generation && !terminal(s.state), "REALTIME_GENERATION_MISMATCH", "旧代次媒体不能确认发送");
-    demand(s.queue.some((item) => item.sequence === sequence && item.state === "queued"), "REALTIME_SEQUENCE_CONFLICT", "句段已经发送或失效");
-    await patch(s, { queue: s.queue.map((item) => item.sequence === sequence ? { ...item, state: "sent" } : item) });
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const s = await read(id);
+      demand(s.generation === generation && !terminal(s.state), "REALTIME_GENERATION_MISMATCH", "旧代次媒体不能确认发送");
+      const item = s.queue.find((item) => item.sequence === sequence);
+      if (item?.state === "sent") return;
+      demand(item?.state === "queued", "REALTIME_SEQUENCE_CONFLICT", "句段已经发送或失效");
+      try { await patch(s, { queue: s.queue.map((item) => item.sequence === sequence ? { ...item, state: "sent" } : item) }); return; }
+      catch (error) { if (error.code !== "REALTIME_STATE_CONFLICT" || attempt === 3) throw error; }
+    }
   }
   async function mediaFailed(id) { const s = await read(id); return invalidate(s, "media_disconnected", "cancelling"); }
-  return { report, catalog, create, get, turn, turnByRequest, events, byRequest, cancelByRequest, mutate, claim, workerState, workerEvent, ticket, consumeTicket, mediaPermit, mediaSent, mediaFailed };
+  return { report, catalog, create, get, turn, turnByRequest, events, beginAsr, asrByRequest, inputTicket, consumeInputTicket, audioReadPermit, audioReaderReady, audioReceived,
+    byRequest, cancelByRequest, mutate, claim, workerState, workerEvent, ticket, consumeTicket, mediaPermit, mediaSent, mediaFailed };
 }

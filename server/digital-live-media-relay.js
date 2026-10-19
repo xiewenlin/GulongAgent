@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
+
 /** A bounded, single-process byte relay. No model, COS object, complete MP4 or
  * base64 buffer is created here. Consumers must connect to the same persistent
  * Tencent process. A deployment/disconnect cancels only the owning session. */
 export function createDigitalLiveMediaRelay({ maxStreams = 8, maxBytes = 16 * 1024 * 1024, maxChunkBytes = 256 * 1024,
-  timeoutMs = 60_000, writeTimeoutMs = 5000, onSent = async () => {}, onFailed = async () => {} } = {}) {
+  timeoutMs = 60_000, writeTimeoutMs = 5000, format = "fmp4", onSent = async () => {}, onFailed = async () => {} } = {}) {
   const streams = new Map();
   const keyOf = (p) => `${p.sessionId}:${p.generation}:${p.sequence}`;
   const error = (code, message, status = 409) => Object.assign(new Error(message), { code, status });
@@ -61,15 +63,16 @@ export function createDigitalLiveMediaRelay({ maxStreams = 8, maxBytes = 16 * 10
     if (entry.writing) throw error("REALTIME_MEDIA_ALREADY_WRITING", "原句段媒体正在传输，不能重复上传");
     if (!body || permit.mimeType !== entry.mimeType) throw error("REALTIME_MEDIA_INVALID", "媒体格式不匹配", 400);
     entry.writing = true;
-    if (permit.validate) {
+    const validate = permit.validate || entry.validate;
+    if (validate) {
       entry.validationTimer = setInterval(() => {
         if (entry.validating || entry.closed) return;
         entry.validating = true;
-        Promise.resolve(permit.validate()).catch((cause) => close(entry, cause)).finally(() => { entry.validating = false; });
+        Promise.resolve(validate()).catch((cause) => close(entry, cause)).finally(() => { entry.validating = false; });
       }, 2000); entry.validationTimer.unref?.();
     }
-    let bytes = 0, header = new Uint8Array(0), checked = false;
-    const framing = framingInspector();
+    let bytes = 0, header = new Uint8Array(0), checked = format === "pcm16";
+    const framing = format === "pcm16" ? null : framingInspector(), hash = createHash("sha256");
     const reader = body.getReader();
     entry.inputReader = reader;
     const abort = () => close(entry, error("REALTIME_MEDIA_DISCONNECTED", "媒体上传连接已断开"));
@@ -80,7 +83,7 @@ export function createDigitalLiveMediaRelay({ maxStreams = 8, maxBytes = 16 * 10
         const result = await reader.read(); if (result.done) break;
         const chunk = result.value; bytes += chunk?.byteLength || 0;
         if (!(chunk instanceof Uint8Array) || chunk.byteLength > maxChunkBytes || bytes > maxBytes) throw error("REALTIME_MEDIA_LIMIT", "媒体分片或总大小超过安全上限", 413);
-        framing.push(chunk);
+        hash.update(chunk); framing?.push(chunk);
         if (!checked) {
           const next = new Uint8Array(header.length + chunk.length); next.set(header); next.set(chunk, header.length); header = next;
           if (header.length < 12) continue;
@@ -96,9 +99,11 @@ export function createDigitalLiveMediaRelay({ maxStreams = 8, maxBytes = 16 * 10
         header = new Uint8Array(0);
       }
       if (!checked || !bytes) throw error("REALTIME_FMP4_INVALID", "媒体初始化片段不完整", 400);
-      framing.finish();
-      await onSent(entry.sessionId, entry.generation, entry.sequence);
-      await entry.writer.close(); close(entry); return { ok: true, bytes };
+      framing?.finish();
+      if (format === "pcm16" && bytes % 2) throw error("REALTIME_PCM_INVALID", "PCM16输入必须是完整的16位采样", 400);
+      const sha256 = hash.digest("hex");
+      await onSent(entry.sessionId, entry.generation, entry.sequence, { bytes, sha256 });
+      await entry.writer.close(); close(entry); return { ok: true, bytes, sha256 };
     } catch (cause) { close(entry, cause); await reader.cancel().catch(() => {}); throw cause; }
     finally { signal?.removeEventListener("abort", abort); entry.inputReader = null; reader.releaseLock(); }
   }

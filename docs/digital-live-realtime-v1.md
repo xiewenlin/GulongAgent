@@ -1,6 +1,6 @@
 # 数字直播实时会话与有界媒体网关 v1
 
-状态：会话控制、身份隔离及媒体直通源码已实现，可审查/测试；**连续实时验证器和真实节点尚未验收，生产始终 `dispatchable=false`、`acceptance=adapter_required`**。不能把九项异步自动验收、模型文件存在、CPU编码测试或客户端原型当作连续直播通过。本次不占GPU、不改Windows服务、不安装依赖。
+状态：会话控制、身份隔离、媒体直通、远程有界PCM输入及候选挑战/字节观察接口已实现，可审查/测试；**真实神经模型与独立播放见证验证器尚未接通，真实节点未验收，生产仍 `dispatchable=false`、`acceptance=adapter_required`**。候选result没有激活权限。不能把九项异步自动验收、模型文件存在、CPU编码测试或客户端原型当作连续直播通过。本次不占GPU、不改Windows服务、不安装依赖。
 
 ## 部署边界
 
@@ -25,6 +25,7 @@
   "voice_id":"c01",
   "character_image_sha256":"替换为真实64位小写SHA256",
   "voice_audio_sha256":"替换为真实64位小写SHA256",
+  "asr_model":"仅在该精确组合独立验收远程ASR后出现的实际模型编号",
   "mime_type":"video/mp4; codecs=\"avc1.42E01E, mp4a.40.2\""
 }
 ```
@@ -100,6 +101,29 @@ worker-state的 `turn` 包含原user_text/history、request_id/turn_id、context
 
 本模块单元/内存HTTP测试不是GPU验收。后续真实联调至少要：实际27B→TTS→神经avatar连续10轮、精确角色/音色摘要、首token/首样本/首帧、播放fps/偏差/队列水位、打断静音和worker回收、断线/重连、跨账号/分组拒绝、物理GPU独占/真实共驻。生产无验证器时任何客户端都不能自行注册ready。
 
-官网任务负责后续受控challenge和服务端证据验证/写入通道；节点实际消费者由H3所属任务在九项自然安全检查点实现/实跑，数字直播任务负责客户端和独立神经worker。当前提交未实现该实时验证器，故不开放派发。不能手写proof、用环境开关解封或借用异步gcv。
+官网任务负责受控challenge和服务端证据验证/写入通道；节点实际消费者由H3所属任务在九项自然安全检查点实现/实跑，数字直播任务负责客户端和独立神经worker。当前已有下述候选观察接口，但独立真实神经/播放见证验证器仍缺，因此不开放派发。不能手写proof、用环境开关解封或借用异步gcv。
 
-远程真人麦克风/ASR同样尚未开放（config.remote_asr明确integration_required/null）。后续由官网补同会话/代次/租约下有界16k mono PCM16或短WAV二进制输入、指定节点真实ASR、partial/final与语音端点/ACK背压/取消；节点只读本会话音频，不持久录音，final接同一原请求turn。客户端负责原生有界音频代理，不用WebSpeech冒充模型，也不能静默改用本地H3。仅文字turn+视频通过不能称为真人连续语音完整链路。
+## 远程真人语音输入（源码已接，真实ASR仍未开放）
+
+只有实际provider行含 `asr_model` 且同一真实组合证明的 `realtime_asr` 独立通过才可使用；库存不能自动取得该字段权限。config.remote_asr明确integration_required。仅文字turn+视频通过不能称为真人连续语音完整链路。
+
+1. 客户端 `POST /sessions/{id}/asr/utterances`：`{generation,request_id,turn_id,utterance_id,history}`，稳定原键，不传模型或音频JSON。仅上一轮已真实排空时开始，最多16项/4096字节历史；同键不同内容409。`GET /sessions/{id}/asr/by-request/{request_id}` 查询原语句，未知不能重录重投。
+2. worker-state.input_audio含utterance_id/request_id/turn_id、实际ASR model、state、固定content_type、max_bytes、input摘要及read_path。指定节点先带绑定/原实时lease `GET /sessions/{id}/input-audio/{generation}/{utterance_id}`，常驻网关建立有界读取连接后持久记录reader_ready。
+3. 客户端 `POST /sessions/{id}/asr/input-ticket`：`{generation,utterance_id,origin}`，返回一次 `DigitalLiveInput dli_...` header票据、input_url、method=PUT、期限和格式。URL不含票据，最长30秒且不超节点lease。必须等active_asr.reader_ready；输入开始后不再签新票据。
+4. 客户端向腾讯input_url PUT二进制，Header `Authorization: DigitalLiveInput dli_...`、原Origin、`Content-Type: audio/pcm; rate=16000; channels=1; format=s16le`。单声道16k/s16le、每段最多20秒/640000字节，建议100ms=3200字节采集块，网络合并允许64KiB。以EOF为这段明确端点，传输最多25秒、背压5秒；不是HTTP1浏览器在说话中必然持续发送的保证。原生代理应有界采集/上传，不Base64、不WebSpeech、不持久录音。
+5. 网关完整统计bytes/SHA256，仅保存摘要，不保存音频。节点 `worker-events` 用原event_id/event_sequence/generation/providers/utterance_id/turn_id，`event:"asr_partial",text` 产生 `asr.partial`；`event:"asr_final",text,input_sha256,input_bytes` 必须与网关完整输入一致才接收。旧代次、旧语句、未收齐或摘要不符均拒绝。
+6. **ASR final原子派生同一原request_id/turn_id的activeTurn**，由原指定节点接着跑27B。客户端不得再次调用普通live.send或POST /turns，否则会重复执行。`asr.final` 和active_asr查询包含generation/media_generation、原request_id/turn_id、input_sha256/input_bytes及event_cursor_start；客户端核对自己同一PCM摘要后，只查/附着原轮次。PUT回包丢失且状态receiving/unknown时不盲重传；input_received=true时只等原识别结果。取消或中断推进原session generation并关闭输入，不能让旧final恢复新轮次。
+
+## 候选真实挑战与服务端字节观察（不会激活生产）
+
+源码 `server/digital-live-verification.js`，节点继续使用自己的绑定，不向数字直播客户端传绑定密钥。所有后续挑战调用另带 `X-Gulong-Realtime-Verification-Lease`，不是业务实时租约。以下接口不是管理员手填验收，普通网页用户不可调用。
+
+- `POST /verifications/next`：节点先持久保存 `{request_id,lease_token,provider_sha256,mode:"media"|"asr",dry_run:false}`。lease_token为本机新生成43位base64url高熵随机值，服务端只保存hash。`{dry_run:true}`只返回reachable、无挑战/预算/租约。必须有本节点当前选择共享的精确库存、新鲜idle GPU、空任务列表、无H3任务和空物理槽；不能抢九项验收。按原请求键重试只恢复原挑战。
+- 每节点实时候选每天最多2次，同时计入既有每节点总验收16次预算；复用九项 `binding:*` / `global:0..3` 四个全站并发锁和独占物理槽，固定15分钟租约。超预算/忙碌不触发模型。原键保留失败/未发出记录，不自动换键重跑。
+- `GET /verifications/by-request/{key}` 或 `/{id}` 查询原挑战。返回dlv ID、state/lease_valid、固定providers、provider_sha256、预算、固定随机nonce十轮短句或ASR输入下载票据；不返回binding/user/email/token。媒体模式最多10轮、每轮32输出token、音频总计60秒，第5轮需打断测试。ASR模式只允许现有服务器固定JFK 11秒完整FLAC夹具及其SHA，最多一次推理，不能换URL/音频。
+- 节点媒体模式向腾讯 `PUT /verifications/{id}/media/{sequence}`（1–10）流式发原fMP4，Content-Type必须与原组合一致。服务器逐块检查、计算全字节摘要后丢弃原媒体，最多16MiB/片，不缓存完整视频或落库原音视频；查询只显示接收状态/大小/摘要。原片状态receiving/received/failed不自动重传或重跑模型，先查原请求。
+- `POST /verifications/{id}/result` 提交有界**不可信声明**：`actual_provider_sha256,completed_turns,played_sequences,ended,interrupt{before_generation,after_generation,stopped_ms}`，ASR另含 `asr{fixture_sha256,transcript}`。ASR可省略没有实际执行的播放/打断字段，不能伪造数值。媒体声明与网关实际收到的十片字节记录分开保存；ASR需固定源摘要及完整转录关键句。缺实际媒体时awaiting_runtime_witness，数据错误failed。
+- **即使十片实际字节/所有客户端声明看似完整，当前result也只能adapter_required，绝不写入capabilityAutoVerifications active或放开目录**。还缺真实神经运行身份和独立播放见证验证器；字节格式/客户端claimed played不能冒充这个证据。此接口连注入的验证器返回active都会拒绝转成激活状态。
+- result完成不等于GPU释放。节点确认本次owned worker真实停止后 `POST /verifications/{id}/stopped {owned_worker_stopped:true}`，才幂等释放精确物理/全站锁；传输仍在进行则409，异常失联依15分钟租约到期。挑战/摘要7天TTL，保留失败证据，不阻塞其他节点。
+
+当前上述源码/内存HTTP测试是协议与边界证据，未创建真实挑战、未请求模型。真实消费者、独立播放见证、可激活的神经验证器仍是后续必须完成的工作，不能宣称真人直播已全链路打通。
