@@ -13,6 +13,13 @@ const OFFICIAL_BROWSER_ORIGINS = [
   "https://sologle.com",
 ];
 
+// Every signed header must pass the browser preflight, not only Content-Type.
+export const SHARED_UPLOAD_HEADERS = Object.freeze([
+  "content-type", "x-cos-meta-sha256", "x-cos-meta-bytes", "x-cos-meta-owner-id",
+  "x-cos-meta-capability-asset-id", "x-cos-forbid-overwrite", "x-cos-meta-capability-order-id",
+  "x-cos-meta-capability-output-id", "x-cos-meta-node-id-hash",
+]);
+
 function required(name) {
   const value = process.env[name]?.trim();
   if (!value) throw new ConfigurationError(`腾讯云 COS 尚未配置 ${name}`);
@@ -71,8 +78,37 @@ export function browserUploadCorsReady(rules, origins = OFFICIAL_BROWSER_ORIGINS
     const allowedHeaders = ruleValues(rule, "AllowedHeader").map((header) => header.toLowerCase());
     return (allowedOrigins.includes(origin) || allowedOrigins.includes("*"))
       && allowedMethods.includes("PUT")
-      && (allowedHeaders.includes("*") || allowedHeaders.includes("content-type"));
+      && (allowedHeaders.includes("*") || SHARED_UPLOAD_HEADERS.every((header) => allowedHeaders.includes(header)));
   }));
+}
+
+// A bounded metadata report only: never return bucket names, keys, raw CORS
+// rules, SDK errors, URLs or credentials. This does not run an upload/probe.
+export function capabilityUploadPolicySummary(versioning, cors, origins) {
+  const versioningKnown = versioning?.status === "fulfilled"
+    && versioning.value?.VersioningConfiguration
+    && typeof versioning.value.VersioningConfiguration === "object"
+    && !Array.isArray(versioning.value.VersioningConfiguration);
+  const corsKnown = cors?.status === "fulfilled" && Array.isArray(cors.value?.CORSRules);
+  const writeOnce = Boolean(versioningKnown && singleWriteBucketReady(versioning.value));
+  const browserCors = Boolean(corsKnown && browserUploadCorsReady(cors.value.CORSRules, origins));
+  return { schema: "shared-upload-policy-audit-v1", mode: "read_only", ready: writeOnce && browserCors,
+    versioning: !versioningKnown ? "unavailable" : writeOnce ? "write_once_compatible" : "incompatible",
+    browser_cors: !corsKnown ? "unavailable" : browserCors ? "ready" : "missing_required_origins_or_headers",
+    origin_count: origins.length, checked_at: new Date().toISOString(), object_writes: 0,
+    bucket_policy_writes: 0, model_requests: 0, real_transfer_verified: false };
+}
+
+export async function inspectCapabilityUploadPolicy(origins) {
+  if (!Array.isArray(origins) || !origins.length || origins.some((origin) => {
+    try { const url = new URL(origin); return url.origin !== origin || url.protocol !== "https:"; }
+    catch { return true; }
+  })) throw new Error("只读存储核验需要明确的 HTTPS 来源");
+  const cos = getClient();
+  const [versioning, cors] = await Promise.allSettled([
+    cos.getBucketVersioning(bucketParams()), cos.getBucketCors(bucketParams()),
+  ]);
+  return capabilityUploadPolicySummary(versioning, cors, origins);
 }
 
 export async function ensureBrowserUploadCors() {

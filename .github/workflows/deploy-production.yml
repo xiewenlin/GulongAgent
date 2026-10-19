@@ -60,6 +60,7 @@ jobs:
           mkdir -p "$bundle/scripts"
           cp scripts/backfill-gulong-engine-credits.mjs "$bundle/scripts/"
           cp scripts/purge-super-video-activation-codes.mjs "$bundle/scripts/"
+          cp scripts/inspect-capability-storage.mjs "$bundle/scripts/"
           printf '%s\n' "$GITHUB_SHA" > "$bundle/.deploy-commit"
           tar -czf "$archive" -C "$bundle" .
 
@@ -231,6 +232,19 @@ jobs:
             --retry 8 --retry-delay 3 --retry-all-errors \
             "$health_url" >/dev/null
           printf '### Tencent Cloud production\n\n- Health: %s\n- Commit: `%s`\n' "$health_url" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Read-only shared-upload policy audit
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          policy="$(ssh -p "${{ steps.ssh.outputs.port }}" \
+            -i "${{ steps.ssh.outputs.key }}" \
+            -o UserKnownHostsFile="${{ steps.ssh.outputs.known_hosts }}" \
+            -o StrictHostKeyChecking=yes \
+            "$TENCENT_SSH_USER@$TENCENT_SSH_HOST" \
+            "cd /opt/gulong/current && node --env-file=/etc/gulong/gulong.env scripts/inspect-capability-storage.mjs")"
+          printf '::notice title=Shared upload policy (read-only; not model acceptance)::%s\n' "$policy"
+          printf '\n### Shared upload storage observation\n\n```json\n%s\n```\n\nMetadata only; no upload, bucket changes or model acceptance.\n' "$policy" >> "$GITHUB_STEP_SUMMARY"
 
   frontend-parity:
     name: Verify Vercel and Tencent frontend parity
