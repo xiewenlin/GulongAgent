@@ -1,6 +1,7 @@
 import { POSE_IMAGE_FIXTURE, POSE_VIDEO_FIXTURE, WHISPER_AUDIO_FIXTURE } from "./capability-probe-fixtures.js";
 import { validateSpecialInlineResult, wholeLyricsInTranscript } from "./worklucky-capabilities.js";
 import { createHash } from "node:crypto";
+import { verifiedImageModelScope } from "./capability-verification-adapters.js";
 
 // Native component revisions are not invented numeric API versions. Formats
 // stay bounded; only these capability-specific versions have real adapters.
@@ -59,6 +60,17 @@ export function automaticNativeNodeMatchesOrder(report, order) {
 }
 
 export function nativeVerificationAvailability(capabilityId, reports = []) {
+  if (capabilityId === "qwen_image_2_1.text_to_image") {
+    const models = new Map();
+    for (const report of reports) {
+      if (report.automaticVerification !== true || report.trustedAcceptance !== true || report.contractTests?.exact_image_scope !== true) continue;
+      for (const model of report.models || []) {
+        const scope = verifiedImageModelScope(capabilityId, model);
+        if (scope) models.set(JSON.stringify(scope), scope);
+      }
+    }
+    return { models: [...models.values()] };
+  }
   if (!Object.hasOwn(MODEL_IDS, capabilityId)) return {};
   const profiles = new Map();
   for (const report of reports) {

@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
+import { OpenAPIHono } from "@hono/zod-openapi";
+import { ObjectId } from "mongodb";
+import { createCapabilityMemoryCollection } from "../helpers/capability-memory.mjs";
 import { createNativeCapabilityVerificationAdapters, NATIVE_PROBE_VERSIONS, automaticNativeNodeMatchesOrder, nativeVerificationAvailability } from "../../server/capability-native-verification.js";
 import { normalizeAutoVerificationInventory } from "../../server/capability-auto-verification.js";
 import { POSE_VIDEO_FIXTURE } from "../../server/capability-probe-fixtures.js";
-import { normalizeCapabilityParameters, CAPABILITY_ORDER_DEFINITIONS, capabilityNodeCanRunOrder, normalizeCapabilityReport } from "../../server/capability-orders.js";
+import { normalizeCapabilityParameters, CAPABILITY_ORDER_DEFINITIONS, capabilityNodeCanRunOrder, normalizeCapabilityReport, registerCapabilityOrderRoutes, CAPABILITY_ORDER_PROTOCOL } from "../../server/capability-orders.js";
 
 // Protocol/validator stand-ins are memory-only. Actual COS byte inspection has
 // separate tests; none of these tests invokes or claims a real installed model.
@@ -56,6 +59,49 @@ test("native adapters retain actual component IDs and revisions instead of inven
     const capability = CAPABILITY_ORDER_DEFINITIONS.find((item) => item.capabilityId === id);
     assert.deepEqual(normalizeCapabilityParameters(f.probe.parameters, capability), f.probe.parameters);
   }
+});
+
+test("legacy native Qwen text-to-image exposes only its exact automatic model scopes in availability.models", () => {
+  const id = "qwen_image_2_1.text_to_image";
+  const scope = { id: "qwen-image21-uc", task: "text_to_image", input_asset_count: 0, width: 512, height: 512, steps: 4, guidance_scale: 4, batch_size: 1 };
+  const report = { automaticVerification: true, trustedAcceptance: true, contractTests: { exact_image_scope: true }, models: [scope] };
+  assert.deepEqual(nativeVerificationAvailability(id, [report, report]), { models: [scope] });
+  for (const patch of [{ automaticVerification: false }, { trustedAcceptance: false }, { contractTests: {} },
+    { models: [{ ...scope, width: 2048 }] }, { models: [{ ...scope, id: "unknown-native-model" }] }]) {
+    assert.deepEqual(nativeVerificationAvailability(id, [{ ...report, ...patch }]), { models: [] });
+  }
+  assert.deepEqual(nativeVerificationAvailability(id, []), { models: [] });
+});
+
+test("the authenticated native Qwen catalog route returns its real automatic model without injecting a model parameter", async () => {
+  const requester = { _id: new ObjectId(), status: "active", role: "user" }, executor = { _id: new ObjectId(), status: "active", role: "user" };
+  const binding = { _id: new ObjectId(), userId: executor._id, nodeId: "native-qwen-node", status: "active", revokedAt: null,
+    autoVerificationPolicy: "capability-v2", autoVerificationCapabilityIds: ["qwen_image_2_1.text_to_image"] };
+  const scope = { id: "qwen-image21-uc", task: "text_to_image", input_asset_count: 0, width: 512, height: 512, steps: 4, guidance_scale: 4, batch_size: 1 };
+  const report = normalizeCapabilityReport({ capability_id: "qwen_image_2_1.text_to_image", capability_version: "2.1", protocol_version: CAPABILITY_ORDER_PROTOCOL,
+    installed: true, enabled: true, validated: true, sharing_opt_in: true, validation: { tested_at: new Date(), artifact_sha256: "a".repeat(64) } });
+  const collections = new Map(), collection = (name) => {
+    if (!collections.has(name)) collections.set(name, createCapabilityMemoryCollection());
+    return collections.get(name);
+  };
+  collection("users").rows.push(requester, executor); collection("nodeAccountBindings").rows.push(binding);
+  collection("capabilityNodeReports").rows.push({ _id: new ObjectId(), bindingId: binding._id, userId: executor._id, nodeId: binding.nodeId,
+    protocolVersion: CAPABILITY_ORDER_PROTOCOL, capabilities: [report], reportedAt: new Date(), resources: { max_concurrent_tasks: 1, running_task_count: 0 } });
+  const app = new OpenAPIHono(); let accepted = true;
+  registerCapabilityOrderRoutes(app, { getCollection: async (name) => collection(name), getUserComputeGroupId: async () => null,
+    enforceRateLimit: async () => ({ allowed: true }), requireTrustedMutation: () => null,
+    authenticate: async () => ({ kind: "desktop-gulong-engine", user: { ...requester, id: String(requester._id) } }),
+    findTrustedConsumerAcceptance: async () => accepted ? { source: "automatic", models: [scope], defaultModel: scope.id, contractTests: { exact_image_scope: true }, asrLanguages: [] } : null });
+  const catalog = async () => {
+    const response = await app.request("http://localhost/api/v1/capability-orders/catalog?product=gulong_engine");
+    assert.equal(response.status, 200);
+    return (await response.json()).capabilities.find((row) => row.capability_id === "qwen_image_2_1.text_to_image");
+  };
+  const ready = await catalog();
+  assert.equal(ready.availability.verified_node_count, 1); assert.deepEqual(ready.availability.models, [scope]);
+  assert.equal(ready.parameters_schema.properties.model, undefined); assert.equal(ready.parameters_schema.additionalProperties, false);
+  accepted = false;
+  const offline = await catalog(); assert.equal(offline.availability.verified_node_count, 0); assert.deepEqual(offline.availability.models, []);
 });
 
 test("each native probe is bounded and fixture-backed; media outputs are never synthesized from a validated flag", async () => {
