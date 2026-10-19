@@ -143,7 +143,7 @@ function publicState(record) {
 }
 
 export function createCapabilityAutoVerificationService(dependencies) {
-  const { getCollection, verifyMediaOutputs, issueProbeOutputUpload, issueProbeInputDownloads, canProbe, acquireExecution, releaseExecution, adapters = {} } = dependencies;
+  const { getCollection, verifyMediaOutputs, issueProbeOutputUpload, getProbeOutputStatus, issueProbeInputDownloads, canProbe, acquireExecution, releaseExecution, adapters = {} } = dependencies;
   assert(typeof getCollection === "function", "VERIFICATION_DEPENDENCY_INVALID", "自动验收数据库未配置", 500);
   const now = dependencies.now || (() => new Date());
   const rateLimit = dependencies.enforceRateLimit || (async () => ({ allowed: false }));
@@ -489,6 +489,16 @@ export function createCapabilityAutoVerificationService(dependencies) {
     validateProbeOutputDescriptor(challenge, output);
     return issueProbeOutputUpload({ binding, challenge: { ...challenge, verificationId: challenge._id, _id: challenge.challengeId }, output });
   }
+  async function outputStatus({ binding, challengeId, leaseToken, outputId }) {
+    const challenge = await ownedChallenge(binding, challengeId, leaseToken, ["leased", "verifying"]);
+    assert(/^[A-Za-z0-9_-]{43}$/.test(outputId || ""), "VERIFICATION_OUTPUT_ID_INVALID", "验收输出编号格式不正确", 400);
+    await limited(challenge.bindingId, "output-status", 60);
+    assert(typeof getProbeOutputStatus === "function", "VERIFICATION_ADAPTER_REQUIRED", "验收输出只读恢复尚未就绪，请停止写入", 503);
+    const result = await getProbeOutputStatus({ binding, challenge: { ...challenge, verificationId: challenge._id, _id: challenge.challengeId }, outputId });
+    const current = await ownedChallenge(binding, challengeId, leaseToken, ["leased", "verifying"]);
+    return result.state === "confirmed_absent" && current.status !== "leased"
+      ? { ...result, state: "uncertain", retry_put_allowed: false, reason_code: "CHALLENGE_NOT_WRITABLE" } : result;
+  }
   async function validateResult(record, inlineResult, outputs, binding) {
     const adapter = adapters[record.capabilityId];
     if (adapter?.validateResult) {
@@ -604,7 +614,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
       testedAt: new Date(Math.min(...records.map((item) => +new Date(item.testedAt)))),
       expiresAt: new Date(Math.min(...records.map((item) => +new Date(item.expiresAt)))), verificationIds: records.map((item) => item._id) };
   }
-  return { report, next, submit, outputUpload, findTrusted, list, byRequest, getChallenge };
+  return { report, next, submit, outputUpload, outputStatus, findTrusted, list, byRequest, getChallenge };
 }
 
 async function boundedBody(c, limit = 64 * 1024) {
@@ -661,6 +671,12 @@ export function registerCapabilityAutoVerificationRoutes(app, dependencies) {
   });
   app.get(`${base}/by-request/:key`, boundLookup("byRequest", "requestId"));
   app.get(`${base}/challenges/:id`, boundLookup("getChallenge", "challengeId"));
+  app.get(`${base}/:id/outputs/:output_id`, route(async (c) => {
+    const auth = await requireBinding(c); if (auth.error) return auth.error;
+    assert(!Object.keys(c.req.query()).length, "VERIFICATION_QUERY_INVALID", "输出状态查询不能更改原文件清单", 400);
+    return c.json(await service.outputStatus({ binding: auth.binding, challengeId: c.req.param("id"), outputId: c.req.param("output_id"),
+      leaseToken: c.req.header("X-Gulong-Verification-Lease") }));
+  }));
   app.get(admin, route(async (c) => {
     const auth = await requireAdmin(c); if (auth.error) return auth.error;
     const parsed = z.object({ binding_id: z.string().regex(/^[a-f0-9]{24}$/i).optional(), limit: z.coerce.number().int().min(1).max(256).default(100) }).safeParse(c.req.query());
@@ -734,6 +750,19 @@ export function registerCapabilityAutoVerificationRoutes(app, dependencies) {
           400: { description: "编号或安全凭据格式不正确" }, 401: { description: "绑定已失效" }, 403: { description: "分组不一致" },
           404: { description: "当前节点从未创建此请求或任务" }, 409: { description: "已有请求的安全凭据不一致" }, 429: { description: "查询过于频繁" } } });
     }
+    app.openAPIRegistry.registerPath({ method: "get", path: `${base}/{id}/outputs/{output_id}`, tags: ["Automatic Capability Verification"],
+      summary: "只读恢复原自动验收输出状态，不签发新上传或验收证明", security: [{ accountBinding: [] }],
+      request: { params: z.object({ id: z.string().regex(/^gcv_[a-f0-9-]{36}$/), output_id: z.string().regex(/^[A-Za-z0-9_-]{43}$/) }),
+        headers: z.object({ "X-Gulong-Verification-Lease": z.string().min(32).max(256) }) },
+      description: "同时提供绑定令牌和原journal租约，校验当前绑定/分组/租约及服务器登记的完整descriptor。仅HEAD及版本策略只读查询，不返回URL/PUT/新对象，不延长expires_at、不开放模型。confirmed_present仍须提交原output_id走result完整字节SHA与媒体校验。只有confirmed_absent且retry_put_allowed=true才可在原期限内按原对象/原字节/原headers重试原PUT；uncertain、404、403、409、429或网络未知必须停写保留journal。新票据签名含x-cos-forbid-overwrite=true；旧无防覆盖票据不授予absent重传。普通用户素材恢复入口不能替代本接口。",
+      responses: { 200: { description: "原输出的只读状态；不是模型或媒体验收通过", content: { "application/json": { schema: z.object({
+        ok: z.literal(true), challenge_id: z.string(), output_id: z.string(), state: z.enum(["confirmed_present", "confirmed_absent", "uncertain"]),
+        retry_put_allowed: z.boolean(), content_verified: z.literal(false), reason_code: z.string().nullable(),
+        descriptor: z.object({ role: z.enum(Object.keys(PROBE_OUTPUT_TYPES)), filename: z.string(), content_type: z.string(), bytes: z.number().int().positive(), sha256: artifactSchema, object_key: z.string() }),
+        expires_at: z.iso.datetime(), checked_at: z.iso.datetime() }) } } },
+        400: { description: "编号或查询参数不正确" }, 401: { description: "节点绑定已失效" }, 403: { description: "跨节点/分组或租约不匹配" },
+        404: { description: "当前租约没有登记此输出；不能当成COS对象不存在" }, 409: { description: "验收已结束、过期或清单不一致" },
+        429: { description: "每节点每分钟最多60次状态查询" }, 503: { description: "恢复适配器不可用，请停止写入" } } });
     app.openAPIRegistry.registerPath({ method: "get", path: admin, tags: ["Automatic Capability Verification"], summary: "管理员只读查询自动模型验收状态", security: [{ sessionCookie: [] }], responses: { 200: { description: "不包含租约令牌、随机探测内容、用户邮箱或模型原始结果" } } });
   }
 }

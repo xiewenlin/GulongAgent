@@ -18,6 +18,7 @@ export const SHARED_UPLOAD_HEADERS = Object.freeze([
   "content-type", "x-cos-meta-sha256", "x-cos-meta-bytes", "x-cos-meta-owner-id",
   "x-cos-meta-capability-asset-id", "x-cos-forbid-overwrite", "x-cos-meta-capability-order-id",
   "x-cos-meta-capability-output-id", "x-cos-meta-node-id-hash",
+  "x-cos-meta-verification-id", "x-cos-meta-binding-id", "x-cos-meta-verification-output-id", "x-cos-meta-verification-role",
 ]);
 
 function required(name) {

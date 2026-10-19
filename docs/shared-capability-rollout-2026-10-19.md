@@ -26,6 +26,8 @@
 
 发布日志中的 `shared-upload-policy-audit-v1` 是元数据观察，不是自动模型验收。`ready=false` 或 unavailable 必须保留阻断；即使 ready=true，`real_transfer_verified=false` 仍表示没有真实上传、完成和恢复闭环证明。本地缺少可信SSH指纹时不绕过主机校验；此检查不导出CI中保存的主机密钥或私钥。
 
+自动探测输出另有专用GET ` /api/v1/capability-verifications/{challenge_id}/outputs/{output_id}`，同时要求绑定与`X-Gulong-Verification-Lease`，固定原登记descriptor。它不签票据、不写对象、不修改验收；只有`confirmed_absent`且`retry_put_allowed=true`允许在原期限内重试原防覆盖PUT。`confirmed_present`仅作HEAD状态，仍走全内容result校验；uncertain及所有HTTP错误都停写。普通用户素材身份不能混用。精确字段和旧票据边界见统一合同“自动探测输出的只读恢复”一节。
+
 ## 尚不能混称为“全部开放”的项目
 
 统一 `gulong_engine.video` 新消费者、真实TTS全部音色、工具/多模态逐模型组合，以及其他尚无完整消费者/验证器的能力，必须逐项接通验证。原生H3旧视频队列 `/api/h3/tasks` 保持独立，不把异步视频完成当作统一实时流式通道。

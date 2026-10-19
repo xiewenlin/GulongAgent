@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { inflateSync } from "node:zlib";
-import { copyObject, createPresignedDownloadUrl, createPresignedPutUrl, deleteObject, headObject, sanitizeFilename } from "./cos.js";
+import { copyObject, createPresignedDownloadUrl, createPresignedPutUrl, deleteObject, headObject, sanitizeFilename, assertSingleWriteUploads } from "./cos.js";
 import { inspectFlacStream } from "./capability-flac.js";
 import { validateProbeOutputDescriptor, validateProbeOutputSet } from "./capability-probe-outputs.js";
 import { inspectProbeArchive } from "./capability-probe-archive.js";
@@ -114,7 +114,7 @@ export function inspectVerificationBinary(bytes, contentType, { maskStats = fals
 /** Only short-lived probe objects, never user works. Credentials/URLs stay out of audit records. */
 export function createCapabilityVerificationMedia({ getCollection, issueUploadUrl = createPresignedPutUrl,
   issueDownloadUrl = createPresignedDownloadUrl, inspectObject = headObject, publishObject = copyObject,
-  removeObject = deleteObject, fetchObject = fetch, now = () => new Date() }) {
+  removeObject = deleteObject, fetchObject = fetch, requireWriteOnce = assertSingleWriteUploads, now = () => new Date() }) {
   async function issueProbeOutputUpload({ binding, challenge, output }) {
     const root = prefix(challenge, binding), instant = new Date(now());
     const filename = sanitizeFilename(output.filename, "probe.bin").replace(/\.{2,}/g, "-");
@@ -130,15 +130,66 @@ export function createCapabilityVerificationMedia({ getCollection, issueUploadUr
     const expiresAt = new Date(Math.min(+new Date(challenge.leaseExpiresAt), +instant + 10 * 60_000));
     if (expiresAt <= instant) fail("自动验收执行租约已过期", "VERIFICATION_LEASE_EXPIRED");
     const record = { _id: outputId, challengeId: challenge._id, bindingId: String(binding._id), leaseTokenHash: challenge.leaseTokenHash,
-      outputId, objectKey, filename, role: output.role, contentType, bytes: output.bytes, sha256, expiresAt, cleanupAt: new Date(+instant + 24 * 60 * 60_000), status: "issued", createdAt: instant };
-    const existing = await collection.findOne({ _id: outputId });
-    if (existing && ["filename", "contentType", "bytes", "sha256", "objectKey"].some((key) => existing[key] !== record[key])) fail("同一自动验收输出不能更改文件清单", "VERIFICATION_OUTPUT_CONFLICT");
+      outputId, objectKey, filename, role: output.role, contentType, bytes: output.bytes, sha256, expiresAt, writeOnce: true,
+      cleanupAt: new Date(+instant + 24 * 60 * 60_000), status: "issued", createdAt: instant };
+    let existing = await collection.findOne({ _id: outputId });
+    const conflict = (value) => ["filename", "role", "contentType", "bytes", "sha256", "objectKey"].some((key) => value[key] !== record[key]);
+    if (existing && conflict(existing)) fail("同一自动验收输出不能更改文件清单", "VERIFICATION_OUTPUT_CONFLICT");
+    if (existing && existing.writeOnce !== true) fail("旧验收票据不能续签，请仅恢复已有结果或等待新探测", "VERIFICATION_OUTPUT_LEGACY_TICKET");
+    await requireWriteOnce();
     if (!existing) { try { await collection.insertOne(record); } catch (error) { if (error?.code !== 11000) throw error;
-      const winner = await collection.findOne({ _id: outputId });
-      if (!winner || ["filename", "contentType", "bytes", "sha256", "objectKey"].some((key) => winner[key] !== record[key])) fail("自动验收输出票据冲突");
+      existing = await collection.findOne({ _id: outputId });
+      if (!existing || conflict(existing) || existing.writeOnce !== true) fail("自动验收输出票据冲突");
     } }
-    const headers = { "Content-Type": contentType, "x-cos-meta-sha256": sha256, "x-cos-meta-bytes": String(output.bytes), "x-cos-meta-verification-id": challenge._id, "x-cos-meta-binding-id": String(binding._id) };
-    return { output_id: outputId, object_key: objectKey, url: issueUploadUrl(objectKey, { expires: Math.max(1, Math.floor((+expiresAt - +instant) / 1000)), headers }), method: "PUT", headers, expires_at: expiresAt.toISOString() };
+    const ticket = existing || record, originalExpiry = new Date(ticket.expiresAt);
+    if (originalExpiry <= new Date(now()) || !["issued", "verifying", "verified"].includes(ticket.status)) fail("原验收票据已结束，禁止重新签发", "VERIFICATION_LEASE_EXPIRED");
+    const headers = { "Content-Type": contentType, "x-cos-meta-sha256": sha256, "x-cos-meta-bytes": String(output.bytes),
+      "x-cos-meta-verification-id": challenge._id, "x-cos-meta-binding-id": String(binding._id),
+      "x-cos-meta-verification-output-id": outputId, "x-cos-meta-verification-role": output.role, "x-cos-forbid-overwrite": "true" };
+    const remainingSeconds = Math.floor((+originalExpiry - +new Date(now())) / 1000);
+    if (remainingSeconds < 1) fail("原验收票据剩余时间不足，禁止续签", "VERIFICATION_LEASE_EXPIRED");
+    return { output_id: outputId, object_key: objectKey, url: issueUploadUrl(objectKey, { expires: remainingSeconds, headers }), method: "PUT", headers, expires_at: originalExpiry.toISOString() };
+  }
+  async function getProbeOutputStatus({ binding, challenge, outputId }) {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(outputId || "")) fail("验收输出编号格式不正确", "VERIFICATION_OUTPUT_ID_INVALID", 400);
+    const root = prefix(challenge, binding), collection = await getCollection("capabilityVerificationOutputs");
+    const record = await collection.findOne({ _id: outputId, challengeId: challenge._id,
+      bindingId: String(binding._id), leaseTokenHash: challenge.leaseTokenHash });
+    if (!record) fail("未找到当前验收租约登记的输出文件", "VERIFICATION_OUTPUT_NOT_FOUND", 404);
+    const expiry = new Date(record.expiresAt);
+    if (!Number.isFinite(+expiry) || expiry <= new Date(now()) || !["issued", "verifying", "verified"].includes(record.status)) fail("原验收输出票据已过期或结束", "VERIFICATION_LEASE_EXPIRED");
+    if (record.outputId !== outputId || record.objectKey !== `${root}uploads/${outputId}-${record.filename}`
+      || record.filename !== sanitizeFilename(record.filename, "probe.bin").replace(/\.{2,}/g, "-")
+      || !/^[a-f0-9]{64}$/.test(record.sha256 || "")) fail("原验收输出的登记清单或对象归属不一致");
+    validateProbeOutputDescriptor(challenge, record);
+    const view = (state, reason = null) => ({ ok: true, challenge_id: challenge._id, output_id: outputId, state,
+      retry_put_allowed: state === "confirmed_absent", content_verified: false,
+      descriptor: { role: record.role, filename: record.filename, content_type: record.contentType,
+        bytes: record.bytes, sha256: record.sha256, object_key: record.objectKey },
+      expires_at: expiry.toISOString(), checked_at: new Date(now()).toISOString(), reason_code: reason });
+    let head;
+    try { head = await inspectObject(record.objectKey); }
+    catch (error) {
+      const code = error?.error?.Code || error?.code;
+      const directEmptyHead = (!code || code === "Error") && Boolean(header(error, "x-cos-request-id"));
+      const absent = Number(error?.statusCode) === 404 && (code === "NoSuchKey" || directEmptyHead)
+        && header(error, "x-cos-delete-marker") !== "true";
+      if (!absent) return view("uncertain", "HEAD_UNAVAILABLE");
+      if (record.writeOnce !== true) return view("uncertain", "LEGACY_TICKET_NOT_WRITE_ONCE");
+      try { await requireWriteOnce(); } catch { return view("uncertain", "STORAGE_POLICY_UNAVAILABLE"); }
+      if (expiry <= new Date(now())) fail("查询过程中原验收票据已过期，禁止重传", "VERIFICATION_LEASE_EXPIRED");
+      return challenge.status === "leased" ? view("confirmed_absent") : view("uncertain", "CHALLENGE_NOT_WRITABLE");
+    }
+    if (expiry <= new Date(now())) fail("查询过程中原验收票据已过期，禁止重传", "VERIFICATION_LEASE_EXPIRED");
+    const matches = Number(header(head, "content-length")) === record.bytes
+      && header(head, "content-type").split(";")[0].trim().toLowerCase() === record.contentType
+      && header(head, "x-cos-meta-sha256").toLowerCase() === record.sha256
+      && header(head, "x-cos-meta-bytes") === String(record.bytes)
+      && header(head, "x-cos-meta-verification-id") === challenge._id
+      && header(head, "x-cos-meta-binding-id") === String(binding._id) && Boolean(header(head, "etag"))
+      && (record.writeOnce !== true || header(head, "x-cos-meta-verification-output-id") === outputId
+        && header(head, "x-cos-meta-verification-role") === record.role);
+    return matches ? view("confirmed_present") : view("uncertain", "OUTPUT_DESCRIPTOR_MISMATCH");
   }
   async function verifyMediaOutputs({ binding, challenge, outputs }) {
     const root = prefix(challenge, binding), instant = new Date(now());
@@ -153,7 +204,10 @@ export function createCapabilityVerificationMedia({ getCollection, issueUploadUr
       const head = await inspectObject(record.objectKey);
       if (Number(header(head, "content-length")) !== record.bytes || header(head, "x-cos-meta-sha256").toLowerCase() !== record.sha256
         || header(head, "x-cos-meta-verification-id") !== challenge._id || header(head, "x-cos-meta-binding-id") !== String(binding._id)
-        || header(head, "x-cos-meta-bytes") !== String(record.bytes) || !header(head, "etag")) fail("自动验收文件大小、摘要或归属不匹配");
+        || header(head, "x-cos-meta-bytes") !== String(record.bytes) || !header(head, "etag")
+        || record.writeOnce === true && (header(head, "content-type").split(";")[0].trim().toLowerCase() !== record.contentType
+          || header(head, "x-cos-meta-verification-output-id") !== record.outputId
+          || header(head, "x-cos-meta-verification-role") !== record.role)) fail("自动验收文件大小、摘要或归属不匹配");
       // PUT remains usable until expiry. Verify an immutable conditional copy so
       // a late overwrite cannot change what was actually tested.
       const copyKey = `${root}verified/${record.outputId}.bin`;
@@ -193,5 +247,5 @@ export function createCapabilityVerificationMedia({ getCollection, issueUploadUr
     }
     return result;
   }
-  return { issueProbeOutputUpload, verifyMediaOutputs, cleanup };
+  return { issueProbeOutputUpload, getProbeOutputStatus, verifyMediaOutputs, cleanup };
 }

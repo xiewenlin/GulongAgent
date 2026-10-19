@@ -748,3 +748,81 @@ test("HTTP recovery exposes stable route/header schemas and never echoes the ori
   const next = document.paths["/api/v1/capability-verifications/next"].post.requestBody.content["application/json"].schema.properties;
   assert.ok(next.request_id); assert.ok(next.lease_token);
 });
+
+function statusFixture() {
+  const outputId = "O".repeat(43); let f;
+  f = fixture({ getProbeOutputStatus: async ({ binding, challenge, outputId: id }) => {
+    f.hooks.statusCalls += 1; assert.equal(String(binding._id), String(BINDING));
+    if (id !== outputId) throw Object.assign(new Error("未登记此输出"), { code: "VERIFICATION_OUTPUT_NOT_FOUND", status: 404 });
+    if (f.hooks.afterStatus) f.hooks.afterStatus();
+    return { ok: true, challenge_id: challenge._id, output_id: outputId, state: "confirmed_absent", retry_put_allowed: true,
+      content_verified: false, descriptor: { role: "primary_audio", filename: "probe.flac", content_type: "audio/flac", bytes: 128,
+        sha256: "c".repeat(64), object_key: `capability-verifications/${challenge._id}/uploads/${outputId}-probe.flac` },
+      expires_at: new Date(+NOW + 600000).toISOString(), checked_at: f.now().toISOString(), reason_code: null };
+  } });
+  f.hooks.statusCalls = 0;
+  return { f, outputId };
+}
+
+test("probe output GET authenticates binding plus lease, exposes exact OpenAPI and never accepts query descriptors", async () => {
+  const { f, outputId } = statusFixture(), challenge = await reportAndNext(f, inventory("music"));
+  const app = new OpenAPIHono();
+  registerCapabilityAutoVerificationRoutes(app, { service: f.service,
+    requireBinding: async (c) => f.hooks.auth ? { binding: f.binding } : { error: c.json({ code: "UNAUTHORIZED" }, 401) },
+    requireAdmin: async () => ({ user: { id: String(USER) } }) });
+  const path = `/api/v1/capability-verifications/${challenge.id}/outputs/${outputId}`;
+  const get = (url = path, token = challenge.lease_token) => app.request(`http://localhost${url}`, { headers: token ? { "X-Gulong-Verification-Lease": token } : {} });
+  const before = JSON.stringify(f.rows), reply = await get();
+  assert.equal(reply.status, 200); assert.equal(reply.headers.get("Cache-Control"), "private, no-store");
+  const value = await reply.json(); assert.equal(value.state, "confirmed_absent"); assert.equal(value.content_verified, false);
+  assert.equal(JSON.stringify(f.rows), before); assert.equal(value.url, undefined); assert.equal(value.headers, undefined);
+  assert.equal((await get(path, null)).status, 403); assert.equal((await get(path, "invalid-lease")).status, 403);
+  assert.equal((await get(`${path}?object_key=another-object`)).status, 400);
+  assert.equal((await get(path.replace(outputId, "A".repeat(43)))).status, 404);
+  assert.equal((await get(path.replace(outputId, "malformed"))).status, 400);
+  f.hooks.auth = false; const denied = await get();
+  assert.equal(denied.status, 401); assert.equal(denied.headers.get("Cache-Control"), "private, no-store");
+  const document = app.getOpenAPI31Document({ openapi: "3.1.0", info: { title: "test", version: "1" } });
+  const route = document.paths["/api/v1/capability-verifications/{id}/outputs/{output_id}"].get;
+  assert.ok(route); assert.ok(route.parameters.some((parameter) => parameter.name === "X-Gulong-Verification-Lease"));
+  const properties = route.responses["200"].content["application/json"].schema.properties;
+  assert.deepEqual(properties.state.enum, ["confirmed_present", "confirmed_absent", "uncertain"]);
+  assert.equal(properties.content_verified.const ?? properties.content_verified.enum?.[0], false);
+  assert.equal(properties.url, undefined); assert.equal(properties.method, undefined);
+});
+
+test("output lookup refuses cross-node/group/revoked/expired leases and honors its own rate limit", async () => {
+  const { f, outputId } = statusFixture(), challenge = await reportAndNext(f, inventory("music"));
+  const args = { binding: f.binding, challengeId: challenge.id, leaseToken: challenge.lease_token, outputId };
+  await assert.rejects(f.service.outputStatus({ ...args, binding: { ...f.binding, nodeId: "other-node" } }), { status: 401 });
+  f.rows.nodeAccountBindings[0].computeGroupId = "group-two";
+  await assert.rejects(f.service.outputStatus({ ...args, binding: { ...f.binding, computeGroupId: "group-two" } }), { code: "COMPUTE_GROUP_MISMATCH" });
+  f.rows.nodeAccountBindings[0].computeGroupId = "group-one"; f.hooks.allow = false;
+  await assert.rejects(f.service.outputStatus(args), { status: 429 }); assert.equal(f.hooks.statusCalls, 0);
+  f.hooks.allow = true; f.rows.nodeAccountBindings[0].status = "revoked";
+  await assert.rejects(f.service.outputStatus(args), { status: 401 }); assert.equal(f.hooks.statusCalls, 0);
+  f.rows.nodeAccountBindings[0].status = "active"; f.advance(16 * 60000);
+  await assert.rejects(f.service.outputStatus(args), { code: "VERIFICATION_LEASE_EXPIRED" }); assert.equal(f.hooks.statusCalls, 0);
+});
+
+test("output recovery rechecks current binding/lease after the storage read before returning absence", async () => {
+  for (const change of ["revoke", "expire", "verifying"]) {
+    const { f, outputId } = statusFixture(), challenge = await reportAndNext(f, inventory("music"));
+    f.hooks.afterStatus = () => {
+      if (change === "revoke") f.rows.nodeAccountBindings[0].status = "revoked";
+      if (change === "expire") f.advance(16 * 60000);
+      if (change === "verifying") f.rows[AUTO_VERIFICATION_COLLECTION][0].status = "verifying";
+    };
+    const call = f.service.outputStatus({ binding: f.binding, challengeId: challenge.id, leaseToken: challenge.lease_token, outputId });
+    if (change !== "verifying") await assert.rejects(call, { status: change === "revoke" ? 401 : 409 });
+    else { const result = await call; assert.equal(result.state, "uncertain"); assert.equal(result.retry_put_allowed, false); }
+  }
+});
+
+test("parallel status reads do not issue challenges, spend budgets or mutate verification/output records", async () => {
+  const { f, outputId } = statusFixture(), challenge = await reportAndNext(f, inventory("music")), before = JSON.stringify(f.rows);
+  const args = { binding: f.binding, challengeId: challenge.id, leaseToken: challenge.lease_token, outputId };
+  const reports = await Promise.all(Array.from({ length: 20 }, () => f.service.outputStatus(args)));
+  assert.equal(reports.length, 20); assert.equal(f.hooks.statusCalls, 20); assert.equal(JSON.stringify(f.rows), before);
+  assert.ok(f.hooks.calls.filter((item) => item.key.endsWith(":output-status")).every((item) => item.config.limit === 60));
+});

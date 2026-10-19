@@ -274,3 +274,6 @@ jobs:
 
       - name: Verify Digital Live product contract without creating orders
         run: node scripts/verify-digital-live-deployment.mjs https://sologle.com https://111.229.70.235
+
+      - name: Verify probe output recovery without issuing challenges or uploads
+        run: node scripts/verify-probe-output-recovery-deployment.mjs https://sologle.com https://111.229.70.235

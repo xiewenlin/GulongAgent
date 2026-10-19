@@ -60,11 +60,12 @@ function wav({ silent = false, float = false } = {}) {
 }
 function fixture(kind = "image") {
   let instant = new Date(NOW);
-  const records = new Map(), objects = new Map(), copies = [], reads = [], removals = [], uploads = [];
-  const hooks = { removeFailures: 0, fetchStatus: 200, fetchBytes: null, corruptHead: {}, mutateSourceAfterCopy: false };
+  const records = new Map(), objects = new Map(), copies = [], reads = [], removals = [], uploads = [], heads = [];
+  const hooks = { removeFailures: 0, fetchStatus: 200, fetchBytes: null, corruptHead: {}, mutateSourceAfterCopy: false,
+    headError: null, policyFails: false, policyCalls: 0, advanceOnHead: 0 };
   const binding = { _id: "6ab71678e4859d7255789e08" };
   const challenge = { _id: "gcv_12345678-1234-4234-8234-123456789abc", bindingId: binding._id,
-    leaseTokenHash: "b".repeat(64), leaseExpiresAt: new Date(+instant + 15 * 60_000), probeKind: kind };
+    leaseTokenHash: "b".repeat(64), leaseExpiresAt: new Date(+instant + 15 * 60_000), probeKind: kind, status: "leased" };
   const clone = (value) => value instanceof Date ? new Date(value) : Array.isArray(value) ? value.map(clone)
     : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clone(item)])) : value;
   const matches = (record, query) => Object.entries(query).every(([key, expected]) => expected && typeof expected === "object" && !(expected instanceof Date)
@@ -78,11 +79,16 @@ function fixture(kind = "image") {
       return { sort() { result.sort((a, b) => +a.cleanupAt - +b.cleanupAt); return this; }, limit(count) { result = result.slice(0, count); return this; }, async toArray() { return clone(result); } }; },
   };
   const service = createCapabilityVerificationMedia({ getCollection: async () => collection, now: () => instant,
+    requireWriteOnce: async () => { hooks.policyCalls += 1; if (hooks.policyFails) throw new Error("private COS policy error must not leak"); },
     issueUploadUrl: (key, options) => { uploads.push({ key, options }); return `https://cos.example.invalid/put/${uploads.length}`; },
     issueDownloadUrl: (key, options) => { reads.push({ key, options }); return `https://cos.example.invalid/get/${encodeURIComponent(key)}`; },
     inspectObject: async (key) => {
-      const object = objects.get(key); if (!object) throw new Error("object absent");
-      return { headers: { "content-length": String(object.bytes.length), ...object.headers, etag: object.etag, ...hooks.corruptHead } };
+      heads.push(key); instant = new Date(+instant + hooks.advanceOnHead);
+      if (hooks.headError) throw hooks.headError;
+      const object = objects.get(key); if (!object) throw Object.assign(new Error("object absent"), { statusCode: 404, code: "NoSuchKey" });
+      return { headers: { "content-length": String(object.bytes.length),
+        ...Object.fromEntries(Object.entries(object.headers).map(([name, value]) => [name.toLowerCase(), value])),
+        etag: object.etag, ...hooks.corruptHead } };
     },
     publishObject: async (source, target, options) => {
       copies.push({ source, target, options }); const object = objects.get(source);
@@ -105,7 +111,7 @@ function fixture(kind = "image") {
     objects.set(ticket.object_key, { bytes: Buffer.from(bytes), headers: { ...ticket.headers }, etag: '"source-etag-v1"' });
     return ticket;
   }
-  return { service, binding, challenge, output, bytes, records, objects, copies, reads, removals, uploads, hooks, issue,
+  return { service, binding, challenge, output, bytes, records, objects, copies, reads, removals, uploads, heads, hooks, issue,
     advance(ms) { instant = new Date(+instant + ms); }, get now() { return instant; } };
 }
 
@@ -175,11 +181,103 @@ test("探测输出PUT票据稳定且绑定节点、challenge、短租约和精�
   assert.equal(first.output_id, again.output_id); assert.equal(first.object_key, again.object_key); assert.equal(f.records.size, 1);
   assert.equal(first.method, "PUT"); assert.equal(first.headers["x-cos-meta-verification-id"], f.challenge._id);
   assert.equal(first.headers["x-cos-meta-binding-id"], f.binding._id);
+  assert.equal(first.headers["x-cos-forbid-overwrite"], "true");
+  assert.equal(first.headers["x-cos-meta-verification-output-id"], first.output_id);
+  assert.equal(first.headers["x-cos-meta-verification-role"], f.output.role);
   assert.ok(new Date(first.expires_at) <= f.challenge.leaseExpiresAt); assert.ok(new Date(first.expires_at) <= +f.now + 600_000);
   assert.ok(first.object_key.startsWith(`capability-verifications/${f.challenge._id}/uploads/`));
   await assert.rejects(f.service.issueProbeOutputUpload({ binding: { _id: "another-binding" }, challenge: f.challenge, output: f.output }), { code: "VERIFICATION_OUTPUT_INVALID" });
   await assert.rejects(f.issue({ filename: "changed.png" }), { code: "VERIFICATION_OUTPUT_CONFLICT" });
   await assert.rejects(f.issue({ content_type: "text/html" }), { code: "VERIFICATION_OUTPUT_INVALID" });
+});
+
+const outputState = (f, ticket, extra = {}) => f.service.getProbeOutputStatus({ binding: f.binding, challenge: f.challenge, outputId: ticket.output_id, ...extra });
+test("输出恢复只HEAD原对象并返回原完整清单，不签新URL、不修改状态或充当内容验收", async () => {
+  const f = fixture(), ticket = await f.issue(), before = JSON.stringify([...f.records]);
+  const report = await outputState(f, ticket);
+  assert.equal(report.state, "confirmed_present"); assert.equal(report.retry_put_allowed, false); assert.equal(report.content_verified, false);
+  assert.deepEqual(report.descriptor, { ...f.output, object_key: ticket.object_key });
+  assert.equal(report.challenge_id, f.challenge._id); assert.equal(report.expires_at, ticket.expires_at);
+  assert.equal(f.uploads.length, 1); assert.equal(f.reads.length + f.copies.length + f.removals.length, 0);
+  assert.equal(JSON.stringify([...f.records]), before);
+  for (const field of ["url", "method", "headers", "lease_token", "leaseTokenHash"]) assert.equal(report[field], undefined);
+  f.objects.get(ticket.object_key).bytes.fill(0); // Matching HEAD metadata is never full-content proof.
+  assert.equal((await outputState(f, ticket)).content_verified, false);
+  await assert.rejects(f.service.verifyMediaOutputs({ binding: f.binding, challenge: f.challenge, outputs: [{ output_id: ticket.output_id }] }));
+  assert.notEqual([...f.records.values()][0].status, "verified");
+});
+
+test("确证原对象不存在且防覆盖可用才允许重试，重复出票不改变原对象/原headers/原到期时间", async () => {
+  const f = fixture(), ticket = await f.service.issueProbeOutputUpload({ binding: f.binding, challenge: f.challenge, output: f.output });
+  const report = await outputState(f, ticket);
+  assert.equal(report.state, "confirmed_absent"); assert.equal(report.retry_put_allowed, true);
+  assert.equal(f.uploads.length, 1); assert.equal(f.records.size, 1);
+  f.advance(12345);
+  const repeated = await f.service.issueProbeOutputUpload({ binding: f.binding, challenge: f.challenge, output: f.output });
+  assert.equal(repeated.output_id, ticket.output_id); assert.equal(repeated.object_key, ticket.object_key);
+  assert.equal(repeated.expires_at, ticket.expires_at); assert.deepEqual(repeated.headers, ticket.headers);
+  assert.ok(f.uploads[1].options.expires < f.uploads[0].options.expires); assert.equal(f.records.size, 1);
+});
+
+test("网络未知/403/桶不存在/非COS404/删除标记均不能当作可重传的对象不存在", async () => {
+  for (const error of [new Error("network secret"), { statusCode: 403, code: "AccessDenied" },
+    { statusCode: 404, code: "NoSuchBucket" }, { statusCode: 404 },
+    { statusCode: 404, code: "NoSuchKey", headers: { "x-cos-delete-marker": "true" } }]) {
+    const f = fixture(), ticket = await f.issue(); f.hooks.headError = error;
+    const before = JSON.stringify([...f.records]), report = await outputState(f, ticket);
+    assert.equal(report.state, "uncertain"); assert.equal(report.retry_put_allowed, false);
+    assert.equal(f.uploads.length, 1); assert.equal(JSON.stringify([...f.records]), before);
+    assert.doesNotMatch(JSON.stringify(report), /network secret|AccessDenied|NoSuchBucket/);
+  }
+  const f = fixture(), ticket = await f.issue();
+  f.hooks.headError = { statusCode: 404, code: "Error", headers: { "x-cos-request-id": "direct-cos-request" } };
+  assert.equal((await outputState(f, ticket)).state, "confirmed_absent");
+});
+
+test("HEAD每项MIME/摘要/大小/角色/节点/租约输出归属不符均停写", async () => {
+  for (const field of ["content-type", "content-length", "x-cos-meta-sha256", "x-cos-meta-bytes", "x-cos-meta-verification-id",
+    "x-cos-meta-binding-id", "x-cos-meta-verification-output-id", "x-cos-meta-verification-role", "etag"]) {
+    const f = fixture(), ticket = await f.issue(); f.hooks.corruptHead = { [field]: field === "etag" ? "" : "mismatch" };
+    const report = await outputState(f, ticket);
+    assert.equal(report.state, "uncertain", field); assert.equal(report.reason_code, "OUTPUT_DESCRIPTOR_MISMATCH");
+    assert.equal(report.retry_put_allowed, false); assert.equal(f.copies.length + f.reads.length, 0);
+  }
+});
+
+test("存储策略未知不出票，旧无防覆盖票据不续签也不授予absent重传", async () => {
+  const missing = fixture(); missing.hooks.policyFails = true;
+  await assert.rejects(missing.service.issueProbeOutputUpload({ binding: missing.binding, challenge: missing.challenge, output: missing.output }));
+  assert.equal(missing.records.size + missing.uploads.length, 0);
+  const f = fixture(), ticket = await f.issue(); f.objects.clear(); f.hooks.policyFails = true;
+  const uncertain = await outputState(f, ticket);
+  assert.equal(uncertain.state, "uncertain"); assert.equal(uncertain.reason_code, "STORAGE_POLICY_UNAVAILABLE");
+  delete [...f.records.values()][0].writeOnce; f.hooks.policyFails = false;
+  assert.equal((await outputState(f, ticket)).reason_code, "LEGACY_TICKET_NOT_WRITE_ONCE");
+  await assert.rejects(f.service.issueProbeOutputUpload({ binding: f.binding, challenge: f.challenge, output: f.output }), { code: "VERIFICATION_OUTPUT_LEGACY_TICKET" });
+  assert.equal(f.uploads.length, 1);
+});
+
+test("过期/错误节点/challenge/租约/输出编号或篡改原对象键不得HEAD其他对象", async () => {
+  const f = fixture(), ticket = await f.issue();
+  for (const extra of [{ binding: { _id: "another-binding" } },
+    { challenge: { ...f.challenge, _id: "gcv_12345678-1234-4234-8234-123456789abd" } },
+    { challenge: { ...f.challenge, leaseTokenHash: "a".repeat(64) } }, { outputId: "A".repeat(43) }]) {
+    await assert.rejects(outputState(f, ticket, extra));
+  }
+  assert.equal(f.heads.length, 0);
+  [...f.records.values()][0].objectKey = "other-user/private-output.png";
+  await assert.rejects(outputState(f, ticket)); assert.equal(f.heads.length, 0);
+  const expired = fixture(), old = await expired.issue(); expired.advance(600001);
+  await assert.rejects(outputState(expired, old), { code: "VERIFICATION_LEASE_EXPIRED" }); assert.equal(expired.heads.length, 0);
+});
+
+test("HEAD期间票据到期或任务不再可写，不能放行重传", async () => {
+  const f = fixture(), ticket = await f.issue(); f.hooks.advanceOnHead = 600001;
+  await assert.rejects(outputState(f, ticket), { code: "VERIFICATION_LEASE_EXPIRED" });
+  const changed = fixture(), pending = await changed.issue(); changed.objects.clear(); changed.challenge.status = "verifying";
+  const state = await outputState(changed, pending);
+  assert.equal(state.state, "uncertain"); assert.equal(state.retry_put_allowed, false);
+  assert.equal(state.reason_code, "CHALLENGE_NOT_WRITABLE");
 });
 
 test("文件名清洗不能生成cleanup拒绝的路径或连续点", async () => {

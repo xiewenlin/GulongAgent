@@ -532,6 +532,30 @@ HTTP 超时不等于请求没创建。必须用原请求编号和原 secret 查�
 
 其他 capability、未知版本、DWPose 等在缺少可靠 fixture 或结果验证器时，其自动验收状态保持 `adapter_required`，不得伪造验收；原有业务目录是否可用仍按对应独立合同和真实节点状态判断。统一 `gulong_engine.video` 的新消费者适配未完成前也不因此开放；原生 H3 视频仍走 `/api/h3/tasks`。`english_coach.*` 保持 `local_only`，不会因共享自动验收绕过产品边界。商业许可证仍由节点运营者负责，已有 `license_review_required` 限制不因探测通过消失。
 
+### 自动探测输出的只读恢复（2026-10-19）
+
+PUT响应丢失时，先停止写入，保留原输出文件、完整descriptor、ticket及journal。此入口专属自动验收节点，不是普通用户素材恢复：
+
+```http
+GET /api/v1/capability-verifications/{challenge_id}/outputs/{output_id}
+X-Gulong-Account-Binding: 原绑定令牌
+X-Gulong-Verification-Lease: 原journal中的租约secret
+```
+
+不接受query/body来更换文件描述。`challenge_id=gcv_<UUID>`、`output_id`是原POST outputs返回的43位base64url编号。服务器校验当前节点/账号绑定、分组、有效租约和原登记清单；返回`Cache-Control: private, no-store`：
+
+```json
+{"ok":true,"challenge_id":"原gcv编号","output_id":"原输出编号","state":"confirmed_present","retry_put_allowed":false,"content_verified":false,"descriptor":{"role":"primary_image","filename":"probe.png","content_type":"image/png","bytes":1234,"sha256":"原64位小写SHA256","object_key":"原专属对象键"},"expires_at":"原ticket到期时间","checked_at":"核对时间","reason_code":null}
+```
+
+- `confirmed_present`：HEAD的MIME/字节/SHA声明/节点/挑战/输出ID/角色与原descriptor一致；**不是**实际内容或模型验收通过。只能继续提交原`output_id`到原result，仍需服务器条件复制、全文件SHA、实际媒体/JSON/归档结构及模型验证。
+- `confirmed_absent`且`retry_put_allowed=true`：只在直连COS确证原key不存在、原防覆盖策略可读且有效、原票据及挑战仍可写时返回；客户端还须核对原文件完整大小/SHA、原对象键、原全套headers及原期限，随后最多重试原PUT。不能重新推理、换输出ID、换对象、换文件或延长期限。
+- `uncertain`：网络/403/非对象404/删除标记/元数据不符/旧无防覆盖票据/桶策略未知等，均`retry_put_allowed=false`。停止写入并保留journal，仅退避只读查询；不得将任意HTTP404当作COS缺文件。[腾讯云错误码](https://cloud.tencent.com/document/api/436/7730)
+
+GET不签PUT或GET URL、不创建输出、不变更验收/预算/清理状态。每绑定每分钟最多60次；HTTP400=格式/额外query，401=绑定失效，403=错误节点/分组/租约，404=`VERIFICATION_OUTPUT_NOT_FOUND`表示此租约没有登记该输出，409=过期/结束/原清单不一致，429=查询限流，503=只读适配器缺失。所有这些错误均禁止PUT，不能解释为`confirmed_absent`。查询期间绑定、分组、任务状态或租约变化会再次拒绝或收紧为uncertain。
+
+新POST outputs票据签名包括`x-cos-forbid-overwrite=true`、原verification/binding/output ID和role；桶版本策略不支持防覆盖时不出票。重复POST只可使用原清单、原output_id/对象和原expires_at，不延长时间；所有headers都必须按原票据发送。旧无防覆盖票据不能续签（409 `VERIFICATION_OUTPUT_LEGACY_TICKET`）且不获得absent重试权限，已上传的旧实物可在原有效期内继续走原全内容result校验。此恢复接口不会扩大任何能力的共享准入范围。
+
 ### 原生六能力的固定输入与精确输出（2026-10-19）
 
 以下是服务器验证器合同，不是已发布消费者或所有模型已通过的声明。模型 ID、能力合同版本、模型制品修订分别保存，不相互替代。节点完成真实探测后才在鉴权目录出现 `availability.native_profiles`；客户端必须照该范围下单，不能将固定 schema 的所有参数当成已验收范围。
