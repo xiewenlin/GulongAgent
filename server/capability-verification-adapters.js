@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 const IMAGE_TYPES = new Set(["image/png"]);
 const IMAGE_MODELS = new Set(["zimage", "qwen_image_2_1"]);
+const LEGACY_QWEN_COMPONENTS = new Set(["qwen_image_2_1", "qwen-image21-uc"]);
 const HASH = /^[a-f0-9]{64}$/i;
 const VOICE = /^[A-Za-z0-9_.:-]{1,120}$/;
 const VERSIONS = Object.freeze({
@@ -24,7 +25,8 @@ const IMAGE_SCOPES = Object.freeze({
 // an inventory's advertised editing features are never copied into a receipt.
 export function verifiedImageModelScope(capabilityId, model) {
   const scope = IMAGE_SCOPES[capabilityId];
-  if (!scope || !plain(model) || !(capabilityId === "gulong_engine.image" ? IMAGE_MODELS.has(model.id) : model.id === "qwen_image_2_1")
+  if (!scope || !plain(model) || !(capabilityId === "gulong_engine.image" ? IMAGE_MODELS.has(model.id)
+    : capabilityId === "qwen_image_2_1.text_to_image" ? LEGACY_QWEN_COMPONENTS.has(model.id) : model.id === "qwen_image_2_1")
     || Object.entries(scope).some(([key, value]) => model[key] !== value)) return null;
   return { id: model.id, ...scope };
 }
@@ -46,7 +48,8 @@ export function automaticImageNodeMatchesOrder(report, order) {
 function supportsImage(inventory, model) {
   const scope = IMAGE_SCOPES[inventory.capabilityId];
   return VERSIONS[inventory.capabilityId]?.includes(inventory.capabilityVersion) === true && scope && plain(model)
-    && (inventory.capabilityId === "gulong_engine.image" ? IMAGE_MODELS.has(model.id) : model.id === "qwen_image_2_1")
+    && (inventory.capabilityId === "gulong_engine.image" ? IMAGE_MODELS.has(model.id)
+      : inventory.capabilityId === "qwen_image_2_1.text_to_image" ? LEGACY_QWEN_COMPONENTS.has(model.id) : model.id === "qwen_image_2_1")
     && Object.entries(scope).every(([key, value]) => model[key] === undefined || model[key] === value);
 }
 function supportsTts(inventory, model) {

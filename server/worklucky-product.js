@@ -1,3 +1,4 @@
+import { NATIVE_SHARED_CAPABILITY_IDS } from "./native-shared-capability-ids.js";
 // WorkLucky is included in the existing subscription, never a second billing SKU.
 export const WORKLUCKY_PRODUCT_ID = "worklucky";
 export const WORKLUCKY_ROOT = "/api/v1/desktop/worklucky";
@@ -6,6 +7,7 @@ export const WORKLUCKY_PLAN_ID = "gulong_engine_monthly";
 export const WORKLUCKY_CAPABILITY_IDS = Object.freeze([
   "gulong_engine.text", "gulong_engine.image", "gulong_engine.image_2k", "gulong_engine.tts", "gulong_engine.video",
   "gulong_engine.agent_chat", "gulong_engine.embedding", "gulong_engine.music",
+  ...NATIVE_SHARED_CAPABILITY_IDS,
 ]);
 
 export function workLuckyEntitlement(value) {

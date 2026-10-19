@@ -65,9 +65,9 @@ MiniMax H3 视频继续使用 `/api/h3/tasks`、`/api/h3/tasks/claim` 与 `/api/
 | `breeze_tts_2.synthesize` | `text` 1–12000 字符 | `language`=zh-CN/en-US/ja-JP/ko-KR；`voice_id` 1–120；`speed` 0.5–2；`pitch_semitones` -12–12；`sample_rate`=16000/22050/24000/44100/48000；`output_format`=mp3/wav/flac；`seed` -1–2147483647 |
 | `whisper.transcribe` | 无 | `task`=transcribe/translate；`language`=auto 或 BCP-47 简码；`initial_prompt` ≤4000；`word_timestamps` 布尔；`output_format`=json/txt/vtt/srt |
 | `sam.segment` | 无 | `mode`=everything/points/box；`points` 最多 64 个 `{x,y,label}`，x/y 为 0–1，label 为 0/1；`box` 为 4 个 0–1 数值；`multimask` 布尔；`output_format`=mask_png/json/both。points/box 模式必须提交对应数据 |
-| `sam.video_track` | 无 | `prompt_mode`=everything/points/box；点/框规则同上；`start_frame` 0–1000000；`end_frame`=-1 或不小于 start_frame；`sample_fps` 1–60；`output_format`=mask_video/tracks_json/both |
+| `sam.video_track` | text 模式必填 `text_prompts` | `prompt_mode`=everything/text/points/box；text 模式为 1–8 个非空对象提示，每项≤200字符，不能混入点/框；其他模式禁止夹带文字提示。点/框规则同上；`start_frame` 0–1000000；`end_frame`=-1 或不小于 start_frame；可选 `sample_fps` 1–60，省略表示保留完整原帧，不隐式请求24FPS；`output_format`=mask_video/tracks_json/both/native_layers。消费者必须与已验证范围匹配，不能静默忽略未支持的参数 |
 | `mediapipe.pose_track` | 无 | `model_complexity` 0–2；检测/跟踪置信度 0–1；`output_fps` 1–120；`include_world_landmarks` 布尔；`output_format`=json/csv/both |
-| `mediapipe.video_analysis` | 无 | `pipelines` 为 pose/hands/face/holistic 中的 1–4 项；`model_complexity` 0–2；检测/跟踪置信度 0–1；`output_fps` 1–120；world landmarks/标注视频开关；`output_format`=json/csv/both |
+| `mediapipe.video_analysis` | 无 | `pipelines` 为 pose/hands/face/holistic 中的 1–4 项；`model_complexity` 0–2；检测/跟踪置信度 0–1；可选 `output_fps` 1–120（省略保留原帧）；world landmarks/标注视频开关；`output_format`=json/csv/both/native_layers |
 | `dwpose.estimate` | 无 | `detect_resolution` 128–2048；body/hands/face 开关；`output_fps` 1–60；`output_format`=json/pose_png/both |
 | `prompt.optimize_translate` | `text` 1–32000 字符 | `mode`=optimize/translate/optimize_translate；源/目标语言 2–32 字符；`tone`=neutral/cinematic/commercial/technical/natural；`preserve_placeholders` 布尔 |
 
@@ -82,9 +82,9 @@ MiniMax H3 视频继续使用 `/api/h3/tasks`、`/api/h3/tasks/claim` 与 `/api/
 | Breeze TTS2 | `voice_reference` 0–1，MP3/WAV/FLAC，≤256 MB | `primary_audio` 1，MP3/WAV/FLAC，≤512 MB |
 | Whisper | `media` 1，MP3/WAV/FLAC/MP4/WebM/MOV，≤2 GB | `transcript_json` 0–1；`transcript_text` 0–1（TXT/VTT/SRT）；也可返回 ≤64 KB 内联结果 |
 | SAM | `source_image` 1，PNG/JPEG/WebP，≤512 MB | `mask_image` 0–1 PNG；`segments_json` 0–1；也可返回 ≤64 KB 内联结果 |
-| SAM 视频跟踪 | `source_video` 1，MP4/WebM/MOV，≤2 GB | `mask_video` 0–1 MP4/WebM；`tracks_json` 0–1；也可返回 ≤64 KB 内联结果 |
+| SAM 视频跟踪 | `source_video` 1，MP4/WebM/MOV，≤2 GB | 旧模式 `mask_video` 0–1 MP4/WebM；`tracks_json` 0–1；`native_layers` 必须恰好 `manifest_json`、`tracks_jsonl`、`mask_archive` 各1份，不得以 JSONL 冒充视频或 JSON |
 | MediaPipe | `source_video` 1，MP4/WebM/MOV，≤2 GB | `pose_json` 0–1；`pose_csv` 0–1；也可返回 ≤64 KB 内联结果 |
-| MediaPipe 视频分析 | `source_video` 1，MP4/WebM/MOV，≤2 GB | `analysis_json` 0–1；`analysis_csv` 0–1；`annotated_video` 0–1；也可返回 ≤64 KB 内联结果 |
+| MediaPipe 视频分析 | `source_video` 1，MP4/WebM/MOV，≤2 GB | 旧模式 `analysis_json` 0–1；`analysis_csv` 0–1；`annotated_video` 0–1；`native_layers` 必须恰好 `analysis_json`、`pose_tracks_jsonl`、`person_layers_archive` 各1份 |
 | DWPose | `source_media` 1，PNG/JPEG/WebP/MP4/WebM，≤2 GB | `pose_json` 0–1；`pose_image` 0–1 PNG；也可返回 ≤64 KB 内联结果 |
 | 提示词优化/翻译 | 无 | `result_json` 或 `result_text` 各 0–1；也可返回 ≤64 KB 内联结果 |
 
@@ -422,8 +422,8 @@ npm run build
 - 服务端原子追加 `autoVerificationCapabilityIds`，保存 `autoVerificationPolicy=capability-v2`；重试、并发上报、列表清空或库存遗漏只能扩展，不能撤销已迁移 ID。
 - 已迁移能力采用自动结果的精确交集；pending、失败、到期、禁用、制品/模型/分组变更均禁止回退到旧 GCA 或客户端 `validated=true`。
 - 未迁移能力记录为 `migration_deferred`，不会领取自动探测，仅保留原有能力版本、验证新鲜度、制品、GCA（若该原合同要求）、产品、算力分组和资源槽位规则。没有旧证明的能力仍不可用；不新建 GCA、不延长旧有效期、不为新制品继承旧证明、不放开原本 `dispatchable=false` 的能力。原生 H3 独立接口也不因另一个能力迁移而被整绑定停用。
-- 仅 v2 **尚未迁移且不在本次迁移列表**的能力允许原样上报有界原生版本：1–120位，匹配 `[A-Za-z0-9][A-Za-z0-9_.+-]*`。例如 `3.1-object-multiplex`、`0.10.14-pose-full`、`large-v3-turbo-whisper.cpp`、`gpt-6-astra`；不截断、不替换为假 `1.0.0`，原值参与库存指纹，拒绝空白、控制字符和路径分隔符。自动迁移能力仍须数字合同版本及对应适配器版本白名单；已迁移ID即使从列表遗漏也不能使用这个兼容入口。该库存兼容不改变旧派单合同、不新授予资格。
-- 图像编辑、SAM/Whisper/MediaPipe 的输入 fixture、统一 video/TTS 等未完整接通时，仍完整上报库存，但不能把文生图通过当作这些功能的验收；只有对应完整适配和实测通过后再追加迁移 ID。
+- v2 **尚未迁移且不在本次迁移列表**的能力允许原样上报有界原生版本：1–120位，匹配 `[A-Za-z0-9][A-Za-z0-9_.+-]*`；不截断、不替换为假 `1.0.0`，原值参与库存指纹，拒绝空白、控制字符和路径分隔符。自动迁移能力只接受对应适配器的精确版本白名单：既有 `gulong_engine.*` 数字合同版本不变，下面明确注册的原生能力可以使用其真实组件修订号。注册原生能力的未知有界修订可进入库存但没有适配器，已迁移时旧矩阵失效，首次迁移则拒绝，不借此恢复旧证明。该库存兼容不新授予资格。
+- 输入 fixture 和对应结果校验器已接入的原生能力仍须先部署节点消费者再实测，不能把文生图通过当作图像编辑、SAM、转录或姿态分析通过；未实现的统一 video/TTS 消费者继续保留库存，不提前追加迁移 ID。
 - 已经是 v1 绑定级策略的节点请求 v2 返回 `409 VERIFICATION_MIGRATION_REVIEW_REQUIRED`，不通过客户端改变策略解除原保护；需要独立迁移审计。v2 节点以后每次 `/report` 都必须沿用策略，省略则返回 `409 VERIFICATION_POLICY_REQUIRED`。
 - 新客户端只调用 `/report-v2`，必须确认响应 `migration.policy=capability-v2`；404、缺少确认或网络未知结果时停止自动登记/恢复原请求，不尝试旧 `/report`。旧 `/report` 保留 v1 行为并兼容显式 v2，但不推荐新消费者使用。已有 v2 节点投入使用后，不应把生产回滚到不识别逐能力策略的旧版本。
 - 返回 `migration.policy`、累计 `migration.automatic_capability_ids` 和逐能力 `{capability_id,mode,all_models_have_adapter}`。`mode=legacy_compatibility` 不是已验证或已在线；实时鉴权目录才是派单依据。`all_models_have_adapter=true` 也不代表所有参数/输入模式已通过。
@@ -471,18 +471,52 @@ HTTP 超时不等于请求没创建。必须用原请求编号和原 secret 查�
 | `gulong_engine.music` | `1.0.0`；完整 FLAC 实物大小、SHA、实际时长，完整歌词与整段 ASR 原文 | 12 秒小探测不会证明模型支持任意长时长；目录只开放实际验证范围 |
 | `gulong_engine.image` | `1` 或 `1.0.0`；仅原样 `zimage/qwen_image_2_1`，512² PNG 单图 | 其他名字不猜测映射或偷偷替换模型 |
 | `gulong_engine.image_2k` | `1.0.0`；原样 `qwen_image_2_1`，原生 2048²、`fast_lora_6`、6 步 PNG | 不以 512² 探测冒充原生 2K |
-| `qwen_image_2_1.text_to_image` | 真实旧合同 `2.1`；固定 Qwen、512²、单张 PNG | 不把旧消费者合同强改成 `1.0.0` |
+| `qwen_image_2_1.text_to_image` | 真实旧合同 `2.1`；原样模型 `qwen_image_2_1` 或真实组件 `qwen-image21-uc`、512²、单张 PNG | 不把旧消费者合同强改成 `1.0.0`，不把组件名映射为另一个模型 |
 | `gulong_engine.tts` | `1.0.0`；原模型/真实音色、WAV 实物摘要、时长、采样率、声道及非静音 | 未做语音内容 ASR 或发音质量认证 |
 
 图像自动验收按**实际已测范围**签发，不把模型名称当成全部图像功能的通行证。`verified_model` 与目录 `availability.models` 保留以下简单标量字段：
 
 - `gulong_engine.image`：`{id,task:"text_to_image",input_asset_count:0,width:512,height:512}`。
 - `gulong_engine.image_2k`：`{id:"qwen_image_2_1",task:"text_to_image",input_asset_count:0,width:2048,height:2048,generation_mode:"fast_lora_6",steps:6,prompt_enhancement:"none"}`。
-- 自动验收的旧 `qwen_image_2_1.text_to_image`：`{id:"qwen_image_2_1",task:"text_to_image",input_asset_count:0,width:512,height:512,steps:4,guidance_scale:4,batch_size:1}`。
+- 自动验收的旧 `qwen_image_2_1.text_to_image`：`{id:"qwen_image_2_1"或"qwen-image21-uc",task:"text_to_image",input_asset_count:0,width:512,height:512,steps:4,guidance_scale:4,batch_size:1}`，ID 保持实际请求值。
 
 创建和领取均按该范围匹配；原生 `image` 省略 task 视为文生图，但带任何参考素材仍拒绝。未测试的多图编辑、参考图路径、画布和 2K 标准/提示词增强模式不得从无参考图探测扩大开放。提示词、负向描述、随机种子仍可正常更改。显式上报编辑 task 的清单保持 `adapter_required`，不替换为文生图测试。历史自动记录若缺少范围或 `exact_image_scope` 证明，立即不再公开/派单，并在下一次清单上报时自动重新排队；原有明确验收的历史非自动消费者合同不因此改变。清单仍可只上报 `{id}`，范围由服务端实测生成，不能让客户端自行宣称范围。
 
-其他 capability、未知版本、图像编辑、SAM/Whisper/MediaPipe/DWPose 等需要输入素材的能力在缺少可靠 fixture 或结果验证器时，其本轮自动验收状态保持 `adapter_required`，不得伪造验收；原有业务目录是否可用仍按对应独立合同和真实节点状态判断。统一 `gulong_engine.video` 的新消费者适配未完成前也不因此开放；原生 H3 视频仍走 `/api/h3/tasks`。`english_coach.*` 保持 `local_only`，不会因共享自动验收绕过产品边界。商业许可证仍由节点运营者负责，已有 `license_review_required` 限制不因探测通过消失。
+其他 capability、未知版本、DWPose 等在缺少可靠 fixture 或结果验证器时，其自动验收状态保持 `adapter_required`，不得伪造验收；原有业务目录是否可用仍按对应独立合同和真实节点状态判断。统一 `gulong_engine.video` 的新消费者适配未完成前也不因此开放；原生 H3 视频仍走 `/api/h3/tasks`。`english_coach.*` 保持 `local_only`，不会因共享自动验收绕过产品边界。商业许可证仍由节点运营者负责，已有 `license_review_required` 限制不因探测通过消失。
+
+### 原生六能力的固定输入与精确输出（2026-10-19）
+
+以下是服务器验证器合同，不是已发布消费者或所有模型已通过的声明。模型 ID、能力合同版本、模型制品修订分别保存，不相互替代。节点完成真实探测后才在鉴权目录出现 `availability.native_profiles`；客户端必须照该范围下单，不能将固定 schema 的所有参数当成已验收范围。
+
+| 能力 / 版本 | 精确模型与测试参数 | 必须上传的实际结果 |
+|---|---|---|
+| `qwen_image_2_1.text_to_image` / `2.1` | `qwen-image21-uc`（兼容旧 `qwen_image_2_1`）；512²、4步、guidance=4、batch=1、无参考图 | `primary_image` PNG，实际512² |
+| `qwen_image_2_1.multi_image_edit` / `2.1` | `qwen-image21-uc`；1张固定JPEG、512²、4步、guidance=4、batch=1、edit_strength=1 | `primary_image` PNG，实际512²；内联 `model/input_sha256` 精确绑定 |
+| `minimax_music_3.generate` / `3` | `MiniMax-Music3`；12秒、44100Hz、FLAC、无参考音频、auto语言，固定随机英文歌词；库存需整段英文ASR | `primary_audio` + `inline_result.lyric_verification` 完整音频/歌词SHA、`full_audio=true`、有序完整ASR原文。实际11–12.05秒；开放上限取实测值且不超过12秒，不按库存300秒开放 |
+| `sam.video_track` / `3.1-object-multiplex` | `sam-video-3.1`；`text_prompts=["person"]`、全源帧、无点/框/FPS重采样、`native_layers` | `manifest_json` 原生manifest、`tracks_jsonl` 原生objects.jsonl、`mask_archive` PNG归档；16帧全部有真实非空人物蒙版 |
+| `whisper.transcribe` / `large-v3-turbo-whisper.cpp` | `whisper-large-v3-turbo`；11秒完整固定FLAC、auto语言、transcribe、无initial_prompt、无word timestamps、json | `transcript_json` 原始whisper.cpp JSON；原生毫秒offsets、完整英文句段含末句。不能改造成客户端“verified”摘要 |
+| `mediapipe.video_analysis` / `0.10.14-pose-full` | `mediapipe-pose-full-0.10.14`；pose、complexity=1、两置信度0.5、完整源帧、无world/annotated/FPS重采样、`native_layers` | `analysis_json` 原生evidence、`pose_tracks_jsonl` 连续16帧、`person_layers_archive`；真实33点和匹配人物蒙版，不接受全空轨迹 |
+
+SAM 的 manifest/轨迹/蒙版不能冒充 `mask_video`；MediaPipe 同样不能把 JSON 文件改名当视频。业务 `native_layers` 输出角色必须三份各一次；claim 的 `required_output_roles` 和目录 schema 是机器可读依据。原生音乐合同版本 `3` 不等于模型修订 `Music3 INT8 ConvRot`；图像合同版本 `2.1` 也不凭空生成模型版本。
+
+带输入的探测新增：
+
+```json
+{
+  "input_assets": [{"fixture_id":"registered-source-v1","role":"source_video","filename":"fixture.mp4","content_type":"video/mp4","bytes":62832,"sha256":"实际固定SHA256","download_url":"短期HTTPS签名GET","expires_at":"ISO时间"}],
+  "output_requirements": [{"role":"tracks_jsonl","content_types":["application/x-ndjson"],"max_bytes":4194304,"min_count":1,"max_count":1}]
+}
+```
+
+上例只说明字段，实际 challenge 同时携带全部必需输出。输入描述符固定于服务器适配器：最多3份/总8MiB，单份≤4MiB；不能传任意客户端URL或对象键。下载后先核对完整大小与SHA，再执行一次。GET票据≤5分钟且不越过租约，COS准备后再次检查租约；恢复只刷新同一输入下载票据，不增加推理。终态返回无URL描述符，绝不重跑。不要向COS或本地模型转发官网账号/绑定令牌。
+
+固定源文件及出处见 `server/probe-fixtures/README.md`。2秒/16帧人物视频由一张真实源照片重复编码，仅验证逐帧处理、人物检测及结果链路，不是动态跟踪质量、任意长视频或性能认证。Whisper处理完整11秒音频，音乐只生成一次并整段ASR；任何未验证的参数组合仍会在入队前拒绝。
+
+六类原生能力使用跨账户共享时，创建JSON带 `client_product=gulong_engine` 或 `worklucky`，查询/恢复带同值 `?product=`，取消JSON带相同 `client_product`；幂等键不能跨产品复用。古龙引擎桌面凭据也自动进入此共享边界。需要有效古龙引擎包月（管理员除外）、节点明确共享、服务端自动验收证明、相同算力分组及物理槽位；价格0分，不扣余额、不分佣。未标记的历史同账户原生任务保留原合同，不借其绕过新共享验收。新建素材票据可带精确 `capability_id`，以对应目录 MIME/大小上限允许ASR音频、SAM/姿态视频，不依赖尚未完成的统一视频能力。
+
+### 多文件输出安全
+
+探测 `outputs` 最多4个不重复的本租约 `output_id`，每个role的MIME/数量/大小由 `output_requirements` 决定，不能替换成URL或内联布尔。JSON≤1MiB，JSONL≤4MiB；JSONL保留完整逐帧记录并拒绝空行、非法UTF-8和原型污染键。蒙版ZIP≤32MiB/128条/解压总32MiB/单文件4MiB，仅接受安全相对路径的PNG及小型README，不落盘解包、不跟随链接；逐项验证CRC、实际解压大小及PNG像素，蒙版单图≤1024²、总像素≤16Mi。JSON、JSONL和归档与媒体一样经过私有条件复制和实际全文件SHA校验，按24小时探测输出生命周期清理。
 
 ### 媒体探测安全
 

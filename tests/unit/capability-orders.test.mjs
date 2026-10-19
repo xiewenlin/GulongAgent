@@ -12,6 +12,8 @@ import {
   normalizeCapabilityReport,
   registerCapabilityOrderRoutes as registerCapabilityOrderRoutesImpl,
   validateCapabilityInput,
+  requiredNativeOutputRoles,
+  validateNativeOutputSet,
 } from "../../server/capability-orders.js";
 const registerCapabilityOrderRoutes = (app, dependencies) => {
   const nodeSlots = createCapabilityMemoryCollection();
@@ -100,6 +102,48 @@ test("asset roles, mime types and counts are capability specific", () => {
   assert.throws(() => validateCapabilityInput(edit, parameters, [{ ...image, contentType: "video/mp4" }]), (error) => error.code === "UNSUPPORTED_INPUT_MIME");
 });
 
+test("SAM text object prompts survive normalization and full-frame processing is not silently resampled", () => {
+  const sam = CAPABILITY_ORDER_DEFINITIONS.find((item) => item.capabilityId === "sam.video_track");
+  const input = { assetId: "source-one", role: "source_video", contentType: "video/mp4", bytes: 1024 };
+  const p = normalizeCapabilityParameters({ prompt_mode: "text", text_prompts: ["person", "blue bag"], output_format: "tracks_json" }, sam);
+  assert.deepEqual(p.text_prompts, ["person", "blue bag"]);
+  assert.equal(Object.hasOwn(p, "sample_fps"), false, "omitted FPS means the original complete source, not an implicit 24-FPS request");
+  assert.doesNotThrow(() => validateCapabilityInput(sam, p, [input]));
+  for (const patch of [{ text_prompts: [] }, { text_prompts: [" "] }, { points: [{ x: 0.5, y: 0.5, label: 1 }] },
+    { box: [0, 0, 1, 1] }, { prompt_mode: "everything" }]) {
+    assert.throws(() => validateCapabilityInput(sam, { ...p, ...patch }, [input]), (error) => error.code === "INVALID_CAPABILITY_PARAMETERS");
+  }
+  assert.throws(() => normalizeCapabilityParameters({ prompt_mode: "text", text_prompts: Array(9).fill("person") }, sam),
+    (error) => error.code === "INVALID_CAPABILITY_PARAMETERS");
+  assert.throws(() => normalizeCapabilityParameters({ prompt_mode: "text", text_prompts: ["a".repeat(201)] }, sam),
+    (error) => error.code === "INVALID_CAPABILITY_PARAMETERS");
+});
+
+test("native layer output modes require genuine complete artifact roles instead of renaming manifests as tracks or videos", () => {
+  for (const [capabilityId, roles] of [
+    ["sam.video_track", ["manifest_json", "tracks_jsonl", "mask_archive"]],
+    ["mediapipe.video_analysis", ["analysis_json", "pose_tracks_jsonl", "person_layers_archive"]],
+  ]) {
+    const capability = CAPABILITY_ORDER_DEFINITIONS.find((item) => item.capabilityId === capabilityId);
+    const parameters = normalizeCapabilityParameters({ output_format: "native_layers" }, capability);
+    const order = { capabilityId, parameters };
+    assert.deepEqual(requiredNativeOutputRoles(order), roles);
+    assert.equal(validateNativeOutputSet(order, roles.map((role) => ({ role }))), true);
+    for (const output of [[], [{ role: "tracks_json" }], roles.slice(1).map((role) => ({ role })),
+      roles.map(() => ({ role: roles[0] })), [...roles.map((role) => ({ role })), { role: "mask_video" }]]) {
+      assert.throws(() => validateNativeOutputSet(order, output), (error) => error.code === "NATIVE_OUTPUT_SET_INCOMPLETE");
+    }
+    assert.equal(capability.outputRules.filter((item) => roles.includes(item.role)).length, 3);
+    assert.equal(Object.hasOwn(parameters, "output_fps"), false);
+    assert.equal(Object.hasOwn(parameters, "include_world_landmarks"), false);
+  }
+  const whisper = CAPABILITY_ORDER_DEFINITIONS.find((item) => item.capabilityId === "whisper.transcribe");
+  assert.equal(Object.hasOwn(normalizeCapabilityParameters({}, whisper), "word_timestamps"), false,
+    "whole-source segment ASR must not implicitly request unsupported word-level alignment");
+  assert.equal(normalizeCapabilityParameters({ word_timestamps: true }, whisper).word_timestamps, true,
+    "an explicit unsupported option is preserved for admission rejection, never silently discarded");
+});
+
 test("only installed, recently validated and enabled capabilities enter scheduling", () => {
   const report = normalizeCapabilityReport(READY_REPORT());
   assert.equal(report.installed, true);
@@ -140,6 +184,11 @@ test("OpenAPI publishes the versioned create, claim, output and callback contrac
     requireTrustedMutation: () => null,
   });
   const document = app.getOpenAPIDocument({ openapi: "3.1.0", info: { title: "test", version: "1" } });
+  const native = document.components.schemas.NativeSharedCapabilityContract;
+  assert.equal(native.properties.capability_ids.items.enum.length, 6);
+  assert.match(native.description, /client_product=gulong_engine\|worklucky/);
+  assert.match(native.properties.native_layers.description, /tracks_jsonl.*mask_archive/);
+  assert.match(document.paths["/api/v1/capability-assets/presign"].post.description, /capability_id/);
   for (const [path, method] of [
     ["/api/v1/capability-orders/catalog", "get"],
     ["/api/v1/capability-assets/presign", "post"],

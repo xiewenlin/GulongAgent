@@ -20,6 +20,10 @@ import { createCapabilityAutoVerificationService, registerCapabilityAutoVerifica
 import { requiresAutomaticCapabilityVerification } from "./capability-verification-policy.js";
 import { createCapabilityVerificationMedia } from "./capability-verification-media.js";
 import { createCapabilityVerificationAdapters, automaticImageNodeMatchesOrder } from "./capability-verification-adapters.js";
+import { createNativeCapabilityVerificationAdapters, automaticNativeNodeMatchesOrder, nativeVerificationAvailability } from "./capability-native-verification.js";
+import { createProbeFixtureIssuer } from "./capability-probe-inputs.js";
+import { CAPABILITY_PROBE_FIXTURES } from "./capability-probe-fixtures.js";
+import { isNativeSharedCapability, NATIVE_SHARED_CAPABILITY_IDS } from "./native-shared-capability-ids.js";
 import { inspectFlacStream } from "./capability-flac.js";
 
 export const CAPABILITY_ORDER_PROTOCOL = "gulong-capability-orders-v1";
@@ -135,7 +139,7 @@ const CAPABILITY_PARAMETER_SCHEMAS = Object.freeze({
     task: enumField(["transcribe", "translate"], "transcribe"),
     language: stringField({ minLength: 2, maxLength: 16, pattern: "^(auto|[a-z]{2,3}(?:-[A-Z]{2})?)$", default: "auto" }),
     initial_prompt: stringField({ maxLength: 4000, default: "" }),
-    word_timestamps: booleanField(true),
+    word_timestamps: { type: "boolean" },
     output_format: enumField(["json", "txt", "vtt", "srt"], "json"),
   }),
   "sam.segment": objectSchema({
@@ -146,13 +150,14 @@ const CAPABILITY_PARAMETER_SCHEMAS = Object.freeze({
     output_format: enumField(["mask_png", "json", "both"], "both"),
   }),
   "sam.video_track": objectSchema({
-    prompt_mode: enumField(["everything", "points", "box"], "everything"),
+    prompt_mode: enumField(["everything", "text", "points", "box"], "everything"),
+    text_prompts: { type: "array", maxItems: 8, default: [], items: stringField({ minLength: 1, maxLength: 200 }) },
     points: { type: "array", maxItems: 64, default: [], items: objectSchema({ x: numberField({ minimum: 0, maximum: 1 }), y: numberField({ minimum: 0, maximum: 1 }), label: integerField({ enum: [0, 1] }) }, ["x", "y", "label"]) },
     box: { type: ["array", "null"], minItems: 4, maxItems: 4, default: null, items: numberField({ minimum: 0, maximum: 1 }) },
     start_frame: integerField({ minimum: 0, maximum: 1000000, default: 0 }),
     end_frame: integerField({ minimum: -1, maximum: 1000000, default: -1 }),
-    sample_fps: integerField({ minimum: 1, maximum: 60, default: 24 }),
-    output_format: enumField(["mask_video", "tracks_json", "both"], "both"),
+    sample_fps: integerField({ minimum: 1, maximum: 60 }),
+    output_format: enumField(["mask_video", "tracks_json", "both", "native_layers"], "both"),
   }),
   "mediapipe.pose_track": objectSchema({
     model_complexity: integerField({ minimum: 0, maximum: 2, default: 1 }),
@@ -167,10 +172,10 @@ const CAPABILITY_PARAMETER_SCHEMAS = Object.freeze({
     model_complexity: integerField({ minimum: 0, maximum: 2, default: 1 }),
     min_detection_confidence: numberField({ minimum: 0, maximum: 1, default: 0.5 }),
     min_tracking_confidence: numberField({ minimum: 0, maximum: 1, default: 0.5 }),
-    output_fps: integerField({ minimum: 1, maximum: 120, default: 30 }),
-    include_world_landmarks: booleanField(true),
+    output_fps: integerField({ minimum: 1, maximum: 120 }),
+    include_world_landmarks: { type: "boolean" },
     include_annotated_video: booleanField(false),
-    output_format: enumField(["json", "csv", "both"], "json"),
+    output_format: enumField(["json", "csv", "both", "native_layers"], "json"),
   }),
   "dwpose.estimate": objectSchema({
     detect_resolution: integerField({ minimum: 128, maximum: 2048, default: 512 }),
@@ -225,6 +230,9 @@ const CAPABILITY_OUTPUT_RULES = Object.freeze({
   "sam.video_track": [
     { role: "mask_video", min: 0, max: 1, mimeTypes: ["video/mp4", "video/webm"], maxBytes: CAPABILITY_MAX_ASSET_BYTES },
     { role: "tracks_json", min: 0, max: 1, mimeTypes: ["application/json"], maxBytes: 256 * 1024 * 1024 },
+    { role: "manifest_json", min: 0, max: 1, mimeTypes: ["application/json"], maxBytes: 1024 * 1024 },
+    { role: "tracks_jsonl", min: 0, max: 1, mimeTypes: ["application/x-ndjson"], maxBytes: 256 * 1024 * 1024 },
+    { role: "mask_archive", min: 0, max: 1, mimeTypes: ["application/zip"], maxBytes: CAPABILITY_MAX_ASSET_BYTES },
   ],
   "mediapipe.pose_track": [
     { role: "pose_json", min: 0, max: 1, mimeTypes: ["application/json"], maxBytes: 256 * 1024 * 1024 },
@@ -234,6 +242,8 @@ const CAPABILITY_OUTPUT_RULES = Object.freeze({
     { role: "analysis_json", min: 0, max: 1, mimeTypes: ["application/json"], maxBytes: 512 * 1024 * 1024 },
     { role: "analysis_csv", min: 0, max: 1, mimeTypes: ["text/csv"], maxBytes: 512 * 1024 * 1024 },
     { role: "annotated_video", min: 0, max: 1, mimeTypes: ["video/mp4", "video/webm"], maxBytes: CAPABILITY_MAX_ASSET_BYTES },
+    { role: "pose_tracks_jsonl", min: 0, max: 1, mimeTypes: ["application/x-ndjson"], maxBytes: 256 * 1024 * 1024 },
+    { role: "person_layers_archive", min: 0, max: 1, mimeTypes: ["application/zip"], maxBytes: CAPABILITY_MAX_ASSET_BYTES },
   ],
   "dwpose.estimate": [
     { role: "pose_json", min: 0, max: 1, mimeTypes: ["application/json"], maxBytes: 256 * 1024 * 1024 },
@@ -278,15 +288,31 @@ export const CAPABILITY_ORDER_DEFINITIONS = Object.freeze([
   definition("breeze_tts_2.synthesize", AUDIO_MIME, ["audio/mpeg", "audio/wav", "audio/flac"], { maxAssets: 1, maxTotalInputBytes: 256 * 1024 * 1024, defaultEtaSeconds: 90, maxRuntimeSeconds: 1200, commercialUse: "license_review_required", dispatchable: false }),
   definition("whisper.transcribe", ["audio/mpeg", "audio/mp4", "audio/wav", "audio/x-wav", "audio/flac", "video/mp4", "video/webm", "video/quicktime"], ["application/json", "text/plain", "text/vtt", "application/x-subrip"], { maxAssets: 1, maxTotalInputBytes: CAPABILITY_MAX_ASSET_BYTES, defaultEtaSeconds: 180, maxRuntimeSeconds: 3600, inlineResult: true }),
   definition("sam.segment", ["image/png", "image/jpeg", "image/webp"], ["image/png", "application/json"], { maxAssets: 1, maxTotalInputBytes: 512 * 1024 * 1024, defaultEtaSeconds: 60, maxRuntimeSeconds: 900, inlineResult: true, dispatchable: false }),
-  definition("sam.video_track", VIDEO_MIME, ["video/mp4", "video/webm", "application/json"], { maxAssets: 1, maxTotalInputBytes: CAPABILITY_MAX_ASSET_BYTES, defaultEtaSeconds: 300, maxRuntimeSeconds: 3600, inlineResult: true }),
+  definition("sam.video_track", VIDEO_MIME, ["video/mp4", "video/webm", "application/json", "application/x-ndjson", "application/zip"], { maxAssets: 1, maxTotalInputBytes: CAPABILITY_MAX_ASSET_BYTES, defaultEtaSeconds: 300, maxRuntimeSeconds: 3600, inlineResult: true }),
   definition("mediapipe.pose_track", VIDEO_MIME, ["application/json", "text/csv"], { maxAssets: 1, maxTotalInputBytes: CAPABILITY_MAX_ASSET_BYTES, defaultEtaSeconds: 240, maxRuntimeSeconds: 3600, inlineResult: true, dispatchable: false }),
-  definition("mediapipe.video_analysis", VIDEO_MIME, ["application/json", "text/csv", "video/mp4", "video/webm"], { maxAssets: 1, maxTotalInputBytes: CAPABILITY_MAX_ASSET_BYTES, defaultEtaSeconds: 240, maxRuntimeSeconds: 3600, inlineResult: true }),
+  definition("mediapipe.video_analysis", VIDEO_MIME, ["application/json", "text/csv", "video/mp4", "video/webm", "application/x-ndjson", "application/zip"], { maxAssets: 1, maxTotalInputBytes: CAPABILITY_MAX_ASSET_BYTES, defaultEtaSeconds: 240, maxRuntimeSeconds: 3600, inlineResult: true }),
   definition("dwpose.estimate", ["image/png", "image/jpeg", "image/webp", "video/mp4", "video/webm"], ["application/json", "image/png"], { maxAssets: 1, maxTotalInputBytes: CAPABILITY_MAX_ASSET_BYTES, defaultEtaSeconds: 120, maxRuntimeSeconds: 1800, inlineResult: true, dispatchable: false }),
   definition("prompt.optimize_translate", [], ["application/json", "text/plain"], { defaultEtaSeconds: 45, maxRuntimeSeconds: 300, inlineResult: true }),
   definition("minimax_h3.video_generation", ["image/png", "image/jpeg", "image/webp", "video/mp4", "audio/mpeg", "audio/wav"], ["video/mp4"], { maxAssets: 15, maxTotalInputBytes: CAPABILITY_MAX_ASSET_BYTES, defaultEtaSeconds: 1200, maxRuntimeSeconds: 6 * 60 * 60, legacyRoute: "/api/h3/tasks" }),
 ]);
 
 const CAPABILITY_MAP = new Map(CAPABILITY_ORDER_DEFINITIONS.map((item) => [item.capabilityId, item]));
+const NATIVE_LAYER_ROLES = Object.freeze({
+  "sam.video_track": Object.freeze(["manifest_json", "tracks_jsonl", "mask_archive"]),
+  "mediapipe.video_analysis": Object.freeze(["analysis_json", "pose_tracks_jsonl", "person_layers_archive"]),
+});
+export function requiredNativeOutputRoles(order) {
+  return order.parameters?.output_format === "native_layers" ? NATIVE_LAYER_ROLES[order.capabilityId] || [] : [];
+}
+export function validateNativeOutputSet(order, outputs) {
+  const required = requiredNativeOutputRoles(order);
+  if (!required.length) return true;
+  if (!Array.isArray(outputs) || outputs.length !== required.length
+    || required.some((role) => outputs.filter((output) => output.role === role).length !== 1)) {
+    throw Object.assign(new Error("原生图层结果必须完整包含清单、逐帧记录和真实蒙版归档，不能用内联声明或伪造视频代替"), { code: "NATIVE_OUTPUT_SET_INCOMPLETE", status: 400 });
+  }
+  return true;
+}
 
 function integer(value, fallback = 0) {
   const parsed = Number(value);
@@ -412,6 +438,11 @@ export function validateCapabilityInput(capability, parameters, assets) {
     if (!parameters.voice_id.trim()) throw validationError("voice_id 不能为空", "parameters.voice_id");
   }
   if (capability.capabilityId === "sam.video_track") {
+    const prompts = parameters.text_prompts || [];
+    if (parameters.prompt_mode === "text") {
+      if (!prompts.length || prompts.some((prompt) => !prompt.trim())) throw validationError("文字对象提示模式需要 1–8 个非空 text_prompts", "parameters.text_prompts");
+      if (parameters.points.length || parameters.box !== null) throw validationError("文字对象提示不能混入点或边框参数", "parameters.points/box");
+    } else if (prompts.length) throw validationError("text_prompts 必须与 prompt_mode=text 一起提交，不能静默忽略对象提示", "parameters.prompt_mode");
     if (parameters.prompt_mode === "points" && !parameters.points.length) throw validationError("points 模式至少需要一个点", "parameters.points");
     if (parameters.prompt_mode === "box" && !Array.isArray(parameters.box)) throw validationError("box 模式必须提供归一化边框 [x1,y1,x2,y2]", "parameters.box");
     if (parameters.end_frame !== -1 && parameters.end_frame < parameters.start_frame) throw validationError("必须为 -1 或不小于 start_frame", "parameters.end_frame");
@@ -462,7 +493,7 @@ export function normalizeCapabilityReport(value = {}, now = new Date(), { allowL
     validated,
     enabled,
     maxConcurrent,
-    sharingOptIn: (isEnglishCapability(capabilityId) || isGulongEngineCapability(capabilityId)) && value.sharing_opt_in === true,
+    sharingOptIn: (isEnglishCapability(capabilityId) || isGulongEngineCapability(capabilityId) || isNativeSharedCapability(capabilityId)) && value.sharing_opt_in === true,
     supportedModels,
     supportedVoices,
     ...(isWorkLuckyCapability(capabilityId) ? normalizeSpecialNodeModels(capabilityId, value) : {}),
@@ -482,11 +513,13 @@ export function capabilityNodeCanRunOrder(node, order) {
   if (order.preferredNodeId && order.preferredNodeId !== node.nodeId) return false;
   if (node.binding?.userId && String(node.binding.userId) !== String(order.requesterUserId)
     && !(order.sharingScope === "english_shared" && englishNodeSharesCapability(node, order.capabilityId))
-    && !(order.sharingScope === "gulong_shared" && gulongEngineNodeSharesCapability(node, order.capabilityId))) return false;
+    && !(order.sharingScope === "gulong_shared" && (gulongEngineNodeSharesCapability(node, order.capabilityId) || nativeNodeSharesCapability(node, order.capabilityId)))) return false;
+  if (order.sharingScope === "gulong_shared" && isNativeSharedCapability(order.capabilityId) && !nativeNodeSharesCapability(node, order.capabilityId)) return false;
   return Boolean(node.capabilities?.some((item) => item.capabilityId === order.capabilityId
     && (!order.capabilityVersion || item.capabilityVersion === order.capabilityVersion)
     && item.installed && item.validated && item.enabled
     && automaticImageNodeMatchesOrder(item, order)
+    && automaticNativeNodeMatchesOrder(item, order)
     && (!isWorkLuckyCapability(order.capabilityId) || (item.trustedAcceptance === true && (order.catalogProbe === true || specialNodeMatches(order, item))))
     && (order.capabilityId !== "gulong_engine.tts" || !order.parameters?.voice_id || item.supportedVoices?.includes(order.parameters.voice_id))
     && (order.capabilityId !== "gulong_engine.tts" || !order.parameters?.model || (item.trustedAcceptance === true
@@ -494,6 +527,12 @@ export function capabilityNodeCanRunOrder(node, order) {
     && (!isGulongEngineCapability(order.capabilityId) || !order.parameters?.model || order.parameters.model === "auto"
       || isWorkLuckyCapability(order.capabilityId) || (item.supportedModels || []).includes(order.parameters.model))));
 }
+export function nativeNodeSharesCapability(node, id) {
+  return isNativeSharedCapability(id) && node.capabilities?.some((item) => item.capabilityId === id && item.installed && item.validated && item.enabled
+    && item.sharingOptIn === true && item.trustedAcceptance === true && item.automaticVerification === true
+    && (item.contractTests?.exact_native_scope === true || id === "qwen_image_2_1.text_to_image" && item.contractTests?.exact_image_scope === true)) === true;
+}
+const isGulongCallable = (id) => isGulongEngineCapability(id) || isNativeSharedCapability(id);
 
 function publicDefinition(item) {
   const rule = (entry) => ({
@@ -589,6 +628,7 @@ function workerOrder(order, assets) {
     capability_version: order.capabilityVersion,
     parameters: order.parameters,
     parameters_schema_version: capability.parametersSchemaVersion,
+    ...(requiredNativeOutputRoles(order).length ? { required_output_roles: requiredNativeOutputRoles(order) } : {}),
     assets,
     assigned_node: { node_id: order.assignedNode.nodeId, node_name: order.assignedNode.nodeName || null },
     claim_id: order.claimId,
@@ -620,7 +660,9 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
   const verificationMedia = dependencies.verificationMedia || createCapabilityVerificationMedia({ getCollection });
   const automaticVerification = dependencies.automaticVerification || createCapabilityAutoVerificationService({
     getCollection, enforceRateLimit, ...verificationMedia,
-    adapters: createCapabilityVerificationAdapters({ verifyMediaOutputs: verificationMedia.verifyMediaOutputs }),
+    issueProbeInputDownloads: dependencies.issueProbeInputDownloads || createProbeFixtureIssuer({ fixtures: CAPABILITY_PROBE_FIXTURES }),
+    adapters: { ...createCapabilityVerificationAdapters({ verifyMediaOutputs: verificationMedia.verifyMediaOutputs }),
+      ...createNativeCapabilityVerificationAdapters({ verifyMediaOutputs: verificationMedia.verifyMediaOutputs }) },
     canProbe: async ({ binding, resources, now }) => {
       const load = normalizeGpuLoadReport(resources, now);
       if (load.gpu_state !== "idle" || load.current_task_remaining_seconds !== 0 || resources.running_task_count !== 0) return false;
@@ -696,13 +738,14 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     return null;
   }
 
-  async function gulongAvailability(capabilityId, ownerId, { order = null, now = new Date() } = {}) {
+  async function gulongAvailability(capabilityId, ownerId, { order = null, nativeShared = false, now = new Date() } = {}) {
     const capability = CAPABILITY_MAP.get(capabilityId);
     if (!capability?.dispatchable) return { verified_node_count: 0, free_slot_count: 0, status: "adapter_required" };
     const reports = await (await getCollection("capabilityNodeReports"))
       .find({ "capabilities.capabilityId": capabilityId, reportedAt: { $gte: new Date(now.getTime() - 3 * 60_000) } })
       .limit(200).toArray();
-    if (!reports.length) return { verified_node_count: 0, free_slot_count: 0, status: "offline", ...specialAvailability(capabilityId, []), ...(capabilityId === "gulong_engine.tts" ? { voice_ids: [] } : {}) };
+    if (!reports.length) return { verified_node_count: 0, free_slot_count: 0, status: "offline", ...specialAvailability(capabilityId, []),
+      ...nativeVerificationAvailability(capabilityId, []), ...(capabilityId === "gulong_engine.tts" ? { voice_ids: [] } : {}) };
     const computeGroupId = await readUserGroup(ownerId);
     const bindings = await (await getCollection("nodeAccountBindings"))
       .find({ _id: { $in: reports.map((report) => report.bindingId) }, status: "active", revokedAt: null }).toArray();
@@ -738,7 +781,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
         resource.max_concurrent_tasks - resource.running_task_count - snapshot.activeCount));
       if (!capabilityNodeCanRunOrder({ nodeId: report.nodeId, binding, availableSlots: Math.max(1, availableSlots), capabilities: [reportedCapability] },
         { ...(order || { capabilityId, requesterUserId: ownerId, catalogProbe: true,
-          sharingScope: isEnglishCapability(capabilityId) ? "english_shared" : isGulongEngineCapability(capabilityId) ? "gulong_shared" : null,
+          sharingScope: isEnglishCapability(capabilityId) ? "english_shared" : isGulongEngineCapability(capabilityId) || nativeShared && isNativeSharedCapability(capabilityId) ? "gulong_shared" : null,
           capabilityVersion: capability.requiredCapabilityVersion || null,
           parameters: capabilityId === "gulong_engine.image_2k" ? { model: "qwen_image_2_1" } : {} }), computeGroupId })) continue;
       nodeCount += 1;
@@ -748,6 +791,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     }
     return { verified_node_count: nodeCount, free_slot_count: freeSlots, status: freeSlots ? "ready" : nodeCount ? "busy" : "offline",
       ...specialAvailability(capabilityId, acceptedReports),
+      ...nativeVerificationAvailability(capabilityId, acceptedReports),
       ...(capabilityId === "gulong_engine.tts" ? { voice_ids: [...voiceIds].sort() } : {}) };
   }
 
@@ -780,7 +824,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
   }
   const clientMayReadOrder = (auth, order) => auth.kind !== "desktop-english" || isEnglishCapability(order.capabilityId) || order.cancellationTombstone;
   const scopedMayReadOrder = (auth, order) => clientMayReadOrder(auth, order)
-    && (auth.kind !== "desktop-gulong-engine" || isGulongEngineCapability(order.capabilityId) || order.cancellationTombstone);
+    && (auth.kind !== "desktop-gulong-engine" || isGulongCallable(order.capabilityId) || order.cancellationTombstone);
   const workerOwnsClaim = (order, auth) => englishWorkerOwnsClaim(order, auth)
     || (isGulongEngineCapability(order.capabilityId) && order.sharingScope === "gulong_shared"
       && String(order.assignedNode?.userId) === String(auth.user._id)
@@ -848,9 +892,9 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
   function requestedClientProduct(c, auth, body) {
     const query = c.req.queries("product");
     const bodyProduct = body?.client_product;
-    if ((query && (query.length !== 1 || query[0] !== "worklucky"))
-      || (bodyProduct !== undefined && bodyProduct !== "worklucky")) {
-      return { error: c.json({ code: "PRODUCT_CAPABILITY_MISMATCH", message: "产品参数不正确，仅支持 WorkLucky 或不指定产品" }, 400) };
+    if ((query && (query.length !== 1 || !["worklucky", "gulong_engine"].includes(query[0])))
+      || (bodyProduct !== undefined && !["worklucky", "gulong_engine"].includes(bodyProduct))) {
+      return { error: c.json({ code: "PRODUCT_CAPABILITY_MISMATCH", message: "产品参数不正确，仅支持 WorkLucky、古龙引擎或不指定产品" }, 400) };
     }
     const clientProduct = bodyProduct ?? query?.[0];
     if (clientProduct && auth.kind === "desktop-english") {
@@ -864,12 +908,12 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const auth = await authenticate(c); if (auth.error) return auth.error;
     const product = requestedClientProduct(c, auth); if (product.error) return product.error;
     const definitions = auth.kind === "desktop-english" ? CAPABILITY_ORDER_DEFINITIONS.filter((item) => isEnglishCapability(item.capabilityId))
-      : auth.kind === "desktop-gulong-engine" ? CAPABILITY_ORDER_DEFINITIONS.filter((item) => isGulongEngineCapability(item.capabilityId)) : CAPABILITY_ORDER_DEFINITIONS;
+      : auth.kind === "desktop-gulong-engine" ? CAPABILITY_ORDER_DEFINITIONS.filter((item) => isGulongCallable(item.capabilityId)) : CAPABILITY_ORDER_DEFINITIONS;
     c.header("Cache-Control", "private, no-store, max-age=0");
     const requestedProduct = product.clientProduct;
     const capabilities = definitions.map(publicDefinition).filter((item) => !requestedProduct || item.products.includes(requestedProduct));
     for (const item of capabilities.filter((entry) => !entry.legacy_route)) {
-      item.availability = await gulongAvailability(item.capability_id, auth.user.id);
+      item.availability = await gulongAvailability(item.capability_id, auth.user.id, { nativeShared: Boolean(requestedProduct) || auth.kind === "desktop-gulong-engine" });
       item.dispatchable = item.dispatchable && item.availability.verified_node_count > 0;
     }
     return c.json({ protocol_version: CAPABILITY_ORDER_PROTOCOL, ...(requestedProduct ? { product: requestedProduct } : {}), capabilities });
@@ -891,8 +935,10 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     }
     if (auth.kind === "desktop-gulong-engine") {
       const rejected = await requireGulong(c, auth.user.id); if (rejected) return rejected;
-      if (!gulongEngineUploadAllowed(contentType, bytes)) return c.json({ code: "CAPABILITY_INPUT_LIMIT_EXCEEDED", message: "古龙共享素材仅支持目录内的图片、视频或音频格式及相应大小上限" }, 400);
-      if (!IMAGE_MIME.includes(contentType) && !CAPABILITY_MAP.get("gulong_engine.video")?.dispatchable) {
+      const nativePurpose = isNativeSharedCapability(body.capability_id) ? CAPABILITY_MAP.get(body.capability_id) : null;
+      const nativeAllowed = nativePurpose?.assetRules.some((rule) => rule.mimeTypes.includes(contentType) && bytes > 0 && bytes <= rule.maxBytes);
+      if (!nativeAllowed && !gulongEngineUploadAllowed(contentType, bytes)) return c.json({ code: "CAPABILITY_INPUT_LIMIT_EXCEEDED", message: "古龙共享素材仅支持目录内的图片、视频或音频格式及相应大小上限" }, 400);
+      if (!nativeAllowed && !IMAGE_MIME.includes(contentType) && !CAPABILITY_MAP.get("gulong_engine.video")?.dispatchable) {
         return c.json({ code: "CAPABILITY_ADAPTER_REQUIRED", message: "视频能力尚未完成真实节点适配，暂不开放视频或音频参考素材上传" }, 409);
       }
     }
@@ -943,7 +989,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     if (rawKey.length < 8 || rawKey.length > 160) return c.json({ code: "IDEMPOTENCY_KEY_REQUIRED", message: "请提供 8–160 字符的 Idempotency-Key" }, 400);
     const capabilityId = String(body.capability_id || "").trim().toLowerCase();
     if (auth.kind === "desktop-english" && !isEnglishCapability(capabilityId)) return c.json({ code: "ENGLISH_CAPABILITY_ONLY", message: "英语教练凭据仅可用于英语学习能力" }, 403);
-    if (auth.kind === "desktop-gulong-engine" && !isGulongEngineCapability(capabilityId)) return c.json({ code: "GULONG_ENGINE_CAPABILITY_ONLY", message: "古龙绿色版凭据仅可用于本产品共享能力" }, 403);
+    if (auth.kind === "desktop-gulong-engine" && !isGulongCallable(capabilityId)) return c.json({ code: "GULONG_ENGINE_CAPABILITY_ONLY", message: "古龙绿色版凭据仅可用于本产品共享能力" }, 403);
     const capability = CAPABILITY_MAP.get(capabilityId);
     const product = requestedClientProduct(c, auth, body); if (product.error) return product.error;
     const clientProduct = product.clientProduct;
@@ -982,8 +1028,9 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       return c.json({ order: publicOrder(existing, issueDownloadUrl, await queueSnapshot(existing)), idempotent: true }, 201);
     }
     if (isEnglishCapability(capabilityId)) { const rejected = await requireEnglish(c, ownerId); if (rejected) return rejected; }
-    if ((isGulongEngineCapability(capabilityId) || computeGroupId !== null) && auth.user.role !== "admin") { const rejected = await requireGulong(c, ownerId); if (rejected) return rejected; }
-    if (isGulongEngineCapability(capabilityId)) {
+    const sharedGulongRequest = isGulongEngineCapability(capabilityId) || isNativeSharedCapability(capabilityId) && (Boolean(clientProduct) || auth.kind === "desktop-gulong-engine");
+    if ((sharedGulongRequest || computeGroupId !== null) && auth.user.role !== "admin") { const rejected = await requireGulong(c, ownerId); if (rejected) return rejected; }
+    if (sharedGulongRequest) {
       const availability = await gulongAvailability(capabilityId, ownerId, {
         order: { capabilityId, requesterUserId: ownerId, computeGroupId, sharingScope: "gulong_shared", preferredNodeId, capabilityVersion: requestedCapabilityVersion, parameters, assets },
       });
@@ -1004,7 +1051,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       ...(clientProduct ? { clientProduct } : {}),
       capabilityId,
       ...(isEnglishCapability(capabilityId) ? { sharingScope: "english_shared", entitlementPlan: "english_coach_monthly" } : {}),
-      ...(isGulongEngineCapability(capabilityId) ? { sharingScope: "gulong_shared", entitlementPlan: "gulong_engine_monthly" } : {}),
+      ...(sharedGulongRequest ? { sharingScope: "gulong_shared", entitlementPlan: "gulong_engine_monthly" } : {}),
       capabilityVersion: requestedCapabilityVersion,
       parameters,
       assets,
@@ -1218,7 +1265,8 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     nodes.sort(compareSharedNodeLoad);
     const capabilityIds = [...new Set(nodes.flatMap((item) => item.capabilities.map((capability) => capability.capabilityId)))];
     const sharedEnglishIds = ownCapabilities.filter((item) => isEnglishCapability(item.capabilityId) && item.sharingOptIn).map((item) => item.capabilityId);
-    const sharedGulongIds = ownCapabilities.filter((item) => isGulongEngineCapability(item.capabilityId) && item.sharingOptIn).map((item) => item.capabilityId);
+    const sharedGulongIds = ownCapabilities.filter((item) => item.sharingOptIn && (isGulongEngineCapability(item.capabilityId)
+      || nativeNodeSharesCapability({ capabilities: [item] }, item.capabilityId))).map((item) => item.capabilityId);
     const ownerScope = { $or: [{ requesterUserId: auth.user._id },
       ...(sharedEnglishIds.length ? [{ capabilityId: { $in: sharedEnglishIds }, sharingScope: "english_shared" }] : []),
       ...(sharedGulongIds.length ? [{ capabilityId: { $in: sharedGulongIds }, sharingScope: "gulong_shared" }] : [])] };
@@ -1357,6 +1405,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     const role = String(body.role || "result").trim().replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 80) || "result";
     const outputRule = capability.outputRules.find((item) => item.role === role);
     if (!outputRule || !mimeAllowed(contentType, outputRule.mimeTypes) || bytes < 1 || bytes > Math.min(CAPABILITY_MAX_ASSET_BYTES, outputRule.maxBytes) || !/^[A-F0-9]{64}$/.test(sha256)) return c.json({ code: "INVALID_OUTPUT_MANIFEST", message: "输出角色、类型、大小或 SHA-256 不符合能力合同" }, 400);
+    if (requiredNativeOutputRoles(order).length && !requiredNativeOutputRoles(order).includes(role)) return c.json({ code: "INVALID_OUTPUT_MANIFEST", message: "原生图层模式只能上传本次合同要求的真实文件角色" }, 400);
     if (order.capabilityId === "gulong_engine.tts" && contentType !== (order.parameters?.output_format === "wav" ? "audio/wav" : "audio/mpeg")) return c.json({ code: "INVALID_OUTPUT_MANIFEST", message: "配音文件类型与订单选择的输出格式不一致" }, 400);
     const outputUploads = await getCollection("capabilityOutputUploads");
     // One stable grant per logical output. Lost responses are retried, not uploaded
@@ -1498,6 +1547,8 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       if (grants.length !== outputIds.length) return c.json({ code: "OUTPUT_GRANT_MISMATCH", message: "输出上传票据无效、过期或不属于当前执行节点" }, 409);
       const roleCounts = new Map();
       for (const grant of grants) roleCounts.set(grant.role, (roleCounts.get(grant.role) || 0) + 1);
+      try { validateNativeOutputSet(order, grants); }
+      catch (error) { return c.json({ code: error.code, message: error.message }, error.status); }
       for (const rule of capability.outputRules) {
         const count = roleCounts.get(rule.role) || 0;
         const requiredMinimum = inlineResult != null && capability.inlineResult && !isWorkLuckyCapability(order.capabilityId) ? 0 : rule.min;
@@ -1593,8 +1644,18 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       lifecycle: { type: "object", description: "claim租约300秒，started/progress同时续租订单和槽位；每15秒worker-state，should_stop或租约失效必须停止。用户取消先保留运行槽，执行节点cancelled确认停机后释放。event_id+payload指纹幂等，改变payload409，写入中断可重放原事件补偿。音乐单primary_audio签发幂等同output_id；其他输出可用output_key。" },
     },
   });
+  app.openAPIRegistry.registerComponent("schemas", "NativeSharedCapabilityContract", {
+    type: "object", description: "原生六能力按真实自动验收范围加入古龙引擎/WorkLucky共享，不代表节点消费者已发布。client_product=gulong_engine|worklucky；查询与恢复使用同值?product=；取消JSON沿用client_product。产品标记参与幂等身份，不能跨产品复用请求。有效古龙引擎包月或管理员、明确共享、服务端自动证明、同算力分组及物理槽位缺一不可。零价，不扣余额、不分佣，无付费回退。旧未标记同账户原生订单保留原合同。",
+    properties: {
+      capability_ids: { type: "array", items: { type: "string", enum: [...NATIVE_SHARED_CAPABILITY_IDS] } },
+      availability: { type: "object", description: "鉴权目录availability.native_profiles返回实际通过的精确模型参数交集；文生图沿用availability.models。模型/版本/制品变化、证明到期或不匹配时禁止派单。固定schema并非全部参数已支持。" },
+      native_layers: { type: "object", description: "sam.video_track输出native_layers时必须manifest_json(application/json)+tracks_jsonl(application/x-ndjson)+mask_archive(application/zip)各1份；mediapipe.video_analysis必须analysis_json+pose_tracks_jsonl+person_layers_archive各1份。claim.required_output_roles指定全部必需角色，不得冒充mask_video或用内联布尔代替实物。" },
+      upload_purpose: { type: "object", description: "古龙引擎桌面会话上传原生输入时可向capability-assets/presign提交精确capability_id，按对应目录MIME/字节上限允许Whisper音频和SAM/姿态源视频；账号私有归属、SHA和COS校验不变。" },
+      verification: { type: "object", description: "专属report-v2完整库存+逐能力迁移。Qwen原生合同2.1/Music3合同3/SAM3.1-object-multiplex/Whisperlarge-v3-turbo-whisper.cpp/MediaPipe0.10.14-pose-full，只认精确适配版本与真实模型编号。固定input_assets短期GET、完整摘要；output_requirements指定全部实物输出。探测最多一次推理，音乐一次整段ASR，不创建业务或钱包记录。" },
+    },
+  });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/catalog", tags: ["Unified Capability Orders"], summary: "读取官网统一能力目录", description: "english_coach.* 已全部转为 local_only。gulong_engine.* 的 dispatchable 根据近 3 分钟真实上报、有效绑定、30 天内推理验证与共享授权动态计算；availability 返回 verified_node_count、free_slot_count、status=ready|busy|offline|adapter_required。busy 表示有兼容节点但暂无线程空位，仍可排队；offline 不接受新任务。gulong_engine.tts 还要求 1.0.0 合同；新消费者必须读取 availability.models=[{id,voice_id}] 并选择同一条已自动验收的精确模型/音色，不能把不同条目的模型和音色交叉组合。availability.voice_ids 仅为旧版扁平兼容字段，不证明模型/音色交集。大展宏图原生 2K 使用独立 gulong_engine.image_2k、required_capability_version=1.0.0；新消费者的 availability.models 仅在对应自动验收有效时包含 {id:qwen_image_2_1}。tts/image_2k 未验收矩阵均为 []，不能从固定 schema 或客户端自报猜测可用模型。旧 qwen_image_2_1.* 报告不视为兼容。gulong_engine.video 在消费适配完成前始终 adapter_required；收费 /api/h3/tasks 独立。目录不缓存，不保证随后创建时可用性不变。", responses: { 200: { description: "能力合同与实时节点可用性" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-assets/presign", tags: ["Unified Capability Orders"], summary: "签发能力订单输入素材 COS 直传票据", description: "英语教练新录音已在桌面端本地处理，英语桌面凭据调用返回 409 CAPABILITY_LOCAL_ONLY；已签发旧票据可按原合同完成校验。其他产品能力不变。", responses: { 201: { description: "账号专属短时 PUT 票据" }, 409: { description: "英语教练新录音已改为本地处理" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-assets/presign", tags: ["Unified Capability Orders"], summary: "签发能力订单输入素材 COS 直传票据", description: "JSON={filename,content_type,bytes,sha256,capability_id?}。古龙引擎桌面会话可以指定原生六能力的精确capability_id，以目录MIME/大小边界上传其参考图、源视频或ASR音频；并非开放未实现的统一视频能力。英语教练新录音已在桌面端本地处理，英语桌面凭据调用返回409 CAPABILITY_LOCAL_ONLY；已签发旧票据可按原合同完成校验。", responses: { 201: { description: "账号专属短时 PUT 票据" }, 409: { description: "英语教练新录音已改为本地处理" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-assets/{id}/complete", tags: ["Unified Capability Orders"], summary: "校验能力订单输入素材大小、摘要与归属", responses: { 200: { description: "返回安全 asset_id" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders", tags: ["Unified Capability Orders"], summary: "幂等创建同账户本地能力订单", description: "english_coach.* 新任务已改为本地处理，返回 409 CAPABILITY_LOCAL_ONLY；旧订单仍可读取或取消。BIN、模型配件和 runtime 不是独立能力。收费 minimax_h3.video_generation 继续使用 /api/h3/tasks；零价 gulong_engine.video 在消费者完成真实验收前返回 409 CAPABILITY_ADAPTER_REQUIRED。gulong_engine.text/image/image_2k/tts 若无实时兼容节点返回 409 CAPABILITY_NO_COMPATIBLE_NODE，不创建订单；已创建的旧订单不受此创建门禁影响。tts 需要有效古龙引擎包月和 capability_version=1.0.0；parameters 提交 text(1–12000 字符)、voice_id(目录 availability.voice_ids 中的 ID)、language、speed、output_format=mp3|wav；不上传输入素材，primary_audio 直传 COS，完成回调验证对象内容 SHA-256。image_2k 需要有效古龙引擎包月、capability_version=1.0.0；parameters 提交 model=qwen_image_2_1、task=text_to_image|multi_image_edit、prompt、width/height(官方七种 2K 尺寸)、generation_mode=standard|fast_lora_6、steps(快速模式必须6)、prompt_enhancement=none|official|local；assets 按输入数组顺序传 0 或 1–10 张 reference_image。v1 本地能力订单价格为 0 分，不扣钱包且无分佣。", responses: { 201: { description: "订单已入队，含 queue_position、auto_cancel_at、queue_reason_code、queue_message" }, 403: { description: "古龙引擎包月权益未生效" }, 409: { description: "本地处理、无兼容节点、版本不符、幂等冲突、适配未验收或旧 H3 接口" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/{id}", tags: ["Unified Capability Orders"], summary: "查询订单进度、排队位置、ETA 与短时结果下载票据", responses: { 200: { description: "仅返回本人订单；排队含 queue_position、estimated_wait_seconds、queue_reason_code、queue_message、auto_cancel_at；排队超时返回 cancelled、CAPABILITY_QUEUE_TIMEOUT；执行含 progress、eta_seconds" } } });

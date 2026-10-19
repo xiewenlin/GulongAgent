@@ -3,10 +3,14 @@ import { ObjectId } from "mongodb";
 import { z } from "@hono/zod-openapi";
 import { validateSpecialInlineResult } from "./worklucky-capabilities.js";
 import { CAPABILITY_VERIFICATION_POLICY, requiresAutomaticCapabilityVerification } from "./capability-verification-policy.js";
+import { normalizeProbeInputs, validateProbeInputTickets } from "./capability-probe-inputs.js";
+import { PROBE_OUTPUT_TYPES, normalizeProbeOutputRules, validateProbeOutputDescriptor } from "./capability-probe-outputs.js";
+import { NATIVE_PROBE_VERSIONS } from "./capability-native-verification.js";
 
 export const AUTO_VERIFICATION_PROTOCOL = "gulong-auto-verification-v1";
 export const AUTO_VERIFICATION_COLLECTION = "capabilityAutoVerifications";
 export const AUTO_VERIFICATION_CAPABILITY_VERSIONS = Object.freeze({
+  ...NATIVE_PROBE_VERSIONS,
   "gulong_engine.agent_chat": Object.freeze(["1.0.0"]),
   "gulong_engine.embedding": Object.freeze(["1.0.0"]),
   "gulong_engine.music": Object.freeze(["1.0.0"]),
@@ -54,7 +58,7 @@ export function normalizeAutoVerificationInventory(report, { allowLegacyVersion 
   const capabilityVersion = report.capability_version ?? report.capabilityVersion ?? report.specialContractVersion ?? "1.0.0";
   const artifactSha256 = report.validation?.artifact_sha256 ?? report.validation?.artifactSha256 ?? report.artifact_sha256 ?? report.artifactSha256;
   assert(typeof capabilityId === "string" && CAPABILITY.test(capabilityId) && capabilityId.length <= 120
-    && typeof capabilityVersion === "string" && (allowLegacyVersion ? LEGACY_VERSION : CONTRACT_VERSION).test(capabilityVersion)
+    && typeof capabilityVersion === "string" && (allowLegacyVersion || Object.hasOwn(NATIVE_PROBE_VERSIONS, capabilityId) ? LEGACY_VERSION : CONTRACT_VERSION).test(capabilityVersion)
     && HASH.test(artifactSha256 || ""), "VERIFICATION_REPORT_INVALID", "能力清单必须包含能力名称、合同版本和真实制品摘要", 400);
   const rawModels = report.models ?? report.supported_models ?? report.supportedModels;
   assert(Array.isArray(rawModels) && rawModels.length > 0 && rawModels.length <= 64,
@@ -139,7 +143,7 @@ function publicState(record) {
 }
 
 export function createCapabilityAutoVerificationService(dependencies) {
-  const { getCollection, verifyMediaOutputs, issueProbeOutputUpload, canProbe, acquireExecution, releaseExecution, adapters = {} } = dependencies;
+  const { getCollection, verifyMediaOutputs, issueProbeOutputUpload, issueProbeInputDownloads, canProbe, acquireExecution, releaseExecution, adapters = {} } = dependencies;
   assert(typeof getCollection === "function", "VERIFICATION_DEPENDENCY_INVALID", "自动验收数据库未配置", 500);
   const now = dependencies.now || (() => new Date());
   const rateLimit = dependencies.enforceRateLimit || (async () => ({ allowed: false }));
@@ -165,6 +169,13 @@ export function createCapabilityAutoVerificationService(dependencies) {
     "VERIFICATION_REQUEST_ID_INVALID", "请求编号与 32 字节安全凭据必须成对提供，且格式必须正确", 400);
     return supplied;
   }
+  async function inputTickets(record, active) {
+    const inputs = normalizeProbeInputs(record.probeInputs);
+    if (!inputs.length) return [];
+    assert(typeof issueProbeInputDownloads === "function", "VERIFICATION_FIXTURE_REQUIRED", "该能力的固定输入夹具尚未配置，禁止开始验收", 503);
+    const tickets = await issueProbeInputDownloads({ binding: active, challenge: record });
+    return validateProbeInputTickets(inputs, tickets, record.leaseExpiresAt, new Date(now()));
+  }
   async function recoveryView(record, active, leaseToken) {
     assert(record && record.bindingId === String(active._id) && record.nodeId === active.nodeId
       && secretMatches(leaseToken, record.leaseTokenHash), "VERIFICATION_REQUEST_CONFLICT", "请求编号已存在，但安全凭据或节点不一致", 409);
@@ -180,7 +191,9 @@ export function createCapabilityAutoVerificationService(dependencies) {
     const challenge = snapshot.parameters ? { id: record.challengeId, expires_at: snapshot.leaseExpiresAt,
       capability_id: snapshot.capabilityId, capability_version: snapshot.capabilityVersion, artifact_sha256: snapshot.artifactSha256,
       model: snapshot.model, parameters: snapshot.parameters, budget: snapshot.budget, compute_group_id: snapshot.computeGroupId,
-      node_id: snapshot.nodeId, output_upload_required: snapshot.outputUploadRequired === true } : null;
+      node_id: snapshot.nodeId, output_upload_required: snapshot.outputUploadRequired === true,
+      ...(snapshot.probeOutputRules?.length ? { output_requirements: snapshot.probeOutputRules } : {}),
+      ...(snapshot.probeInputs?.length ? { input_assets: leaseValid ? await inputTickets(snapshot, active) : normalizeProbeInputs(snapshot.probeInputs) } : {}) } : null;
     return { ok: true, protocol: AUTO_VERIFICATION_PROTOCOL, recovered: true, request_id: record.requestId || null,
       state, lease_valid: leaseValid, execute_once: true, execution_policy: "resume_existing_journal_only", challenge,
       ...(snapshot.error ? { error: snapshot.error } : {}) };
@@ -212,6 +225,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
     const versions = AUTO_VERIFICATION_CAPABILITY_VERSIONS[inventory.capabilityId] || custom?.versions || ["1.0.0"];
     if (!Array.isArray(versions) || !versions.includes(inventory.capabilityVersion)) return null;
     if (custom && typeof custom.createProbe === "function" && typeof custom.validateResult === "function") {
+      if (custom.requiresProbeInputs === true && typeof issueProbeInputDownloads !== "function") return null;
       return typeof custom.supports !== "function" || custom.supports(inventory, model) === true ? custom : null;
     }
     const sample = baseProbe(inventory, model, "gcv-12345678");
@@ -281,7 +295,8 @@ export function createCapabilityAutoVerificationService(dependencies) {
     // version as an automatically eligible contract after that transition.
     inventories.forEach((inventory) => {
       if (requiresAutomaticCapabilityVerification(enrolledBinding, inventory.capabilityId)) {
-        assert(CONTRACT_VERSION.test(inventory.capabilityVersion), "VERIFICATION_REPORT_INVALID", "自动验收能力须使用对应的数字合同版本，不能使用原生组件版本", 400);
+        assert((Object.hasOwn(NATIVE_PROBE_VERSIONS, inventory.capabilityId) ? LEGACY_VERSION : CONTRACT_VERSION).test(inventory.capabilityVersion),
+          "VERIFICATION_REPORT_INVALID", "自动验收能力须使用对应的合同版本或已注册的原生组件版本格式", 400);
       }
     });
     for (const inventory of inventories) {
@@ -407,11 +422,23 @@ export function createCapabilityAutoVerificationService(dependencies) {
       assert(Buffer.byteLength(canonical(probe.parameters)) <= 64 * 1024 && (probe.budget.max_output_tokens ?? 0) <= 128
         && (probe.budget.max_audio_seconds ?? 0) <= 12 && (probe.budget.max_images ?? 0) <= 1
         && (probe.budget.max_image_pixels ?? 0) <= 2048 * 2048
+        && (probe.budget.max_input_assets ?? 0) <= 3 && (probe.budget.max_input_bytes ?? 0) <= 8 * 1024 * 1024
+        && (probe.budget.max_video_frames ?? 0) <= 64 && (probe.budget.max_video_seconds ?? 0) <= 12
+        && (probe.budget.max_asr_passes ?? 0) <= 1
         && Object.values(probe.budget).every((value) => Number.isSafeInteger(value) && value >= 0),
       "VERIFICATION_BUDGET_INVALID", "自动验收超过单次安全预算", 503);
+      const probeInputs = normalizeProbeInputs(probe.inputAssets);
+      const probeOutputRules = normalizeProbeOutputRules(probe.outputRules, probe.probeKind);
+      assert(!probeInputs.length || probeInputs.length <= probe.budget.max_input_assets
+        && probeInputs.reduce((total, item) => total + item.bytes, 0) <= probe.budget.max_input_bytes,
+      "VERIFICATION_BUDGET_INVALID", "固定输入夹具超过本次探测的独立安全预算", 503);
+      const leaseExpiresAt = new Date(+instant + LEASE_MS);
+      // Prepare/sign before committing an executable challenge. Failure must
+      // leave no leased record whose physical slot has already been released.
+      const signedInputs = probeInputs.length ? await inputTickets({ ...selected, probeInputs, leaseExpiresAt }, active) : [];
       const leaseToken = controlled ? clientLeaseToken : randomBytes(32).toString("base64url");
       const updated = unwrap(await records.findOneAndUpdate({ _id: selected._id, status: selected.status, matrixSha256: selected.matrixSha256 },
-        { $set: { challengeId, leaseTokenHash: sha(leaseToken), leaseExpiresAt: new Date(+instant + LEASE_MS), status: "leased",
+        { $set: { challengeId, leaseTokenHash: sha(leaseToken), leaseExpiresAt, status: "leased", probeInputs, probeOutputRules,
           nonce, probeKind: probe.probeKind, parameters: probe.parameters, budget: probe.budget, language: probe.language ?? null,
           requestId: controlled ? requestId : null, outputUploadRequired: probe.outputUploadRequired === true || probe.probeKind === "music", updatedAt: instant },
           $unset: { resultFingerprint: "", error: "" }, $inc: { attempts: 1 } }, { returnDocument: "after" }));
@@ -423,7 +450,9 @@ export function createCapabilityAutoVerificationService(dependencies) {
         execute_once: true, challenge: { id: challengeId, lease_token: leaseToken,
         expires_at: updated.leaseExpiresAt, capability_id: updated.capabilityId, capability_version: updated.capabilityVersion,
         artifact_sha256: updated.artifactSha256, model: updated.model, parameters: updated.parameters, budget: updated.budget,
-        compute_group_id: updated.computeGroupId, node_id: updated.nodeId, output_upload_required: updated.outputUploadRequired } };
+        compute_group_id: updated.computeGroupId, node_id: updated.nodeId, output_upload_required: updated.outputUploadRequired,
+        ...(probeOutputRules.length ? { output_requirements: probeOutputRules } : {}),
+        ...(signedInputs.length ? { input_assets: signedInputs } : {}) } };
     } catch (error) {
       // A partially persisted issuance is not permission to run. Retain a
       // deterministic failed/preparing journal state rather than returning 404.
@@ -447,16 +476,17 @@ export function createCapabilityAutoVerificationService(dependencies) {
   }
   async function outputUpload({ binding, challengeId, leaseToken, output }) {
     const challenge = await ownedChallenge(binding, challengeId, leaseToken);
-    await limited(challenge.bindingId, "output", 4);
+    await limited(challenge.bindingId, "output", 12);
     assert(typeof issueProbeOutputUpload === "function", "VERIFICATION_ADAPTER_REQUIRED", "媒体验收上传适配器尚未就绪", 409);
     assert(isObject(output) && typeof output.filename === "string" && output.filename.length > 0 && output.filename.length <= 240
       && !/[\\/\u0000-\u001f\u007f]/.test(output.filename) && ![".", ".."].includes(output.filename)
       && typeof output.content_type === "string" && output.content_type.length <= 100
       && Number.isSafeInteger(output.bytes) && output.bytes > 0 && output.bytes <= 64 * 1024 * 1024
-      && HASH.test(output.sha256 || "") && ["primary_audio", "primary_image", "primary_video"].includes(output.role)
+      && HASH.test(output.sha256 || "") && Object.hasOwn(PROBE_OUTPUT_TYPES, output.role)
       && challenge.outputUploadRequired === true
       && (challenge.probeKind !== "music" || output.role === "primary_audio" && ["audio/flac", "audio/x-flac"].includes(output.content_type)),
     "VERIFICATION_OUTPUT_INVALID", "自动验收只能上传当前任务要求的有界媒体文件", 400);
+    validateProbeOutputDescriptor(challenge, output);
     return issueProbeOutputUpload({ binding, challenge: { ...challenge, verificationId: challenge._id, _id: challenge.challengeId }, output });
   }
   async function validateResult(record, inlineResult, outputs, binding) {
@@ -642,14 +672,14 @@ export function registerCapabilityAutoVerificationRoutes(app, dependencies) {
     const modelSchema = z.object({ id: z.string().min(1).max(240) }).catchall(z.union([z.string(), z.number(), z.boolean()]));
     const artifactSchema = z.string().regex(/^[a-f0-9]{64}$/i);
     const inventorySchema = z.object({ capability_id: z.string().min(1).max(120), capability_version: z.string().max(120).default("1.0.0")
-      .describe("自动迁移能力须使用数字合同版本并通过对应适配器白名单；仅capability-v2未迁移能力允许原样保留1-120位原生版本[A-Za-z0-9][A-Za-z0-9_.+-]*，仅作库存指纹，不授予验收资格"),
+      .describe("自动迁移能力须通过对应精确版本适配器白名单；已注册的原生组件能力原样使用有界组件版本，其他自动能力须数字合同版本。仅capability-v2未迁移能力可保留其他1-120位原生版本[A-Za-z0-9][A-Za-z0-9_.+-]*作库存指纹，不授予验收资格"),
       installed: z.boolean(), enabled: z.boolean(), sharing_opt_in: z.boolean().default(false), artifact_sha256: artifactSchema.optional(),
       validation: z.object({ artifact_sha256: artifactSchema }).passthrough().optional(),
       models: z.array(modelSchema).min(1).max(64), default_model: z.string().optional(), asr_languages: z.array(z.enum(["zh", "en"])).max(2).optional(),
     }).passthrough();
     const resourceSchema = z.object({ gpu_state: z.enum(["idle", "busy", "unknown"]), gpu_observed_at: z.iso.datetime(),
       current_task_remaining_seconds: z.number().int().min(0), running_task_count: z.number().int().min(0) }).passthrough();
-    const manifestSchema = z.object({ lease_token: z.string().min(32).max(256), role: z.enum(["primary_audio", "primary_image", "primary_video"]),
+    const manifestSchema = z.object({ lease_token: z.string().min(32).max(256), role: z.enum(Object.keys(PROBE_OUTPUT_TYPES)),
       filename: z.string().min(1).max(240), content_type: z.string().max(100), bytes: z.number().int().positive().max(64 * 1024 * 1024), sha256: artifactSchema });
     const migrationSchema = z.object({ policy: z.enum(["binding-v1", CAPABILITY_VERIFICATION_POLICY]),
       automatic_capability_ids: z.array(z.string()), capabilities: z.array(z.object({ capability_id: z.string(),
@@ -665,10 +695,19 @@ export function registerCapabilityAutoVerificationRoutes(app, dependencies) {
         inline_result: objectSchema.optional(), outputs: z.array(z.object({ output_id: z.string() }).strict()).max(4).optional(), error: z.string().max(1000).optional() }),
     };
     requestSchemas["report-v2"] = requestSchemas.report.required({ migration_policy: true, automatic_capability_ids: true });
+    const inputAssetSchema = z.object({ fixture_id: z.string().max(80), role: z.enum(["reference_image", "source_image", "source_video", "media", "reference_audio"]),
+      filename: z.string().max(120), content_type: z.enum(["image/png", "image/jpeg", "video/mp4", "audio/flac", "audio/wav"]),
+      bytes: z.number().int().positive().max(4 * 1024 * 1024), sha256: artifactSchema,
+      download_url: z.string().url().optional(), expires_at: z.iso.datetime().optional() });
     const challengeSchema = z.object({ id: z.string(), lease_token: z.string().optional(), expires_at: z.iso.datetime(), capability_id: z.string(), capability_version: z.string(),
       artifact_sha256: artifactSchema, model: modelSchema, parameters: objectSchema,
       budget: z.object({ max_inferences: z.literal(1), max_output_tokens: z.number().max(128).optional(), max_audio_seconds: z.number().max(12).optional(),
-        max_images: z.number().int().max(1).optional(), max_image_pixels: z.number().int().max(2048 * 2048).optional() }),
+        max_images: z.number().int().max(1).optional(), max_image_pixels: z.number().int().max(2048 * 2048).optional(),
+        max_input_assets: z.number().int().max(3).optional(), max_input_bytes: z.number().int().max(8 * 1024 * 1024).optional(),
+        max_video_frames: z.number().int().max(64).optional(), max_video_seconds: z.number().int().max(12).optional(), max_asr_passes: z.number().int().max(1).optional() }),
+      input_assets: z.array(inputAssetSchema).max(3).optional().describe("仅服务器固定夹具；下载后必须校验完整大小及SHA-256，不能替换为用户文件或传官网令牌到下载地址。下载票据最多5分钟且不超过租约；原请求GET恢复可重签同一输入，不新增推理。终态仅返回无URL的描述符，禁止重执行"),
+      output_requirements: z.array(z.object({ role: z.enum(Object.keys(PROBE_OUTPUT_TYPES)), content_types: z.array(z.string()),
+        max_bytes: z.number().int().positive().max(64 * 1024 * 1024), min_count: z.number().int().min(0).max(1), max_count: z.literal(1) })).max(4).optional(),
       compute_group_id: z.string().nullable(), node_id: z.string(), output_upload_required: z.boolean() });
     for (const suffix of ["report", "report-v2", "next", "{id}/outputs", "{id}/result"]) app.openAPIRegistry.registerPath({ method: "post", path: `${base}/${suffix}`,
       tags: ["Automatic Capability Verification"], summary: { report: "上报未验收的已安装模型清单", "report-v2": "新消费者专用逐能力迁移，旧部署404时禁止回退report", next: "领取单次随机自动验收探测", "{id}/outputs": "签发本次媒体探测的私有上传票据", "{id}/result": "提交真实探测结果并由服务端自动验收" }[suffix],

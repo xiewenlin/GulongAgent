@@ -588,6 +588,7 @@ test("invalid legacy version or migration list is rejected before any enrollment
 test("a concurrent migration cannot persist a legacy-only version into an automatic record", async () => {
   const f = fixture(); let reads = 0;
   const legacy = nativeLegacyInventory()[0];
+  legacy.capability_id = "example.legacy_inventory"; // Not a registered native-version verifier.
   f.hooks.findOne = async (name, query) => {
     if (name !== "nodeAccountBindings" || String(query._id) !== String(f.binding._id) || ++reads !== 2) return;
     f.binding.autoVerificationCapabilityIds.push(legacy.capability_id);

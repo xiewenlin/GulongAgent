@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { inflateSync } from "node:zlib";
 import { copyObject, createPresignedDownloadUrl, createPresignedPutUrl, deleteObject, headObject, sanitizeFilename } from "./cos.js";
 import { inspectFlacStream } from "./capability-flac.js";
+import { validateProbeOutputDescriptor, validateProbeOutputSet } from "./capability-probe-outputs.js";
+import { inspectProbeArchive } from "./capability-probe-archive.js";
 
 const MAX_BYTES = 64 * 1024 * 1024;
 const challengePattern = /^gcv_[a-f0-9-]{36}$/;
@@ -16,8 +18,33 @@ function prefix(challenge, binding) {
   return `capability-verifications/${challenge._id}/`;
 }
 
-export function inspectVerificationBinary(bytes, contentType) {
-  if (!Buffer.isBuffer(bytes) || bytes.length < 24) fail("验收输出文件不完整");
+export function inspectVerificationBinary(bytes, contentType, { maskStats = false } = {}) {
+  if (!Buffer.isBuffer(bytes) || bytes.length < 1) fail("验收输出文件不完整");
+  if (["application/json", "application/x-ndjson"].includes(contentType)) {
+    if (bytes.length > 4 * 1024 * 1024) fail("逐帧结果超过自动验收安全预算");
+    let text, result;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes).replace(/^\uFEFF/, "");
+      if (contentType === "application/json") result = JSON.parse(text);
+      else {
+        const lines = text.trimEnd().split("\n");
+        if (!lines.length || lines.length > 4096 || lines.some((line) => !line.trim())) fail("逐帧记录必须是完整的非空JSONL");
+        result = lines.map((line) => JSON.parse(line));
+      }
+    } catch { fail("自动验收结构化结果不是完整的UTF-8 JSON"); }
+    const pending = [[result, 0]]; let nodes = 0;
+    while (pending.length) {
+      const [value, depth] = pending.pop();
+      if (++nodes > 20000 || depth > 24) fail("自动验收结构化结果层级或节点数量超限");
+      if (value && typeof value === "object") for (const [key, item] of Object.entries(value)) {
+        if (["__proto__", "prototype", "constructor"].includes(key)) fail("自动验收结构化结果含有非法字段");
+        pending.push([item, depth + 1]);
+      }
+    }
+    return contentType === "application/json" ? { json: result } : { jsonl: result };
+  }
+  if (contentType === "application/zip") return inspectProbeArchive(bytes, (png) => inspectVerificationBinary(png, "image/png", { maskStats: true }));
+  if (bytes.length < 24) fail("验收输出文件不完整");
   if (contentType === "image/png") {
     if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) || bytes.toString("ascii", 12, 16) !== "IHDR") fail("输出不是有效的 PNG 图像");
     const width = bytes.readUInt32BE(16), height = bytes.readUInt32BE(20), depth = bytes[24], color = bytes[25];
@@ -39,7 +66,23 @@ export function inspectVerificationBinary(bytes, contentType) {
     catch { fail("PNG 像素数据无法完整解压"); }
     if (pixels.length !== expectedBytes) fail("PNG 像素数据长度不正确");
     for (let row = 0; row < height; row += 1) if (pixels[row * rowBytes] > 4) fail("PNG 像素过滤参数不正确");
-    return { actualContentType: contentType, width, height };
+    const metadata = { actualContentType: contentType, width, height };
+    if (maskStats) {
+      let previous = Buffer.alloc(width * channels), foreground = 0;
+      const paeth = (a, b, c) => { const p = a + b - c, x = Math.abs(p - a), y = Math.abs(p - b), z = Math.abs(p - c); return x <= y && x <= z ? a : y <= z ? b : c; };
+      for (let y = 0; y < height; y++) {
+        const row = Buffer.alloc(width * channels), filter = pixels[y * rowBytes];
+        for (let x = 0; x < row.length; x++) {
+          const a = x >= channels ? row[x - channels] : 0, b = previous[x], c = x >= channels ? previous[x - channels] : 0;
+          const prediction = filter === 1 ? a : filter === 2 ? b : filter === 3 ? Math.floor((a + b) / 2) : filter === 4 ? paeth(a, b, c) : 0;
+          row[x] = (pixels[y * rowBytes + 1 + x] + prediction) & 255;
+        }
+        for (let x = 0; x < width; x++) if (row[x * channels + ([4, 6].includes(color) ? channels - 1 : 0)] > 127) foreground++;
+        previous = row;
+      }
+      metadata.foregroundRatio = foreground / (width * height);
+    }
+    return metadata;
   }
   if (contentType === "audio/wav") {
     if (bytes.toString("ascii", 0, 4) !== "RIFF" || bytes.toString("ascii", 8, 12) !== "WAVE" || bytes.readUInt32LE(4) + 8 !== bytes.length) fail("WAV 音频数据不完整");
@@ -77,14 +120,12 @@ export function createCapabilityVerificationMedia({ getCollection, issueUploadUr
     const filename = sanitizeFilename(output.filename, "probe.bin").replace(/\.{2,}/g, "-");
     const contentType = String(output.content_type || "").toLowerCase();
     const sha256 = String(output.sha256 || "").toLowerCase();
-    const allowed = challenge.probeKind === "music" ? output.role === "primary_audio" && ["audio/flac", "audio/x-flac"].includes(contentType)
-      : challenge.probeKind === "image" ? output.role === "primary_image" && contentType === "image/png"
-      : challenge.probeKind === "tts" && output.role === "primary_audio" && contentType === "audio/wav";
-    if (!allowed
-      || !Number.isSafeInteger(output.bytes) || output.bytes < 1 || output.bytes > MAX_BYTES || !/^[a-f0-9]{64}$/.test(sha256)) fail("验收输出的文件格式、角色、大小或摘要不符合当前探测合同", "VERIFICATION_OUTPUT_INVALID", 400);
+    validateProbeOutputDescriptor(challenge, output);
+    if (!Number.isSafeInteger(output.bytes) || output.bytes < 1 || output.bytes > MAX_BYTES || !/^[a-f0-9]{64}$/.test(sha256)) fail("验收输出的文件格式、角色、大小或摘要不符合当前探测合同", "VERIFICATION_OUTPUT_INVALID", 400);
     if (challenge.probeKind === "image" && output.bytes > 20 * 1024 * 1024 || challenge.probeKind === "tts" && output.bytes > 32 * 1024 * 1024) fail("验收文件超过本能力允许的大小", "VERIFICATION_OUTPUT_INVALID", 400);
     const collection = await getCollection("capabilityVerificationOutputs");
-    const outputId = createHash("sha256").update(`${challenge._id}:${challenge.leaseTokenHash}:primary_audio`).digest("base64url");
+    const identityRole = challenge.probeOutputRules ? output.role : "primary_audio"; // Preserve outstanding legacy ticket identities.
+    const outputId = createHash("sha256").update(`${challenge._id}:${challenge.leaseTokenHash}:${identityRole}`).digest("base64url");
     const objectKey = `${root}uploads/${outputId}-${filename}`;
     const expiresAt = new Date(Math.min(+new Date(challenge.leaseExpiresAt), +instant + 10 * 60_000));
     if (expiresAt <= instant) fail("自动验收执行租约已过期", "VERIFICATION_LEASE_EXPIRED");
@@ -101,37 +142,43 @@ export function createCapabilityVerificationMedia({ getCollection, issueUploadUr
   }
   async function verifyMediaOutputs({ binding, challenge, outputs }) {
     const root = prefix(challenge, binding), instant = new Date(now());
-    if (!Array.isArray(outputs) || outputs.length !== 1 || typeof outputs[0]?.output_id !== "string") fail("请提交本次自动验收的一个输出编号");
+    if (!Array.isArray(outputs) || !outputs.length || outputs.length > 4 || outputs.some((item) => typeof item?.output_id !== "string")
+      || new Set(outputs.map((item) => item.output_id)).size !== outputs.length) fail("请提交本次自动验收的不重复输出编号");
     const collection = await getCollection("capabilityVerificationOutputs");
-    const record = await collection.findOne({ _id: outputs[0].output_id, challengeId: challenge._id, bindingId: String(binding._id), leaseTokenHash: challenge.leaseTokenHash });
-    if (!record || record.expiresAt <= instant || !record.objectKey.startsWith(`${root}uploads/`)) fail("自动验收输出票据已失效或不属于当前租约");
-    const head = await inspectObject(record.objectKey);
-    if (Number(header(head, "content-length")) !== record.bytes || header(head, "x-cos-meta-sha256").toLowerCase() !== record.sha256
-      || header(head, "x-cos-meta-verification-id") !== challenge._id || header(head, "x-cos-meta-binding-id") !== String(binding._id)
-      || header(head, "x-cos-meta-bytes") !== String(record.bytes) || !header(head, "etag")) fail("自动验收音频大小、摘要或归属不匹配");
-    // PUT remains usable until expiry. Verify an immutable conditional copy so
-    // a late overwrite cannot change what was actually tested.
-    const copyKey = `${root}verified/${record.outputId}.bin`;
-    await collection.updateOne({ _id: record._id }, { $set: { copyKey, status: "verifying", updatedAt: instant } });
-    await publishObject(record.objectKey, copyKey, { sourceETag: header(head, "etag") });
-    const response = await fetchObject(issueDownloadUrl(copyKey, { expires: 120 }), { signal: AbortSignal.timeout(60_000), redirect: "error" });
-    if (!response.ok || !response.body) fail("自动验收音频暂时无法读取，请稍后重试", "VERIFICATION_OUTPUT_UNAVAILABLE", 503);
-    let metadata;
-    if (challenge.probeKind === "music") {
-      const audio = await inspectFlacStream(response.body, { expectedBytes: record.bytes, expectedSha256: record.sha256, maxBytes: MAX_BYTES });
-      metadata = { durationSeconds: audio.durationSeconds, sampleRate: audio.sampleRate, channels: audio.channels };
-    } else {
-      const buffer = Buffer.allocUnsafe(record.bytes), hash = createHash("sha256"); let count = 0;
-      for await (const chunk of response.body) {
-        if (count + chunk.byteLength > record.bytes) fail("验收文件实际大小超过声明");
-        buffer.set(chunk, count); count += chunk.byteLength; hash.update(chunk);
+    const records = await Promise.all(outputs.map((item) => collection.findOne({ _id: item.output_id, challengeId: challenge._id, bindingId: String(binding._id), leaseTokenHash: challenge.leaseTokenHash })));
+    if (records.some((record) => !record || record.expiresAt <= instant || !record.objectKey.startsWith(`${root}uploads/`))) fail("自动验收输出票据已失效或不属于当前租约");
+    validateProbeOutputSet(challenge, records);
+    const verified = [];
+    for (const record of records) {
+      const head = await inspectObject(record.objectKey);
+      if (Number(header(head, "content-length")) !== record.bytes || header(head, "x-cos-meta-sha256").toLowerCase() !== record.sha256
+        || header(head, "x-cos-meta-verification-id") !== challenge._id || header(head, "x-cos-meta-binding-id") !== String(binding._id)
+        || header(head, "x-cos-meta-bytes") !== String(record.bytes) || !header(head, "etag")) fail("自动验收文件大小、摘要或归属不匹配");
+      // PUT remains usable until expiry. Verify an immutable conditional copy so
+      // a late overwrite cannot change what was actually tested.
+      const copyKey = `${root}verified/${record.outputId}.bin`;
+      await collection.updateOne({ _id: record._id }, { $set: { copyKey, status: "verifying", updatedAt: instant } });
+      await publishObject(record.objectKey, copyKey, { sourceETag: header(head, "etag") });
+      const response = await fetchObject(issueDownloadUrl(copyKey, { expires: 120 }), { signal: AbortSignal.timeout(60_000), redirect: "error" });
+      if (!response.ok || !response.body) fail("自动验收文件暂时无法读取，请稍后重试", "VERIFICATION_OUTPUT_UNAVAILABLE", 503);
+      let metadata;
+      if (["audio/flac", "audio/x-flac"].includes(record.contentType)) {
+        const audio = await inspectFlacStream(response.body, { expectedBytes: record.bytes, expectedSha256: record.sha256, maxBytes: MAX_BYTES });
+        metadata = { durationSeconds: audio.durationSeconds, sampleRate: audio.sampleRate, channels: audio.channels };
+      } else {
+        const buffer = Buffer.allocUnsafe(record.bytes), hash = createHash("sha256"); let count = 0;
+        for await (const chunk of response.body) {
+          if (count + chunk.byteLength > record.bytes) fail("验收文件实际大小超过声明");
+          buffer.set(chunk, count); count += chunk.byteLength; hash.update(chunk);
+        }
+        if (count !== record.bytes || hash.digest("hex") !== record.sha256) fail("验收文件实际内容与大小或摘要不一致");
+        metadata = inspectVerificationBinary(buffer, record.contentType);
       }
-      if (count !== record.bytes || hash.digest("hex") !== record.sha256) fail("验收文件实际内容与大小或摘要不一致");
-      metadata = inspectVerificationBinary(buffer, record.contentType);
+      await collection.updateOne({ _id: record._id, copyKey }, { $set: { status: "verified", verifiedAt: instant } });
+      verified.push({ outputId: record.outputId, role: record.role, filename: record.filename, contentType: record.contentType,
+        bytes: record.bytes, sha256: record.sha256, objectKey: copyKey, ...metadata });
     }
-    await collection.updateOne({ _id: record._id, copyKey }, { $set: { status: "verified", verifiedAt: instant } });
-    return [{ outputId: record.outputId, role: record.role, filename: record.filename, contentType: record.contentType,
-      bytes: record.bytes, sha256: record.sha256, objectKey: copyKey, ...metadata }];
+    return verified;
   }
   async function cleanup({ limit = 30 } = {}) {
     const instant = new Date(now()), collection = await getCollection("capabilityVerificationOutputs");

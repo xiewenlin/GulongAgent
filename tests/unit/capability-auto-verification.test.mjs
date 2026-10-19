@@ -157,6 +157,80 @@ test("legacy inventory version fingerprints preserve the exact bounded native st
   assert.equal(normalizeAutoVerificationInventory({ ...input, capability_version: "a".repeat(120) }, { allowLegacyVersion: true }).capabilityVersion.length, 120);
 });
 
+const probeInput = { fixture_id: "memory-only-audio-v1", role: "media", filename: "audio-v1.flac", content_type: "audio/flac", bytes: 100,
+  sha256: "b".repeat(64) };
+function fixtureAdapter(extra = {}) {
+  return { versions: ["1.0.0"], requiresProbeInputs: true,
+    createProbe: () => ({ probeKind: "test-input", parameters: { task: "fixture-test" }, inputAssets: [probeInput],
+      budget: { max_inferences: 1, max_input_assets: 1, max_input_bytes: 100, max_audio_seconds: 12 } }),
+    validateResult: ({ challenge }) => ({ verifiedModel: challenge.model, contractTests: { exact_input: true } }), ...extra };
+}
+const inputInventory = () => inventory("input_test", { models: [{ id: "memory-fixture-model" }] });
+
+test("input challenges persist only fixed hashes and recovery refreshes the same tickets without another model budget", async () => {
+  let grants = 0;
+  const f = fixture({ adapters: { "gulong_engine.input_test": fixtureAdapter() },
+    issueProbeInputDownloads: async ({ challenge }) => { grants += 1; return challenge.probeInputs.map((input) => ({ ...input,
+      download_url: `https://fixture.example.invalid/download?signature=${grants}`, expires_at: new Date(+f.now() + 300_000) })); } });
+  await f.service.report({ binding: f.binding, reports: [inputInventory()] });
+  const requestId = "fixed-input-probe", leaseToken = clientSecret();
+  const first = await f.service.next({ binding: f.binding, requestId, leaseToken });
+  assert.equal(first.challenge.input_assets[0].sha256, probeInput.sha256);
+  assert.equal(grants, 1);
+  assert.equal(JSON.stringify(f.rows).includes("fixture.example.invalid"), false, "signed URLs must never enter a persisted snapshot");
+  const originalId = first.challenge.id;
+  f.advance(60_000);
+  const recovered = await f.service.byRequest({ binding: f.binding, requestId, leaseToken });
+  assert.equal(recovered.challenge.id, originalId);
+  assert.equal(grants, 2);
+  assert.equal(recovered.challenge.input_assets[0].sha256, probeInput.sha256);
+  assert.notEqual(recovered.challenge.input_assets[0].download_url, first.challenge.input_assets[0].download_url);
+  assert.equal(f.rows.capabilityVerificationBudgets[0].count, 1);
+  await submit(f, first.challenge, { status: "failed", inlineResult: undefined });
+  const terminal = await f.service.byRequest({ binding: f.binding, requestId, leaseToken });
+  assert.equal(terminal.lease_valid, false);
+  assert.deepEqual(terminal.challenge.input_assets, [probeInput]);
+  assert.equal(grants, 2, "terminal requests cannot get executable input tickets");
+  assert.equal(f.rows.wallets, undefined); assert.equal(f.rows.capabilityOrders, undefined);
+});
+
+test("missing input issuer keeps fixture adapters closed and failed preparation never leaves an executable challenge", async () => {
+  const noIssuer = fixture({ adapters: { "gulong_engine.input_test": fixtureAdapter() } });
+  const response = await noIssuer.service.report({ binding: noIssuer.binding, reports: [inputInventory()] });
+  assert.equal(response.verifications[0].status, "adapter_required");
+  assert.equal((await noIssuer.service.next({ binding: noIssuer.binding })).challenge, null);
+  const f = fixture({ adapters: { "gulong_engine.input_test": fixtureAdapter() },
+    issueProbeInputDownloads: async () => { throw Object.assign(new Error("夹具未配置"), { code: "VERIFICATION_FIXTURE_REQUIRED", status: 503 }); } });
+  await f.service.report({ binding: f.binding, reports: [inputInventory()] });
+  const requestId = "unavailable-fixture", leaseToken = clientSecret();
+  await assert.rejects(() => f.service.next({ binding: f.binding, requestId, leaseToken }), (error) => error.code === "VERIFICATION_FIXTURE_REQUIRED");
+  assert.equal(f.rows[AUTO_VERIFICATION_COLLECTION].some((row) => row.status === "leased"), false);
+  const state = await f.service.byRequest({ binding: f.binding, requestId, leaseToken });
+  assert.equal(state.state, "failed"); assert.equal(state.lease_valid, false); assert.equal(state.challenge, null);
+  assert.ok(f.hooks.released.length > 0);
+});
+
+test("changed input tickets or unbounded fixture budgets fail before issuance and recovery failures never release a live slot", async () => {
+  let broken = false;
+  const f = fixture({ adapters: { "gulong_engine.input_test": fixtureAdapter() },
+    issueProbeInputDownloads: async ({ challenge }) => challenge.probeInputs.map((input) => ({ ...input,
+      sha256: broken ? "e".repeat(64) : input.sha256, download_url: "https://fixture.example.invalid/download", expires_at: new Date(+f.now() + 300_000) })) });
+  await f.service.report({ binding: f.binding, reports: [inputInventory()] });
+  const requestId = "ticket-recovery", leaseToken = clientSecret();
+  const first = await f.service.next({ binding: f.binding, requestId, leaseToken });
+  const releases = f.hooks.released.length;
+  broken = true;
+  await assert.rejects(() => f.service.byRequest({ binding: f.binding, requestId, leaseToken }), (error) => error.code === "VERIFICATION_INPUT_INVALID");
+  assert.equal(f.hooks.released.length, releases);
+  assert.equal(f.rows[AUTO_VERIFICATION_COLLECTION].find((row) => row.challengeId === first.challenge.id).status, "leased");
+  const oversized = fixture({ adapters: { "gulong_engine.input_test": fixtureAdapter({ createProbe: () => ({
+    probeKind: "test-input", parameters: {}, inputAssets: [probeInput], budget: { max_inferences: 1, max_input_assets: 1, max_input_bytes: 99 } }) }) },
+    issueProbeInputDownloads: async () => { throw new Error("must not sign"); } });
+  await oversized.service.report({ binding: oversized.binding, reports: [inputInventory()] });
+  await assert.rejects(() => oversized.service.next({ binding: oversized.binding }), (error) => error.code === "VERIFICATION_BUDGET_INVALID");
+  assert.equal(oversized.rows[AUTO_VERIFICATION_COLLECTION].some((row) => row.status === "leased"), false);
+});
+
 test("dry-run authenticates and rate limits without leases, probes or budget consumption", async () => {
   const f = fixture(); await f.service.report({ binding: f.binding, reports: [inventory()] });
   const before = copy(f.rows);

@@ -90,8 +90,26 @@ function fixture() {
 test("capability product selectors reject unknown, null and duplicate products", async () => {
   const f = fixture();
   for (const query of ["product=other", "product=", "product=worklucky&product=worklucky"]) assert.equal((await f.call(`/catalog?${query}`)).status, 400);
-  for (const product of [null, false, "gulong_engine", "other", ["worklucky"]]) assert.equal((await f.create({ client_product: product })).status, 400);
+  for (const product of [null, false, "other", ["worklucky"]]) assert.equal((await f.create({ client_product: product })).status, 400);
   assert.equal((await f.call("/catalog?product=worklucky")).status, 200);
+  assert.equal((await f.call("/catalog?product=gulong_engine")).status, 200);
+});
+
+test("the explicit Gulong product marker has its own idempotent identity and native shared models stay closed without proof", async () => {
+  const f = fixture();
+  const created = await f.create({ client_product: "gulong_engine" });
+  assert.equal(created.status, 201);
+  assert.equal(f.rows.capabilityOrders[0].clientProduct, "gulong_engine");
+  assert.equal((await f.create({ client_product: "worklucky" })).status, 409);
+  const before = f.rows.capabilityOrders.length;
+  const native = await f.call("", { client_product: "gulong_engine", capability_id: "minimax_music_3.generate",
+    parameters: { prompt: "Simple short melody", lyrics: "Blue sky", duration_seconds: 12, sample_rate: 44100, output_format: "flac", language: "auto", seed: 1 } },
+  "memory-owner", "native-without-consumer");
+  assert.equal(native.status, 409);
+  assert.equal((await native.json()).code, "CAPABILITY_NO_COMPATIBLE_NODE");
+  assert.equal(f.rows.capabilityOrders.length, before);
+  assert.equal(f.rows.wallets, undefined);
+  assert.equal((await f.call("/catalog?product=gulong_engine", undefined, "memory-english")).status, 403);
 });
 
 test("order read and cancellation check product scope before revealing any record", async () => {

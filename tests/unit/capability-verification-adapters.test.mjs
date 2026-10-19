@@ -54,6 +54,19 @@ test("图像探测保留精确模型编号，无素材且单次单图，2K使用
   assert.deepEqual(legacy.adapter.versions, ["2.1"]);
 });
 
+test("Qwen原生组件编号只按真实旧合同接入，不重写到通用图像或2K模型", async () => {
+  const native = fixture("qwen_image_2_1.text_to_image", { id: "qwen-image21-uc" });
+  assert.equal(native.adapter.supports(native.inventory, native.model), true);
+  assert.equal(native.probe.parameters.model, undefined);
+  const result = await native.adapter.validateResult(native.input);
+  assert.equal(result.verifiedModel.id, "qwen-image21-uc");
+  const adapters = createCapabilityVerificationAdapters({ verifyMediaOutputs: async () => [] });
+  for (const id of ["gulong_engine.image", "gulong_engine.image_2k"]) {
+    assert.equal(adapters[id].supports({ capabilityId: id, capabilityVersion: "1.0.0" }, native.model), false);
+  }
+  await assert.rejects(() => native.adapter.validateResult({ ...native.input, inlineResult: { model: "qwen_image_2_1" } }), { code: "VERIFICATION_MODEL_MISMATCH" });
+});
+
 test("图像验收仅接受当前票据经服务端验证后的真实格式尺寸和摘要", async () => {
   const context = fixture();
   const result = await context.adapter.validateResult(context.input);

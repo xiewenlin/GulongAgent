@@ -109,6 +109,32 @@ function fixture(kind = "image") {
     advance(ms) { instant = new Date(+instant + ms); }, get now() { return instant; } };
 }
 
+test("多文件原生探测按角色签发独立稳定票据，完整校验JSON/JSONL实物而非内联声明", async () => {
+  const f = fixture(); f.challenge.probeKind = "native-test";
+  f.challenge.probeOutputRules = [
+    { role: "manifest_json", content_types: ["application/json"], max_bytes: 1024, min_count: 1, max_count: 1 },
+    { role: "tracks_jsonl", content_types: ["application/x-ndjson"], max_bytes: 1024, min_count: 1, max_count: 1 },
+  ];
+  const refs = [];
+  for (const [role, type, text] of [["manifest_json", "application/json", '{"frames":2}'],
+    ["tracks_jsonl", "application/x-ndjson", '{"frame":0}\n{"frame":1}\n']]) {
+    const bytes = Buffer.from(text), output = { role, filename: role === "manifest_json" ? "manifest.json" : "objects.jsonl",
+      content_type: type, bytes: bytes.length, sha256: digest(bytes) };
+    const ticket = await f.service.issueProbeOutputUpload({ binding: f.binding, challenge: f.challenge, output });
+    f.objects.set(ticket.object_key, { bytes, headers: ticket.headers, etag: `"etag-${role}"` });
+    assert.equal((await f.service.issueProbeOutputUpload({ binding: f.binding, challenge: f.challenge, output })).output_id, ticket.output_id);
+    refs.push({ output_id: ticket.output_id });
+  }
+  assert.notEqual(refs[0].output_id, refs[1].output_id);
+  await assert.rejects(() => f.service.verifyMediaOutputs({ binding: f.binding, challenge: f.challenge, outputs: refs.slice(0, 1) }));
+  assert.equal(f.copies.length, 0, "incomplete role sets must fail before any object verification work");
+  const verified = await f.service.verifyMediaOutputs({ binding: f.binding, challenge: f.challenge, outputs: refs });
+  assert.deepEqual(verified.find((row) => row.role === "manifest_json").json, { frames: 2 });
+  assert.deepEqual(verified.find((row) => row.role === "tracks_jsonl").jsonl, [{ frame: 0 }, { frame: 1 }]);
+  assert.equal(f.copies.length, 2);
+  await assert.rejects(() => f.service.verifyMediaOutputs({ binding: f.binding, challenge: f.challenge, outputs: [refs[0], refs[0]] }));
+});
+
 test("真实PNG像素尺寸和PCM/浮点WAV采样时长由实物解析，未启用JPEG解码器不接纳JPEG", () => {
   assert.deepEqual(inspectVerificationBinary(png(), "image/png"), { actualContentType: "image/png", width: 16, height: 8 });
   assert.throws(() => inspectVerificationBinary(jpeg(), "image/jpeg"), { code: "VERIFICATION_OUTPUT_INVALID" });
