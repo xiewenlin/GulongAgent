@@ -349,6 +349,17 @@ test("ASR catalog admission is explicit and uses exact proved combinations, not 
   const closed = await f.service.catalog(f.owner);
   assert.deepEqual(closed.remote_asr, { status: "integration_required", dispatchable: false }); assert.deepEqual(closed.providers, []);
 });
+test("authenticated new-session config derives ASR readiness from the exact real-proof catalog while anonymous stays closed", async () => {
+  const f = fixture({ withAsr: true }); await f.report(); const app = new OpenAPIHono();
+  registerDigitalLiveRealtimeRoutes(app, { service: f.service, getCollection: f.getCollection,
+    authenticate: async () => ({ user: { id: f.owner } }), requireTrustedMutation: () => null, enforceRateLimit: async () => ({ allowed: true }) });
+  const anonymous = await (await app.request(`${ROOT}/config`)).json(); assert.equal(anonymous.remote_asr.dispatchable, false);
+  const ready = await (await app.request(`${ROOT}/config`, { headers: { Authorization: "Bearer memory-not-a-real-account" } })).json();
+  assert.equal(ready.remote_asr.dispatchable, true); assert.equal(ready.remote_asr.status, "available");
+  f.approve(false);
+  const rejected = await (await app.request(`${ROOT}/config`, { headers: { Authorization: "Bearer memory-not-a-real-account" } })).json();
+  assert.equal(rejected.remote_asr.dispatchable, false); assert.equal(rejected.remote_asr.status, "integration_required");
+});
 test("ASR input ticket is one-use, waits for node reader and forbids re-upload after input begins", async () => {
   const f = fixture({ withAsr: true }), { id } = await f.ready(), body = asrRequest(); await f.service.beginAsr(f.owner, id, body);
   const ticketBody = { generation: 1, utterance_id: body.utterance_id, origin: "https://www.sologle.com" };

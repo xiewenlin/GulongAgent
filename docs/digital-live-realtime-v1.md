@@ -109,6 +109,8 @@ worker-state的 `turn` 包含原user_text/history、request_id/turn_id、context
 
 目录free_slot_count用于**新会话**；已有会话所持独占物理槽不能导致会话内ASR被误禁用。已建会话的turn/ASR创建依其原provider及自有lease、当前权威组/账号权益/有效精确证明重新检查，不再预订新槽。当前生产所有真实组合仍未验收，目录为空。仅文字turn+视频通过不能称为真人连续语音完整链路。
 
+`GET /config` 带当前GGE Bearer时，从该账号受鉴权实时目录导出顶层/remote_asr相同available/dispatchable状态；没有真实证明便保持integration_required/false，不会只更新catalog而让config永久false。匿名config始终不可派发；它不是解封证明。客户端创建前用相同登录身份查询config和精确provider行双层校验，已有会话不再以新会话空槽数量控制ASR。
+
 1. 客户端 `POST /sessions/{id}/asr/utterances`：`{generation,request_id,turn_id,utterance_id,history}`，稳定原键，不传模型或音频JSON。仅上一轮已真实排空时开始，最多16项/4096字节历史；同键不同内容409。`GET /sessions/{id}/asr/by-request/{request_id}` 查询原语句，未知不能重录重投。
 2. worker-state.input_audio含utterance_id/request_id/turn_id、实际ASR model、state、固定content_type、max_bytes、input摘要及read_path。指定节点先带绑定/原实时lease `GET /sessions/{id}/input-audio/{generation}/{utterance_id}`，常驻网关建立有界读取连接后持久记录reader_ready。
 3. 客户端 `POST /sessions/{id}/asr/input-ticket`：`{generation,utterance_id,origin}`，返回一次 `DigitalLiveInput dli_...` header票据、input_url、method=PUT、期限和格式。URL不含票据，最长30秒且不超节点lease。必须等active_asr.reader_ready；输入开始后不再签新票据。

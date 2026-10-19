@@ -71,7 +71,25 @@ export function registerDigitalLiveRealtimeRoutes(app, dependencies) {
       sessionId: session.id, generation: session.generation, sequence: item.sequence }) })) };
   };
   const gatewayGuard = (c) => !mediaEnabled() ? c.json({ code: "REALTIME_PERSISTENT_GATEWAY_REQUIRED", message: "媒体流只能连接会话返回的腾讯云常驻网关，本平台仅提供会话控制" }, 421) : null;
-  app.get(`${ROOT}/config`, (c) => { c.header("Cache-Control", "no-store"); return c.json(realtimeConfig()); });
+  app.get(`${ROOT}/config`, async (c) => {
+    c.header("Cache-Control", "private, no-store, max-age=0");
+    const config = realtimeConfig();
+    // Anonymous discovery is always unavailable. An authenticated new-session
+    // config derives availability from that account's exact proved/grouped
+    // provider rows; no permanent global false and no inventory-based unlock.
+    if (!c.req.header("Authorization") && !c.req.header("Cookie")) return c.json(config);
+    try {
+      const auth = await dependencies.authenticate(c, { required: false });
+      if (auth?.error) return auth.error;
+      if (!auth?.user?.id) return c.json(config);
+      const catalog = await service.catalog(auth.user.id);
+      return c.json({ ...config, status: catalog.dispatchable ? "available" : "integration_required", dispatchable: catalog.dispatchable,
+        acceptance: catalog.acceptance, remote_asr: { ...config.remote_asr, ...catalog.remote_asr } });
+    } catch (error) {
+      if (error.code === "DIGITAL_LIVE_SUBSCRIPTION_REQUIRED") return c.json(config);
+      return c.json({ code: "REALTIME_UNAVAILABLE", message: "实时目录暂不可用，请稍后重新查询" }, 503);
+    }
+  });
   app.get(`${ROOT}/providers`, safe(async (c, auth) => c.json(await service.catalog(auth.user.id, c.req.query()))));
   app.post(`${ROOT}/nodes/report`, safe(async (c, auth) => c.json(await service.report(auth.binding, await jsonBody(c))), "node"));
   app.post(`${ROOT}/nodes/claim`, safe(async (c, auth) => {
@@ -165,8 +183,8 @@ export function registerDigitalLiveRealtimeRoutes(app, dependencies) {
     const result = await audioRelay.write(permit, c.req.raw.body, c.req.raw.signal);
     c.header("Access-Control-Allow-Origin", c.req.header("Origin")); c.header("Vary", "Origin"); return c.json(result);
   }, "ticket"));
-  const configSchema = z.object({ schema_version: z.literal("digital-live-realtime-v1"), status: z.literal("integration_required"),
-    dispatchable: z.literal(false), acceptance: z.literal("adapter_required"), transport: z.literal("http-fmp4-mse-v1") }).passthrough();
+  const configSchema = z.object({ schema_version: z.literal("digital-live-realtime-v1"), status: z.enum(["integration_required", "available"]),
+    dispatchable: z.boolean(), acceptance: z.enum(["adapter_required", "automatic_verified"]), transport: z.literal("http-fmp4-mse-v1") }).passthrough();
   app.openAPIRegistry?.register("DigitalLiveRealtimeContract", configSchema);
   app.openAPIRegistry?.register("DigitalLiveRealtimeProvider", digitalLiveRealtimeSchemas.providers);
   app.openAPIRegistry?.register("DigitalLiveRealtimeCreate", digitalLiveRealtimeSchemas.create);
