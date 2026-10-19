@@ -1,6 +1,6 @@
 # 数字直播实时会话与有界媒体网关 v1
 
-状态：会话控制、身份隔离、媒体直通、远程有界PCM输入及候选挑战/字节观察接口已实现，可审查/测试；**真实神经模型与独立播放见证验证器尚未接通，真实节点未验收，生产仍 `dispatchable=false`、`acceptance=adapter_required`**。候选result没有激活权限。不能把九项异步自动验收、模型文件存在、CPU编码测试或客户端原型当作连续直播通过。本次不占GPU、不改Windows服务、不安装依赖。
+状态：会话控制、身份隔离、媒体直通、远程有界PCM输入、候选挑战及独立见证签名校验/证明写入链已实现，可审查/测试；**真实独立观察器尚未登记，真实节点未验收，生产仍 `dispatchable=false`、`acceptance=adapter_required`**。候选result自身没有激活权限。不能把九项异步自动验收、模型文件存在、CPU编码测试或客户端原型当作连续直播通过。本次不占GPU、不改Windows服务、不安装依赖。
 
 ## 部署边界
 
@@ -47,7 +47,7 @@
 }
 ```
 
-返回 `{ok:true,inventory_recorded:true,dispatchable:false,acceptance:"adapter_required"}`，仅登记候选。客户端的ready/validated字段不获批准。生产 `lookupRealtimeProof` 故意无适配器；不能用环境变量、手动数据库记录或异步gcv跳过。后续需真实自动探测连续fMP4、实际provider、播放排空、打断代次和独占GPU，再实现服务器验证器；测试注入的memory proof不是上线证据。
+返回 `{ok:true,inventory_recorded:true,dispatchable:false,acceptance:"adapter_required"}`，仅登记候选。客户端的ready/validated字段不获批准。生产 `lookupRealtimeProof` 已接独立签名/实际字节/原挑战证明链复核，但受审制品及观察器注册表当前为空，仍不准入；不能用环境变量、手动数据库记录或异步gcv跳过。后续需真实自动探测连续fMP4、实际provider、播放排空、打断代次和独占GPU，由真正独立观察器签名。测试注入的memory proof不是上线证据。
 
 `POST /sessions`，JSON `{client_product:"digital_live",client_request_id,providers}`。可提供同值 `Idempotency-Key`；稳定请求键8–160位ASCII。成功201 `{session,idempotent:false}`；重放200同一会话，改变参数409。没有同组、已自动实测、空闲且共享选择开启的节点时503 `REALTIME_INTEGRATION_REQUIRED`，不建单、不扣费。独占物理槽与九项探测/业务共用 `capabilityNodeSlots`，不能另起不兼容GPU锁。
 
@@ -130,4 +130,62 @@ worker-state的 `turn` 包含原user_text/history、request_id/turn_id、context
 - **即使十片实际字节/所有客户端声明看似完整，当前result也只能adapter_required，绝不写入capabilityAutoVerifications active或放开目录**。还缺真实神经运行身份和独立播放见证验证器；字节格式/客户端claimed played不能冒充这个证据。此接口连注入的验证器返回active都会拒绝转成激活状态。
 - result完成不等于GPU释放。节点确认本次owned worker真实停止后 `POST /verifications/{id}/stopped {owned_worker_stopped:true}`，才幂等释放精确物理/全站锁；传输仍在进行则409，异常失联依15分钟租约到期。挑战/摘要7天TTL，保留失败证据，不阻塞其他节点。
 
-当前上述源码/内存HTTP测试是协议与边界证据，未创建真实挑战、未请求模型。真实消费者、独立播放见证、可激活的神经验证器仍是后续必须完成的工作，不能宣称真人直播已全链路打通。
+当前上述源码/内存HTTP测试是协议与边界证据，未创建真实挑战、未请求模型。真实消费者和独立神经/播放观察器仍须交付并真实验收，不能宣称真人直播已全链路打通。
+
+## 播放器见证合同（OpenAPI 2.14.0）
+
+实现：`server/digital-live-witness.js`。版本 `digital-live-playback-witness-v1`；原挑战新增独立随机 `nonce`。本节接口仍使用前述ROOT。GGE持有人必须是原挑战节点绑定的同一账号，有效 `digital_live.use`，且当前权威分组一致；管理员也不能绕过分组或替别的账号查询。节点原绑定/制品/精确providers仍须有效。无需向数字直播客户端交付节点密钥。
+
+### 短票、取流与未知结果
+
+- GGE Bearer `POST /verifications/{id}/witness-tickets`：`{request_id,consumer_artifact_sha256,purpose,sequence?,origin}`。purpose=`media|interrupt_media|report`；仅media包含sequence=1..10。request_id沿用稳定8–160位ASCII原键；consumer摘要是实际测量版二进制小写SHA256，不是旧候选的借用hash。
+- 首次返回 `{protocol,idempotent:false,ticket,header,expires_at,witness_id,consumer_registration,challenge,interrupt_probe,url}`。`challenge`含原id/nonce/provider_sha256/node_artifact_sha256/providers/turns，不含账号/绑定/租约秘密。未登记的消费者仍可收集测量，但 `consumer_registration=unregistered` 不能激活。一次ticket最长60秒、不超挑战租约，仅存hash，严格绑定原账号/挑战/用途/序号/消费者/Origin；不能放URL。
+- 取媒体/报告均使用 `Authorization: DigitalLiveWitness dlw_...` 和原Origin。URL固定腾讯HTTPS网关。每个消费者/挑战/用途/序号只签发一个槽，不换键累积票据。原键重试只返 `idempotent:true,ticket_recoverable:false,consumed,expires_at`，绝不重返或重签token。
+- `GET /verifications/{id}/witness-state?request_id=原键`，同一GGE账号鉴权，返回用途/序号/consumed/expires_at/report_received/report_sha256/gateway_media/gateway_interrupt/wire_sha256/admission。这个查询不重开媒体、不重新POST报告、不执行模型。票据使用期60秒与原请求恢复收据7天是不同期限；数据库TTL按purgeAt，不按expiresAt删掉原键。
+- media用途先GET返回的 `/witness-media/{sequence}` 建读取连接，节点查询原挑战 `witness.media_ready_sequences` 后再用原GAB+VerificationLease PUT原 `/media/{sequence}`。同一真实流发给播放器，服务端只保留字节数/SHA和时间/状态，不存完整视频。每段独立ftyp+moov+moof/mdat；不能用整文件base64替代。媒体响应无缓存、明确Origin。
+- 媒体GET失败/部分接收、PUT已开始或回包未知：只查原键并停止本挑战，不重GET、不重新推理、不换新票。客户端Abort所有本挑战fetch；节点停止其owned worker后调用原 `/stopped`。仍有活读取或上传时409不释放；失联依原15分钟租约自然到期。失败证据保留，下一次新挑战仍受每天2次/总16次/全站4槽预算，不能无界自动重试。
+
+### 十轮完整播放与独立打断探针
+
+十个正常片段都必须完整接收并真实播放ended。前五个generation=1，后五个=2；media_generation等于sequence，每片turn_sequence=1，turn_id使用原challenge.turns。这个逻辑代次切换**不是**在途打断通过证据。
+
+另有且仅有一次独立 `interrupt_probe`：id=`probe-{nonce}-interrupt`、source_sequence=5、独立generation1→2。复用已生成第五段完整源，不额外调用LLM/TTS/avatar。只允许节点本挑战RAM保留完整源<=4MiB/<=10秒，在probe终态/取消/租约结束清理；不增加磁盘载荷或官网原视频存储。第五段源超限则明确失败，不能截断后冒称同一完整源。
+
+客户端取purpose=`interrupt_media`的短票GET `/witness-interrupt-media`；节点带GAB+VerificationLease PUT `/interrupt-media`。先等reader-ready，源发送速率不超过524288B/s，保留最后64个真实字节最多5000ms，使真实帧已经呈现而fetch仍活动时才能静音/Abort。探针4MiB/10秒上限，不允许第二次上传。快网导致先收完、没有真实已呈现帧、没有活动fetch时必须失败，不以0ms补值。
+
+网关只在原读端取消、writer确实活动且已写前缀 `0 < bytes < 原第五段完整bytes` 时记在途中断；记录的是**已写前缀**摘要而非完整媒体摘要。此探针仅证明取流/播放取消，不能证明神经推理在途停止或物理GPU释放。后两者由独立runtime观察器另验，不由local mute/Abort或节点自报替代。
+
+### 客户端测量报告
+
+purpose=report一次票据 `POST /verifications/{id}/witness-report`：
+
+```json
+{
+  "protocol":"digital-live-playback-witness-v1",
+  "challenge_id":"原dlv编号","nonce":"原16位小写hex",
+  "provider_sha256":"原64位小写SHA256","node_artifact_sha256":"原节点制品SHA256",
+  "consumer_artifact_sha256":"实际测量版二进制SHA256",
+  "observations":[{
+    "sequence":1,"turn_id":"原challenge.turns[0].turn_id","generation":1,"media_generation":1,"turn_sequence":1,
+    "sha256":"该片真实完整接收SHA256","bytes":12345,
+    "first_body_ms":10,"first_presented_ms":40,"first_playing_ms":42,"ended_ms":1030,
+    "played_start_seconds":0,"played_end_seconds":1,"presented_frames":15,"total_frames":15,"dropped_frames":0,"ended":true
+  }],
+  "interrupt":{"probe_id":"probe-{nonce}-interrupt","source_sequence":5,"from_generation":1,"to_generation":2,
+    "local_mute_ms":2,"fetch_abort_ms":3}
+}
+```
+
+observations恰好十项、顺序1..10，上例仅展示一项结构，不是可提交的验收数据。时间均同一轮开始的浏览器performance.now相对毫秒；first_body取WebView真实ReadableStream首块，first_presented取requestVideoFrameCallback首次呈现，不称解码器内部首帧。每轮新video元素，真实played/currentTime/EOS/ended、RVFC帧数、getVideoPlaybackQuality帧数；总已播放时长<=60秒。Rust可独立计算字节/SHA，但不能把网关摘要抄成自己的测量。上列所有字段仍是**不可信客户端测量**。无maxAVskew或物理release客户端字段，不要求SDK猜测。report回包未知只GET原witness-state，绝不重投。
+
+### 独立观察器与可激活证明链
+
+`POST /verifications/{id}/attestations` 接受 `digital-live-independent-attestation-v1` 严格schema：`protocol,role,key_id,observer_artifact_sha256,challenge_id,nonce,provider_sha256,node_artifact_sha256,consumer_artifact_sha256,wire_sha256,report_sha256,observed_at,expires_at,payload,signature`。角色runtime/playback，各用**不同Ed25519身份**；私钥只能在独立观察器安全边界，不能打包进消费者或节点普通配置。服务端先查受审注册表并验签，再查挑战，避免未授权枚举。证明签发时间位于原挑战租约、无未来时间、上传最长5分钟，不得重放到不同nonce。
+
+- runtime payload：`actual_text_model`固定实际27B ID、实际 `actual_tts_model/actual_avatar_model`、十个 `{turn_id,text_sha256}`（真实LLM输出必须与原随机挑战对应）、实测 `max_av_skew_ms<=150`、独立观测的 `exclusive_gpu:true,owned_worker_stopped:true`。独立观察器须真实检查模型运行身份、停止和物理租约，不只是为节点JSON代签。
+- playback payload：`decoded_streams:10,end_of_stream_verified:true,interrupted_generation_verified:true`。独立观察器须真实解码/测量并核对原客户端报告；不能只给客户端claimed ended盖签名。
+- 签名为64字节Ed25519的86字符base64url，无padding。签名消息为去掉signature后按 `canonicalWitnessJson` 递归ASCII键升序、UTF-8、无空格JSON；以实现导出的函数为精确合同。`report_sha256`取相同规范化客户端报告；`wire_sha256`由原键状态返回，是十段完整网关摘要与独立打断前缀记录的规范摘要，不是完整视频hash。
+- `DIGITAL_LIVE_WITNESS_REGISTRY`只通过受审源码发布登记消费者真实hash及独立观察器公钥/制品hash/有效期/撤销状态，无自注册、管理员手填通过或env后门。**当前生产注册表为空**，客户端报告永不单独放行。
+- 服务端须同时拿到受认可消费者、原candidate adapter_required、全部真实网关及播放对应证据、两个独立有效签名、原节点停止回执、当前绑定/分组/制品未变，才幂等写 `digitalLiveRealtimeProofs`，最长24小时。原candidate result仍不改active；新实时目录读独立proof，每次都重验整个签名/摘要链，已撤销注册立即失效。没有独立ASR证明时 `realtime_asr=false`，不能借媒体证明开放ASR。
+
+上述签名验证/准入链代码与非GPU回归已接，不代表真实观察器、真实消费者和神经推理验收已完成。注册表为空必须保持关闭，不能把测试私钥或虚构模型证明配置到生产。

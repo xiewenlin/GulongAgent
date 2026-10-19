@@ -41,6 +41,11 @@ export async function verifyDigitalLiveDeployment(origin, read = fetch) {
   assert.ok(spec.paths["/api/v1/digital-live/realtime/sessions/{id}/events"].get);
   assert.ok(spec.paths["/api/v1/digital-live/realtime/sessions/{id}/asr/utterances"].post);
   assert.ok(spec.paths["/api/v1/digital-live/realtime/verifications/next"].post);
+  assert.ok(spec.components.schemas.DigitalLivePlaybackWitness);
+  for (const [method, path] of [["post", "witness-tickets"], ["get", "witness-state"], ["post", "witness-report"],
+    ["get", "witness-interrupt-media"], ["post", "attestations"]]) {
+    assert.ok(spec.paths[`/api/v1/digital-live/realtime/verifications/{verificationId}/${path}`]?.[method]);
+  }
   await get(realtime.catalog_url, 401);
   await get("/api/v1/desktop/digital-live/config?product=worklucky", 400);
   await get("/api/v1/desktop/gulong-engine/account", 401);

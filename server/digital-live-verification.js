@@ -50,7 +50,7 @@ export function validateDigitalLiveCandidateEvidence({ record, claims, observed 
 
 export function createDigitalLiveCandidateVerification({ getCollection, now = () => new Date(),
   slots = createCapabilitySlotCoordinator({ getCollection }), issueInputs = createProbeFixtureIssuer({ fixtures: CAPABILITY_PROBE_FIXTURES }),
-  validator = validateDigitalLiveCandidateEvidence } = {}) {
+  validator = validateDigitalLiveCandidateEvidence, witness = null } = {}) {
   const clock = () => new Date(now()), collection = (name) => getCollection(name);
   const identity = (r) => ({ bindingId: r.bindingId, nodeId: r.nodeId, userId: r.userId, capabilityId: "digital_live.realtime_verification", claimId: r.id, taskId: r.id });
   async function lock(key, record) {
@@ -86,11 +86,15 @@ export function createDigitalLiveCandidateVerification({ getCollection, now = ()
     const media = await (await collection(MEDIA)).find({ challengeId: record.id }).sort({ sequence: 1 }).limit(10).toArray();
     return { protocol: DIGITAL_LIVE_VERIFICATION_VERSION, id: record.id, request_id: record.requestId, state: record.state,
       mode: record.mode, activated: false, dispatchable: false, providers: record.providers, provider_sha256: record.providerSha256,
+      nonce: record.nonce || null, witness: witness ? await witness.status(record.id) : null,
       lease_expires_at: record.leaseExpiresAt, lease_valid: record.state === "issued" && record.leaseExpiresAt > clock() && !record.stoppedAt,
       owned_worker_stopped: Boolean(record.stoppedAt),
       budget: { max_model_inferences: record.mode === "media" ? 10 : 1, max_turns: record.mode === "media" ? 10 : 1,
-        max_total_audio_seconds: record.mode === "media" ? 60 : 12, max_output_tokens_per_turn: 32, max_media_bytes: 16 * 1024 * 1024 },
-      probe: record.mode === "media" ? { turns: record.turns, interrupt_after_turn: 5, expected_model: record.providers.text_model,
+        max_total_audio_seconds: record.mode === "media" ? 60 : 12, max_output_tokens_per_turn: 32, max_media_bytes: 16 * 1024 * 1024,
+        max_extra_interrupt_model_inferences: 0, max_interrupt_media_bytes: 4 * 1024 * 1024 },
+      probe: record.mode === "media" ? { turns: record.turns, interrupt_after_turn: 5,
+        interrupt_probe: { id: `probe-${record.nonce}-interrupt`, source_sequence: 5, reuse_existing_output: true,
+          separate_from_ten_complete_playbacks: true, max_seconds: 10 }, expected_model: record.providers.text_model,
         context_tokens: 8192, media_transport: "http-fmp4-mse-v1", required_independent_playback_witness: true }
         : { task: "transcribe", expected_model: record.providers.asr_model, full_source_required: true,
           inputs: withInputs && record.state === "issued" && !record.stoppedAt && record.leaseExpiresAt > clock()
@@ -129,7 +133,7 @@ export function createDigitalLiveCandidateVerification({ getCollection, now = ()
     const id = `dlv_${randomUUID()}`, nonce = randomBytes(8).toString("hex"), instant = clock();
     const record = { _id: requestId, id, requestId: body.request_id, bindingId: String(binding._id), nodeId: binding.nodeId,
       userId: String(binding.userId), computeGroupId: node.computeGroupId, mode: body.mode, providerSha256: body.provider_sha256,
-      providers: provider, artifactSha256: node.artifactSha256, leaseTokenHash: sha(body.lease_token), state: "preparing", revision: 0,
+      providers: provider, artifactSha256: node.artifactSha256, nonce, leaseTokenHash: sha(body.lease_token), state: "preparing", revision: 0,
       turns: Array.from({ length: 10 }, (_, i) => ({ turn_id: `probe-${nonce}-${i + 1}`, prompt: `Reply only: Verification ${nonce} turn ${i + 1}.`, expected_text: `Verification ${nonce} turn ${i + 1}.` })),
       leaseExpiresAt: new Date(+instant + 15 * 60_000), purgeAt: new Date(+instant + 7 * 86400_000), createdAt: instant, updatedAt: instant };
     try { await table.insertOne(record); } catch (error) { if (error.code !== 11000) throw error; return next(binding, raw); }
@@ -170,6 +174,13 @@ export function createDigitalLiveCandidateVerification({ getCollection, now = ()
     } });
     const permit = { sessionId: id, generation: 1, sequence, mimeType: record.providers.mime_type,
       validate: () => owned(binding, id, secret) };
+    if (witness?.mediaReaderReady(id, sequence)) {
+      try {
+        const metadata = await witness.mediaWrite(permit, stream);
+        await table.updateOne({ _id: key, state: "receiving" }, { $set: { bytes: metadata.bytes, sha256: metadata.sha256, state: "received", receivedAt: clock() } });
+        return metadata;
+      } catch (error) { await table.updateOne({ _id: key }, { $set: { state: "failed", updatedAt: clock() } }); throw error; }
+    }
     const reader = relay.open(permit).getReader();
     const draining = (async () => { try { while (!(await reader.read()).done) { /* discard, never retain full media */ } } finally { reader.releaseLock(); } })();
     try { const result = await relay.write(permit, stream); await draining; return result; }
@@ -188,17 +199,30 @@ export function createDigitalLiveCandidateVerification({ getCollection, now = ()
     const saved = await table.updateOne({ _id: record._id, claimsHash: { $exists: false } }, { $set: {
       state, claims: parsed.data, claimsHash, reasonCode: result.code || "REALTIME_VALIDATOR_REQUIRED", updatedAt: clock() } });
     demand(saved.modifiedCount === 1, "REALTIME_VERIFICATION_STATE_CONFLICT", "验收结果已更新，请查询原请求");
+    await witness?.reconcile(id);
     return get(binding, id, secret);
   }
   async function stopped(binding, id, secret, body) {
     const record = await owned(binding, id, secret, { expired: true });
     demand(body?.owned_worker_stopped === true, "REALTIME_VERIFICATION_STOP_REQUIRED", "必须先确认本次owned worker已真实结束");
+    if (record.stoppedAt) return get(binding, id, secret);
     const pending = await (await collection(MEDIA)).findOne({ challengeId: id, state: "receiving" });
     demand(!pending || record.leaseExpiresAt <= clock(), "REALTIME_VERIFICATION_TRANSFER_ACTIVE", "原验收仍在传输，不能释放物理租约");
+    demand(!witness || record.leaseExpiresAt <= clock() || !(await witness.status(id)).media_ready_sequences.length,
+      "REALTIME_VERIFICATION_TRANSFER_ACTIVE", "原播放器见证或打断探针仍连接，不能释放物理租约");
     if (pending) await (await collection(MEDIA)).updateMany({ challengeId: id, state: "receiving" }, { $set: { state: "failed_expired", updatedAt: clock() } });
     await release(record);
-    await (await collection(RECORDS)).updateOne({ _id: record._id }, { $set: { stoppedAt: clock(), updatedAt: clock() } });
+    await (await collection(RECORDS)).updateOne({ _id: record._id, stoppedAt: { $exists: false } }, { $set: { stoppedAt: clock(), updatedAt: clock() } });
+    if (record.leaseExpiresAt > clock()) await witness?.reconcile(id);
     return get(binding, id, secret);
   }
-  return { next, get, byRequest, collect, submit, stopped };
+  async function interruptMedia(binding, id, secret, stream, contentType) {
+    const record = await owned(binding, id, secret);
+    demand(record.mode === "media" && record.state === "issued" && contentType === record.providers.mime_type && witness,
+      "REALTIME_VERIFICATION_MEDIA_INVALID", "当前挑战不支持该打断探针", 400);
+    demand(await (await collection(MEDIA)).findOne({ _id: `${id}:5`, state: "received" }),
+      "REALTIME_INTERRUPT_SOURCE_REQUIRED", "请先完成第五段原媒体，打断探针只复用该输出而不再次推理");
+    return witness.writeInterrupt(record, stream);
+  }
+  return { next, get, byRequest, collect, interruptMedia, submit, stopped };
 }

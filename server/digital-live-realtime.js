@@ -7,6 +7,7 @@ import { getUserComputeGroupId, computeGroupsMatch } from "./compute-groups.js";
 import { createCapabilitySlotCoordinator } from "./capability-slots.js";
 import { normalizeGpuLoadReport } from "./shared-node-scheduler.js";
 import { DIGITAL_LIVE_TEXT_MODEL } from "./digital-live-product.js";
+import { createDigitalLiveRealtimeProofLookup } from "./digital-live-witness.js";
 
 export const DIGITAL_LIVE_REALTIME_ROOT = "/api/v1/digital-live/realtime";
 export const DIGITAL_LIVE_REALTIME_VERSION = "digital-live-realtime-v1";
@@ -61,14 +62,14 @@ export function realtimeConfig() {
     reason: "会话控制与有界媒体网关已实现；连续实时节点验证器及真实节点尚未验收，暂不开放派发" };
 }
 
-/** This service never turns inventory into approval. The production lookup is
- * deliberately absent until a real streaming verifier/consumer is delivered.
- * Async nine-capability proofs are not realtime proofs and cannot be reused. */
+/** Inventory and async nine-capability proofs cannot grant realtime admission.
+ * The production lookup revalidates independent signatures and wire evidence;
+ * without release-registered genuine observers it remains unavailable. */
 export function createDigitalLiveRealtimeService({ getCollection = databaseCollection, now = () => new Date(),
   readEntitlement = (id, instant) => readGulongEngineEntitlement(id, instant, getCollection),
   isOwnerActive = async (id) => ObjectId.isValid(id) && Boolean(await (await getCollection("users")).findOne({ _id: new ObjectId(id), status: "active" })),
   readGroup = (id) => getUserComputeGroupId(id, getCollection), slots = createCapabilitySlotCoordinator({ getCollection }),
-  lookupRealtimeProof = async () => null, onInvalidate = () => {}, gatewayOrigin = DIGITAL_LIVE_GATEWAY_ORIGIN } = {}) {
+  lookupRealtimeProof = createDigitalLiveRealtimeProofLookup({ getCollection }), onInvalidate = () => {}, gatewayOrigin = DIGITAL_LIVE_GATEWAY_ORIGIN } = {}) {
   const collection = (name) => getCollection(name);
   const clock = () => new Date(now());
   const fence = (s) => ({ bindingId: s.bindingId, nodeId: s.nodeId, userId: s.executorUserId,

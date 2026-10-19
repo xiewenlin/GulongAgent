@@ -34,11 +34,14 @@ export function createDigitalLiveMediaRelay({ maxStreams = 8, maxBytes = 16 * 10
   }
   function close(entry, cause, notifyFailure = true) {
     if (entry.closed) return;
-    entry.closed = true; clearTimeout(entry.timer); clearInterval(entry.validationTimer); streams.delete(entry.key);
+    entry.closed = true; entry.closeCause = cause; clearTimeout(entry.timer); clearInterval(entry.validationTimer); streams.delete(entry.key);
     if (cause) {
       entry.writer.abort(cause).catch(() => {});
       entry.inputReader?.cancel(cause).catch(() => {});
-      if (notifyFailure) Promise.resolve(onFailed(entry.sessionId)).catch(() => {});
+      if (notifyFailure) entry.failurePromise = Promise.resolve(onFailed(entry.sessionId, entry.generation, entry.sequence, {
+        code: cause.code, writing_when_cancelled: entry.writing, bytes: entry.bytesWritten || 0,
+        sha256: entry.writtenHash?.copy().digest("hex") || null,
+      })).catch(() => {});
     }
   }
   function open(permit) {
@@ -47,8 +50,8 @@ export function createDigitalLiveMediaRelay({ maxStreams = 8, maxBytes = 16 * 10
     if (streams.size >= maxStreams) throw error("REALTIME_GATEWAY_BUSY", "媒体网关连接已满，请稍后重试", 503);
     const pipe = new TransformStream(undefined, new ByteLengthQueuingStrategy({ highWaterMark: maxChunkBytes }),
       new ByteLengthQueuingStrategy({ highWaterMark: maxChunkBytes }));
-    const entry = { ...permit, key, writer: pipe.writable.getWriter(), writing: false, closed: false };
-    entry.timer = setTimeout(() => close(entry, error("REALTIME_MEDIA_TIMEOUT", "媒体连接超时")), timeoutMs); entry.timer.unref?.();
+    const entry = { ...permit, key, writer: pipe.writable.getWriter(), writing: false, closed: false, bytesWritten: 0, writtenHash: createHash("sha256") };
+    entry.timer = setTimeout(() => close(entry, error("REALTIME_MEDIA_TIMEOUT", "媒体连接超时")), Math.min(permit.timeoutMs || timeoutMs, timeoutMs)); entry.timer.unref?.();
     streams.set(key, entry);
     // Wrap cancel: a browser disconnect must terminate its session and writer.
     const reader = pipe.readable.getReader();
@@ -81,7 +84,9 @@ export function createDigitalLiveMediaRelay({ maxStreams = 8, maxBytes = 16 * 10
     try {
       for (;;) {
         if (signal?.aborted || entry.closed) throw error("REALTIME_MEDIA_DISCONNECTED", "媒体传输已取消");
-        const result = await reader.read(); if (result.done) break;
+        const result = await reader.read();
+        if (entry.closed) throw entry.closeCause || error("REALTIME_MEDIA_DISCONNECTED", "媒体传输已取消");
+        if (result.done) break;
         const wire = result.value; bytes += wire?.byteLength || 0;
         if (!(wire instanceof Uint8Array) || bytes > maxBytes) throw error("REALTIME_MEDIA_LIMIT", "媒体总大小超过安全上限", 413);
         // HTTP/read chunk boundaries are not producer frame boundaries. Split
@@ -100,7 +105,8 @@ export function createDigitalLiveMediaRelay({ maxStreams = 8, maxBytes = 16 * 10
           try { await Promise.race([entry.writer.write(header.length ? header : chunk), new Promise((_, reject) => {
             timeout = setTimeout(() => reject(error("REALTIME_BACKPRESSURE_TIMEOUT", "客户端未及时读取媒体，已取消本会话")), writeTimeoutMs);
             timeout.unref?.();
-          })]); } finally { clearTimeout(timeout); }
+          })]); entry.writtenHash.update(header.length ? header : chunk); entry.bytesWritten += header.length ? header.length : chunk.byteLength;
+          } finally { clearTimeout(timeout); }
           header = new Uint8Array(0);
         }
       }
@@ -110,7 +116,7 @@ export function createDigitalLiveMediaRelay({ maxStreams = 8, maxBytes = 16 * 10
       const sha256 = hash.digest("hex");
       await onSent(entry.sessionId, entry.generation, entry.sequence, { bytes, sha256 });
       await entry.writer.close(); close(entry); return { ok: true, bytes, sha256 };
-    } catch (cause) { close(entry, cause); await reader.cancel().catch(() => {}); throw cause; }
+    } catch (cause) { const failure = entry.closeCause || cause; close(entry, failure); await entry.failurePromise; await reader.cancel().catch(() => {}); throw failure; }
     finally { signal?.removeEventListener("abort", abort); entry.inputReader = null; reader.releaseLock(); }
   }
   function invalidate(sessionId) { for (const entry of [...streams.values()]) if (entry.sessionId === sessionId) close(entry, error("REALTIME_MEDIA_CANCELLED", "会话已打断或取消"), false); }

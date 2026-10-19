@@ -5,6 +5,7 @@ import { hashOpaqueToken, fingerprintIp } from "./security.js";
 import { createDigitalLiveRealtimeService, realtimeConfig, digitalLiveRealtimeSchemas, DIGITAL_LIVE_PCM_MIME, DIGITAL_LIVE_REALTIME_ROOT as ROOT } from "./digital-live-realtime.js";
 import { createDigitalLiveMediaRelay } from "./digital-live-media-relay.js";
 import { createDigitalLiveCandidateVerification, digitalLiveVerificationSchemas } from "./digital-live-verification.js";
+import { createDigitalLiveWitnessService, digitalLiveWitnessSchemas, DIGITAL_LIVE_WITNESS_VERSION } from "./digital-live-witness.js";
 
 let persistentMediaRuntime = false;
 // Only the persistent Node entry point enables media pairing. Importing this
@@ -35,7 +36,8 @@ export function registerDigitalLiveRealtimeRoutes(app, dependencies) {
   service = dependencies.service || createDigitalLiveRealtimeService({ getCollection, ...dependencies.serviceOptions,
     onInvalidate: (id) => { relay.invalidate(id); audioRelay.invalidate(id); } });
   const mediaEnabled = dependencies.mediaEnabled || (() => persistentMediaRuntime);
-  const verification = dependencies.verification || createDigitalLiveCandidateVerification({ getCollection, ...dependencies.verificationOptions });
+  const witness = dependencies.witness || createDigitalLiveWitnessService({ getCollection, ...dependencies.witnessOptions });
+  const verification = dependencies.verification || createDigitalLiveCandidateVerification({ getCollection, witness, ...dependencies.verificationOptions });
   async function nodeAuth(c) {
     const raw = c.req.header("X-Gulong-Account-Binding") || "";
     if (!/^gab_[A-Za-z0-9_-]{40,196}$/.test(raw)) return { error: c.json({ code: "ACCOUNT_BINDING_REQUIRED", message: "请先在已激活的桌面节点绑定官网账号" }, 401) };
@@ -111,6 +113,42 @@ export function registerDigitalLiveRealtimeRoutes(app, dependencies) {
     const rejected = gatewayGuard(c); if (rejected) return rejected;
     return c.json(await verification.collect(auth.binding, c.req.param("verificationId"), verificationLease(c), Number(c.req.param("sequence")), c.req.raw.body, c.req.header("Content-Type")));
   }, "node"));
+  app.put(`${ROOT}/verifications/:verificationId/interrupt-media`, safe(async (c, auth) => {
+    const rejected = gatewayGuard(c); if (rejected) return rejected;
+    return c.json(await verification.interruptMedia(auth.binding, c.req.param("verificationId"), verificationLease(c), c.req.raw.body, c.req.header("Content-Type")));
+  }, "node"));
+  const witnessRoot = `${ROOT}/verifications/:verificationId`;
+  app.post(`${witnessRoot}/witness-tickets`, safe(async (c, auth) => c.json(await witness.issue(auth.user.id, c.req.param("verificationId"), await jsonBody(c))), "user", true));
+  app.get(`${witnessRoot}/witness-state`, safe(async (c, auth) => c.json(await witness.state(auth.user.id, c.req.param("verificationId"), c.req.query("request_id")))));
+  for (const path of [`${witnessRoot}/witness-media/:sequence`, `${witnessRoot}/witness-interrupt-media`, `${witnessRoot}/witness-report`]) app.options(path, (c) => {
+    const origin = c.req.header("Origin");
+    if (!["https://www.sologle.com", "https://sologle.com", "https://111.229.70.235", "http://tauri.localhost", "tauri://localhost"].includes(origin)) return c.body(null, 403);
+    c.header("Access-Control-Allow-Origin", origin); c.header("Vary", "Origin"); c.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    c.header("Access-Control-Allow-Headers", "Authorization, Content-Type"); return c.body(null, 204);
+  });
+  const witnessToken = (c) => (c.req.header("Authorization") || "").replace(/^DigitalLiveWitness /, "");
+  app.get(`${witnessRoot}/witness-media/:sequence`, safe(async (c) => {
+    const rejected = gatewayGuard(c); if (rejected) return rejected;
+    if (!/^(?:[1-9]|10)$/.test(c.req.param("sequence"))) return c.json({ code: "REALTIME_WITNESS_REQUEST_INVALID", message: "完整媒体序号必须为1至10" }, 400);
+    const result = await witness.open(c.req.param("verificationId"), Number(c.req.param("sequence")), witnessToken(c), c.req.header("Origin") || "");
+    return new Response(result.stream, { headers: { "Content-Type": result.mimeType, "Cache-Control": "private, no-store, no-transform",
+      "Access-Control-Allow-Origin": c.req.header("Origin"), Vary: "Origin", "X-Accel-Buffering": "no" } });
+  }, "ticket"));
+  app.get(`${witnessRoot}/witness-interrupt-media`, safe(async (c) => {
+    const rejected = gatewayGuard(c); if (rejected) return rejected;
+    const result = await witness.open(c.req.param("verificationId"), 11, witnessToken(c), c.req.header("Origin") || "");
+    return new Response(result.stream, { headers: { "Content-Type": result.mimeType, "Cache-Control": "private, no-store, no-transform",
+      "Access-Control-Allow-Origin": c.req.header("Origin"), Vary: "Origin", "X-Accel-Buffering": "no" } });
+  }, "ticket"));
+  app.post(`${witnessRoot}/witness-report`, safe(async (c) => {
+    const result = await witness.report(c.req.param("verificationId"), witnessToken(c), c.req.header("Origin") || "", await jsonBody(c));
+    c.header("Access-Control-Allow-Origin", c.req.header("Origin")); c.header("Vary", "Origin"); return c.json(result);
+  }, "ticket"));
+  app.post(`${witnessRoot}/attestations`, safe(async (c) => {
+    const body = await jsonBody(c);
+    if (body.challenge_id !== c.req.param("verificationId")) return c.json({ code: "REALTIME_ATTESTATION_MISMATCH", message: "证明与请求路径不一致" }, 400);
+    return c.json(await witness.attest(body));
+  }, "ticket"));
   app.post(`${ROOT}/sessions`, safe(async (c, auth) => {
     const result = await service.create(auth.user.id, await jsonBody(c), c.req.header("Idempotency-Key"));
     return c.json(result, result.idempotent ? 200 : 201);
@@ -197,6 +235,9 @@ export function registerDigitalLiveRealtimeRoutes(app, dependencies) {
     [`${ROOT}/nodes/report`]: digitalLiveRealtimeSchemas.report,
     [`${ROOT}/verifications/next`]: digitalLiveVerificationSchemas.next,
     [`${ROOT}/verifications/{verificationId}/result`]: digitalLiveVerificationSchemas.result,
+    [`${ROOT}/verifications/{verificationId}/witness-tickets`]: digitalLiveWitnessSchemas.ticket,
+    [`${ROOT}/verifications/{verificationId}/witness-report`]: digitalLiveWitnessSchemas.report,
+    [`${ROOT}/verifications/{verificationId}/attestations`]: digitalLiveWitnessSchemas.attestation,
     [`${ROOT}/verifications/{verificationId}/stopped`]: z.object({ owned_worker_stopped: z.literal(true) }),
     [`${ROOT}/nodes/claim`]: z.object({ lease_token: z.string().regex(/^[A-Za-z0-9_-]{43}$/), dry_run: z.boolean().optional() }),
     [`${ROOT}/sessions`]: digitalLiveRealtimeSchemas.create,
@@ -224,6 +265,13 @@ export function registerDigitalLiveRealtimeRoutes(app, dependencies) {
     ["get", `${ROOT}/verifications/{verificationId}`, "查询原挑战及网关实际媒体摘要；不是激活证明"],
     ["post", `${ROOT}/verifications/{verificationId}/result`, "有界声明与服务端字节证据分离验证；当前绝不写active证明"],
     ["post", `${ROOT}/verifications/{verificationId}/stopped`, "owned worker停止后幂等释放原物理租约"],
+    ["post", `${ROOT}/verifications/{verificationId}/witness-tickets`, "GGE原账号领取60秒一次用途/nonce/制品绑定的播放器见证票据；不是注册或激活"],
+    ["get", `${ROOT}/verifications/{verificationId}/witness-state`, "GGE原账号按原request_id恢复见证状态，不重发票据、不重跑模型"],
+    ["get", `${ROOT}/verifications/{verificationId}/witness-media/{sequence}`, "腾讯网关一次DigitalLiveWitness header票据读取原验收媒体；不存完整MP4"],
+    ["get", `${ROOT}/verifications/{verificationId}/witness-interrupt-media`, "独立在途打断探针，复用第五段输出不新增模型推理；不声称完整ended或完整摘要"],
+    ["put", `${ROOT}/verifications/{verificationId}/interrupt-media`, "绑定节点复用已有第五段媒体供独立打断探针，最多4MiB/10秒且不可重复"],
+    ["post", `${ROOT}/verifications/{verificationId}/witness-report`, "客户端完整播放测量与网关摘要核对，仍不等于受信模型/播放证明"],
+    ["post", `${ROOT}/verifications/{verificationId}/attestations`, "独立运行时及播放器观察器Ed25519签名；源码登记公钥与制品，不接受自注册或手填active"],
     ["put", `${ROOT}/verifications/{verificationId}/media/{sequence}`, "腾讯网关完整流式收取并丢弃固定验收媒体，仅存服务端摘要"],
     ["post", `${ROOT}/sessions`, "同账户与产品原键创建零费用会话；无真实实时证明时503"],
     ["get", `${ROOT}/sessions/by-request/{key}`, "原键恢复会话；跨账户404"],
@@ -244,9 +292,14 @@ export function registerDigitalLiveRealtimeRoutes(app, dependencies) {
   ]) app.openAPIRegistry?.registerPath({ method, path, tags: ["Digital Live Realtime"], summary,
     description: "digital-live-realtime-v1；现有digital_live.use权益，所有金额0分且无钱包/分佣；生产尚无实时验证器，候选清单不能派发。详见docs/digital-live-realtime-v1.md。节点worker-state每秒读取，客户端每5秒heartbeat，worker租约15秒，media独立30秒一次性header票据。仅腾讯常驻进程配对媒体流。",
     ...(bodies[path] ? { request: { body: { required: true, content: { "application/json": { schema: bodies[path] } } } } } : {}),
-    ...(method === "get" && path.includes("/media/") ? { security: [{ digitalLiveMediaTicket: [] }] } : {}),
+    ...(path.includes("/witness-") ? { security: path.endsWith("/witness-tickets") || path.endsWith("/witness-state")
+      ? [{ gulongEngineDesktopBearer: [] }, { sessionCookie: [] }] : [{ digitalLiveWitnessTicket: [] }] }
+      : method === "get" && path.includes("/media/") ? { security: [{ digitalLiveMediaTicket: [] }] } : {}),
     responses: { 200: { description: "按归属及代次返回会话状态/有界媒体流；不代表真实节点已验收" },
       401: { description: "身份或一次媒体票据无效" }, 403: { description: "无权益/分组不符/来源不符" },
       409: { description: "原键/代次/序号/物理租约冲突" }, 503: { description: "REALTIME_INTEGRATION_REQUIRED：无自动实测连续实时节点" } } });
-  return { service, relay, audioRelay, verification };
+  app.openAPIRegistry?.register("DigitalLivePlaybackWitness", digitalLiveWitnessSchemas.report);
+  app.openAPIRegistry?.registerComponent("securitySchemes", "digitalLiveWitnessTicket", { type: "apiKey", in: "header", name: "Authorization",
+    description: `${DIGITAL_LIVE_WITNESS_VERSION}；DigitalLiveWitness dlw_...，60秒一次且绑定用途/Origin/nonce，不放URL` });
+  return { service, relay, audioRelay, verification, witness };
 }
