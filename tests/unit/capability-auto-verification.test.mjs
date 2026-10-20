@@ -552,6 +552,33 @@ async function captionFixture() {
   return {...f,native,caption:createCapabilityCaptionRetestBudget({getCollection:f.getCollection,now:f.now})};
 }
 
+test("installation quarantine blocks all new-artifact capabilities before any budget or physical reservation, including UTC rollover/group changes",async()=>{
+  for(const groupId of [null,"changed-group"]){
+    const f=await releaseFixture({reports:releaseReports("b".repeat(64)),bindingPatch:{computeGroupId:groupId}});
+    const before=copy(f.rows.capabilityVerificationBudgets);
+    for(let i=0;i<2;i++){
+      const response=await f.service.next({binding:f.binding,requestId:`quarantined-${i}`,leaseToken:clientSecret(i+1)});
+      assert.equal(response.challenge,null);assert.equal(response.code,"VERIFICATION_ARTIFACT_REVIEW_REQUIRED");
+      f.advance(24*3600_000);
+    }
+    assert.equal(f.hooks.acquired.length,0);
+    assert.deepEqual(f.rows.capabilityVerificationBudgets,before);
+    for(const name of [SUPPLEMENT_COLLECTION,RELEASE_VERIFICATION_COLLECTION,CAPTION_RETEST_COLLECTION])assert.equal((f.rows[name]||[]).length,0);
+    const status=await f.service.supplementStatus({binding:f.binding});assert.equal(status.installation_guard.applicable,true);
+    assert.equal(status.installation_guard.fixed_case_authorization_active,false);
+  }
+});
+
+test("installation guard denies even a purported active new-artifact proof, without touching the old proof",async()=>{
+  const f=await releaseFixture({reports:releaseReports("c".repeat(64))});
+  const row=f.rows[AUTO_VERIFICATION_COLLECTION].find(r=>r.capabilityId==="gulong_engine.agent_chat");
+  row.status="active";row.verifiedModel=copy(row.model);row.contractTests={exact_request:true,complete_response:true};
+  row.testEvidenceSha256="a".repeat(64);row.testedAt=f.now();row.expiresAt=new Date(+f.now()+86400_000);
+  const before=copy(row);
+  assert.equal(await f.service.findTrusted({bindingId:f.binding._id,report:releaseReports("c".repeat(64))[0]}),null);
+  assert.deepEqual(row,before);
+});
+
 test("separate caption retest is exactly one corrected native challenge and never rewrites prior budgets or failure history",async()=>{
   const f=await captionFixture();const old=copy({release:f.rows[RELEASE_VERIFICATION_COLLECTION],f8:f.rows[SUPPLEMENT_COLLECTION],ordinary:f.rows.capabilityVerificationBudgets});
   const status=await f.service.supplementStatus({binding:f.binding});assert.equal(status.native_caption_retest.total.remaining,1);
@@ -755,7 +782,7 @@ test("supplement cannot escape binding, node, group, artifact, capability or mod
     { bindingPatch: { computeGroupId: "another-group" } }, { artifact: "b".repeat(64) }, { capability: "agent_chat" }]) {
     const f = await retestFixture(config);
     const response = await f.service.next({ binding: f.binding, requestId: "out-of-scope-case", leaseToken: clientSecret() });
-    assert.equal(response.code, "VERIFICATION_DAILY_BUDGET_EXHAUSTED");
+    assert.equal(response.code, config.artifact === "b".repeat(64) ? "VERIFICATION_ARTIFACT_REVIEW_REQUIRED" : "VERIFICATION_DAILY_BUDGET_EXHAUSTED");
     assert.equal((f.rows[SUPPLEMENT_COLLECTION] || []).length, 0);
     assert.equal(f.rows.capabilityVerificationBudgets[0].count, 16);
   }

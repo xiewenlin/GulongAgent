@@ -19,6 +19,7 @@ import { SHARED_NODE_SCHEDULING, NODE_REPORT_MAX_AGE_MS, normalizeGpuLoadReport,
 import { findTrustedConsumerAcceptance } from "./capability-consumer-acceptance.js";
 import { createCapabilityAutoVerificationService, registerCapabilityAutoVerificationRoutes } from "./capability-auto-verification.js";
 import { requiresAutomaticCapabilityVerification } from "./capability-verification-policy.js";
+import { isNodeArtifactQuarantined } from "./capability-artifact-installation-guard.js";
 import { createCapabilityVerificationMedia } from "./capability-verification-media.js";
 import { createCapabilityVerificationAdapters, automaticImageNodeMatchesOrder } from "./capability-verification-adapters.js";
 import { createNativeCapabilityVerificationAdapters, automaticNativeNodeMatchesOrder, nativeVerificationAvailability } from "./capability-native-verification.js";
@@ -517,6 +518,7 @@ export function capabilityNodeCanRunOrder(node, order) {
     && !(order.sharingScope === "gulong_shared" && (gulongEngineNodeSharesCapability(node, order.capabilityId) || nativeNodeSharesCapability(node, order.capabilityId)))) return false;
   if (order.sharingScope === "gulong_shared" && isNativeSharedCapability(order.capabilityId) && !nativeNodeSharesCapability(node, order.capabilityId)) return false;
   return Boolean(node.capabilities?.some((item) => item.capabilityId === order.capabilityId
+    && !isNodeArtifactQuarantined({ ...node.binding, nodeId: node.binding?.nodeId || node.nodeId }, item.artifactSha256)
     && (!order.capabilityVersion || item.capabilityVersion === order.capabilityVersion)
     && item.installed && item.validated && item.enabled
     && automaticImageNodeMatchesOrder(item, order)

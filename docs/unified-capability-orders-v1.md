@@ -667,4 +667,14 @@ LAN 节点可在各自的 `lan_cluster.nodes[].resources` 独立上报，必须�
 
 原只读补测查询新增 `native_caption_retest`，含范围摘要、期限、`total:{limit:1,used,remaining}`、唯一cap与原始消费request/challenge收据；查询不创建账本/挑战、不会唤醒节点缓存。原native三次尚未用完时显示 `awaiting_original_budget`，精确库存缺失则 `awaiting_inventory`。新账本只在节点自然轮询实际预留时物化；服务端发布核验不代替节点调用next或模型，也不保证发布后读数一定仍为0（真实消费者可能先合法消费），必须如实报告时间与账本状态。
 
+### 指定节点的新制品安装前隔离（2026-10-20，OpenAPI 2.14.7）
+
+`bound-node-unknown-artifact-deny-v1` 是只拒绝的安装保护，不是新额度或等价继承。范围以受审原绑定+匿名节点的摘要固定；更改用户分组不会让该节点未知制品回退普通日预算。现有554a、独立Qwen983e和历史f8仍按其原预算、精确证明与组隔离规则处理，名单本身不赋予任何模型准入；其他绑定/节点不受此专项政策影响。
+
+未知制品可登记真实库存，但自动next在任何日预算/补测预留、物理槽获取或模型挑战签发前拒绝，返回空challenge及 `VERIFICATION_ARTIFACT_REVIEW_REQUIRED`。包括普通日额度未用、UTC换日、原授权已用完等情况，都不能回退；所有cap适用。统一能力业务的最终候选匹配也拒绝该绑定未知制品，即使是旧同账号路径或客户端携带validated；findTrusted不把未知制品的伪/旧证明作为准入。原有已领取任务不在本保护中被主动取消或全局释放。
+
+原只读补测查询新增 `installation_guard`：`policy/applicable/unknown_artifacts=blocked/denies_ordinary_fallback=true/fixed_case_authorization_active=false/grants_admission=false`。它不创建账本、不改计数、不唤醒本机缓存。此护栏覆盖官网自动验收和统一能力订单链路，不替代节点本地调度/Windows安装安全点，不停止独立H3视频队列或其他本机工作。
+
+安装顺序：先双端发布并核对该deny-only策略；再由节点归属在安全点安装候选、核对真实artifact和完整raw库存；最后另行审定原始固定回归向量、实际artifact/matrix和独立单次CAS授权，并在护栏内只开这一条例外。未知/预测制品目前一律没有可消费授权，不能为了安装先放开普通预算。固定回归草案未在本次生产版本接线或启用，不向新制品复制旧8项通过。
+
 OpenAPI 2.14.3 修正补测候选尚在失败退避时的提示分类：若本绑定范围内仍有真实补测余量，且对应已适配模型仅因原 `nextRetryAt` 未到而不可领，`next` 返回 `challenge=null, code=VERIFICATION_BACKOFF, retry_at=原最早nextRetryAt, retry_after_seconds=ceil(剩余秒数)`（至少1秒），而非错误的每日额度耗尽/3600秒。原日志同时保存本次提示对应的 `responseRetryAt`；不领取/预留挑战、不消耗补测、不重置 attempts、不改原8/16/32分钟退避。真正无剩余补测、失效/撤销/越范围或没有相应有效候选时仍保留原限额门禁。节点已经缓存的旧 `next_at` 不因发布或GET额度查询被追溯改写；目前没有无需操作节点、无需发行挑战的远程通知唤醒接口，本次不新造旁路。

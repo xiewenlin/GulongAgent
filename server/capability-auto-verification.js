@@ -9,6 +9,7 @@ import { NATIVE_PROBE_VERSIONS } from "./capability-native-verification.js";
 import { createCapabilityVerificationSupplement } from "./capability-verification-supplement.js";
 import { createCapabilityReleaseVerificationBudget } from "./capability-release-verification-budget.js";
 import { createCapabilityCaptionRetestBudget } from "./capability-caption-retest-budget.js";
+import { isNodeArtifactQuarantined, nodeArtifactInstallationGuardStatus } from "./capability-artifact-installation-guard.js";
 
 export const AUTO_VERIFICATION_PROTOCOL = "gulong-auto-verification-v1";
 export const AUTO_VERIFICATION_COLLECTION = "capabilityAutoVerifications";
@@ -401,10 +402,11 @@ export function createCapabilityAutoVerificationService(dependencies) {
       $or: [{ status: "pending" }, { status: "failed", nextRetryAt: { $lte: instant } }, { status: "active", expiresAt: { $lte: instant } }] }).sort({ createdAt: 1, _id: 1 }).limit(32).toArray();
     const budgetId = `${active._id}:${instant.toISOString().slice(0, 10)}`;
     const priorBudget = await (await getCollection(BUDGETS)).findOne({ _id: budgetId });
-    let selected = null, useSupplement = false, useReleaseBudget = false, useCaptionBudget = false, releaseBlocked = false;
+    let selected = null, useSupplement = false, useReleaseBudget = false, useCaptionBudget = false, releaseBlocked = false, artifactBlocked = false;
     for (const item of candidates) {
       if (item.automaticMigrationEnabled === false || !requiresAutomaticCapabilityVerification(active, item.capabilityId)
         || !adapterFor(item.inventory, item.model)) continue;
+      if (isNodeArtifactQuarantined(active, item.artifactSha256)) { artifactBlocked = true; continue; }
       // This exact release is capped even when ordinary daily funds are unused.
       // No scope, matrix, expiry or per-cap failure may fall back to ordinary.
       if (releaseBudget.applies(item)) {
@@ -443,6 +445,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
             retry_after_seconds: Math.max(1, Math.ceil((+new Date(item.nextRetryAt) - +new Date(now())) / 1000)) });
         }
       }
+      if (artifactBlocked) return noChallenge({ ok: true, challenge: null, code: "VERIFICATION_ARTIFACT_REVIEW_REQUIRED", retry_after_seconds: 3600 });
       if (releaseBlocked) return noChallenge({ ok: true, challenge: null, code: "VERIFICATION_RELEASE_BUDGET_UNAVAILABLE", retry_after_seconds: 3600 });
       return noChallenge({ ok: true, challenge: null,
         ...((priorBudget?.count || 0) >= 16 ? { code: "VERIFICATION_DAILY_BUDGET_EXHAUSTED", retry_after_seconds: 3600 } : { retry_after_seconds: 60 }) });
@@ -657,6 +660,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
     if (!inventory.enabled || !ObjectId.isValid(bindingId)) return null;
     const binding = await (await getCollection("nodeAccountBindings")).findOne({ _id: new ObjectId(bindingId), status: "active", revokedAt: null });
     if (!binding) return null;
+    if (isNodeArtifactQuarantined(binding, inventory.artifactSha256)) return null;
     const instant = new Date(suppliedNow || now());
     const accepted = await (await collection()).find({ bindingId: String(bindingId), nodeId: binding.nodeId, userId: String(binding.userId),
       computeGroupId: group(binding.computeGroupId), matrixSha256: inventory.matrixSha256, status: "active", inventoryEnabled: true,
@@ -680,7 +684,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
     const active = await currentBinding(binding);
     await limited(String(active._id), "supplement-status", 30);
     return { ...await supplementalBudget.status({ binding: active }), release_reverification: await releaseBudget.status({ binding: active }),
-      native_caption_retest: await captionBudget.status({ binding: active }) };
+      native_caption_retest: await captionBudget.status({ binding: active }), installation_guard: nodeArtifactInstallationGuardStatus(active) };
   }
   return { report, next, submit, outputUpload, outputStatus, findTrusted, list, byRequest, getChallenge, supplementStatus };
 }
@@ -761,7 +765,7 @@ export function registerCapabilityAutoVerificationRoutes(app, dependencies) {
       tags: ["Automatic Capability Verification"], summary: "查询当前绑定的发布审定一次性补测额度，不创建挑战、不授予模型准入",
       security: [{ accountBinding: [] }],
       request: { headers: z.object({ "X-Gulong-Account-Binding": z.string().min(1) }) },
-      responses: { 200: { description: "仅本绑定的补测范围、期限和已消耗账本；release_reverification硬上限11次；native_caption_retest为另经人类明确授权的修正后原生音乐独立1次、8小时内有效；均无普通日额度回退，原账本不重置", content: { "application/json": { schema: z.object({ release_reverification: objectSchema, native_caption_retest: objectSchema }).catchall(z.unknown()) } } },
+      responses: { 200: { description: "仅本绑定的补测范围、期限和已消耗账本；installation_guard为指定节点未知制品安装隔离，只拒绝普通预算/准入、不发授权；原账本不重置", content: { "application/json": { schema: z.object({ release_reverification: objectSchema, native_caption_retest: objectSchema, installation_guard: objectSchema }).catchall(z.unknown()) } } },
         401: { description: "节点绑定无效" }, 429: { description: "查询频率受限" } } });
     const modelSchema = z.object({ id: z.string().min(1).max(240) }).catchall(z.union([z.string(), z.number(), z.boolean()]));
     const artifactSchema = z.string().regex(/^[a-f0-9]{64}$/i);
