@@ -12,6 +12,7 @@ import { createCapabilityCaptionRetestBudget, CAPTION_RETEST_COLLECTION } from "
 import { createFixedMusicRetestBudget, activateFixedMusicRetestForDeployment, FIXED_MUSIC_RETEST_COLLECTION } from "../../server/capability-fixed-music-retest.js";
 import { buildFixedNativeMusicRegressionCase } from "../../server/capability-fixed-music-case.js";
 import { createConditionalSixBudget, CONDITIONAL_SIX_COLLECTION } from "../../server/capability-conditional-six-budget.js";
+import { createGenericMusicContinuationBudget, GENERIC_MUSIC_CONTINUATION_COLLECTION } from "../../server/capability-generic-music-continuation.js";
 
 // These test fixtures live only in memory. No installation, extraction, model
 // invocation, build output or on-disk fixture is created by this test file.
@@ -772,6 +773,120 @@ test("wired conditional preparation failure is spent and not reissued, expired p
   f.hooks.snapshotFails=false;f.advance(7_200_000);
   assert.equal((await f.service.next({binding:f.binding,requestId:"six-after-expiry",leaseToken:clientSecret(2)})).challenge,null);
   assert.equal(f.rows[CONDITIONAL_SIX_COLLECTION][0].usedTotal,1);
+});
+
+async function genericContinuationFixture({activate=true}={}){
+  const f=await fixedFixture();await completeFixedMemory(f);f.advance(2*3600_000);
+  const row=f.rows[AUTO_VERIFICATION_COLLECTION].find(r=>r.capabilityId==="gulong_engine.music");
+  for(const item of f.rows[AUTO_VERIFICATION_COLLECTION])if(item!==row){item.status="active";item.expiresAt=new Date(+f.now()+86400_000);}
+  row.status="failed";row.attempts=1;row.nextRetryAt=new Date(+f.now()-1);
+  row.error={code:"VERIFICATION_AUDIO_TOO_SHORT",message:"original short output"};
+  const requestId="0bf14094-7f29-4e16-8e65-fe6244b772ca",challengeId="gcv_544da053-eb9b-43f7-9fef-092c5f955c75";
+  f.rows.capabilityVerificationChallenges.push({_id:digest(requestId),requestId,challengeId,featureId:row._id,bindingId:String(f.binding._id),
+    status:"failed",budgetSource:"conditional_six_after_fixed",artifactSha256:FIXED_ARTIFACT,matrixSha256:row.matrixSha256,error:copy(row.error)});
+  f.rows[CONDITIONAL_SIX_COLLECTION]=[{_id:"gvs_20261020_1829_after_fixed_six",state:"active",usedTotal:6,
+    usedByCapability:{chat:1,embedding:1,music:1,sam:1,mediapipe:1,whisper:1},
+    consumptions:{music:{capabilityId:"gulong_engine.music",requestId,challengeId,verificationId:row._id},a:{},b:{},c:{},d:{},e:{}}}];
+  const continuation=createGenericMusicContinuationBudget({getCollection:f.getCollection,now:f.now});
+  if(activate)await continuation.activate({expectedCommit:"e".repeat(40),installedCommit:"e".repeat(40)});
+  return {...f,continuation,music:row};
+}
+async function completeGenericMemory(f,challenge,duration=11.993106575963719){
+  const audioSha="b".repeat(64);f.hooks.media=[{role:"primary_audio",contentType:"audio/flac",bytes:1000,sha256:audioSha,durationSeconds:duration,sampleRate:44100}];
+  return submit(f,challenge,{outputs:[{output_id:"memory-generic-output"}],inlineResult:{model:"MiniMax-Music3",lyric_verification:{
+    algorithm:"ordered-whole-lyrics-v1",full_audio:true,language:"en",audio_sha256:audioSha,
+    lyrics_sha256:digest(challenge.parameters.lyrics),transcript:challenge.parameters.lyrics}}});
+}
+test("generic continuation requires deployment activation, preserves expired six, has a new fixed expiry and idempotent epoch",async()=>{
+  const f=await genericContinuationFixture({activate:false}),before=copy(f.rows[CONDITIONAL_SIX_COLLECTION]);
+  assert.equal((await f.continuation.status({binding:f.binding})).state,"awaiting_deployment_activation");
+  assert.equal((await f.service.next({binding:f.binding,requestId:"generic-before-ci",leaseToken:clientSecret()})).challenge,null);
+  await assert.rejects(()=>f.continuation.activate({expectedCommit:"e".repeat(40),installedCommit:"f".repeat(40)}));
+  const activated=await f.continuation.activate({expectedCommit:"e".repeat(40),installedCommit:"e".repeat(40)});
+  assert.equal(+new Date(activated.expires_at),+new Date("2026-10-21T14:30:00Z"));
+  const ledger=copy(f.rows[GENERIC_MUSIC_CONTINUATION_COLLECTION]);f.advance(1000);
+  const replay=await f.continuation.activate({expectedCommit:"f".repeat(40),installedCommit:"f".repeat(40)});
+  assert.equal(replay.authorization_epoch,activated.authorization_epoch);assert.deepEqual(f.rows[GENERIC_MUSIC_CONTINUATION_COLLECTION],ledger);
+  assert.deepEqual(f.rows[CONDITIONAL_SIX_COLLECTION],before);
+});
+test("generic continuation uses new random challenges, one inference and ASR, batches of three only after terminal failure",async()=>{
+  const f=await genericContinuationFixture(),old=copy({six:f.rows[CONDITIONAL_SIX_COLLECTION],fixed:f.rows[FIXED_MUSIC_RETEST_COLLECTION],daily:f.rows.capabilityVerificationBudgets});
+  const ids=new Set(),seeds=new Set();
+  for(let i=0;i<7;i++){
+    const requestId=`generic-continue-${i}`,leaseToken=clientSecret(i+2),result=await f.service.next({binding:f.binding,requestId,leaseToken});
+    assert.equal(result.challenge.capability_id,"gulong_engine.music");ids.add(result.challenge.id);seeds.add(result.challenge.parameters.seed);
+    assert.equal(result.challenge.parameters.seconds,12);assert.equal(result.challenge.budget.max_inferences,1);assert.equal(result.challenge.budget.max_asr_passes,1);
+    const ledger=f.rows[GENERIC_MUSIC_CONTINUATION_COLLECTION][0];assert.equal(ledger.usedTotal,i+1);assert.equal(ledger.issuedTotal,3*Math.ceil((i+1)/3));
+    assert.equal(f.rows.capabilityVerificationChallenges.find(r=>r.requestId===requestId).budgetSource,"generic_music_continuation");
+    assert.equal((await f.service.next({binding:f.binding,requestId,leaseToken})).challenge.id,result.challenge.id);
+    assert.equal(ledger.usedTotal,i+1);
+    await submit(f,result.challenge,{status:"failed",inlineResult:undefined});f.advance(3600_000);
+  }
+  assert.equal(ids.size,7);assert.equal(seeds.size,7);
+  assert.deepEqual({six:f.rows[CONDITIONAL_SIX_COLLECTION],fixed:f.rows[FIXED_MUSIC_RETEST_COLLECTION],daily:f.rows.capabilityVerificationBudgets},old);
+});
+test("generic continuation preserves the exact >=11s gate and permanently stops at first real pass",async()=>{
+  const f=await genericContinuationFixture();
+  const first=await f.service.next({binding:f.binding,requestId:"generic-short",leaseToken:clientSecret()});
+  const failed=await completeGenericMemory(f,first.challenge,10.878548752834467);
+  assert.equal(failed.verification.status,"failed");assert.equal(failed.verification.error.code,"VERIFICATION_AUDIO_TOO_SHORT");
+  f.advance(3600_000);const second=await f.service.next({binding:f.binding,requestId:"generic-pass",leaseToken:clientSecret(2)});
+  const passed=await completeGenericMemory(f,second.challenge);assert.equal(passed.verification.status,"active");
+  const ledger=f.rows[GENERIC_MUSIC_CONTINUATION_COLLECTION][0];assert.equal(ledger.state,"passed");assert.equal(ledger.usedTotal,2);
+  assert.equal((await f.continuation.status({binding:f.binding})).total.remaining,0);
+  f.music.status="failed";f.music.nextRetryAt=f.now();
+  assert.equal((await f.service.next({binding:f.binding,requestId:"generic-never-after-pass",leaseToken:clientSecret(3)})).challenge,null);
+  assert.equal(ledger.usedTotal,2);
+});
+test("generic continuation has one in-flight CAS across instances and cannot consume native, other groups, models or uncontrolled calls",async()=>{
+  const f=await genericContinuationFixture(),args={binding:f.binding,candidate:f.music,controlled:true};
+  const services=Array.from({length:3},()=>createGenericMusicContinuationBudget({getCollection:f.getCollection,now:f.now}));
+  const result=await Promise.all(Array.from({length:24},(_,i)=>services[i%3].reserve({...args,challengeId:`generic-cas-${i}`,requestId:`generic-cas-${i}`,requestRecordId:digest(`generic-cas-${i}`)})));
+  assert.equal(result.filter(Boolean).length,1);assert.equal(f.rows[GENERIC_MUSIC_CONTINUATION_COLLECTION][0].usedTotal,1);
+  for(const patch of [{binding:{...f.binding,computeGroupId:"wrong"}},{candidate:{...f.music,model:{id:"other"}}},{controlled:false},
+    {candidate:f.rows[AUTO_VERIFICATION_COLLECTION].find(r=>r.capabilityId==="minimax_music_3.generate")}])assert.equal(await f.continuation.available({...args,...patch}),false);
+  assert.equal((await f.continuation.status({binding:f.binding})).state,"in_flight");
+});
+test("generic continuation respects original backoff, GPU locks, preparation failure and absolute expiry without ordinary fallback",async()=>{
+  const f=await genericContinuationFixture();f.music.nextRetryAt=new Date(+f.now()+480_000);
+  const waiting=await f.service.next({binding:f.binding,requestId:"generic-original-backoff",leaseToken:clientSecret()});
+  assert.equal(waiting.code,"VERIFICATION_BACKOFF");assert.equal(waiting.retry_after_seconds,480);
+  f.advance(480_000);f.hooks.acquire=false;
+  assert.equal((await f.service.next({binding:f.binding,requestId:"generic-busy-slot",leaseToken:clientSecret()})).code,"VERIFICATION_NODE_BUSY");
+  assert.equal(f.rows[GENERIC_MUSIC_CONTINUATION_COLLECTION][0].usedTotal,0);
+  f.hooks.acquire=true;f.hooks.snapshotFails=true;
+  await assert.rejects(()=>f.service.next({binding:f.binding,requestId:"generic-snapshot-fail",leaseToken:clientSecret()}));
+  assert.equal(f.rows[GENERIC_MUSIC_CONTINUATION_COLLECTION][0].usedTotal,1);
+  assert.equal((await f.service.byRequest({binding:f.binding,requestId:"generic-snapshot-fail",leaseToken:clientSecret()})).lease_valid,false);
+  f.hooks.snapshotFails=false;f.advance(2*86400_000);
+  assert.equal((await f.continuation.status({binding:f.binding})).state,"expired");
+  assert.equal((await f.service.next({binding:f.binding,requestId:"generic-no-expiry-fallback",leaseToken:clientSecret(2)})).challenge,null);
+  const prior=copy(f.rows[GENERIC_MUSIC_CONTINUATION_COLLECTION]);
+  await f.continuation.activate({expectedCommit:"f".repeat(40),installedCommit:"f".repeat(40)});
+  assert.deepEqual(f.rows[GENERIC_MUSIC_CONTINUATION_COLLECTION],prior);
+});
+test("generic activation rejects altered old failure, wrong live scope and incomplete raw matrix without creating a grant",async()=>{
+  for(const mutate of [f=>{f.rows.capabilityVerificationChallenges.find(r=>r.requestId==="0bf14094-7f29-4e16-8e65-fe6244b772ca").error.code="OTHER";},
+    f=>{f.rows.nodeAccountBindings[0].computeGroupId="other";},f=>{f.music.inventory.models[0].max_duration_seconds=600;},
+    f=>{f.rows[CONDITIONAL_SIX_COLLECTION][0].usedTotal=5;}]){
+    const f=await genericContinuationFixture({activate:false});mutate(f);
+    await assert.rejects(()=>f.continuation.activate({expectedCommit:"e".repeat(40),installedCommit:"e".repeat(40)}));
+    assert.deepEqual(f.rows[GENERIC_MUSIC_CONTINUATION_COLLECTION]||[],[]);
+  }
+});
+test("generic revoked or corrupted ledger never falls back and preparation lease expiry can safely continue with a new request",async()=>{
+  for(const change of [d=>{d.state="revoked";},d=>{d.usedTotal=100;}]){
+    const f=await genericContinuationFixture();change(f.rows[GENERIC_MUSIC_CONTINUATION_COLLECTION][0]);
+    assert.equal((await f.service.next({binding:f.binding,requestId:"generic-denied-grant",leaseToken:clientSecret()})).challenge,null);
+  }
+  const f=await genericContinuationFixture();f.hooks.snapshotFails=true;
+  await assert.rejects(()=>f.service.next({binding:f.binding,requestId:"generic-old-preparation",leaseToken:clientSecret()}));
+  f.hooks.snapshotFails=false;f.advance(16*60_000);
+  await f.service.next({binding:f.binding,requestId:"generic-expire-mark-only",leaseToken:clientSecret(2)});
+  f.advance(60_000);
+  const next=await f.service.next({binding:f.binding,requestId:"generic-after-lease-failure",leaseToken:clientSecret(3)});
+  assert.equal(next.challenge.capability_id,"gulong_engine.music");
+  assert.equal(f.rows[GENERIC_MUSIC_CONTINUATION_COLLECTION][0].usedTotal,2);
 });
 
 test("installation quarantine blocks all new-artifact capabilities before any budget or physical reservation, including UTC rollover/group changes",async()=>{

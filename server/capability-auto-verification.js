@@ -12,6 +12,7 @@ import { createCapabilityCaptionRetestBudget } from "./capability-caption-retest
 import { isNodeArtifactQuarantined, nodeArtifactInstallationGuardStatus } from "./capability-artifact-installation-guard.js";
 import { createFixedMusicRetestBudget } from "./capability-fixed-music-retest.js";
 import { createConditionalSixBudget } from "./capability-conditional-six-budget.js";
+import { createGenericMusicContinuationBudget } from "./capability-generic-music-continuation.js";
 
 export const AUTO_VERIFICATION_PROTOCOL = "gulong-auto-verification-v1";
 export const AUTO_VERIFICATION_COLLECTION = "capabilityAutoVerifications";
@@ -158,6 +159,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
   const captionBudget = createCapabilityCaptionRetestBudget({ getCollection, now });
   const fixedMusicBudget = createFixedMusicRetestBudget({ getCollection, now });
   const conditionalSixBudget = createConditionalSixBudget({ getCollection, now });
+  const genericMusicContinuation = createGenericMusicContinuationBudget({ getCollection, now });
   const rateLimit = dependencies.enforceRateLimit || (async () => ({ allowed: false }));
   const collection = () => getCollection(AUTO_VERIFICATION_COLLECTION);
   const requestRecordId = (bindingId, requestId) => sha(`verification-request:${bindingId}:${requestId}`);
@@ -407,7 +409,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
       $or: [{ status: "pending" }, { status: "failed", nextRetryAt: { $lte: instant } }, { status: "active", expiresAt: { $lte: instant } }] }).sort({ createdAt: 1, _id: 1 }).limit(32).toArray();
     const budgetId = `${active._id}:${instant.toISOString().slice(0, 10)}`;
     const priorBudget = await (await getCollection(BUDGETS)).findOne({ _id: budgetId });
-    let selected = null, useSupplement = false, useReleaseBudget = false, useCaptionBudget = false, useFixedMusicBudget = false, useConditionalSixBudget = false,
+    let selected = null, useSupplement = false, useReleaseBudget = false, useCaptionBudget = false, useFixedMusicBudget = false, useConditionalSixBudget = false, useGenericMusicContinuation = false,
       releaseBlocked = false, artifactBlocked = false, fixedRetryAt = null;
     for (const item of candidates) {
       if (item.automaticMigrationEnabled === false || !requiresAutomaticCapabilityVerification(active, item.capabilityId)
@@ -417,6 +419,9 @@ export function createCapabilityAutoVerificationService(dependencies) {
         if (permission.available) { selected = item; useFixedMusicBudget = true; break; }
         if (await conditionalSixBudget.available({ binding: active, candidate: item, controlled })) {
           selected = item; useConditionalSixBudget = true; break;
+        }
+        if (await genericMusicContinuation.available({ binding: active, candidate: item, controlled })) {
+          selected = item; useGenericMusicContinuation = true; break;
         }
         if (permission.retry_at) fixedRetryAt = permission.retry_at;
         artifactBlocked = true; continue;
@@ -442,9 +447,11 @@ export function createCapabilityAutoVerificationService(dependencies) {
       // supplemental probe. Inspect only this release-scoped grant's remaining
       // capabilities; never shorten the stored model backoff or reserve a lease.
       const scopes = controlled ? [await supplementalBudget.status({ binding: active }), await releaseBudget.status({ binding: active }),
-        await captionBudget.status({ binding: active }), await conditionalSixBudget.status({ binding: active })] : [];
+        await captionBudget.status({ binding: active }), await conditionalSixBudget.status({ binding: active }),
+        await genericMusicContinuation.status({ binding: active })] : [];
       for (const scope of scopes) if (scope?.state === "available" && scope.total.remaining > 0) {
-        const scopedBudget = scope.policy === "six-after-verified-fixed-native-v1" ? conditionalSixBudget
+        const scopedBudget = scope.policy === "generic-music-three-at-a-time-until-pass-v1" ? genericMusicContinuation
+          : scope.policy === "six-after-verified-fixed-native-v1" ? conditionalSixBudget
           : scope.policy === "native-caption-single-retest-v1" ? captionBudget
           : scope.policy === "release-scoped-seven-capability-reverification-v1" ? releaseBudget : supplementalBudget;
         const waiting = await records.find({ bindingId: String(active._id), computeGroupId: group(active.computeGroupId),
@@ -477,9 +484,9 @@ export function createCapabilityAutoVerificationService(dependencies) {
         return noChallenge({ ok: true, challenge: null, code: "VERIFICATION_NODE_BUSY", retry_after_seconds: 30 });
       }
       let reserved, supplementReceipt = null;
-      if (useSupplement || useReleaseBudget || useCaptionBudget || useFixedMusicBudget || useConditionalSixBudget) {
+      if (useSupplement || useReleaseBudget || useCaptionBudget || useFixedMusicBudget || useConditionalSixBudget || useGenericMusicContinuation) {
         const liveBinding = await currentBinding(active);
-        supplementReceipt = await (useFixedMusicBudget ? fixedMusicBudget : useConditionalSixBudget ? conditionalSixBudget : useCaptionBudget ? captionBudget : useReleaseBudget ? releaseBudget : supplementalBudget).reserve({ binding: liveBinding, candidate: selected, controlled,
+        supplementReceipt = await (useFixedMusicBudget ? fixedMusicBudget : useGenericMusicContinuation ? genericMusicContinuation : useConditionalSixBudget ? conditionalSixBudget : useCaptionBudget ? captionBudget : useReleaseBudget ? releaseBudget : supplementalBudget).reserve({ binding: liveBinding, candidate: selected, controlled,
           challengeId, requestId, requestRecordId: associationId });
         reserved = supplementReceipt;
       } else {
@@ -490,12 +497,15 @@ export function createCapabilityAutoVerificationService(dependencies) {
           { $inc: { count: 1, [`models.${selected._id}`]: 1 } }, { returnDocument: "after" }));
       }
       if (!reserved) { await releaseLocks({ _id: challengeId }); return noChallenge({ ok: true, challenge: null,
-        code: useReleaseBudget || useCaptionBudget || useFixedMusicBudget || useConditionalSixBudget ? "VERIFICATION_RELEASE_BUDGET_UNAVAILABLE" : "VERIFICATION_DAILY_BUDGET_EXHAUSTED", retry_after_seconds: 3600 }); }
+        code: useReleaseBudget || useCaptionBudget || useFixedMusicBudget || useConditionalSixBudget || useGenericMusicContinuation ? "VERIFICATION_RELEASE_BUDGET_UNAVAILABLE" : "VERIFICATION_DAILY_BUDGET_EXHAUSTED", retry_after_seconds: 3600 }); }
       const nonce = `gcv-${randomBytes(5).toString("hex")}`;
       const adapter = adapterFor(selected.inventory, selected.model);
       const probe = useFixedMusicBudget ? fixedMusicBudget.buildProbe()
         : await adapter.createProbe({ inventory: selected.inventory, model: selected.model, nonce, binding: active });
-      if (useConditionalSixBudget && selected.capabilityId === "gulong_engine.music" && probe?.budget) probe.budget.max_asr_passes = 1;
+      if ((useGenericMusicContinuation || useConditionalSixBudget) && selected.capabilityId === "gulong_engine.music" && probe?.budget) probe.budget.max_asr_passes = 1;
+      assert(!useGenericMusicContinuation || probe?.probeKind === "music" && probe.parameters?.seconds === 12
+        && probe.parameters?.model === "MiniMax-Music3" && probe.budget.max_asr_passes === 1,
+      "VERIFICATION_CONTINUATION_PROBE_INVALID", "追加音乐验收必须沿用原模型、12秒和一次完整ASR", 503);
       assert(isObject(probe) && isObject(probe.parameters) && probe.budget?.max_inferences === 1,
         "VERIFICATION_ADAPTER_INVALID", "自动验收适配器未提供安全探测预算", 503);
       assert(!useCaptionBudget || captionBudget.matchesProbe(probe), "VERIFICATION_CAPTION_POLICY_MISMATCH",
@@ -532,7 +542,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
       // Keep createdAt insert-only: MongoDB rejects it in both $set and $setOnInsert.
       const { _id: featureId, requestId: snapshotRequestId, createdAt: _inventoryCreatedAt, ...snapshot } = updated;
       await requestRecords.updateOne({ _id: associationId }, { $set: { ...snapshot, ...(controlled ? { requestId: snapshotRequestId } : {}),
-        budgetSource: useFixedMusicBudget ? "fixed_music_regression" : useConditionalSixBudget ? "conditional_six_after_fixed" : useCaptionBudget ? "caption_retest" : useReleaseBudget ? "release_reverification" : supplementReceipt ? "supplement" : "ordinary", supplementalBudget: supplementReceipt, featureId, updatedAt: instant },
+        budgetSource: useFixedMusicBudget ? "fixed_music_regression" : useGenericMusicContinuation ? "generic_music_continuation" : useConditionalSixBudget ? "conditional_six_after_fixed" : useCaptionBudget ? "caption_retest" : useReleaseBudget ? "release_reverification" : supplementReceipt ? "supplement" : "ordinary", supplementalBudget: supplementReceipt, featureId, updatedAt: instant },
         $setOnInsert: { createdAt: instant } }, { upsert: true });
       return { ok: true, protocol: AUTO_VERIFICATION_PROTOCOL, ...(controlled ? { request_id: requestId } : {}), state: "leased", lease_valid: true,
         execute_once: true, challenge: { id: challengeId, lease_token: leaseToken,
@@ -674,6 +684,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
       ...(saved ? update : { status: "invalidated", error: { code: "VERIFICATION_STATE_CONFLICT", message: "模型清单已变化，本次验收结果已失效" } }),
       resultFingerprint: fingerprint, updatedAt: finished,
     } });
+    if (saved?.status === "active" && owned.capabilityId === "gulong_engine.music") await genericMusicContinuation.closeIfPassed({ binding: active, record: saved });
     await releaseLocks({ _id: challengeId });
     assert(saved, "VERIFICATION_STATE_CONFLICT", "模型清单已变化，本次结果不会开放派单", 409);
     return { ok: true, idempotent: false, verification: publicState(saved) };
@@ -711,7 +722,8 @@ export function createCapabilityAutoVerificationService(dependencies) {
     return { ...await supplementalBudget.status({ binding: active }), release_reverification: await releaseBudget.status({ binding: active }),
       native_caption_retest: await captionBudget.status({ binding: active }), installation_guard: { ...nodeArtifactInstallationGuardStatus(active),
         fixed_case_authorization_active: ["available", "backoff", "awaiting_inventory"].includes(fixed.state) && fixed.total?.remaining === 1 },
-      fixed_native_music_retest: fixed, conditional_six_after_fixed: await conditionalSixBudget.status({ binding: active }) };
+      fixed_native_music_retest: fixed, conditional_six_after_fixed: await conditionalSixBudget.status({ binding: active }),
+      generic_music_continuation: await genericMusicContinuation.status({ binding: active }) };
   }
   return { report, next, submit, outputUpload, outputStatus, findTrusted, list, byRequest, getChallenge, supplementStatus };
 }
@@ -792,7 +804,7 @@ export function registerCapabilityAutoVerificationRoutes(app, dependencies) {
       tags: ["Automatic Capability Verification"], summary: "查询当前绑定的发布审定一次性补测额度，不创建挑战、不授予模型准入",
       security: [{ accountBinding: [] }],
       request: { headers: z.object({ "X-Gulong-Account-Binding": z.string().min(1) }) },
-      responses: { 200: { description: "仅本绑定的补测范围和账本；固定native真实通过后conditional_six_after_fixed允许六项各1次，沿用固定单次ready/绝对截止，不授普通业务准入，原账本不重置", content: { "application/json": { schema: z.object({ release_reverification: objectSchema, native_caption_retest: objectSchema, installation_guard: objectSchema, fixed_native_music_retest: objectSchema, conditional_six_after_fixed: objectSchema }).catchall(z.unknown()) } } },
+      responses: { 200: { description: "仅本绑定补测；generic_music_continuation是直接人类授权的独立通用音乐累计账本，每批3次、通过即关闭，固定绝对截止；不复活旧六项/固定native窗口、不授普通业务准入", content: { "application/json": { schema: z.object({ release_reverification: objectSchema, native_caption_retest: objectSchema, installation_guard: objectSchema, fixed_native_music_retest: objectSchema, conditional_six_after_fixed: objectSchema, generic_music_continuation: objectSchema }).catchall(z.unknown()) } } },
         401: { description: "节点绑定无效" }, 429: { description: "查询频率受限" } } });
     const modelSchema = z.object({ id: z.string().min(1).max(240) }).catchall(z.union([z.string(), z.number(), z.boolean()]));
     const artifactSchema = z.string().regex(/^[a-f0-9]{64}$/i);

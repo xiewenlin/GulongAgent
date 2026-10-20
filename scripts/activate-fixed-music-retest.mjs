@@ -3,6 +3,7 @@
 import { readFile } from "node:fs/promises";
 import { MongoClient } from "mongodb";
 import { activateFixedMusicRetestForDeployment } from "../server/capability-fixed-music-retest.js";
+import { createGenericMusicContinuationBudget } from "../server/capability-generic-music-continuation.js";
 
 let client;
 try {
@@ -14,6 +15,8 @@ try {
   await client.connect();const db=client.db(process.env.MONGODB_DB||"gulong_platform");
   const result=await activateFixedMusicRetestForDeployment({getCollection:async name=>db.collection(name),
     expectedCommit:args[1],installedCommit});
-  console.log(JSON.stringify({ok:true,...result}));
+  const continuation=await createGenericMusicContinuationBudget({getCollection:async name=>db.collection(name)})
+    .activate({expectedCommit:args[1],installedCommit});
+  console.log(JSON.stringify({ok:true,...result,generic_music_continuation:continuation}));
 }catch(error){console.error(JSON.stringify({ok:false,code:/^[A-Z_]+$/.test(error.code||"")?error.code:"FIXED_RETEST_ACTIVATION_FAILED"}));process.exitCode=1;}
 finally{if(client)await client.close();}
