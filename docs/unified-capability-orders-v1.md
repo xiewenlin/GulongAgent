@@ -653,4 +653,10 @@ LAN 节点可在各自的 `lan_cluster.nodes[].resources` 独立上报，必须�
 
 替换制品后原7项按既有matrix变更规则失效并重新实测；两项Qwen只有独立制品、matrix、分组、范围、TTL仍有效才保留。单次推理预算、输入/输出实物检查、完整ASR及 `ordered-whole-lyrics-v1` 均未修改。原生音乐caption策略未随本次额度发布变更；时长达标但缺失验证码歌词仍是真实失败。有限补验不等于九项通过或桌面整包已发布。
 
+### 未来原生音乐挑战的 caption 输入澄清（2026-10-20，OpenAPI 2.14.5）
+
+仅新建 `minimax_music_3.generate` 探测的 `parameters.prompt` 改用与通用音乐一致的 `A clear solo singing voice, simple gentle accompaniment, sing the complete lyrics exactly once.`，不再把 `Verification ${nonce}.` 审计串混入音乐语义提示。该差异可能影响模型遵循，但尚无受控实跑证明它是过去失败的根因；本次只做CPU回归，不发额外A/B模型调用。
+
+完整原nonce继续保存在服务端原challenge/request快照。相同nonce的SHA派生四个数字词、完整lyrics字节、seed、12秒、44100Hz、FLAC、单次整段ASR及v1全词序/时长门槛逐项不变。原生模型合同版本仍为3，consumer artifact/matrix、7cap11次硬账本与固定TTL不变；不增加额度，不重置attempts或退避，不复制旧通过。每个真实结果仍按其原挑战快照校验，已发出的旧caption在原键恢复时原样返回，不重建挑战、不改写旧失败；未来正常轮询只能消费原剩余额度。输入提示澄清不是降低验收标准，也不是模型真实成功证明。
+
 OpenAPI 2.14.3 修正补测候选尚在失败退避时的提示分类：若本绑定范围内仍有真实补测余量，且对应已适配模型仅因原 `nextRetryAt` 未到而不可领，`next` 返回 `challenge=null, code=VERIFICATION_BACKOFF, retry_at=原最早nextRetryAt, retry_after_seconds=ceil(剩余秒数)`（至少1秒），而非错误的每日额度耗尽/3600秒。原日志同时保存本次提示对应的 `responseRetryAt`；不领取/预留挑战、不消耗补测、不重置 attempts、不改原8/16/32分钟退避。真正无剩余补测、失效/撤销/越范围或没有相应有效候选时仍保留原限额门禁。节点已经缓存的旧 `next_at` 不因发布或GET额度查询被追溯改写；目前没有无需操作节点、无需发行挑战的远程通知唤醒接口，本次不新造旁路。

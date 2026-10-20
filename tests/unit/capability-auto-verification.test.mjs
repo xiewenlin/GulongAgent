@@ -522,6 +522,20 @@ test("new release backoff retains original retry time while exhausted per-cap ne
   assert.equal((f.rows[RELEASE_VERIFICATION_COLLECTION]||[]).length,0);
 });
 
+test("old native challenge recovery returns its stored caption and audit nonce without reconstructing or spending another release attempt",async()=>{
+  const f=await releaseFixture();f.rows[AUTO_VERIFICATION_COLLECTION]=f.rows[AUTO_VERIFICATION_COLLECTION].filter(r=>r.capabilityId==="minimax_music_3.generate");
+  const requestId="issued-before-caption-fix",leaseToken=clientSecret();
+  const issued=await f.service.next({binding:f.binding,requestId,leaseToken});
+  const feature=f.rows[AUTO_VERIFICATION_COLLECTION][0];const journal=f.rows.capabilityVerificationChallenges.find(r=>r.requestId===requestId);
+  const oldPrompt=`Clear English solo singing, a gentle simple melody. Verification ${journal.nonce}.`;
+  feature.parameters.prompt=oldPrompt;journal.parameters.prompt=oldPrompt;
+  const before=copy(f.rows);
+  const recovered=await f.service.byRequest({binding:f.binding,requestId,leaseToken});
+  assert.equal(recovered.challenge.id,issued.challenge.id);assert.equal(recovered.challenge.parameters.prompt,oldPrompt);
+  assert.deepEqual(recovered.challenge.parameters,journal.parameters);assert.ok(journal.nonce.startsWith("gcv-"));
+  assert.deepEqual(f.rows,before);assert.equal(f.rows[RELEASE_VERIFICATION_COLLECTION][0].usedTotal,1);
+});
+
 test("new inventory invalidates old global-artifact evidence without copying passes or altering independent Qwen rows",async()=>{
   const f=await releaseFixture({reports:releaseReports(RETEST_ARTIFACT)});
   for(const r of f.rows[AUTO_VERIFICATION_COLLECTION])r.status="active";

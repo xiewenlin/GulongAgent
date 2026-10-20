@@ -98,7 +98,9 @@ export function createNativeCapabilityVerificationAdapters({ verifyMediaOutputs 
     const id = inventory.capabilityId;
     const common = { outputUploadRequired: true, budget: { max_inferences: 1, max_output_tokens: 0 } };
     if (id === "minimax_music_3.generate") return { ...common, probeKind: "native-music", budget: { ...common.budget, max_audio_seconds: 12, max_asr_passes: 1 },
-      parameters: { prompt: `Clear English solo singing, a gentle simple melody. Verification ${nonce}.`,
+      // Only future challenges use this authoring hint. The full audit nonce is
+      // still persisted by the service; lyrics/seed retain the original derivation.
+      parameters: { prompt: "A clear solo singing voice, simple gentle accompaniment, sing the complete lyrics exactly once.",
         lyrics: `Blue sky, silver river.\n${[...createHash("sha256").update(nonce).digest().subarray(0, 4)].map((x) => ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"][x % 10]).join(", ")}.`, duration_seconds: 12,
         sample_rate: 44100, output_format: "flac", language: "auto", seed: seed(nonce) },
       outputRules: [rule("primary_audio", "audio/flac", 64 * MiB)] };

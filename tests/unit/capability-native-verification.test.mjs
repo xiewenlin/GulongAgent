@@ -163,6 +163,46 @@ test("native music scope is the tested FLAC duration, not the original advertise
   await assert.rejects(f.result);
 });
 
+test("future native music caption removes audit prose but preserves every nonce-derived lyric word, seed and audio budget", () => {
+  const f = fixture("minimax_music_3.generate");
+  for (const nonce of ["gcv-1234abcdef", "gcv-dabfc11659", "gcv-0000000000", "gcv-fffffffffe"]) {
+    const probe = f.adapter.createProbe({ inventory: f.inventory, model: f.model, nonce });
+    const bytes = createHash("sha256").update(nonce).digest();
+    const words = [...bytes.subarray(0,4)].map(x => ["zero","one","two","three","four","five","six","seven","eight","nine"][x % 10]);
+    assert.deepEqual(probe.parameters, {
+      prompt: "A clear solo singing voice, simple gentle accompaniment, sing the complete lyrics exactly once.",
+      lyrics: `Blue sky, silver river.\n${words.join(", ")}.`, duration_seconds: 12,
+      sample_rate: 44100, output_format: "flac", language: "auto", seed: bytes.readUInt32BE(0) & 0x7fffffff,
+    });
+    assert.equal(probe.parameters.prompt.includes(nonce),false);
+    assert.equal(probe.parameters.prompt.includes("Verification"),false);
+    assert.deepEqual(probe.budget,{max_inferences:1,max_output_tokens:0,max_audio_seconds:12,max_asr_passes:1});
+    assert.deepEqual(probe.outputRules,f.probe.outputRules);
+  }
+});
+
+test("native music caption clarification never excuses missing or reordered whole lyrics or short duration", async () => {
+  for (const transcript of ["- Blue sky.", "Blue sky, silver river.", "Blue sky, silver river. wrong missing words"]) {
+    const f=fixture("minimax_music_3.generate");
+    f.rows[0].durationSeconds=11.993107;
+    f.inlineResult.lyric_verification.transcript=transcript;
+    await assert.rejects(f.result);
+  }
+  const reordered=fixture("minimax_music_3.generate");
+  reordered.inlineResult.lyric_verification.transcript=reordered.probe.parameters.lyrics.split(/\s+/).reverse().join(" ");
+  await assert.rejects(reordered.result);
+  const short=fixture("minimax_music_3.generate");short.rows[0].durationSeconds=10;
+  await assert.rejects(short.result);
+});
+
+test("already-issued native music parameters retain the original caption and remain valid under the unchanged v1 contract", async () => {
+  const f=fixture("minimax_music_3.generate");
+  f.challenge.parameters={...f.challenge.parameters,prompt:"Clear English solo singing, a gentle simple melody. Verification gcv-1234abcdef."};
+  const original=JSON.stringify(f.challenge);const result=await f.result();
+  assert.equal(result.contractTests.exact_lyrics,true);assert.equal(result.contractTests.exact_duration,true);
+  assert.equal(JSON.stringify(f.challenge),original);
+});
+
 test("cross-account native sharing requires opt-in, exact automatic proof, same group and a physical slot; legacy own-account admission is preserved", async () => {
   const f = fixture("sam.video_track"), result = await f.result();
   const raw = { capability_id: f.inventory.capabilityId, capability_version: f.inventory.capabilityVersion, protocol_version: "gulong-capability-orders-v1",
