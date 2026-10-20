@@ -659,4 +659,12 @@ LAN 节点可在各自的 `lan_cluster.nodes[].resources` 独立上报，必须�
 
 完整原nonce继续保存在服务端原challenge/request快照。相同nonce的SHA派生四个数字词、完整lyrics字节、seed、12秒、44100Hz、FLAC、单次整段ASR及v1全词序/时长门槛逐项不变。原生模型合同版本仍为3，consumer artifact/matrix、7cap11次硬账本与固定TTL不变；不增加额度，不重置attempts或退避，不复制旧通过。每个真实结果仍按其原挑战快照校验，已发出的旧caption在原键恢复时原样返回，不重建挑战、不改写旧失败；未来正常轮询只能消费原剩余额度。输入提示澄清不是降低验收标准，也不是模型真实成功证明。
 
+### 人类明确追加的原生音乐 caption 单次实测（2026-10-20，OpenAPI 2.14.6）
+
+在上述11次范围外，用户对明确问题直接回复“允许追加这 1 次验收”。独立授权 `gvc_20261020_554a_native_caption_once` 只允许原绑定、匿名节点、空计算组、精确554a制品、原生 `minimax_music_3.generate` 版本3及已钉住的 `d51904c9…93ae3ae` 完整matrix。不是修改原11次/f8账本，也不是通用管理员提额。新窗口固定 `2026-10-20T06:40:00Z` 至 `2026-10-20T14:40:00Z`（北京时间14:40—22:40），不超过8小时，不自动续。
+
+必须已经消耗原11次账本中native的3次，且新挑战构造的caption摘要精确等于已修正solo/完整lyrics exactly once文本，才允许签发。独立集合 `capabilityVerificationCaptionRetests` 的唯一 `_id` 和 `usedTotal=0→1` CAS保证所有实例合计最多1次；并发、原键重放不重复计，真实失败/准备失败也不返还。其他cap、f8或不同模型/分组不能消费；额度耗尽后不能借generic或ordinary。旧挑战恢复只返回旧快照，不改其参数和失败，attempts与原指数退避不重置。原12秒单推理、44100/FLAC、单次完整ASR、v1全词序/时长和COS实物校验完全不变。
+
+原只读补测查询新增 `native_caption_retest`，含范围摘要、期限、`total:{limit:1,used,remaining}`、唯一cap与原始消费request/challenge收据；查询不创建账本/挑战、不会唤醒节点缓存。原native三次尚未用完时显示 `awaiting_original_budget`，精确库存缺失则 `awaiting_inventory`。新账本只在节点自然轮询实际预留时物化；服务端发布核验不代替节点调用next或模型，也不保证发布后读数一定仍为0（真实消费者可能先合法消费），必须如实报告时间与账本状态。
+
 OpenAPI 2.14.3 修正补测候选尚在失败退避时的提示分类：若本绑定范围内仍有真实补测余量，且对应已适配模型仅因原 `nextRetryAt` 未到而不可领，`next` 返回 `challenge=null, code=VERIFICATION_BACKOFF, retry_at=原最早nextRetryAt, retry_after_seconds=ceil(剩余秒数)`（至少1秒），而非错误的每日额度耗尽/3600秒。原日志同时保存本次提示对应的 `responseRetryAt`；不领取/预留挑战、不消耗补测、不重置 attempts、不改原8/16/32分钟退避。真正无剩余补测、失效/撤销/越范围或没有相应有效候选时仍保留原限额门禁。节点已经缓存的旧 `next_at` 不因发布或GET额度查询被追溯改写；目前没有无需操作节点、无需发行挑战的远程通知唤醒接口，本次不新造旁路。

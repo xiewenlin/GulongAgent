@@ -8,6 +8,7 @@ import { PROBE_OUTPUT_TYPES, normalizeProbeOutputRules, validateProbeOutputDescr
 import { NATIVE_PROBE_VERSIONS } from "./capability-native-verification.js";
 import { createCapabilityVerificationSupplement } from "./capability-verification-supplement.js";
 import { createCapabilityReleaseVerificationBudget } from "./capability-release-verification-budget.js";
+import { createCapabilityCaptionRetestBudget } from "./capability-caption-retest-budget.js";
 
 export const AUTO_VERIFICATION_PROTOCOL = "gulong-auto-verification-v1";
 export const AUTO_VERIFICATION_COLLECTION = "capabilityAutoVerifications";
@@ -150,6 +151,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
   const now = dependencies.now || (() => new Date());
   const supplementalBudget = createCapabilityVerificationSupplement({ getCollection, now });
   const releaseBudget = createCapabilityReleaseVerificationBudget({ getCollection, now });
+  const captionBudget = createCapabilityCaptionRetestBudget({ getCollection, now });
   const rateLimit = dependencies.enforceRateLimit || (async () => ({ allowed: false }));
   const collection = () => getCollection(AUTO_VERIFICATION_COLLECTION);
   const requestRecordId = (bindingId, requestId) => sha(`verification-request:${bindingId}:${requestId}`);
@@ -399,7 +401,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
       $or: [{ status: "pending" }, { status: "failed", nextRetryAt: { $lte: instant } }, { status: "active", expiresAt: { $lte: instant } }] }).sort({ createdAt: 1, _id: 1 }).limit(32).toArray();
     const budgetId = `${active._id}:${instant.toISOString().slice(0, 10)}`;
     const priorBudget = await (await getCollection(BUDGETS)).findOne({ _id: budgetId });
-    let selected = null, useSupplement = false, useReleaseBudget = false, releaseBlocked = false;
+    let selected = null, useSupplement = false, useReleaseBudget = false, useCaptionBudget = false, releaseBlocked = false;
     for (const item of candidates) {
       if (item.automaticMigrationEnabled === false || !requiresAutomaticCapabilityVerification(active, item.capabilityId)
         || !adapterFor(item.inventory, item.model)) continue;
@@ -408,6 +410,9 @@ export function createCapabilityAutoVerificationService(dependencies) {
       if (releaseBudget.applies(item)) {
         if (await releaseBudget.available({ binding: active, candidate: item, controlled })) {
           selected = item; useReleaseBudget = true; break;
+        }
+        if (await captionBudget.available({ binding: active, candidate: item, controlled })) {
+          selected = item; useCaptionBudget = true; break;
         }
         releaseBlocked = true; continue;
       }
@@ -420,8 +425,11 @@ export function createCapabilityAutoVerificationService(dependencies) {
       // Ordinary exhaustion must not hide the actual retry time of an authorized
       // supplemental probe. Inspect only this release-scoped grant's remaining
       // capabilities; never shorten the stored model backoff or reserve a lease.
-      const scopes = controlled ? [await supplementalBudget.status({ binding: active }), await releaseBudget.status({ binding: active })] : [];
+      const scopes = controlled ? [await supplementalBudget.status({ binding: active }), await releaseBudget.status({ binding: active }),
+        await captionBudget.status({ binding: active })] : [];
       for (const scope of scopes) if (scope?.state === "available" && scope.total.remaining > 0) {
+        const scopedBudget = scope.policy === "native-caption-single-retest-v1" ? captionBudget
+          : scope.policy === "release-scoped-seven-capability-reverification-v1" ? releaseBudget : supplementalBudget;
         const waiting = await records.find({ bindingId: String(active._id), computeGroupId: group(active.computeGroupId),
           inventoryEnabled: true, artifactSha256: scope.artifact_sha256,
           capabilityId: { $in: scope.capabilities.filter((item) => item.remaining > 0).map((item) => item.capability_id) },
@@ -429,7 +437,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
         for (const item of waiting) {
           if (item.automaticMigrationEnabled === false || !requiresAutomaticCapabilityVerification(active, item.capabilityId)
             || !adapterFor(item.inventory, item.model)
-            || !await (releaseBudget.applies(item) ? releaseBudget : supplementalBudget).available({ binding: active, candidate: item, controlled })) continue;
+            || !await scopedBudget.available({ binding: active, candidate: item, controlled })) continue;
           return noChallenge({ ok: true, challenge: null, code: "VERIFICATION_BACKOFF",
             retry_at: new Date(item.nextRetryAt).toISOString(),
             retry_after_seconds: Math.max(1, Math.ceil((+new Date(item.nextRetryAt) - +new Date(now())) / 1000)) });
@@ -449,9 +457,9 @@ export function createCapabilityAutoVerificationService(dependencies) {
         return noChallenge({ ok: true, challenge: null, code: "VERIFICATION_NODE_BUSY", retry_after_seconds: 30 });
       }
       let reserved, supplementReceipt = null;
-      if (useSupplement || useReleaseBudget) {
+      if (useSupplement || useReleaseBudget || useCaptionBudget) {
         const liveBinding = await currentBinding(active);
-        supplementReceipt = await (useReleaseBudget ? releaseBudget : supplementalBudget).reserve({ binding: liveBinding, candidate: selected, controlled,
+        supplementReceipt = await (useCaptionBudget ? captionBudget : useReleaseBudget ? releaseBudget : supplementalBudget).reserve({ binding: liveBinding, candidate: selected, controlled,
           challengeId, requestId, requestRecordId: associationId });
         reserved = supplementReceipt;
       } else {
@@ -462,12 +470,14 @@ export function createCapabilityAutoVerificationService(dependencies) {
           { $inc: { count: 1, [`models.${selected._id}`]: 1 } }, { returnDocument: "after" }));
       }
       if (!reserved) { await releaseLocks({ _id: challengeId }); return noChallenge({ ok: true, challenge: null,
-        code: useReleaseBudget ? "VERIFICATION_RELEASE_BUDGET_UNAVAILABLE" : "VERIFICATION_DAILY_BUDGET_EXHAUSTED", retry_after_seconds: 3600 }); }
+        code: useReleaseBudget || useCaptionBudget ? "VERIFICATION_RELEASE_BUDGET_UNAVAILABLE" : "VERIFICATION_DAILY_BUDGET_EXHAUSTED", retry_after_seconds: 3600 }); }
       const nonce = `gcv-${randomBytes(5).toString("hex")}`;
       const adapter = adapterFor(selected.inventory, selected.model);
       const probe = await adapter.createProbe({ inventory: selected.inventory, model: selected.model, nonce, binding: active });
       assert(isObject(probe) && isObject(probe.parameters) && probe.budget?.max_inferences === 1,
         "VERIFICATION_ADAPTER_INVALID", "自动验收适配器未提供安全探测预算", 503);
+      assert(!useCaptionBudget || captionBudget.matchesProbe(probe), "VERIFICATION_CAPTION_POLICY_MISMATCH",
+        "本次专项验收只允许修正后的原生音乐提示词，未签发可执行挑战", 503);
       assert(Buffer.byteLength(canonical(probe.parameters)) <= 64 * 1024 && (probe.budget.max_output_tokens ?? 0) <= 128
         && (probe.budget.max_audio_seconds ?? 0) <= 12 && (probe.budget.max_images ?? 0) <= 1
         && (probe.budget.max_image_pixels ?? 0) <= 2048 * 2048
@@ -496,7 +506,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
       // Keep createdAt insert-only: MongoDB rejects it in both $set and $setOnInsert.
       const { _id: featureId, requestId: snapshotRequestId, createdAt: _inventoryCreatedAt, ...snapshot } = updated;
       await requestRecords.updateOne({ _id: associationId }, { $set: { ...snapshot, ...(controlled ? { requestId: snapshotRequestId } : {}),
-        budgetSource: useReleaseBudget ? "release_reverification" : supplementReceipt ? "supplement" : "ordinary", supplementalBudget: supplementReceipt, featureId, updatedAt: instant },
+        budgetSource: useCaptionBudget ? "caption_retest" : useReleaseBudget ? "release_reverification" : supplementReceipt ? "supplement" : "ordinary", supplementalBudget: supplementReceipt, featureId, updatedAt: instant },
         $setOnInsert: { createdAt: instant } }, { upsert: true });
       return { ok: true, protocol: AUTO_VERIFICATION_PROTOCOL, ...(controlled ? { request_id: requestId } : {}), state: "leased", lease_valid: true,
         execute_once: true, challenge: { id: challengeId, lease_token: leaseToken,
@@ -669,7 +679,8 @@ export function createCapabilityAutoVerificationService(dependencies) {
   async function supplementStatus({ binding }) {
     const active = await currentBinding(binding);
     await limited(String(active._id), "supplement-status", 30);
-    return { ...await supplementalBudget.status({ binding: active }), release_reverification: await releaseBudget.status({ binding: active }) };
+    return { ...await supplementalBudget.status({ binding: active }), release_reverification: await releaseBudget.status({ binding: active }),
+      native_caption_retest: await captionBudget.status({ binding: active }) };
   }
   return { report, next, submit, outputUpload, outputStatus, findTrusted, list, byRequest, getChallenge, supplementStatus };
 }
@@ -750,7 +761,7 @@ export function registerCapabilityAutoVerificationRoutes(app, dependencies) {
       tags: ["Automatic Capability Verification"], summary: "查询当前绑定的发布审定一次性补测额度，不创建挑战、不授予模型准入",
       security: [{ accountBinding: [] }],
       request: { headers: z.object({ "X-Gulong-Account-Binding": z.string().min(1) }) },
-      responses: { 200: { description: "仅本绑定的补测范围、期限和已消耗账本；release_reverification 为独立新制品硬上限11次，无普通日额度回退，未上报真实库存时awaiting_inventory；普通每日计数与旧f8账本不重置", content: { "application/json": { schema: z.object({ release_reverification: objectSchema }).catchall(z.unknown()) } } },
+      responses: { 200: { description: "仅本绑定的补测范围、期限和已消耗账本；release_reverification硬上限11次；native_caption_retest为另经人类明确授权的修正后原生音乐独立1次、8小时内有效；均无普通日额度回退，原账本不重置", content: { "application/json": { schema: z.object({ release_reverification: objectSchema, native_caption_retest: objectSchema }).catchall(z.unknown()) } } },
         401: { description: "节点绑定无效" }, 429: { description: "查询频率受限" } } });
     const modelSchema = z.object({ id: z.string().min(1).max(240) }).catchall(z.union([z.string(), z.number(), z.boolean()]));
     const artifactSchema = z.string().regex(/^[a-f0-9]{64}$/i);

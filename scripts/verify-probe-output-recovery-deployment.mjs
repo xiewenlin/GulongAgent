@@ -20,6 +20,7 @@ export async function verifyProbeOutputRecoveryDeployment(origin, read = fetch) 
   const supplement = spec.paths["/api/v1/capability-verifications/supplemental-budget"]?.get;
   assert.ok(supplement); assert.deepEqual(supplement.security, [{ accountBinding: [] }]);
   assert.ok(supplement.responses["200"].content["application/json"].schema.properties.release_reverification);
+  assert.ok(supplement.responses["200"].content["application/json"].schema.properties.native_caption_retest);
   assert.ok(spec.paths["/api/v1/capability-verifications/next"].post.responses["200"].content["application/json"].schema.properties.retry_at);
   const supplementReply = await get("/api/v1/capability-verifications/supplemental-budget");
   assert.equal(supplementReply.status, 401); assert.match(supplementReply.headers.get("cache-control"), /private.*no-store/);

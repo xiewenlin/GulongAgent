@@ -8,6 +8,7 @@ import { createCapabilityAutoVerificationService, registerCapabilityAutoVerifica
 import { createNativeCapabilityVerificationAdapters } from "../../server/capability-native-verification.js";
 import { createCapabilityVerificationSupplement, SUPPLEMENT_COLLECTION } from "../../server/capability-verification-supplement.js";
 import { createCapabilityReleaseVerificationBudget, RELEASE_VERIFICATION_COLLECTION } from "../../server/capability-release-verification-budget.js";
+import { createCapabilityCaptionRetestBudget, CAPTION_RETEST_COLLECTION } from "../../server/capability-caption-retest-budget.js";
 
 // These test fixtures live only in memory. No installation, extraction, model
 // invocation, build output or on-disk fixture is created by this test file.
@@ -105,7 +106,7 @@ function fixture(options = {}) {
     ...options,
   };
   const service = createCapabilityAutoVerificationService(dependencies);
-  return { service, getCollection, rows, hooks, binding, advance(milliseconds) { instant = new Date(+instant + milliseconds); }, now: () => instant };
+  return { service, getCollection, rows, hooks, binding, dependencies, advance(milliseconds) { instant = new Date(+instant + milliseconds); }, now: () => instant };
 }
 function inventory(capability = "agent_chat", override = {}) {
   return { capability_id: `gulong_engine.${capability}`, capability_version: "1.0.0", installed: true, enabled: true, sharing_opt_in: true,
@@ -411,6 +412,9 @@ async function releaseFixture({ bindingPatch = {}, reports = releaseReports(), r
 
 test("new release has exactly eleven independent attempts, no ordinary fallback even across UTC day, and no old ledger mutation", async () => {
   const f = await releaseFixture(); const ordinary = copy(f.rows.capabilityVerificationBudgets);
+  // Exercise the original eleven-attempt policy independently of the later,
+  // separately authorized one-shot caption grant; this is memory-only state.
+  f.rows[CAPTION_RETEST_COLLECTION]=[{_id:"gvc_20261020_554a_native_caption_once",state:"revoked"}];
   const historical = { _id: "old-f8-preserved", status: "failed", artifactSha256: RETEST_ARTIFACT, error: { code: "VERIFICATION_EXECUTION_FAILED" } };
   f.rows.capabilityVerificationChallenges = [copy(historical)];
   f.rows[SUPPLEMENT_COLLECTION] = [{ _id: "old-f8-ledger", usedTotal: 4, consumptions: { retained: true } }];
@@ -534,6 +538,90 @@ test("old native challenge recovery returns its stored caption and audit nonce w
   assert.equal(recovered.challenge.id,issued.challenge.id);assert.equal(recovered.challenge.parameters.prompt,oldPrompt);
   assert.deepEqual(recovered.challenge.parameters,journal.parameters);assert.ok(journal.nonce.startsWith("gcv-"));
   assert.deepEqual(f.rows,before);assert.equal(f.rows[RELEASE_VERIFICATION_COLLECTION][0].usedTotal,1);
+});
+
+async function captionFixture() {
+  const f=await releaseFixture();f.advance(3600_000);
+  const native=f.rows[AUTO_VERIFICATION_COLLECTION].find(r=>r.capabilityId==="minimax_music_3.generate");
+  const original=createCapabilityReleaseVerificationBudget({getCollection:f.getCollection,now:f.now});
+  for(let i=0;i<3;i++)assert.ok(await original.reserve({binding:f.binding,candidate:native,controlled:true,
+    challengeId:`gcv-previous-native-${i}`,requestId:`previous-native-${i}`,requestRecordId:digest(`previous-native-${i}`)}));
+  for(const row of f.rows[AUTO_VERIFICATION_COLLECTION]){row.status="active";row.expiresAt=new Date(+f.now()+86400_000);}
+  native.status="failed";native.attempts=3;native.nextRetryAt=new Date(+f.now()-1000);
+  f.rows[SUPPLEMENT_COLLECTION]=[{_id:"historical-f8-ledger",usedTotal:4,retained:true}];
+  return {...f,native,caption:createCapabilityCaptionRetestBudget({getCollection:f.getCollection,now:f.now})};
+}
+
+test("separate caption retest is exactly one corrected native challenge and never rewrites prior budgets or failure history",async()=>{
+  const f=await captionFixture();const old=copy({release:f.rows[RELEASE_VERIFICATION_COLLECTION],f8:f.rows[SUPPLEMENT_COLLECTION],ordinary:f.rows.capabilityVerificationBudgets});
+  const status=await f.service.supplementStatus({binding:f.binding});assert.equal(status.native_caption_retest.total.remaining,1);
+  assert.equal(status.native_caption_retest.state,"available");assert.deepEqual(f.rows[CAPTION_RETEST_COLLECTION],[]);
+  const requestId="one-caption-only",leaseToken=clientSecret();const result=await f.service.next({binding:f.binding,requestId,leaseToken});
+  assert.equal(result.challenge.capability_id,"minimax_music_3.generate");assert.equal(f.caption.matchesProbe(result.challenge),true);
+  assert.equal(result.challenge.parameters.duration_seconds,12);assert.equal(result.challenge.parameters.sample_rate,44100);
+  assert.equal(result.challenge.parameters.output_format,"flac");assert.equal(result.challenge.budget.max_asr_passes,1);
+  const journal=f.rows.capabilityVerificationChallenges.find(r=>r.requestId===requestId);assert.equal(journal.budgetSource,"caption_retest");
+  assert.ok(journal.nonce.startsWith("gcv-"));assert.equal(f.native.attempts,4);
+  const ledgerBeforeRecovery=copy(f.rows[CAPTION_RETEST_COLLECTION]);
+  assert.equal((await f.service.next({binding:f.binding,requestId,leaseToken})).challenge.id,result.challenge.id);
+  assert.deepEqual(f.rows[CAPTION_RETEST_COLLECTION],ledgerBeforeRecovery);
+  await submit(f,result.challenge,{status:"failed",inlineResult:undefined});
+  assert.equal(+f.native.nextRetryAt - +f.now(),480_000);f.advance(3600_000);
+  assert.equal((await f.service.next({binding:f.binding,requestId:"second-caption-denied",leaseToken:clientSecret(2)})).challenge,null);
+  const statusAfter=await f.caption.status({binding:f.binding});assert.equal(statusAfter.total.used,1);assert.equal(statusAfter.total.remaining,0);
+  assert.deepEqual({release:f.rows[RELEASE_VERIFICATION_COLLECTION],f8:f.rows[SUPPLEMENT_COLLECTION],ordinary:f.rows.capabilityVerificationBudgets},old);
+});
+
+test("caption grant requires prior native three attempts, exact own inventory/model/group and original controlled lease",async()=>{
+  const f=await captionFixture();
+  for(const patch of [{binding:{...f.binding,_id:new ObjectId()}},{binding:{...f.binding,nodeId:"other-node"}},
+    {binding:{...f.binding,computeGroupId:"other-group"}},{candidate:{...f.native,artifactSha256:RETEST_ARTIFACT}},
+    {candidate:{...f.native,capabilityId:"gulong_engine.music"}},{candidate:{...f.native,model:{id:"other-music",max_duration_seconds:300}}},
+    {candidate:{...f.native,inventory:{...f.native.inventory,asrLanguages:["zh"]}}},{controlled:false}]){
+    assert.equal(await f.caption.available({binding:f.binding,candidate:f.native,controlled:true,...patch}),false);
+  }
+  assert.deepEqual(f.rows[CAPTION_RETEST_COLLECTION]||[],[]);
+  const g=await releaseFixture();g.advance(3600_000);const pending=await g.service.supplementStatus({binding:g.binding});
+  assert.equal(pending.native_caption_retest.state,"awaiting_original_budget");
+  assert.equal(await createCapabilityCaptionRetestBudget({getCollection:g.getCollection,now:g.now}).available({binding:g.binding,
+    candidate:g.rows[AUTO_VERIFICATION_COLLECTION].find(r=>r.capabilityId==="minimax_music_3.generate"),controlled:true}),false);
+});
+
+test("caption CAS admits only one cross-instance reservation and expiry/revocation/tampering cannot renew it",async()=>{
+  const f=await captionFixture();const args=i=>({binding:f.binding,candidate:f.native,controlled:true,challengeId:`gcv-caption-race-${i}`,requestId:`caption-race-${i}`,requestRecordId:digest(`caption-race-${i}`)});
+  const services=Array.from({length:3},()=>createCapabilityCaptionRetestBudget({getCollection:f.getCollection,now:f.now}));
+  const results=await Promise.all(Array.from({length:30},(_,i)=>services[i%3].reserve(args(i))));assert.equal(results.filter(Boolean).length,1);
+  assert.equal(await f.caption.reserve(args(0)),null);assert.equal(f.rows[CAPTION_RETEST_COLLECTION][0].usedTotal,1);
+  const g=await captionFixture();g.advance(8*3600_000);
+  assert.equal(await g.caption.reserve({...args(0),binding:g.binding,candidate:g.native}),null);
+  assert.equal((await g.caption.status({binding:g.binding})).state,"expired");assert.deepEqual(g.rows[CAPTION_RETEST_COLLECTION]||[],[]);
+  for(const field of ["state","spec"]){const h=await captionFixture();assert.ok(await h.caption.reserve({...args(1),binding:h.binding,candidate:h.native}));
+    if(field==="state")h.rows[CAPTION_RETEST_COLLECTION][0].state="revoked";else h.rows[CAPTION_RETEST_COLLECTION][0].spec.totalLimit=2;
+    assert.equal((await h.caption.status({binding:h.binding})).state,"unavailable");}
+});
+
+test("caption one-shot keeps original backoff and busy/physical guards without spending while waiting",async()=>{
+  const f=await captionFixture();f.native.nextRetryAt=new Date(+f.now()+960_000);
+  const waiting=await f.service.next({binding:f.binding,requestId:"caption-original-backoff",leaseToken:clientSecret()});
+  assert.equal(waiting.code,"VERIFICATION_BACKOFF");assert.equal(waiting.retry_after_seconds,960);assert.equal(waiting.retry_at,f.native.nextRetryAt.toISOString());
+  assert.deepEqual(f.rows[CAPTION_RETEST_COLLECTION]||[],[]);
+  await f.service.next({binding:f.binding,dryRun:true});f.advance(960_000);f.hooks.acquire=false;
+  assert.equal((await f.service.next({binding:f.binding,requestId:"caption-no-physical-slot",leaseToken:clientSecret()})).code,"VERIFICATION_NODE_BUSY");
+  assert.deepEqual(f.rows[CAPTION_RETEST_COLLECTION]||[],[]);
+});
+
+test("old caption or preparation failure spends the authorized one but never issues an executable challenge or repeats inference",async()=>{
+  for(const kind of ["old-caption","snapshot"]){const f=await captionFixture();
+    if(kind==="snapshot")f.hooks.snapshotFails=true;
+    else{const adapter=f.dependencies.adapters["minimax_music_3.generate"],createProbe=adapter.createProbe;
+      adapter.createProbe=args=>{const p=createProbe(args);p.parameters.prompt=`Old Verification ${args.nonce}.`;return p;};}
+    const requestId=`caption-failed-${kind}`,leaseToken=clientSecret();
+    await assert.rejects(()=>f.service.next({binding:f.binding,requestId,leaseToken}));
+    assert.equal(f.rows[CAPTION_RETEST_COLLECTION][0].usedTotal,1);
+    const recovered=await f.service.byRequest({binding:f.binding,requestId,leaseToken});assert.equal(recovered.state,"failed");assert.equal(recovered.lease_valid,false);
+    assert.equal(f.rows[RELEASE_VERIFICATION_COLLECTION][0].usedByCapability.native_music3,3);
+    assert.equal(f.rows.capabilityVerificationBudgets[0].count,0);
+  }
 });
 
 test("new inventory invalidates old global-artifact evidence without copying passes or altering independent Qwen rows",async()=>{
