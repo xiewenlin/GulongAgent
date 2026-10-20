@@ -380,7 +380,8 @@ export function createCapabilityAutoVerificationService(dependencies) {
     }
     const noChallenge = async (response) => {
       if (controlled) await requestRecords.updateOne({ _id: associationId, status: "preparing" },
-        { $set: { status: "not_issued", responseCode: response.code || null, updatedAt: new Date(now()) } });
+        { $set: { status: "not_issued", responseCode: response.code || null,
+          ...(response.retry_at ? { responseRetryAt: new Date(response.retry_at) } : {}), updatedAt: new Date(now()) } });
       return { ...response, ...(controlled ? { request_id: requestId, state: "not_issued", lease_valid: false } : {}) };
     };
     // The server must independently check active H3/capability slots and the
@@ -405,8 +406,28 @@ export function createCapabilityAutoVerificationService(dependencies) {
         selected = item; useSupplement = true; break;
       }
     }
-    if (!selected) return noChallenge({ ok: true, challenge: null,
-      ...((priorBudget?.count || 0) >= 16 ? { code: "VERIFICATION_DAILY_BUDGET_EXHAUSTED", retry_after_seconds: 3600 } : { retry_after_seconds: 60 }) });
+    if (!selected) {
+      // Ordinary exhaustion must not hide the actual retry time of an authorized
+      // supplemental probe. Inspect only this release-scoped grant's remaining
+      // capabilities; never shorten the stored model backoff or reserve a lease.
+      const scope = controlled ? await supplementalBudget.status({ binding: active }) : null;
+      if (scope?.state === "available" && scope.total.remaining > 0) {
+        const waiting = await records.find({ bindingId: String(active._id), computeGroupId: group(active.computeGroupId),
+          inventoryEnabled: true, artifactSha256: scope.artifact_sha256,
+          capabilityId: { $in: scope.capabilities.filter((item) => item.remaining > 0).map((item) => item.capability_id) },
+          status: "failed", nextRetryAt: { $gt: instant } }).sort({ nextRetryAt: 1, _id: 1 }).limit(32).toArray();
+        for (const item of waiting) {
+          if (item.automaticMigrationEnabled === false || !requiresAutomaticCapabilityVerification(active, item.capabilityId)
+            || !adapterFor(item.inventory, item.model)
+            || !await supplementalBudget.available({ binding: active, candidate: item, controlled })) continue;
+          return noChallenge({ ok: true, challenge: null, code: "VERIFICATION_BACKOFF",
+            retry_at: new Date(item.nextRetryAt).toISOString(),
+            retry_after_seconds: Math.max(1, Math.ceil((+new Date(item.nextRetryAt) - +new Date(now())) / 1000)) });
+        }
+      }
+      return noChallenge({ ok: true, challenge: null,
+        ...((priorBudget?.count || 0) >= 16 ? { code: "VERIFICATION_DAILY_BUDGET_EXHAUSTED", retry_after_seconds: 3600 } : { retry_after_seconds: 60 }) });
+    }
     if (!await lock(`binding:${active._id}`, challengeId, instant, String(active._id))) return noChallenge({ ok: true, challenge: null, retry_after_seconds: 15 });
     let globalSlot = null;
     for (let index = 0; index < 4; index += 1) if (await lock(`global:${index}`, challengeId, instant, String(active._id))) { globalSlot = index; break; }
@@ -769,7 +790,9 @@ export function registerCapabilityAutoVerificationRoutes(app, dependencies) {
           migration: migrationSchema, verifications: z.array(objectSchema) }) } } }
           : suffix === "next" ? { content: { "application/json": { schema: z.object({ ok: z.literal(true), protocol: z.string().optional(), challenge: challengeSchema.nullable(),
           request_id: z.string().nullable().optional(), state: z.string().optional(), lease_valid: z.boolean().optional(), recovered: z.boolean().optional(),
-          execute_once: z.boolean().optional(), execution_policy: z.string().optional(), retry_after_seconds: z.number().optional(), code: z.string().optional(), queue: z.string().optional() }) } } }
+          execute_once: z.boolean().optional(), execution_policy: z.string().optional(), retry_after_seconds: z.number().optional(),
+          retry_at: z.iso.datetime().optional().describe("VERIFICATION_BACKOFF时的原模型最早可重试时间，不缩短退避或唤醒客户端缓存"),
+          code: z.string().optional(), queue: z.string().optional() }) } } }
           : suffix.endsWith("outputs") ? { content: { "application/json": { schema: z.object({ output_id: z.string(), object_key: z.string(), url: z.string().url(), method: z.literal("PUT"), headers: z.record(z.string(), z.string()), expires_at: z.iso.datetime() }) } } } : {}) },
         400: { description: "参数不正确" }, 401: { description: "节点未绑定" }, 403: { description: "跨节点、跨分组或租约无效" },
         409: { description: "状态或实物校验不通过；report: VERIFICATION_CAPABILITY_NOT_MIGRATABLE=新追加能力没有完整适配器，VERIFICATION_MIGRATION_REVIEW_REQUIRED=v1绑定不可降级，VERIFICATION_POLICY_REQUIRED=v2请求须保留策略" },

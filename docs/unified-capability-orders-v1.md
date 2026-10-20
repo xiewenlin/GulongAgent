@@ -632,3 +632,5 @@ LAN 节点可在各自的 `lan_cluster.nodes[].resources` 独立上报，必须�
 节点可用原 `X-Gulong-Account-Binding` GET `/api/v1/capability-verifications/supplemental-budget` 只读查询自己的范围、期限、总/逐项 limit/used/remaining 与原挑战消耗引用；跨范围只返回 `applicable=false`。不创建挑战/上传/准入，保持 private/no-store，匿名401，每绑定每分钟30次。授权文档于第一个真实补测 reservation 由正式 next 路径原子登记，不由诊断脚本人工插入；此前查询可显示发布审定的可用额度，但**可用不等于已经实际消耗**。
 
 节点无需重启、改密钥或更换制品，继续原自动轮询；原 `next_at` 退避仍有效，发布完成不等于强制立即领取。不改变 challenge 版本、参数、任何整数 `challenge.budget` 字段；补测来源仅存在服务端原日志/独立账本，现有 f8 客户端无需适配。每挑战仍最多一次模型推理及原完整ASR，歌词 `ordered-whole-lyrics-v1`、音频/歌词摘要、完整词序和原最小时长门槛均不变；历史失败绝不转通过，九项与整包真实验收仍是客户端发版门槛。Vercel/腾讯必须同提交上线，公网只核对 schema/401/提交标识，不由发布脚本抢领真实挑战。
+
+OpenAPI 2.14.3 修正补测候选尚在失败退避时的提示分类：若本绑定范围内仍有真实补测余量，且对应已适配模型仅因原 `nextRetryAt` 未到而不可领，`next` 返回 `challenge=null, code=VERIFICATION_BACKOFF, retry_at=原最早nextRetryAt, retry_after_seconds=ceil(剩余秒数)`（至少1秒），而非错误的每日额度耗尽/3600秒。原日志同时保存本次提示对应的 `responseRetryAt`；不领取/预留挑战、不消耗补测、不重置 attempts、不改原8/16/32分钟退避。真正无剩余补测、失效/撤销/越范围或没有相应有效候选时仍保留原限额门禁。节点已经缓存的旧 `next_at` 不因发布或GET额度查询被追溯改写；目前没有无需操作节点、无需发行挑战的远程通知唤醒接口，本次不新造旁路。

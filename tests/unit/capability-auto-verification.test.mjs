@@ -442,6 +442,64 @@ test("ordinary allowance remains first and never initializes the supplemental gr
   assert.equal(f.rows.capabilityVerificationChallenges[0].budgetSource, "ordinary");
 });
 
+async function supplementBackoffFixture({ seconds = 480, consumed = 1 } = {}) {
+  const f = await retestFixture();
+  const native = f.rows[AUTO_VERIFICATION_COLLECTION].find((r) => r.capabilityId === "minimax_music_3.generate");
+  const generic = f.rows[AUTO_VERIFICATION_COLLECTION].find((r) => r.capabilityId === "gulong_engine.music");
+  generic.status = "active"; generic.testedAt = f.now(); generic.expiresAt = new Date(+f.now() + 86400_000);
+  native.status = "failed"; native.attempts = 3 + consumed; native.nextRetryAt = new Date(+f.now() + seconds * 1000);
+  const service = createCapabilityVerificationSupplement({ getCollection: f.getCollection, now: f.now });
+  for (let i = 0; i < consumed; i++) assert.ok(await service.reserve({ binding: f.binding, candidate: native, controlled: true,
+    challengeId: `gcv_${String(i).padStart(8, "0")}-2222-4222-8222-222222222222`, requestId: `original-native-failure-${i}`, requestRecordId: digest(`original-native-failure-${i}`) }));
+  return { ...f, native };
+}
+
+test("generic active plus native supplemental headroom returns exact backoff, not daily exhaustion", async () => {
+  for (const seconds of [480, 960, 1920]) {
+    const f = await supplementBackoffFixture({ seconds });
+    const originalModels = copy(f.rows[AUTO_VERIFICATION_COLLECTION]), originalDaily = copy(f.rows.capabilityVerificationBudgets), originalGrant = copy(f.rows[SUPPLEMENT_COLLECTION]);
+    const response = await f.service.next({ binding: f.binding, requestId: `native-backoff-${seconds}`, leaseToken: clientSecret() });
+    assert.equal(response.code, "VERIFICATION_BACKOFF"); assert.equal(response.challenge, null);
+    assert.equal(response.retry_after_seconds, seconds); assert.equal(response.retry_at, f.native.nextRetryAt.toISOString());
+    assert.equal(response.state, "not_issued"); assert.equal(response.lease_valid, false);
+    assert.equal(+f.rows.capabilityVerificationChallenges[0].responseRetryAt, +f.native.nextRetryAt);
+    assert.deepEqual(f.rows[AUTO_VERIFICATION_COLLECTION], originalModels);
+    assert.deepEqual(f.rows.capabilityVerificationBudgets, originalDaily);
+    assert.deepEqual(f.rows[SUPPLEMENT_COLLECTION], originalGrant);
+    assert.equal(f.hooks.acquired.length, 0);
+  }
+});
+
+test("backoff ceil stays accurate and becomes normally claimable only at original retry time", async () => {
+  const f = await supplementBackoffFixture();
+  f.advance(1001);
+  const waiting = await f.service.next({ binding: f.binding, requestId: "native-backoff-fraction", leaseToken: clientSecret() });
+  assert.equal(waiting.retry_after_seconds, 479);
+  assert.equal(f.rows[SUPPLEMENT_COLLECTION][0].usedTotal, 1);
+  f.advance(478_999);
+  const eligible = await f.service.next({ binding: f.binding, requestId: "native-after-real-backoff", leaseToken: clientSecret(2) });
+  assert.equal(eligible.challenge.capability_id, "minimax_music_3.generate");
+  assert.equal(f.rows[SUPPLEMENT_COLLECTION][0].usedTotal, 2);
+  assert.equal(f.rows.capabilityVerificationBudgets[0].count, 16);
+});
+
+test("fully consumed native supplement does not become backoff merely because generic has unused headroom", async () => {
+  const f = await supplementBackoffFixture({ consumed: 3 });
+  const response = await f.service.next({ binding: f.binding, requestId: "native-cap-truly-exhausted", leaseToken: clientSecret() });
+  assert.equal(response.code, "VERIFICATION_DAILY_BUDGET_EXHAUSTED");
+  assert.equal(response.retry_after_seconds, 3600); assert.equal(response.retry_at, undefined);
+  assert.equal(f.rows[SUPPLEMENT_COLLECTION][0].usedTotal, 3);
+  assert.equal(f.hooks.acquired.length, 0);
+});
+
+test("backoff hints fail closed for revoked grants and preserve all counters", async () => {
+  const f = await supplementBackoffFixture(); f.rows[SUPPLEMENT_COLLECTION][0].state = "revoked";
+  const before = copy(f.rows[SUPPLEMENT_COLLECTION]);
+  const response = await f.service.next({ binding: f.binding, requestId: "revoked-grant-backoff", leaseToken: clientSecret() });
+  assert.equal(response.code, "VERIFICATION_DAILY_BUDGET_EXHAUSTED");
+  assert.equal(response.retry_at, undefined); assert.deepEqual(f.rows[SUPPLEMENT_COLLECTION], before);
+});
+
 test("supplement cannot escape binding, node, group, artifact, capability or model scope", async () => {
   for (const config of [{ bindingPatch: { _id: new ObjectId() } }, { bindingPatch: { nodeId: "another-node" } },
     { bindingPatch: { computeGroupId: "another-group" } }, { artifact: "b".repeat(64) }, { capability: "agent_chat" }]) {
