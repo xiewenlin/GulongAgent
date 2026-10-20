@@ -677,7 +677,7 @@ LAN 节点可在各自的 `lan_cluster.nodes[].resources` 独立上报，必须�
 
 安装顺序：先双端发布并核对该deny-only策略；再由节点归属在安全点安装候选、核对真实artifact和完整raw库存；最后另行审定原始固定回归向量、实际artifact/matrix和独立单次CAS授权，并在护栏内只开这一条例外。未知/预测制品目前一律没有可消费授权，不能为了安装先放开普通预算。固定回归草案未在本次生产版本接线或启用，不向新制品复制旧8项通过。
 
-### 1829 固定样本独立回归（OpenAPI 2.14.8）
+### 1829 固定样本独立回归（OpenAPI 2.14.8；条件六项 2.14.9）
 
 在源会话实际装机及完整raw库存确认后，精确制品 `1829a188caee1e3bca564edaa0b836dd173785e7ffda7363cd7a27a7d9cf1ccb` 的原生 `minimax_music_3.generate/3` 只开独立固定回归例外，矩阵为 `f3d8ce56d82d427c39e9ad95a525794019851efeb6173fd49be8e66fa1dc9c41`，授权 `gvf_20261020_1829_fixed_native_once`。只接受原绑定/节点/空组；其他cap、新未知制品、ordinary和旧授权回退仍拒绝。
 

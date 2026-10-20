@@ -725,6 +725,55 @@ test("conditional six cannot escape scope or inherit a fresh window after fixed 
   assert.deepEqual(f.rows[CONDITIONAL_SIX_COLLECTION]||[],[]);
 });
 
+test("wired conditional next issues six once, recovers original requests, never spends ordinary or native again",async()=>{
+  const f=await fixedFixture();await completeFixedMemory(f);
+  const old=copy({fixed:f.rows[FIXED_MUSIC_RETEST_COLLECTION],release:f.rows[RELEASE_VERIFICATION_COLLECTION],daily:f.rows.capabilityVerificationBudgets});
+  const seen=[];
+  for(let i=0;i<6;i++){
+    const requestId=`wired-six-${i}`,leaseToken=clientSecret(i+2);
+    const result=await f.service.next({binding:f.binding,requestId,leaseToken});
+    assert.ok(result.challenge);seen.push(result.challenge.capability_id);
+    assert.equal(result.challenge.budget.max_inferences,1);
+    if(result.challenge.capability_id==="gulong_engine.music")assert.equal(result.challenge.budget.max_asr_passes,1);
+    const journal=f.rows.capabilityVerificationChallenges.find(r=>r.requestId===requestId);
+    assert.equal(journal.budgetSource,"conditional_six_after_fixed");
+    const before=copy(f.rows[CONDITIONAL_SIX_COLLECTION]);
+    assert.equal((await f.service.next({binding:f.binding,requestId,leaseToken})).challenge.id,result.challenge.id);
+    assert.deepEqual(f.rows[CONDITIONAL_SIX_COLLECTION],before);
+    await submit(f,result.challenge,{status:"failed",inlineResult:undefined});
+  }
+  assert.deepEqual(seen.sort(),["gulong_engine.agent_chat","gulong_engine.embedding","gulong_engine.music","sam.video_track","mediapipe.video_analysis","whisper.transcribe"].sort());
+  assert.equal((await f.service.next({binding:f.binding,requestId:"wired-no-seventh",leaseToken:clientSecret()})).challenge,null);
+  assert.equal(f.rows[CONDITIONAL_SIX_COLLECTION][0].usedTotal,6);
+  assert.deepEqual({fixed:f.rows[FIXED_MUSIC_RETEST_COLLECTION],release:f.rows[RELEASE_VERIFICATION_COLLECTION],daily:f.rows.capabilityVerificationBudgets},old);
+  assert.equal((await f.service.supplementStatus({binding:f.binding})).conditional_six_after_fixed.total.remaining,0);
+});
+
+test("wired conditional respects dry run, busy GPU, physical lock and original backoff without consumption",async()=>{
+  const f=await fixedFixture();await completeFixedMemory(f);
+  await f.service.next({binding:f.binding,dryRun:true});
+  f.hooks.idle=false;
+  assert.equal((await f.service.next({binding:f.binding,requestId:"six-busy",leaseToken:clientSecret()})).code,"VERIFICATION_NODE_BUSY");
+  f.hooks.idle=true;f.hooks.acquire=false;
+  assert.equal((await f.service.next({binding:f.binding,requestId:"six-slot-busy",leaseToken:clientSecret()})).code,"VERIFICATION_NODE_BUSY");
+  f.hooks.acquire=true;
+  for(const row of f.rows[AUTO_VERIFICATION_COLLECTION])if(row.capabilityId!=="minimax_music_3.generate"){row.status="failed";row.nextRetryAt=new Date(+f.now()+480_000);}
+  const response=await f.service.next({binding:f.binding,requestId:"six-existing-backoff",leaseToken:clientSecret()});
+  assert.equal(response.code,"VERIFICATION_BACKOFF");assert.equal(response.retry_after_seconds,480);
+  assert.deepEqual(f.rows[CONDITIONAL_SIX_COLLECTION]||[],[]);
+});
+
+test("wired conditional preparation failure is spent and not reissued, expired parent cannot renew",async()=>{
+  const f=await fixedFixture();await completeFixedMemory(f);f.hooks.snapshotFails=true;
+  await assert.rejects(()=>f.service.next({binding:f.binding,requestId:"six-prepare-failure",leaseToken:clientSecret()}));
+  assert.equal(f.rows[CONDITIONAL_SIX_COLLECTION][0].usedTotal,1);
+  const recovered=await f.service.byRequest({binding:f.binding,requestId:"six-prepare-failure",leaseToken:clientSecret()});
+  assert.equal(recovered.state,"failed");assert.equal(recovered.lease_valid,false);
+  f.hooks.snapshotFails=false;f.advance(7_200_000);
+  assert.equal((await f.service.next({binding:f.binding,requestId:"six-after-expiry",leaseToken:clientSecret(2)})).challenge,null);
+  assert.equal(f.rows[CONDITIONAL_SIX_COLLECTION][0].usedTotal,1);
+});
+
 test("installation quarantine blocks all new-artifact capabilities before any budget or physical reservation, including UTC rollover/group changes",async()=>{
   for(const groupId of [null,"changed-group"]){
     const f=await releaseFixture({reports:releaseReports("b".repeat(64)),bindingPatch:{computeGroupId:groupId}});

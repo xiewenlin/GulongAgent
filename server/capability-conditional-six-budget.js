@@ -3,9 +3,8 @@ import { createFixedMusicRetestBudget, FIXED_MUSIC_RETEST_COLLECTION } from "./c
 import { buildFixedNativeMusicRegressionCase, matchesFixedNativeMusicParameters } from "./capability-fixed-music-case.js";
 import { nativeVerifiedModelScope } from "./capability-native-verification.js";
 
-// LOCAL REVIEW ONLY: not imported by app/next. Reviewed conditional policy;
-// no caller/environment quota configuration. Production wiring waits for the
-// fixed native's real database proof and a separate reviewed release.
+// Human-authorized conditional probe policy. No caller/environment quota
+// configuration: every reservation rechecks the genuine fixed-native proof.
 export const CONDITIONAL_SIX_COLLECTION="capabilityVerificationConditionalSixBudgets";
 const canonical=v=>JSON.stringify(v,(_,i)=>i&&typeof i==="object"&&!Array.isArray(i)?Object.fromEntries(Object.keys(i).sort().map(k=>[k,i[k]])):i);
 const hash=v=>createHash("sha256").update(canonical(v)).digest("hex");
