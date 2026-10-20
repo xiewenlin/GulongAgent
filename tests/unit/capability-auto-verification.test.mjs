@@ -7,6 +7,7 @@ import { createCapabilityAutoVerificationService, registerCapabilityAutoVerifica
   normalizeAutoVerificationInventory, AUTO_VERIFICATION_COLLECTION } from "../../server/capability-auto-verification.js";
 import { createNativeCapabilityVerificationAdapters } from "../../server/capability-native-verification.js";
 import { createCapabilityVerificationSupplement, SUPPLEMENT_COLLECTION } from "../../server/capability-verification-supplement.js";
+import { createCapabilityReleaseVerificationBudget, RELEASE_VERIFICATION_COLLECTION } from "../../server/capability-release-verification-budget.js";
 
 // These test fixtures live only in memory. No installation, extraction, model
 // invocation, build output or on-disk fixture is created by this test file.
@@ -384,6 +385,153 @@ test("random pure text challenge returns exact model and bounded no-charge reque
 const clientSecret = (byte = 1) => Buffer.alloc(32, byte).toString("base64url");
 
 const RETEST_ARTIFACT = "f8bb182e7059eefe075567f37617324e4105dbfd81426c1cc82a44ef9355c27d";
+const RELEASE_ARTIFACT = "554a6c84d242aadb9e5df18b0dff5f24298ccc3a0ed35fb7f25c97ac0801c281";
+const releaseReports = (artifact = RELEASE_ARTIFACT) => [
+  ["gulong_engine.agent_chat", "1.0.0", { id: "qwen38-27b-uncensored-q4-k-m", tools: false, multimodal: false }],
+  ["gulong_engine.embedding", "1.0.0", { id: "qwen3-embedding-0.6b-q8-0", dimension: 1024 }],
+  ["sam.video_track", "3.1-object-multiplex", { id: "sam-video-3.1" }],
+  ["mediapipe.video_analysis", "0.10.14-pose-full", { id: "mediapipe-pose-full-0.10.14" }],
+  ["whisper.transcribe", "large-v3-turbo-whisper.cpp", { id: "whisper-large-v3-turbo" }],
+  ["gulong_engine.music", "1.0.0", { id: "MiniMax-Music3", max_duration_seconds: 300 }],
+  ["minimax_music_3.generate", "3", { id: "MiniMax-Music3", max_duration_seconds: 300 }],
+].map(([capability_id, capability_version, model]) => ({ capability_id, capability_version, installed: true, enabled: true,
+  sharing_opt_in: true, artifact_sha256: artifact, models: [model], default_model: model.id,
+  asr_languages: capability_id.includes("music") ? ["en", "zh"] : [] }));
+async function releaseFixture({ bindingPatch = {}, reports = releaseReports(), report = true } = {}) {
+  const f = fixture({ adapters: createNativeCapabilityVerificationAdapters({ verifyMediaOutputs: async () => [] }),
+    issueProbeInputDownloads: async ({ challenge }) => challenge.probeInputs.map(input => ({ ...input,
+      download_url: "https://fixture.example.invalid/release-input", expires_at: new Date(+f.now() + 300_000) })) });
+  Object.assign(f.binding, { nodeId: "85254b9d69e4e3307049020c58bab89f2edae70a50817c37ca561194105512d1", computeGroupId: null,
+    autoVerificationPolicy: "capability-v2", autoVerificationEnrolledAt: new Date(NOW), autoVerificationCapabilityIds: reports.map(r => r.capability_id) }, bindingPatch);
+  f.rows.nodeAccountBindings[0] = copy(f.binding); f.advance(44 * 3600_000);
+  if (report) await f.service.report({ binding: f.binding, reports, migrationPolicy: "capability-v2", automaticCapabilityIds: reports.map(r => r.capability_id) });
+  f.rows.capabilityVerificationBudgets = [{ _id: `${f.binding._id}:${f.now().toISOString().slice(0,10)}`, count: 0, models: {} }];
+  return f;
+}
+
+test("new release has exactly eleven independent attempts, no ordinary fallback even across UTC day, and no old ledger mutation", async () => {
+  const f = await releaseFixture(); const ordinary = copy(f.rows.capabilityVerificationBudgets);
+  const historical = { _id: "old-f8-preserved", status: "failed", artifactSha256: RETEST_ARTIFACT, error: { code: "VERIFICATION_EXECUTION_FAILED" } };
+  f.rows.capabilityVerificationChallenges = [copy(historical)];
+  f.rows[SUPPLEMENT_COLLECTION] = [{ _id: "old-f8-ledger", usedTotal: 4, consumptions: { retained: true } }];
+  const oldLedger = copy(f.rows[SUPPLEMENT_COLLECTION]);
+  const counts = {};
+  for (let i=0;i<11;i++) {
+    const requestId=`new-release-${i}`, leaseToken=clientSecret(i+1);
+    const result=await f.service.next({ binding:f.binding,requestId,leaseToken }); assert.ok(result.challenge);
+    const cap=result.challenge.capability_id; counts[cap]=(counts[cap]||0)+1;
+    const journal=f.rows.capabilityVerificationChallenges.find(r=>r.requestId===requestId);
+    assert.equal(journal.budgetSource,"release_reverification");
+    assert.ok(Object.values(result.challenge.budget).every(Number.isSafeInteger));
+    const before=copy(f.rows[RELEASE_VERIFICATION_COLLECTION]);
+    assert.equal((await f.service.next({binding:f.binding,requestId,leaseToken})).challenge.id,result.challenge.id);
+    assert.deepEqual(f.rows[RELEASE_VERIFICATION_COLLECTION],before);
+    await submit(f,result.challenge,{status:"failed",inlineResult:undefined}); f.advance(3600_000);
+  }
+  assert.equal(Object.values(counts).reduce((a,b)=>a+b,0),11);
+  assert.equal(counts["gulong_engine.music"],3); assert.equal(counts["minimax_music_3.generate"],3);
+  for(const [cap,count] of Object.entries(counts)) if(!cap.includes("music")) assert.equal(count,1);
+  assert.equal(f.rows[RELEASE_VERIFICATION_COLLECTION][0].usedTotal,11);
+  assert.equal((await f.service.next({binding:f.binding,requestId:"twelfth-denied",leaseToken:clientSecret()})).code,"VERIFICATION_RELEASE_BUDGET_UNAVAILABLE");
+  f.advance(7*3600_000); // UTC day changes; ordinary daily budget remains untouched.
+  assert.equal((await f.service.next({binding:f.binding,requestId:"next-day-denied",leaseToken:clientSecret()})).challenge,null);
+  assert.deepEqual(f.rows.capabilityVerificationBudgets,ordinary); assert.deepEqual(f.rows[SUPPLEMENT_COLLECTION],oldLedger);
+  assert.deepEqual(f.rows.capabilityVerificationChallenges[0],historical);
+});
+
+test("release status is read-only and awaiting real new inventory; synthetic candidate cannot initialize the grant",async()=>{
+  const f=await releaseFixture({report:false}); const service=createCapabilityReleaseVerificationBudget({getCollection:f.getCollection,now:f.now});
+  const status=await service.status({binding:f.binding}); assert.equal(status.state,"awaiting_inventory");assert.equal(status.total.remaining,11);
+  assert.equal(status.ordinary_fallback,false); assert.equal(status.grants_admission,false);
+  assert.equal((await f.service.next({binding:f.binding,requestId:"no-new-inventory",leaseToken:clientSecret()})).challenge,null);
+  assert.deepEqual(f.rows[RELEASE_VERIFICATION_COLLECTION],[]);
+});
+
+test("release exact matrices, binding, node, group, raw duration, language and lease identity all fail closed without ordinary fallback",async()=>{
+  for(const config of [{bindingPatch:{_id:new ObjectId()}},{bindingPatch:{nodeId:"different-node"}},{bindingPatch:{computeGroupId:"different-group"}},
+    {reports:releaseReports().map(r=>({...r,models:r.models.map(m=>({...m,id:"other-model"})),default_model:"other-model"}))},
+    {reports:releaseReports().map(r=>r.capability_id.includes("music")?{...r,models:[{id:"MiniMax-Music3",max_duration_seconds:11.633}]}:r)}]){
+    const f=await releaseFixture(config);
+    // Isolate the changed music candidates when only those matrices differ.
+    if(config.reports?.some(r=>r.models[0].max_duration_seconds===11.633)) f.rows[AUTO_VERIFICATION_COLLECTION]=f.rows[AUTO_VERIFICATION_COLLECTION].filter(r=>r.capabilityId.includes("music"));
+    const result=await f.service.next({binding:f.binding,requestId:"wrong-release-scope",leaseToken:clientSecret()});
+    assert.equal(result.challenge,null); assert.equal(f.rows.capabilityVerificationBudgets[0].count,0);
+    assert.equal((f.rows[RELEASE_VERIFICATION_COLLECTION]||[]).length,0);
+  }
+  const f=await releaseFixture(); assert.equal((await f.service.next({binding:f.binding})).challenge,null);
+  const service=createCapabilityReleaseVerificationBudget({getCollection:f.getCollection,now:f.now});
+  const candidate=f.rows[AUTO_VERIFICATION_COLLECTION].find(r=>r.capabilityId==="gulong_engine.music");
+  for(const changed of [{...candidate,artifactSha256:RETEST_ARTIFACT},{...candidate,inventory:{...candidate.inventory,asrLanguages:["zh"]}},
+    {...candidate,model:{...candidate.model,max_duration_seconds:301}}]) assert.equal(await service.available({binding:f.binding,candidate:changed,controlled:true}),false);
+});
+
+test("release preserves physical guards, immutable expiry and per-cap ledger CAS races",async()=>{
+  const f=await releaseFixture();await f.service.next({binding:f.binding,dryRun:true});f.hooks.idle=false;
+  assert.equal((await f.service.next({binding:f.binding,requestId:"release-busy",leaseToken:clientSecret()})).code,"VERIFICATION_NODE_BUSY");
+  assert.equal((f.rows[RELEASE_VERIFICATION_COLLECTION]||[]).length,0);
+  const service=createCapabilityReleaseVerificationBudget({getCollection:f.getCollection,now:f.now});
+  const candidate=f.rows[AUTO_VERIFICATION_COLLECTION].find(r=>r.capabilityId==="gulong_engine.agent_chat");
+  const args=i=>({binding:f.binding,candidate,controlled:true,challengeId:`gcv-release-race-${i}`,requestId:`release-race-${i}`,requestRecordId:digest(`release-race-${i}`)});
+  const results=await Promise.all(Array.from({length:20},(_,i)=>service.reserve(args(i))));assert.equal(results.filter(Boolean).length,1);
+  assert.equal(await service.reserve(args(0)),null);assert.equal(f.rows[RELEASE_VERIFICATION_COLLECTION][0].usedTotal,1);
+  f.rows[RELEASE_VERIFICATION_COLLECTION][0].spec.totalLimit=999;
+  const music=f.rows[AUTO_VERIFICATION_COLLECTION].find(r=>r.capabilityId==="gulong_engine.music");
+  assert.equal(await service.available({binding:f.binding,candidate:music,controlled:true}),false);
+  const g=await releaseFixture();g.advance(24*3600_000);
+  assert.equal((await g.service.supplementStatus({binding:g.binding})).release_reverification.state,"expired");
+  assert.equal((await g.service.next({binding:g.binding,requestId:"expired-new-release",leaseToken:clientSecret()})).challenge,null);
+  assert.equal((g.rows[RELEASE_VERIFICATION_COLLECTION]||[]).length,0);
+});
+
+test("new release preparation failure remains spent and status recovery cannot replay inference",async()=>{
+  const f=await releaseFixture(); f.hooks.snapshotFails=true;
+  await assert.rejects(()=>f.service.next({binding:f.binding,requestId:"new-release-prepare-failed",leaseToken:clientSecret()}),/snapshot database unavailable/);
+  assert.equal(f.rows[RELEASE_VERIFICATION_COLLECTION][0].usedTotal,1);
+  const recovered=await f.service.byRequest({binding:f.binding,requestId:"new-release-prepare-failed",leaseToken:clientSecret()});
+  assert.equal(recovered.state,"failed");assert.equal(recovered.lease_valid,false); assert.equal(f.rows.capabilityVerificationBudgets[0].count,0);
+});
+
+test("cross-instance release reservations cannot exceed total eleven or borrow another capability quota",async()=>{
+  const f=await releaseFixture();
+  const services=Array.from({length:3},()=>createCapabilityReleaseVerificationBudget({getCollection:f.getCollection,now:f.now}));
+  const candidates=f.rows[AUTO_VERIFICATION_COLLECTION];
+  const results=await Promise.all(Array.from({length:70},(_,i)=>services[i%3].reserve({binding:f.binding,candidate:candidates[i%7],controlled:true,
+    challengeId:`gcv-total-race-${i}`,requestId:`total-race-${i}`,requestRecordId:digest(`total-race-${i}`)})));
+  assert.equal(results.filter(Boolean).length,11);const ledger=f.rows[RELEASE_VERIFICATION_COLLECTION][0];assert.equal(ledger.usedTotal,11);
+  assert.deepEqual(ledger.usedByCapability,{chat:1,embedding:1,sam:1,mediapipe:1,whisper:1,generic_music:3,native_music3:3});
+  assert.equal(f.rows.capabilityVerificationBudgets[0].count,0);
+});
+
+test("release consumed per-cap refuses ordinary fallback while other capabilities still have allowance",async()=>{
+  const f=await releaseFixture();const service=createCapabilityReleaseVerificationBudget({getCollection:f.getCollection,now:f.now});
+  const chat=f.rows[AUTO_VERIFICATION_COLLECTION].find(r=>r.capabilityId==="gulong_engine.agent_chat");
+  assert.ok(await service.reserve({binding:f.binding,candidate:chat,controlled:true,challengeId:"gcv-only-chat",requestId:"only-chat",requestRecordId:digest("only-chat")}));
+  for(const r of f.rows[AUTO_VERIFICATION_COLLECTION])if(r!==chat){r.status="active";r.expiresAt=new Date(+f.now()+86400_000);}
+  const response=await f.service.next({binding:f.binding,requestId:"used-chat-cannot-borrow",leaseToken:clientSecret()});
+  assert.equal(response.code,"VERIFICATION_RELEASE_BUDGET_UNAVAILABLE");assert.equal(response.challenge,null);
+  assert.equal((await service.status({binding:f.binding})).total.remaining,10);assert.equal(f.rows.capabilityVerificationBudgets[0].count,0);
+});
+
+test("new release backoff retains original retry time while exhausted per-cap never borrows unused caps",async()=>{
+  const f=await releaseFixture();
+  for(const r of f.rows[AUTO_VERIFICATION_COLLECTION]){r.status="active";r.expiresAt=new Date(+f.now()+86400_000);}
+  const native=f.rows[AUTO_VERIFICATION_COLLECTION].find(r=>r.capabilityId==="minimax_music_3.generate");
+  native.status="failed";native.nextRetryAt=new Date(+f.now()+960_000);native.attempts=2;
+  const waiting=await f.service.next({binding:f.binding,requestId:"release-original-backoff",leaseToken:clientSecret()});
+  assert.equal(waiting.code,"VERIFICATION_BACKOFF");assert.equal(waiting.retry_after_seconds,960);assert.equal(waiting.retry_at,native.nextRetryAt.toISOString());
+  assert.equal((f.rows[RELEASE_VERIFICATION_COLLECTION]||[]).length,0);
+});
+
+test("new inventory invalidates old global-artifact evidence without copying passes or altering independent Qwen rows",async()=>{
+  const f=await releaseFixture({reports:releaseReports(RETEST_ARTIFACT)});
+  for(const r of f.rows[AUTO_VERIFICATION_COLLECTION])r.status="active";
+  const qwen={_id:"retained-independent-qwen",bindingId:String(f.binding._id),capabilityId:"qwen_image_2_1.text_to_image",artifactSha256:"983ea1b00180824ef7cf310594efa2a1e755b0293a853225ea286055149c9aa7",matrixSha256:"retained-matrix",status:"active",expiresAt:new Date(+f.now()+86400_000)};
+  f.rows[AUTO_VERIFICATION_COLLECTION].push(copy(qwen));
+  await f.service.report({binding:f.binding,reports:releaseReports(),migrationPolicy:"capability-v2",automaticCapabilityIds:releaseReports().map(r=>r.capability_id)});
+  assert.equal(f.rows[AUTO_VERIFICATION_COLLECTION].filter(r=>r.artifactSha256===RETEST_ARTIFACT&&r.status==="invalidated").length,7);
+  assert.equal(f.rows[AUTO_VERIFICATION_COLLECTION].filter(r=>r.artifactSha256===RELEASE_ARTIFACT&&r.status==="pending").length,7);
+  assert.deepEqual(f.rows[AUTO_VERIFICATION_COLLECTION].find(r=>r._id===qwen._id),qwen);
+});
 async function retestFixture({ bindingPatch = {}, artifact = RETEST_ARTIFACT, model = "MiniMax-Music3", capability, options = {} } = {}) {
   const f = fixture({ adapters: createNativeCapabilityVerificationAdapters({ verifyMediaOutputs: async () => [] }), ...options });
   Object.assign(f.binding, { nodeId: "85254b9d69e4e3307049020c58bab89f2edae70a50817c37ca561194105512d1", computeGroupId: null }, bindingPatch);

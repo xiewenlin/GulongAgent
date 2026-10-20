@@ -633,4 +633,24 @@ LAN 节点可在各自的 `lan_cluster.nodes[].resources` 独立上报，必须�
 
 节点无需重启、改密钥或更换制品，继续原自动轮询；原 `next_at` 退避仍有效，发布完成不等于强制立即领取。不改变 challenge 版本、参数、任何整数 `challenge.budget` 字段；补测来源仅存在服务端原日志/独立账本，现有 f8 客户端无需适配。每挑战仍最多一次模型推理及原完整ASR，歌词 `ordered-whole-lyrics-v1`、音频/歌词摘要、完整词序和原最小时长门槛均不变；历史失败绝不转通过，九项与整包真实验收仍是客户端发版门槛。Vercel/腾讯必须同提交上线，公网只核对 schema/401/提交标识，不由发布脚本抢领真实挑战。
 
+### 冻结制品 554a 的七项独立补验（2026-10-20）
+
+独立审定 `gvr_20261020_554a_once` 只匹配制品 `554a6c84d242aadb9e5df18b0dff5f24298ccc3a0ed35fb7f25c97ac0801c281` 和原经审定绑定、匿名节点及空计算组的摘要。有效窗口固定 `2026-10-20T05:45:00Z` 至 `2026-10-21T05:45:00Z`，不自动续额。原始库存已从生产只读核对：除制品哈希外全部模型、版本、默认模型、参数和语言保持不变，服务端钉住新的完整 matrix SHA-256；不是把已验证时长当成原始音乐库存上限。
+
+| 能力 | 本次上限 | 固定原始模型范围 |
+|---|---:|---|
+| `gulong_engine.agent_chat` | 1 | `qwen38-27b-uncensored-q4-k-m`，tools=false、multimodal=false |
+| `gulong_engine.embedding` | 1 | `qwen3-embedding-0.6b-q8-0`，1024维 |
+| `sam.video_track` | 1 | `sam-video-3.1`，`3.1-object-multiplex` |
+| `mediapipe.video_analysis` | 1 | `mediapipe-pose-full-0.10.14`，`0.10.14-pose-full` |
+| `whisper.transcribe` | 1 | `whisper-large-v3-turbo`，`large-v3-turbo-whisper.cpp` |
+| `gulong_engine.music` | 3 | `MiniMax-Music3`，原始上限300秒、ASR en/zh |
+| `minimax_music_3.generate` | 3 | 同一实际音乐模型/原始上限/语言，原生版本3 |
+
+硬总额11次、各能力不可借额；该制品不能回退到普通每日预算，即便普通日额度为零次已用或UTC日期改变。独立集合 `capabilityVerificationReleaseBudgets` 的唯一 `_id`、总数/分项数、challenge消费条目在一次Mongo CAS内预留；准备失败也保留消费与失败原因，原请求恢复不重复消费。旧f8专项账本、日预算、旧失败和原指数退避不重置，不复制旧通过。额度耗尽、过期或精确范围不符返回空challenge及 `VERIFICATION_RELEASE_BUDGET_UNAVAILABLE`；仍有本项额度但尚在原退避内返回 `VERIFICATION_BACKOFF`、原 `retry_at` 和准确秒数。
+
+沿用原GAB及原request/lease合同。`GET /api/v1/capability-verifications/supplemental-budget` 保留旧f8顶层响应，新增 `release_reverification` 对象，含 `authorization_id/artifact_sha256/valid_from/expires_at/inventory_ready/state/total/capabilities/ordinary_fallback=false`；只读查询不创建账本、挑战、输出或模型调用。新制品尚未实际上报完整匹配库存时 `state=awaiting_inventory`，绝不能把剩余理论次数当作准入证明。新账本只在节点自然领取新制品真实库存时物化，旧f8不能消费。
+
+替换制品后原7项按既有matrix变更规则失效并重新实测；两项Qwen只有独立制品、matrix、分组、范围、TTL仍有效才保留。单次推理预算、输入/输出实物检查、完整ASR及 `ordered-whole-lyrics-v1` 均未修改。原生音乐caption策略未随本次额度发布变更；时长达标但缺失验证码歌词仍是真实失败。有限补验不等于九项通过或桌面整包已发布。
+
 OpenAPI 2.14.3 修正补测候选尚在失败退避时的提示分类：若本绑定范围内仍有真实补测余量，且对应已适配模型仅因原 `nextRetryAt` 未到而不可领，`next` 返回 `challenge=null, code=VERIFICATION_BACKOFF, retry_at=原最早nextRetryAt, retry_after_seconds=ceil(剩余秒数)`（至少1秒），而非错误的每日额度耗尽/3600秒。原日志同时保存本次提示对应的 `responseRetryAt`；不领取/预留挑战、不消耗补测、不重置 attempts、不改原8/16/32分钟退避。真正无剩余补测、失效/撤销/越范围或没有相应有效候选时仍保留原限额门禁。节点已经缓存的旧 `next_at` 不因发布或GET额度查询被追溯改写；目前没有无需操作节点、无需发行挑战的远程通知唤醒接口，本次不新造旁路。
