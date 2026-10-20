@@ -5,6 +5,8 @@ import { ObjectId } from "mongodb";
 import { OpenAPIHono } from "@hono/zod-openapi";
 import { createCapabilityAutoVerificationService, registerCapabilityAutoVerificationRoutes,
   normalizeAutoVerificationInventory, AUTO_VERIFICATION_COLLECTION } from "../../server/capability-auto-verification.js";
+import { createNativeCapabilityVerificationAdapters } from "../../server/capability-native-verification.js";
+import { createCapabilityVerificationSupplement, SUPPLEMENT_COLLECTION } from "../../server/capability-verification-supplement.js";
 
 // These test fixtures live only in memory. No installation, extraction, model
 // invocation, build output or on-disk fixture is created by this test file.
@@ -34,6 +36,7 @@ function matches(record, query) {
       return Object.entries(expected).every(([operator, value]) => {
         if (operator === "$in") return value.some((item) => equal(actual, item));
         if (operator === "$ne") return !equal(actual, value);
+        if (operator === "$exists") return (actual !== undefined) === value;
         if (operator === "$gt") return actual > value;
         if (operator === "$gte") return actual >= value;
         if (operator === "$lt") return actual < value;
@@ -379,6 +382,157 @@ test("random pure text challenge returns exact model and bounded no-charge reque
 });
 
 const clientSecret = (byte = 1) => Buffer.alloc(32, byte).toString("base64url");
+
+const RETEST_ARTIFACT = "f8bb182e7059eefe075567f37617324e4105dbfd81426c1cc82a44ef9355c27d";
+async function retestFixture({ bindingPatch = {}, artifact = RETEST_ARTIFACT, model = "MiniMax-Music3", capability, options = {} } = {}) {
+  const f = fixture({ adapters: createNativeCapabilityVerificationAdapters({ verifyMediaOutputs: async () => [] }), ...options });
+  Object.assign(f.binding, { nodeId: "85254b9d69e4e3307049020c58bab89f2edae70a50817c37ca561194105512d1", computeGroupId: null }, bindingPatch);
+  Object.assign(f.binding, { autoVerificationPolicy: "capability-v2", autoVerificationEnrolledAt: new Date(NOW),
+    autoVerificationCapabilityIds: capability ? ["gulong_engine.agent_chat"] : ["gulong_engine.music", "minimax_music_3.generate"] });
+  f.rows.nodeAccountBindings[0] = copy(f.binding);
+  f.advance(2 * 86400_000);
+  const generic = inventory("music", { validation: { artifact_sha256: artifact }, models: [{ id: model, max_duration_seconds: 300 }] });
+  const native = { ...generic, capability_id: "minimax_music_3.generate", capability_version: "3" };
+  const reports = capability ? [{ ...inventory("agent_chat"), validation: { artifact_sha256: artifact } }] : [generic, native];
+  await f.service.report({ binding: f.binding, reports, migrationPolicy: "capability-v2", automaticCapabilityIds: reports.map((r) => r.capability_id) });
+  const models = {};
+  for (const record of f.rows[AUTO_VERIFICATION_COLLECTION]) {
+    record.status = "failed"; record.attempts = 3; record.nextRetryAt = new Date(+f.now() - 1000); models[record._id] = 3;
+  }
+  f.rows.capabilityVerificationBudgets = [{ _id: `${f.binding._id}:${f.now().toISOString().slice(0, 10)}`, count: 16, models }];
+  return f;
+}
+
+test("scoped supplemental next issues only three per music capability, six total, without resetting ordinary counters", async () => {
+  const f = await retestFixture(); const original = copy(f.rows.capabilityVerificationBudgets);
+  const historical = { _id: "original-failed-audit", status: "failed", error: { code: "VERIFICATION_EXECUTION_FAILED" }, createdAt: new Date(NOW) };
+  f.rows.capabilityVerificationChallenges = [copy(historical)];
+  for (let i = 0; i < 6; i++) {
+    const requestId = `scoped-music-retest-${i}`, leaseToken = clientSecret(i + 1);
+    const result = await f.service.next({ binding: f.binding, requestId, leaseToken });
+    assert.ok(result.challenge); assert.equal(result.challenge.budget.max_inferences, 1);
+    assert.ok(Object.values(result.challenge.budget).every((value) => Number.isSafeInteger(value) && value >= 0));
+    assert.equal(f.rows[SUPPLEMENT_COLLECTION][0].usedTotal, i + 1);
+    const journal = f.rows.capabilityVerificationChallenges.find((r) => r.requestId === requestId);
+    assert.equal(journal.budgetSource, "supplement"); assert.ok(journal.supplementalBudget.consumptionId);
+    const beforeRecovery = copy(f.rows[SUPPLEMENT_COLLECTION]);
+    assert.equal((await f.service.next({ binding: f.binding, requestId, leaseToken })).challenge.id, result.challenge.id);
+    await f.service.byRequest({ binding: f.binding, requestId, leaseToken });
+    assert.deepEqual(f.rows[SUPPLEMENT_COLLECTION], beforeRecovery);
+    await submit(f, result.challenge, { status: "failed", inlineResult: undefined });
+    f.advance(3600_000);
+  }
+  const ledger = f.rows[SUPPLEMENT_COLLECTION][0];
+  assert.deepEqual(ledger.usedByCapability, { generic_music: 3, native_music3: 3 });
+  assert.equal(Object.keys(ledger.consumptions).length, 6);
+  assert.deepEqual(f.rows.capabilityVerificationBudgets, original);
+  assert.equal((await f.service.next({ binding: f.binding, requestId: "seventh-music-retest", leaseToken: clientSecret() })).challenge, null);
+  assert.equal(ledger.usedTotal, 6);
+  assert.deepEqual(f.rows.capabilityVerificationChallenges[0], historical);
+  assert.equal(f.rows[AUTO_VERIFICATION_COLLECTION].some((r) => r.status === "active"), false);
+  assert.equal(f.rows.wallets, undefined); assert.equal(f.rows.capabilityOrders, undefined);
+});
+
+test("ordinary allowance remains first and never initializes the supplemental grant", async () => {
+  const f = await retestFixture(); const daily = f.rows.capabilityVerificationBudgets[0];
+  daily.count = 0; for (const id of Object.keys(daily.models)) daily.models[id] = 0;
+  const result = await f.service.next({ binding: f.binding, requestId: "ordinary-music-first", leaseToken: clientSecret() });
+  assert.ok(result.challenge); assert.equal(daily.count, 1);
+  assert.equal((f.rows[SUPPLEMENT_COLLECTION] || []).length, 0);
+  assert.equal(f.rows.capabilityVerificationChallenges[0].budgetSource, "ordinary");
+});
+
+test("supplement cannot escape binding, node, group, artifact, capability or model scope", async () => {
+  for (const config of [{ bindingPatch: { _id: new ObjectId() } }, { bindingPatch: { nodeId: "another-node" } },
+    { bindingPatch: { computeGroupId: "another-group" } }, { artifact: "b".repeat(64) }, { capability: "agent_chat" }]) {
+    const f = await retestFixture(config);
+    const response = await f.service.next({ binding: f.binding, requestId: "out-of-scope-case", leaseToken: clientSecret() });
+    assert.equal(response.code, "VERIFICATION_DAILY_BUDGET_EXHAUSTED");
+    assert.equal((f.rows[SUPPLEMENT_COLLECTION] || []).length, 0);
+    assert.equal(f.rows.capabilityVerificationBudgets[0].count, 16);
+  }
+  const f = await retestFixture();
+  const service = createCapabilityVerificationSupplement({ getCollection: f.getCollection, now: f.now });
+  const candidate = { ...f.rows[AUTO_VERIFICATION_COLLECTION][0], model: { id: "another-music-model" } };
+  assert.equal(await service.available({ binding: f.binding, candidate, controlled: true }), false);
+});
+
+test("supplement does not bypass dry-run, idle/physical-slot guards or require an uncontrolled lease", async () => {
+  const f = await retestFixture();
+  await f.service.next({ binding: f.binding, dryRun: true });
+  assert.equal((f.rows[SUPPLEMENT_COLLECTION] || []).length, 0);
+  f.hooks.idle = false;
+  assert.equal((await f.service.next({ binding: f.binding, requestId: "busy-music-node", leaseToken: clientSecret() })).code, "VERIFICATION_NODE_BUSY");
+  f.hooks.idle = true; f.hooks.acquire = false;
+  assert.equal((await f.service.next({ binding: f.binding, requestId: "no-physical-slot", leaseToken: clientSecret() })).code, "VERIFICATION_NODE_BUSY");
+  f.hooks.acquire = true;
+  assert.equal((await f.service.next({ binding: f.binding })).code, "VERIFICATION_DAILY_BUDGET_EXHAUSTED");
+  assert.equal((f.rows[SUPPLEMENT_COLLECTION] || []).length, 0);
+});
+
+test("concurrent supplemental next preserves one physical execution and one original consumption", async () => {
+  const f = await retestFixture();
+  const results = await Promise.all(Array.from({ length: 20 }, (_, i) => f.service.next({ binding: f.binding,
+    requestId: `concurrent-supplement-${i}`, leaseToken: clientSecret() })));
+  assert.equal(results.filter((r) => r.challenge).length, 1);
+  assert.equal(f.rows[SUPPLEMENT_COLLECTION][0].usedTotal, 1);
+  assert.equal(f.rows.capabilityVerificationBudgets[0].count, 16);
+});
+
+test("supplement ledger CAS bounds cross-instance races and refuses duplicate challenge consumption", async () => {
+  const f = await retestFixture();
+  const service = createCapabilityVerificationSupplement({ getCollection: f.getCollection, now: f.now });
+  const candidate = f.rows[AUTO_VERIFICATION_COLLECTION][0];
+  const args = (i) => ({ binding: f.binding, candidate, controlled: true,
+    challengeId: `gcv_${String(i).padStart(8, "0")}-1111-4111-8111-111111111111`, requestId: `race-ledger-${i}`, requestRecordId: digest(`race-ledger-${i}`) });
+  const results = await Promise.all(Array.from({ length: 20 }, (_, i) => service.reserve(args(i))));
+  assert.equal(results.filter(Boolean).length, 3); assert.equal(f.rows[SUPPLEMENT_COLLECTION][0].usedTotal, 3);
+  assert.equal(await service.reserve(args(0)), null);
+  assert.equal(f.rows[SUPPLEMENT_COLLECTION][0].usedTotal, 3);
+});
+
+test("supplement expires before reservation and cannot be revived or edited into a larger allowance", async () => {
+  const f = await retestFixture(); const service = createCapabilityVerificationSupplement({ getCollection: f.getCollection, now: f.now });
+  const candidate = f.rows[AUTO_VERIFICATION_COLLECTION][0];
+  assert.equal(await service.available({ binding: f.binding, candidate, controlled: true }), true);
+  f.advance(14 * 3600_000);
+  assert.equal(await service.reserve({ binding: f.binding, candidate, controlled: true, challengeId: "expired", requestId: "expired", requestRecordId: digest("expired") }), null);
+  assert.equal((await service.status({ binding: f.binding })).state, "expired");
+  assert.equal((f.rows[SUPPLEMENT_COLLECTION] || []).length, 0);
+  const g = await retestFixture();
+  const first = await g.service.next({ binding: g.binding, requestId: "immutable-grant-first", leaseToken: clientSecret() });
+  await submit(g, first.challenge, { status: "failed", inlineResult: undefined }); g.advance(3600_000);
+  g.rows[SUPPLEMENT_COLLECTION][0].spec.totalLimit = 100;
+  assert.equal((await g.service.next({ binding: g.binding, requestId: "tampered-grant-next", leaseToken: clientSecret() })).challenge, null);
+  assert.equal(g.rows[SUPPLEMENT_COLLECTION][0].usedTotal, 1);
+});
+
+test("failed preparation spends a supplement once, keeps the original failed journal and never grants admission", async () => {
+  const f = await retestFixture(); f.hooks.snapshotFails = true;
+  await assert.rejects(() => f.service.next({ binding: f.binding, requestId: "failed-supplement-journal", leaseToken: clientSecret() }), /snapshot database unavailable/);
+  assert.equal(f.rows[SUPPLEMENT_COLLECTION][0].usedTotal, 1);
+  const recovered = await f.service.byRequest({ binding: f.binding, requestId: "failed-supplement-journal", leaseToken: clientSecret() });
+  assert.equal(recovered.state, "failed"); assert.equal(recovered.lease_valid, false);
+  assert.equal(f.rows.capabilityVerificationBudgets[0].count, 16);
+  assert.ok(f.hooks.released.length); assert.equal(f.rows[AUTO_VERIFICATION_COLLECTION].some((r) => r.status === "active"), false);
+});
+
+test("supplement status is own-binding read-only and documents the real protected route", async () => {
+  const f = await retestFixture(); const before = copy(f.rows);
+  const status = await f.service.supplementStatus({ binding: f.binding });
+  assert.equal(status.total.remaining, 6); assert.equal(status.capabilities[0].remaining, 3);
+  assert.equal(status.grants_admission, false);
+  assert.deepEqual(f.rows[SUPPLEMENT_COLLECTION] || [], []);
+  assert.deepEqual(f.rows.capabilityVerificationBudgets, before.capabilityVerificationBudgets);
+  const app = new OpenAPIHono(); let authorized = false;
+  registerCapabilityAutoVerificationRoutes(app, { service: f.service,
+    requireBinding: async (c) => authorized ? { binding: f.binding } : { error: c.json({ code: "UNAUTHORIZED" }, 401) },
+    requireAdmin: async (c) => ({ error: c.json({ code: "UNAUTHORIZED" }, 401) }) });
+  assert.equal((await app.request("/api/v1/capability-verifications/supplemental-budget")).status, 401);
+  authorized = true; const response = await app.request("/api/v1/capability-verifications/supplemental-budget");
+  assert.equal(response.status, 200); assert.equal((await response.json()).total.used, 0);
+  assert.match(response.headers.get("cache-control"), /no-store/);
+});
 
 test("MongoDB update conflicts are rejected even for existing or unmatched rows before any mutation", async () => {
   const f = fixture(); const records = await f.getCollection("memoryConflictRegression");

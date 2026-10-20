@@ -622,3 +622,13 @@ LAN 节点可在各自的 `lan_cluster.nodes[].resources` 独立上报，必须�
 `capabilityNodeSlots` 是原生 H3、统一业务和自动探测共用的物理 CAS 准入边界。任务必须先预留再原子领取，领取失败或签发票据失败精确释放；探测持有独占租约时，业务并发槽为零。运行中取消不会提前释放槽位，待节点确认停止后才释放，防止仍在运行的任务与新探测重叠。终态重复回调不能重复释放其他任务的槽，也不能重复扣费、退款或分账。
 
 原生 H3 worker task 与回调响应新增 `claim_lease_expires_at`；其 `progress_callback` 提供 `interval_seconds=15`、`lease_seconds=2700`、`on_lease_expired=stop_task_and_wait_for_redispatch`。节点必须定期回调续租并遵守本地 watchdog；到截止时间、收到取消或 `409 H3_PHYSICAL_SLOT_EXPIRED` 时停止对应精确任务。新 H3 物理槽过期不能用迟到回调复活；旧无物理槽标记的任务仍可按旧合同完成，不强制中断既有作业。物理槽属于官网内部状态，worker DTO 不含其 claim ID、binding ID、需求用户或账务隐私字段。
+
+## 一次性音乐补测：发布审定额度（2026-10-20，OpenAPI 2.14.2）
+
+人类在 H3 归属会话明确要求解决当前音乐验收额度阻断后，本次发布只为经审定的单一绑定、匿名节点、当前执行制品 `f8bb182e7059eefe075567f37617324e4105dbfd81426c1cc82a44ef9355c27d` 及原计算组，启用 `gvs_20261020_music_f8_once`。范围仅 `gulong_engine.music` 与 `minimax_music_3.generate`、实际模型 `MiniMax-Music3`，每项新增最多 3 次，合计最多 6 次；2026-10-21T00:00:00Z（北京时间10月21日08:00）失效。源码只保存范围摘要；原始绑定/节点身份由真实认证上下文核对并写入服务端授权账本。不是通用管理员提额或环境开关，也不扩大其他节点/能力。
+
+补测**已接入原 `POST /api/v1/capability-verifications/next`**：普通每日16次/每组合3次仍优先，原计数不清零、不改写；普通额度阻断时才检查精确匹配的补测范围。仍须原 request_id+安全 lease、正式自动迁移、完整库存、同组、新鲜空闲GPU及独占物理槽；一个原请求恢复不重复扣次。使用单一 Mongo CAS 同时封顶总6和每能力3，并把每次 reservation 的原 request/challenge/model-record/制品/时间记入独立 `capabilityVerificationSupplementBudgets` 消耗账本；准备失败仍留痕且占用一次，不能退款重开未知推理。后续原日志负责记录是否实际 issued/failed/active，补测不是授信或 passed。过期、变更节点/绑定/制品/组、非指定模型、未支持能力、撤销/损坏账本、并发满额均拒绝；不得用换hash绕过普通或补测限制。
+
+节点可用原 `X-Gulong-Account-Binding` GET `/api/v1/capability-verifications/supplemental-budget` 只读查询自己的范围、期限、总/逐项 limit/used/remaining 与原挑战消耗引用；跨范围只返回 `applicable=false`。不创建挑战/上传/准入，保持 private/no-store，匿名401，每绑定每分钟30次。授权文档于第一个真实补测 reservation 由正式 next 路径原子登记，不由诊断脚本人工插入；此前查询可显示发布审定的可用额度，但**可用不等于已经实际消耗**。
+
+节点无需重启、改密钥或更换制品，继续原自动轮询；原 `next_at` 退避仍有效，发布完成不等于强制立即领取。不改变 challenge 版本、参数、任何整数 `challenge.budget` 字段；补测来源仅存在服务端原日志/独立账本，现有 f8 客户端无需适配。每挑战仍最多一次模型推理及原完整ASR，歌词 `ordered-whole-lyrics-v1`、音频/歌词摘要、完整词序和原最小时长门槛均不变；历史失败绝不转通过，九项与整包真实验收仍是客户端发版门槛。Vercel/腾讯必须同提交上线，公网只核对 schema/401/提交标识，不由发布脚本抢领真实挑战。

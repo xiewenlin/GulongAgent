@@ -6,6 +6,7 @@ import { CAPABILITY_VERIFICATION_POLICY, requiresAutomaticCapabilityVerification
 import { normalizeProbeInputs, validateProbeInputTickets } from "./capability-probe-inputs.js";
 import { PROBE_OUTPUT_TYPES, normalizeProbeOutputRules, validateProbeOutputDescriptor } from "./capability-probe-outputs.js";
 import { NATIVE_PROBE_VERSIONS } from "./capability-native-verification.js";
+import { createCapabilityVerificationSupplement } from "./capability-verification-supplement.js";
 
 export const AUTO_VERIFICATION_PROTOCOL = "gulong-auto-verification-v1";
 export const AUTO_VERIFICATION_COLLECTION = "capabilityAutoVerifications";
@@ -146,6 +147,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
   const { getCollection, verifyMediaOutputs, issueProbeOutputUpload, getProbeOutputStatus, issueProbeInputDownloads, canProbe, acquireExecution, releaseExecution, adapters = {} } = dependencies;
   assert(typeof getCollection === "function", "VERIFICATION_DEPENDENCY_INVALID", "自动验收数据库未配置", 500);
   const now = dependencies.now || (() => new Date());
+  const supplementalBudget = createCapabilityVerificationSupplement({ getCollection, now });
   const rateLimit = dependencies.enforceRateLimit || (async () => ({ allowed: false }));
   const collection = () => getCollection(AUTO_VERIFICATION_COLLECTION);
   const requestRecordId = (bindingId, requestId) => sha(`verification-request:${bindingId}:${requestId}`);
@@ -394,11 +396,17 @@ export function createCapabilityAutoVerificationService(dependencies) {
       $or: [{ status: "pending" }, { status: "failed", nextRetryAt: { $lte: instant } }, { status: "active", expiresAt: { $lte: instant } }] }).sort({ createdAt: 1, _id: 1 }).limit(32).toArray();
     const budgetId = `${active._id}:${instant.toISOString().slice(0, 10)}`;
     const priorBudget = await (await getCollection(BUDGETS)).findOne({ _id: budgetId });
-    if ((priorBudget?.count || 0) >= 16) return noChallenge({ ok: true, challenge: null, code: "VERIFICATION_DAILY_BUDGET_EXHAUSTED", retry_after_seconds: 3600 });
-    const selected = candidates.find((item) => item.automaticMigrationEnabled !== false
-      && requiresAutomaticCapabilityVerification(active, item.capabilityId)
-      && (priorBudget?.models?.[item._id] || 0) < 3 && adapterFor(item.inventory, item.model));
-    if (!selected) return noChallenge({ ok: true, challenge: null, retry_after_seconds: 60 });
+    let selected = null, useSupplement = false;
+    for (const item of candidates) {
+      if (item.automaticMigrationEnabled === false || !requiresAutomaticCapabilityVerification(active, item.capabilityId)
+        || !adapterFor(item.inventory, item.model)) continue;
+      if ((priorBudget?.count || 0) < 16 && (priorBudget?.models?.[item._id] || 0) < 3) { selected = item; break; }
+      if (await supplementalBudget.available({ binding: active, candidate: item, controlled })) {
+        selected = item; useSupplement = true; break;
+      }
+    }
+    if (!selected) return noChallenge({ ok: true, challenge: null,
+      ...((priorBudget?.count || 0) >= 16 ? { code: "VERIFICATION_DAILY_BUDGET_EXHAUSTED", retry_after_seconds: 3600 } : { retry_after_seconds: 60 }) });
     if (!await lock(`binding:${active._id}`, challengeId, instant, String(active._id))) return noChallenge({ ok: true, challenge: null, retry_after_seconds: 15 });
     let globalSlot = null;
     for (let index = 0; index < 4; index += 1) if (await lock(`global:${index}`, challengeId, instant, String(active._id))) { globalSlot = index; break; }
@@ -408,11 +416,19 @@ export function createCapabilityAutoVerificationService(dependencies) {
         await releaseLocks({ _id: challengeId });
         return noChallenge({ ok: true, challenge: null, code: "VERIFICATION_NODE_BUSY", retry_after_seconds: 30 });
       }
-      const budgets = await getCollection(BUDGETS);
-      try { await budgets.updateOne({ _id: budgetId }, { $setOnInsert: { count: 0, models: {}, expiresAt: new Date(+instant + 2 * DAY) } }, { upsert: true }); }
-      catch (error) { if (error.code !== 11000) throw error; }
-      const reserved = unwrap(await budgets.findOneAndUpdate({ _id: budgetId, count: { $lt: 16 }, [`models.${selected._id}`]: { $not: { $gte: 3 } } },
-        { $inc: { count: 1, [`models.${selected._id}`]: 1 } }, { returnDocument: "after" }));
+      let reserved, supplementReceipt = null;
+      if (useSupplement) {
+        const liveBinding = await currentBinding(active);
+        supplementReceipt = await supplementalBudget.reserve({ binding: liveBinding, candidate: selected, controlled,
+          challengeId, requestId, requestRecordId: associationId });
+        reserved = supplementReceipt;
+      } else {
+        const budgets = await getCollection(BUDGETS);
+        try { await budgets.updateOne({ _id: budgetId }, { $setOnInsert: { count: 0, models: {}, expiresAt: new Date(+instant + 2 * DAY) } }, { upsert: true }); }
+        catch (error) { if (error.code !== 11000) throw error; }
+        reserved = unwrap(await budgets.findOneAndUpdate({ _id: budgetId, count: { $lt: 16 }, [`models.${selected._id}`]: { $not: { $gte: 3 } } },
+          { $inc: { count: 1, [`models.${selected._id}`]: 1 } }, { returnDocument: "after" }));
+      }
       if (!reserved) { await releaseLocks({ _id: challengeId }); return noChallenge({ ok: true, challenge: null, code: "VERIFICATION_DAILY_BUDGET_EXHAUSTED", retry_after_seconds: 3600 }); }
       const nonce = `gcv-${randomBytes(5).toString("hex")}`;
       const adapter = adapterFor(selected.inventory, selected.model);
@@ -446,7 +462,8 @@ export function createCapabilityAutoVerificationService(dependencies) {
       // The inventory/model creation time is not the request journal's time.
       // Keep createdAt insert-only: MongoDB rejects it in both $set and $setOnInsert.
       const { _id: featureId, requestId: snapshotRequestId, createdAt: _inventoryCreatedAt, ...snapshot } = updated;
-      await requestRecords.updateOne({ _id: associationId }, { $set: { ...snapshot, ...(controlled ? { requestId: snapshotRequestId } : {}), featureId, updatedAt: instant },
+      await requestRecords.updateOne({ _id: associationId }, { $set: { ...snapshot, ...(controlled ? { requestId: snapshotRequestId } : {}),
+        budgetSource: supplementReceipt ? "supplement" : "ordinary", supplementalBudget: supplementReceipt, featureId, updatedAt: instant },
         $setOnInsert: { createdAt: instant } }, { upsert: true });
       return { ok: true, protocol: AUTO_VERIFICATION_PROTOCOL, ...(controlled ? { request_id: requestId } : {}), state: "leased", lease_valid: true,
         execute_once: true, challenge: { id: challengeId, lease_token: leaseToken,
@@ -616,7 +633,12 @@ export function createCapabilityAutoVerificationService(dependencies) {
       testedAt: new Date(Math.min(...records.map((item) => +new Date(item.testedAt)))),
       expiresAt: new Date(Math.min(...records.map((item) => +new Date(item.expiresAt)))), verificationIds: records.map((item) => item._id) };
   }
-  return { report, next, submit, outputUpload, outputStatus, findTrusted, list, byRequest, getChallenge };
+  async function supplementStatus({ binding }) {
+    const active = await currentBinding(binding);
+    await limited(String(active._id), "supplement-status", 30);
+    return supplementalBudget.status({ binding: active });
+  }
+  return { report, next, submit, outputUpload, outputStatus, findTrusted, list, byRequest, getChallenge, supplementStatus };
 }
 
 async function boundedBody(c, limit = 64 * 1024) {
@@ -672,6 +694,10 @@ export function registerCapabilityAutoVerificationRoutes(app, dependencies) {
       leaseToken: c.req.header("X-Gulong-Verification-Lease") }));
   });
   app.get(`${base}/by-request/:key`, boundLookup("byRequest", "requestId"));
+  app.get(`${base}/supplemental-budget`, route(async (c) => {
+    const auth = await requireBinding(c); if (auth.error) return auth.error;
+    return c.json(await service.supplementStatus({ binding: auth.binding }));
+  }));
   app.get(`${base}/challenges/:id`, boundLookup("getChallenge", "challengeId"));
   app.get(`${base}/:id/outputs/:output_id`, route(async (c) => {
     const auth = await requireBinding(c); if (auth.error) return auth.error;
@@ -687,6 +713,12 @@ export function registerCapabilityAutoVerificationRoutes(app, dependencies) {
   }));
   if (openapi && app.openAPIRegistry) {
     const objectSchema = z.record(z.string(), z.unknown());
+    app.openAPIRegistry.registerPath({ method: "get", path: `${base}/supplemental-budget`,
+      tags: ["Automatic Capability Verification"], summary: "查询当前绑定的发布审定一次性补测额度，不创建挑战、不授予模型准入",
+      security: [{ accountBinding: [] }],
+      request: { headers: z.object({ "X-Gulong-Account-Binding": z.string().min(1) }) },
+      responses: { 200: { description: "仅本绑定的补测范围、期限和已消耗账本；普通每日计数不重置", content: { "application/json": { schema: objectSchema } } },
+        401: { description: "节点绑定无效" }, 429: { description: "查询频率受限" } } });
     const modelSchema = z.object({ id: z.string().min(1).max(240) }).catchall(z.union([z.string(), z.number(), z.boolean()]));
     const artifactSchema = z.string().regex(/^[a-f0-9]{64}$/i);
     const inventorySchema = z.object({ capability_id: z.string().min(1).max(120), capability_version: z.string().max(120).default("1.0.0")

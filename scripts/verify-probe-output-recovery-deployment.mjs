@@ -17,7 +17,12 @@ export async function verifyProbeOutputRecoveryDeployment(origin, read = fetch) 
   assert.ok(fields.retry_put_allowed); assert.ok(fields.descriptor); assert.equal(fields.url, undefined); assert.equal(fields.method, undefined);
   const reply = await get(`/api/v1/capability-verifications/gcv_00000000-0000-4000-8000-000000000000/outputs/${"A".repeat(43)}`);
   assert.equal(reply.status, 401); assert.match(reply.headers.get("cache-control"), /private.*no-store/);
+  const supplement = spec.paths["/api/v1/capability-verifications/supplemental-budget"]?.get;
+  assert.ok(supplement); assert.deepEqual(supplement.security, [{ accountBinding: [] }]);
+  const supplementReply = await get("/api/v1/capability-verifications/supplemental-budget");
+  assert.equal(supplementReply.status, 401); assert.match(supplementReply.headers.get("cache-control"), /private.*no-store/);
   return { origin: base.origin, status: "probe_output_recovery_contract_verified", anonymous_status: 401,
+    supplemental_budget_route_verified: true,
     real_transfer_verified: false, model_requests: 0, object_writes: 0 };
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
