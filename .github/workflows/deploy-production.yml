@@ -61,6 +61,7 @@ jobs:
           cp scripts/backfill-gulong-engine-credits.mjs "$bundle/scripts/"
           cp scripts/purge-super-video-activation-codes.mjs "$bundle/scripts/"
           cp scripts/inspect-capability-storage.mjs "$bundle/scripts/"
+          cp scripts/activate-fixed-music-retest.mjs "$bundle/scripts/"
           printf '%s\n' "$GITHUB_SHA" > "$bundle/.deploy-commit"
           tar -czf "$archive" -C "$bundle" .
 
@@ -251,6 +252,13 @@ jobs:
     needs: [vercel-production, tencent-production]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: production
+    env:
+      TENCENT_SSH_HOST: ${{ vars.TENCENT_SSH_HOST }}
+      TENCENT_SSH_PORT: ${{ vars.TENCENT_SSH_PORT }}
+      TENCENT_SSH_USER: ${{ vars.TENCENT_SSH_USER }}
+      TENCENT_SSH_PRIVATE_KEY: ${{ secrets.TENCENT_SSH_PRIVATE_KEY }}
+      TENCENT_SSH_KNOWN_HOSTS: ${{ secrets.TENCENT_SSH_KNOWN_HOSTS }}
     steps:
       - name: Check out the parity verifier
         uses: actions/checkout@v4
@@ -277,3 +285,24 @@ jobs:
 
       - name: Verify probe output recovery without issuing challenges or uploads
         run: node scripts/verify-probe-output-recovery-deployment.mjs https://sologle.com https://111.229.70.235
+
+      - name: Start the reviewed fixed-music window after both targets are ready
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$TENCENT_SSH_HOST"
+          test -n "$TENCENT_SSH_USER"
+          test -n "$TENCENT_SSH_PRIVATE_KEY"
+          test -n "$TENCENT_SSH_KNOWN_HOSTS"
+          key="$RUNNER_TEMP/gulong-fixed-retest-key"
+          known_hosts="$RUNNER_TEMP/gulong-fixed-retest-known-hosts"
+          trap 'rm -f -- "$key" "$known_hosts"' EXIT
+          install -m 600 /dev/null "$key"
+          install -m 600 /dev/null "$known_hosts"
+          printf '%s\n' "$TENCENT_SSH_PRIVATE_KEY" > "$key"
+          printf '%s\n' "$TENCENT_SSH_KNOWN_HOSTS" > "$known_hosts"
+          ssh -p "${TENCENT_SSH_PORT:-22}" -i "$key" \
+            -o UserKnownHostsFile="$known_hosts" -o StrictHostKeyChecking=yes \
+            -o IdentitiesOnly=yes -o ForwardAgent=no -o BatchMode=yes \
+            "$TENCENT_SSH_USER@$TENCENT_SSH_HOST" \
+            "cd /opt/gulong/current && node --env-file=/etc/gulong/gulong.env scripts/activate-fixed-music-retest.mjs --commit '$GITHUB_SHA'"

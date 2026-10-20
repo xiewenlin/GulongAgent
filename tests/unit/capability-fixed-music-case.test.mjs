@@ -59,13 +59,12 @@ test("unchanged native v1 validator still rejects actual historical missing lyri
   await assert.rejects(()=>validateMemoryResult({fullAudio:false}));
 });
 
-test("review draft has no artifact authorization, TTL, route or runtime wiring",async()=>{
-  const plan=fixedNativeMusicActivationPlan();assert.equal(plan.state,"draft_not_active");
+test("pure vector definition cannot authorize a model, own a TTL, access a ledger or register a route",async()=>{
+  const plan=fixedNativeMusicActivationPlan();assert.equal(plan.state,"vector_definition_only");
   for(const key of ["authorization_id","artifact_sha256","matrix_sha256","valid_from","expires_at"])assert.equal(plan[key],null);
   assert.equal(plan.hard_limit,1);assert.equal(plan.routable,false);assert.equal(plan.grants_admission,false);
   assert.equal(plan.ordinary_fallback,false);assert.equal(plan.resets_original_budgets,false);
-  for(const file of ["app.js","capability-auto-verification.js"]){
-    const source=await readFile(new URL(`../../server/${file}`,import.meta.url),"utf8");
-    assert.equal(source.includes('from "./capability-fixed-music-case.js"'),false);
-  }
+  const source=await readFile(new URL("../../server/capability-fixed-music-case.js",import.meta.url),"utf8");
+  assert.equal(source.includes("getCollection"),false);assert.equal(source.includes("findOneAndUpdate"),false);
+  assert.equal(source.includes("app.post("),false);
 });

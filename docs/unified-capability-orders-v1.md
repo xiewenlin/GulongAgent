@@ -677,4 +677,14 @@ LAN 节点可在各自的 `lan_cluster.nodes[].resources` 独立上报，必须�
 
 安装顺序：先双端发布并核对该deny-only策略；再由节点归属在安全点安装候选、核对真实artifact和完整raw库存；最后另行审定原始固定回归向量、实际artifact/matrix和独立单次CAS授权，并在护栏内只开这一条例外。未知/预测制品目前一律没有可消费授权，不能为了安装先放开普通预算。固定回归草案未在本次生产版本接线或启用，不向新制品复制旧8项通过。
 
+### 1829 固定样本独立回归（OpenAPI 2.14.8）
+
+在源会话实际装机及完整raw库存确认后，精确制品 `1829a188caee1e3bca564edaa0b836dd173785e7ffda7363cd7a27a7d9cf1ccb` 的原生 `minimax_music_3.generate/3` 只开独立固定回归例外，矩阵为 `f3d8ce56d82d427c39e9ad95a525794019851efeb6173fd49be8e66fa1dc9c41`，授权 `gvf_20261020_1829_fixed_native_once`。只接受原绑定/节点/空组；其他cap、新未知制品、ordinary和旧授权回退仍拒绝。
+
+参数严格固定为原失败gcv_626fd91d-e00e-4c36-93ea-18a0bd98b8bd/request254ab592-da1a-4738-afcd-05a2312c530d：原修正prompt、`Blue sky, silver river.\ntwo, zero, three, three.`、整数seed716491643、12秒/44100Hz/FLAC/auto。网站不加tag/hint、不重新派生随机歌词；新request/gcv/lease保存新随机审计nonce，并记录固定样本原来源/摘要，不能把固定向量称为新随机向量。仍1次推理+1次完整ASR，原v1/COS/时长门槛不变。
+
+独立集合 `capabilityVerificationFixedMusicRetests` 的发布激活只在双端全部健康、一致性与只读API核验之后由CI执行，无HTTP激活端点；提交须精确匹配服务器`.deploy-commit`，原失败快照和实时绑定须核对。首次激活只插入一次 `readyAt/expiresAt=readyAt+120分钟/usedTotal=0`；再次发布/网络重试不延长、不重置。节点自然领取通过GPU/独占槽检查后，`used0→1`单doc CAS才消耗；忙时不消费。原退避继续生效，失败和准备失败都不返还，原键恢复不重复推理。窗口决定可签发时间，已合法领取的原租约按原15分钟上限完成/失效。
+
+`GET /api/v1/capability-verifications/supplemental-budget` 新增 `fixed_native_music_retest`：`ready_at/expires_at/state/total/source_case/parameters_sha256/business_admission=false`。激活前为 `awaiting_deployment_activation`，未上报精确库存为 `awaiting_inventory`，其余为available/backoff/exhausted/expired/unavailable。只读不唤醒本机缓存。服务端结果记录 `fixed_case_only=true`、`contract_tests.fixed_regression_case=true`（仅实际验证通过），保留旧4次失败来源及新独立执行；不是普通业务准入，不复制旧8项到1829。未知制品统一订单候选/证明准入隔离仍保持。
+
 OpenAPI 2.14.3 修正补测候选尚在失败退避时的提示分类：若本绑定范围内仍有真实补测余量，且对应已适配模型仅因原 `nextRetryAt` 未到而不可领，`next` 返回 `challenge=null, code=VERIFICATION_BACKOFF, retry_at=原最早nextRetryAt, retry_after_seconds=ceil(剩余秒数)`（至少1秒），而非错误的每日额度耗尽/3600秒。原日志同时保存本次提示对应的 `responseRetryAt`；不领取/预留挑战、不消耗补测、不重置 attempts、不改原8/16/32分钟退避。真正无剩余补测、失效/撤销/越范围或没有相应有效候选时仍保留原限额门禁。节点已经缓存的旧 `next_at` 不因发布或GET额度查询被追溯改写；目前没有无需操作节点、无需发行挑战的远程通知唤醒接口，本次不新造旁路。

@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
 
-// LOCAL REVIEW DRAFT ONLY. No runtime import, route, grant, model invocation,
-// database access or configurable activation switch. A predicted artifact is
-// deliberately NOT an authorization scope. Wiring awaits actual installation.
+// Pure vector definition only: no grant, model call, database access or
+// configurable activation switch. The separate reviewed ledger owns authority.
 const parameters = Object.freeze({
   prompt: "A clear solo singing voice, simple gentle accompaniment, sing the complete lyrics exactly once.",
   lyrics: "Blue sky, silver river.\ntwo, zero, three, three.",
@@ -45,7 +44,7 @@ export function matchesFixedNativeMusicParameters(candidate) {
 
 export function fixedNativeMusicActivationPlan() {
   return {
-    state: "draft_not_active", authorization_id: null, artifact_sha256: null, matrix_sha256: null,
+    state: "vector_definition_only", authorization_id: null, artifact_sha256: null, matrix_sha256: null,
     valid_from: null, expires_at: null, routable: false, grants_admission: false,
     hard_limit: 1, ordinary_fallback: false, resets_original_budgets: false,
     audit_origin: { ...origin },

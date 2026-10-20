@@ -10,6 +10,7 @@ import { createCapabilityVerificationSupplement } from "./capability-verificatio
 import { createCapabilityReleaseVerificationBudget } from "./capability-release-verification-budget.js";
 import { createCapabilityCaptionRetestBudget } from "./capability-caption-retest-budget.js";
 import { isNodeArtifactQuarantined, nodeArtifactInstallationGuardStatus } from "./capability-artifact-installation-guard.js";
+import { createFixedMusicRetestBudget } from "./capability-fixed-music-retest.js";
 
 export const AUTO_VERIFICATION_PROTOCOL = "gulong-auto-verification-v1";
 export const AUTO_VERIFICATION_COLLECTION = "capabilityAutoVerifications";
@@ -143,7 +144,8 @@ function publicState(record) {
     contract_tests: record.status === "active" ? record.contractTests ?? null : null,
     asr_languages: record.status === "active" ? record.asrLanguages || [] : [],
     expires_at: record.expiresAt ?? null, next_retry_at: record.nextRetryAt ?? null, next_attempt_at: record.nextRetryAt ?? null,
-    error: record.error ?? null, created_at: record.createdAt, updated_at: record.updatedAt };
+    error: record.error ?? null, created_at: record.createdAt, updated_at: record.updatedAt,
+    ...(record.fixedCaseOnly ? { fixed_case_only: true, business_admission: false, source_case: record.fixedCaseOrigin } : {}) };
 }
 
 export function createCapabilityAutoVerificationService(dependencies) {
@@ -153,6 +155,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
   const supplementalBudget = createCapabilityVerificationSupplement({ getCollection, now });
   const releaseBudget = createCapabilityReleaseVerificationBudget({ getCollection, now });
   const captionBudget = createCapabilityCaptionRetestBudget({ getCollection, now });
+  const fixedMusicBudget = createFixedMusicRetestBudget({ getCollection, now });
   const rateLimit = dependencies.enforceRateLimit || (async () => ({ allowed: false }));
   const collection = () => getCollection(AUTO_VERIFICATION_COLLECTION);
   const requestRecordId = (bindingId, requestId) => sha(`verification-request:${bindingId}:${requestId}`);
@@ -402,11 +405,17 @@ export function createCapabilityAutoVerificationService(dependencies) {
       $or: [{ status: "pending" }, { status: "failed", nextRetryAt: { $lte: instant } }, { status: "active", expiresAt: { $lte: instant } }] }).sort({ createdAt: 1, _id: 1 }).limit(32).toArray();
     const budgetId = `${active._id}:${instant.toISOString().slice(0, 10)}`;
     const priorBudget = await (await getCollection(BUDGETS)).findOne({ _id: budgetId });
-    let selected = null, useSupplement = false, useReleaseBudget = false, useCaptionBudget = false, releaseBlocked = false, artifactBlocked = false;
+    let selected = null, useSupplement = false, useReleaseBudget = false, useCaptionBudget = false, useFixedMusicBudget = false,
+      releaseBlocked = false, artifactBlocked = false, fixedRetryAt = null;
     for (const item of candidates) {
       if (item.automaticMigrationEnabled === false || !requiresAutomaticCapabilityVerification(active, item.capabilityId)
         || !adapterFor(item.inventory, item.model)) continue;
-      if (isNodeArtifactQuarantined(active, item.artifactSha256)) { artifactBlocked = true; continue; }
+      if (isNodeArtifactQuarantined(active, item.artifactSha256)) {
+        const permission = await fixedMusicBudget.inspect({ binding: active, candidate: item, controlled });
+        if (permission.available) { selected = item; useFixedMusicBudget = true; break; }
+        if (permission.retry_at) fixedRetryAt = permission.retry_at;
+        artifactBlocked = true; continue;
+      }
       // This exact release is capped even when ordinary daily funds are unused.
       // No scope, matrix, expiry or per-cap failure may fall back to ordinary.
       if (releaseBudget.applies(item)) {
@@ -445,6 +454,8 @@ export function createCapabilityAutoVerificationService(dependencies) {
             retry_after_seconds: Math.max(1, Math.ceil((+new Date(item.nextRetryAt) - +new Date(now())) / 1000)) });
         }
       }
+      if (fixedRetryAt) return noChallenge({ ok: true, challenge: null, code: "VERIFICATION_BACKOFF", retry_at: fixedRetryAt,
+        retry_after_seconds: Math.max(1, Math.ceil((+new Date(fixedRetryAt) - +new Date(now())) / 1000)) });
       if (artifactBlocked) return noChallenge({ ok: true, challenge: null, code: "VERIFICATION_ARTIFACT_REVIEW_REQUIRED", retry_after_seconds: 3600 });
       if (releaseBlocked) return noChallenge({ ok: true, challenge: null, code: "VERIFICATION_RELEASE_BUDGET_UNAVAILABLE", retry_after_seconds: 3600 });
       return noChallenge({ ok: true, challenge: null,
@@ -460,9 +471,9 @@ export function createCapabilityAutoVerificationService(dependencies) {
         return noChallenge({ ok: true, challenge: null, code: "VERIFICATION_NODE_BUSY", retry_after_seconds: 30 });
       }
       let reserved, supplementReceipt = null;
-      if (useSupplement || useReleaseBudget || useCaptionBudget) {
+      if (useSupplement || useReleaseBudget || useCaptionBudget || useFixedMusicBudget) {
         const liveBinding = await currentBinding(active);
-        supplementReceipt = await (useCaptionBudget ? captionBudget : useReleaseBudget ? releaseBudget : supplementalBudget).reserve({ binding: liveBinding, candidate: selected, controlled,
+        supplementReceipt = await (useFixedMusicBudget ? fixedMusicBudget : useCaptionBudget ? captionBudget : useReleaseBudget ? releaseBudget : supplementalBudget).reserve({ binding: liveBinding, candidate: selected, controlled,
           challengeId, requestId, requestRecordId: associationId });
         reserved = supplementReceipt;
       } else {
@@ -473,14 +484,17 @@ export function createCapabilityAutoVerificationService(dependencies) {
           { $inc: { count: 1, [`models.${selected._id}`]: 1 } }, { returnDocument: "after" }));
       }
       if (!reserved) { await releaseLocks({ _id: challengeId }); return noChallenge({ ok: true, challenge: null,
-        code: useReleaseBudget || useCaptionBudget ? "VERIFICATION_RELEASE_BUDGET_UNAVAILABLE" : "VERIFICATION_DAILY_BUDGET_EXHAUSTED", retry_after_seconds: 3600 }); }
+        code: useReleaseBudget || useCaptionBudget || useFixedMusicBudget ? "VERIFICATION_RELEASE_BUDGET_UNAVAILABLE" : "VERIFICATION_DAILY_BUDGET_EXHAUSTED", retry_after_seconds: 3600 }); }
       const nonce = `gcv-${randomBytes(5).toString("hex")}`;
       const adapter = adapterFor(selected.inventory, selected.model);
-      const probe = await adapter.createProbe({ inventory: selected.inventory, model: selected.model, nonce, binding: active });
+      const probe = useFixedMusicBudget ? fixedMusicBudget.buildProbe()
+        : await adapter.createProbe({ inventory: selected.inventory, model: selected.model, nonce, binding: active });
       assert(isObject(probe) && isObject(probe.parameters) && probe.budget?.max_inferences === 1,
         "VERIFICATION_ADAPTER_INVALID", "自动验收适配器未提供安全探测预算", 503);
       assert(!useCaptionBudget || captionBudget.matchesProbe(probe), "VERIFICATION_CAPTION_POLICY_MISMATCH",
         "本次专项验收只允许修正后的原生音乐提示词，未签发可执行挑战", 503);
+      assert(!useFixedMusicBudget || fixedMusicBudget.matchesProbe(probe) && probe.budget.max_asr_passes === 1,
+        "VERIFICATION_FIXED_CASE_MISMATCH", "固定回归原始向量或整段ASR预算不一致，未签发可执行挑战", 503);
       assert(Buffer.byteLength(canonical(probe.parameters)) <= 64 * 1024 && (probe.budget.max_output_tokens ?? 0) <= 128
         && (probe.budget.max_audio_seconds ?? 0) <= 12 && (probe.budget.max_images ?? 0) <= 1
         && (probe.budget.max_image_pixels ?? 0) <= 2048 * 2048
@@ -502,14 +516,16 @@ export function createCapabilityAutoVerificationService(dependencies) {
       const updated = unwrap(await records.findOneAndUpdate({ _id: selected._id, status: selected.status, matrixSha256: selected.matrixSha256 },
         { $set: { challengeId, leaseTokenHash: sha(leaseToken), leaseExpiresAt, status: "leased", probeInputs, probeOutputRules,
           nonce, probeKind: probe.probeKind, parameters: probe.parameters, budget: probe.budget, language: probe.language ?? null,
-          requestId: controlled ? requestId : null, outputUploadRequired: probe.outputUploadRequired === true || probe.probeKind === "music", updatedAt: instant },
+          requestId: controlled ? requestId : null, outputUploadRequired: probe.outputUploadRequired === true || probe.probeKind === "music",
+          ...(useFixedMusicBudget ? { fixedCaseOnly: true, fixedCaseOrigin: fixedMusicBudget.origin,
+            priorAttempts: supplementReceipt.priorAttempts } : {}), updatedAt: instant },
           $unset: { resultFingerprint: "", error: "" }, $inc: { attempts: 1 } }, { returnDocument: "after" }));
       if (!updated) { await releaseLocks({ _id: challengeId }); return noChallenge({ ok: true, challenge: null, retry_after_seconds: 15 }); }
       // The inventory/model creation time is not the request journal's time.
       // Keep createdAt insert-only: MongoDB rejects it in both $set and $setOnInsert.
       const { _id: featureId, requestId: snapshotRequestId, createdAt: _inventoryCreatedAt, ...snapshot } = updated;
       await requestRecords.updateOne({ _id: associationId }, { $set: { ...snapshot, ...(controlled ? { requestId: snapshotRequestId } : {}),
-        budgetSource: useCaptionBudget ? "caption_retest" : useReleaseBudget ? "release_reverification" : supplementReceipt ? "supplement" : "ordinary", supplementalBudget: supplementReceipt, featureId, updatedAt: instant },
+        budgetSource: useFixedMusicBudget ? "fixed_music_regression" : useCaptionBudget ? "caption_retest" : useReleaseBudget ? "release_reverification" : supplementReceipt ? "supplement" : "ordinary", supplementalBudget: supplementReceipt, featureId, updatedAt: instant },
         $setOnInsert: { createdAt: instant } }, { upsert: true });
       return { ok: true, protocol: AUTO_VERIFICATION_PROTOCOL, ...(controlled ? { request_id: requestId } : {}), state: "leased", lease_valid: true,
         execute_once: true, challenge: { id: challengeId, lease_token: leaseToken,
@@ -632,6 +648,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
     try {
       if (status === "failed") throw failure("VERIFICATION_EXECUTION_FAILED", "节点探测未完成，将在退避后自动重试");
       verified = await validateResult(owned, inlineResult, outputs, active);
+      if (owned.fixedCaseOnly) verified.contractTests = { ...verified.contractTests, fixed_regression_case: true };
       await currentBinding(active);
       assert(new Date(owned.leaseExpiresAt) > new Date(now()), "VERIFICATION_LEASE_EXPIRED", "验收结果已超时，不能开放派单", 409);
       await (await getCollection(AUDITS)).insertOne({ _id: randomUUID(), action: "capability.automatic_verification_passed", challengeId,
@@ -683,8 +700,11 @@ export function createCapabilityAutoVerificationService(dependencies) {
   async function supplementStatus({ binding }) {
     const active = await currentBinding(binding);
     await limited(String(active._id), "supplement-status", 30);
+    const fixed = await fixedMusicBudget.status({ binding: active });
     return { ...await supplementalBudget.status({ binding: active }), release_reverification: await releaseBudget.status({ binding: active }),
-      native_caption_retest: await captionBudget.status({ binding: active }), installation_guard: nodeArtifactInstallationGuardStatus(active) };
+      native_caption_retest: await captionBudget.status({ binding: active }), installation_guard: { ...nodeArtifactInstallationGuardStatus(active),
+        fixed_case_authorization_active: ["available", "backoff", "awaiting_inventory"].includes(fixed.state) && fixed.total?.remaining === 1 },
+      fixed_native_music_retest: fixed };
   }
   return { report, next, submit, outputUpload, outputStatus, findTrusted, list, byRequest, getChallenge, supplementStatus };
 }
@@ -765,7 +785,7 @@ export function registerCapabilityAutoVerificationRoutes(app, dependencies) {
       tags: ["Automatic Capability Verification"], summary: "查询当前绑定的发布审定一次性补测额度，不创建挑战、不授予模型准入",
       security: [{ accountBinding: [] }],
       request: { headers: z.object({ "X-Gulong-Account-Binding": z.string().min(1) }) },
-      responses: { 200: { description: "仅本绑定的补测范围、期限和已消耗账本；installation_guard为指定节点未知制品安装隔离，只拒绝普通预算/准入、不发授权；原账本不重置", content: { "application/json": { schema: z.object({ release_reverification: objectSchema, native_caption_retest: objectSchema, installation_guard: objectSchema }).catchall(z.unknown()) } } },
+      responses: { 200: { description: "仅本绑定的补测范围和账本；fixed_native_music_retest为独立1829固定样本1次，双端ready后120分钟，不授普通业务准入，原账本不重置", content: { "application/json": { schema: z.object({ release_reverification: objectSchema, native_caption_retest: objectSchema, installation_guard: objectSchema, fixed_native_music_retest: objectSchema }).catchall(z.unknown()) } } },
         401: { description: "节点绑定无效" }, 429: { description: "查询频率受限" } } });
     const modelSchema = z.object({ id: z.string().min(1).max(240) }).catchall(z.union([z.string(), z.number(), z.boolean()]));
     const artifactSchema = z.string().regex(/^[a-f0-9]{64}$/i);

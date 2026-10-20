@@ -9,6 +9,8 @@ import { createNativeCapabilityVerificationAdapters } from "../../server/capabil
 import { createCapabilityVerificationSupplement, SUPPLEMENT_COLLECTION } from "../../server/capability-verification-supplement.js";
 import { createCapabilityReleaseVerificationBudget, RELEASE_VERIFICATION_COLLECTION } from "../../server/capability-release-verification-budget.js";
 import { createCapabilityCaptionRetestBudget, CAPTION_RETEST_COLLECTION } from "../../server/capability-caption-retest-budget.js";
+import { createFixedMusicRetestBudget, activateFixedMusicRetestForDeployment, FIXED_MUSIC_RETEST_COLLECTION } from "../../server/capability-fixed-music-retest.js";
+import { buildFixedNativeMusicRegressionCase } from "../../server/capability-fixed-music-case.js";
 
 // These test fixtures live only in memory. No installation, extraction, model
 // invocation, build output or on-disk fixture is created by this test file.
@@ -551,6 +553,124 @@ async function captionFixture() {
   f.rows[SUPPLEMENT_COLLECTION]=[{_id:"historical-f8-ledger",usedTotal:4,retained:true}];
   return {...f,native,caption:createCapabilityCaptionRetestBudget({getCollection:f.getCollection,now:f.now})};
 }
+
+const FIXED_ARTIFACT="1829a188caee1e3bca564edaa0b836dd173785e7ffda7363cd7a27a7d9cf1ccb";
+async function fixedFixture({activate=true,futureBackoff=false}={}){
+  const f=await releaseFixture({reports:releaseReports(FIXED_ARTIFACT)});f.advance(7*3600_000);
+  const fixed=buildFixedNativeMusicRegressionCase();
+  const source={_id:"original-fixed-failure",bindingId:String(f.binding._id),nodeId:f.binding.nodeId,
+    requestId:fixed.audit_origin.source_request_id,challengeId:fixed.audit_origin.source_challenge_id,status:"failed",attempts:4,
+    capabilityId:"minimax_music_3.generate",capabilityVersion:"3",artifactSha256:RELEASE_ARTIFACT,parameters:copy(fixed.probe.parameters),
+    nextRetryAt:new Date(+f.now()+(futureBackoff?900_000:-60_000)),error:{code:"VERIFICATION_EXECUTION_FAILED"}};
+  f.rows.capabilityVerificationChallenges=[copy(source)];
+  f.rows[RELEASE_VERIFICATION_COLLECTION]=[{_id:"historical-eleven",usedTotal:11,retained:true}];
+  f.rows[CAPTION_RETEST_COLLECTION]=[{_id:"historical-caption",usedTotal:1,retained:true}];
+  f.rows[SUPPLEMENT_COLLECTION]=[{_id:"historical-f8",usedTotal:4,retained:true}];
+  const deps={getCollection:f.getCollection,now:f.now};
+  if(activate)await activateFixedMusicRetestForDeployment({...deps,expectedCommit:"d".repeat(40),installedCommit:"d".repeat(40)});
+  Object.assign(f.dependencies.adapters,createNativeCapabilityVerificationAdapters({verifyMediaOutputs:async()=>copy(f.hooks.media||[])}));
+  return {...f,source,controller:createFixedMusicRetestBudget(deps),activation:args=>activateFixedMusicRetestForDeployment({...deps,...args})};
+}
+
+test("fixed regression has no allowance before deployment activation and CI replay never extends its exact 120 minute window",async()=>{
+  const f=await fixedFixture({activate:false});
+  assert.equal((await f.controller.status({binding:f.binding})).state,"awaiting_deployment_activation");
+  assert.equal((await f.service.next({binding:f.binding,requestId:"fixed-not-activated",leaseToken:clientSecret()})).challenge,null);
+  assert.deepEqual(f.rows[FIXED_MUSIC_RETEST_COLLECTION]||[],[]);
+  await assert.rejects(()=>f.activation({expectedCommit:"d".repeat(40),installedCommit:"e".repeat(40)}),e=>e.code==="FIXED_RETEST_DEPLOYMENT_MISMATCH");
+  const activated=await f.activation({expectedCommit:"d".repeat(40),installedCommit:"d".repeat(40)});
+  assert.equal(+new Date(activated.expires_at)- +new Date(activated.ready_at),7_200_000);assert.equal(activated.used,0);
+  const before=copy(f.rows[FIXED_MUSIC_RETEST_COLLECTION]);f.advance(1_800_000);
+  const repeated=await f.activation({expectedCommit:"e".repeat(40),installedCommit:"e".repeat(40)});
+  assert.equal(+new Date(repeated.ready_at),+new Date(activated.ready_at));assert.deepEqual(f.rows[FIXED_MUSIC_RETEST_COLLECTION],before);
+  f.advance(7_200_000);const expired=await f.activation({expectedCommit:"e".repeat(40),installedCommit:"e".repeat(40)});
+  assert.equal(expired.state,"expired");assert.equal(expired.remaining,0);assert.deepEqual(f.rows[FIXED_MUSIC_RETEST_COLLECTION],before);
+});
+
+test("fixed activation pins the original numeric vector and real binding; old source corruption or group changes cannot create a grant",async()=>{
+  for(const change of [f=>{f.rows.capabilityVerificationChallenges[0].parameters.seed="716491643";},
+    f=>{f.rows.capabilityVerificationChallenges[0].status="active";},f=>{f.rows.nodeAccountBindings[0].computeGroupId="other";}]){
+    const f=await fixedFixture({activate:false});change(f);
+    await assert.rejects(()=>f.activation({expectedCommit:"d".repeat(40),installedCommit:"d".repeat(40)}));
+    assert.deepEqual(f.rows[FIXED_MUSIC_RETEST_COLLECTION]||[],[]);
+  }
+  const late=await fixedFixture({activate:false});late.advance(3600_000);
+  await assert.rejects(()=>late.activation({expectedCommit:"d".repeat(40),installedCommit:"d".repeat(40)}),e=>e.code==="FIXED_RETEST_ACTIVATION_CLOSED");
+  assert.deepEqual(late.rows[FIXED_MUSIC_RETEST_COLLECTION]||[],[]);
+});
+
+test("fixed regression issues only its approved native vector once, preserves original budgets/failures and never falls back",async()=>{
+  const f=await fixedFixture();const before=copy({old:f.rows[RELEASE_VERIFICATION_COLLECTION],caption:f.rows[CAPTION_RETEST_COLLECTION],
+    f8:f.rows[SUPPLEMENT_COLLECTION],daily:f.rows.capabilityVerificationBudgets,source:f.rows.capabilityVerificationChallenges[0]});
+  const requestId="new-fixed-vector",leaseToken=clientSecret();const result=await f.service.next({binding:f.binding,requestId,leaseToken});
+  assert.equal(result.challenge.capability_id,"minimax_music_3.generate");assert.equal(result.challenge.artifact_sha256,FIXED_ARTIFACT);
+  assert.deepEqual(result.challenge.parameters,buildFixedNativeMusicRegressionCase().probe.parameters);
+  assert.deepEqual(result.challenge.budget,{max_inferences:1,max_output_tokens:0,max_audio_seconds:12,max_asr_passes:1});
+  const journal=f.rows.capabilityVerificationChallenges.find(r=>r.requestId===requestId);
+  assert.equal(journal.budgetSource,"fixed_music_regression");assert.equal(journal.fixedCaseOnly,true);assert.equal(journal.priorAttempts,4);
+  assert.equal(journal.fixedCaseOrigin.source_request_id,f.source.requestId);assert.notEqual(journal.challengeId,f.source.challengeId);
+  const ledger=copy(f.rows[FIXED_MUSIC_RETEST_COLLECTION]);assert.equal((await f.service.next({binding:f.binding,requestId,leaseToken})).challenge.id,result.challenge.id);
+  assert.deepEqual(f.rows[FIXED_MUSIC_RETEST_COLLECTION],ledger);
+  await submit(f,result.challenge,{status:"failed",inlineResult:undefined});f.advance(600_000);
+  const denied=await f.service.next({binding:f.binding,requestId:"second-fixed-denied",leaseToken:clientSecret(2)});
+  assert.equal(denied.challenge,null);assert.equal(denied.code,"VERIFICATION_ARTIFACT_REVIEW_REQUIRED");
+  assert.deepEqual({old:f.rows[RELEASE_VERIFICATION_COLLECTION],caption:f.rows[CAPTION_RETEST_COLLECTION],f8:f.rows[SUPPLEMENT_COLLECTION],
+    daily:f.rows.capabilityVerificationBudgets,source:f.rows.capabilityVerificationChallenges[0]},before);
+  assert.equal((await f.controller.status({binding:f.binding})).total.remaining,0);
+});
+
+test("busy GPU or physical slot never consumes fixed allowance; original backoff stays exact and original leases remain bounded",async()=>{
+  const f=await fixedFixture({futureBackoff:true});const before=copy(f.rows[FIXED_MUSIC_RETEST_COLLECTION]);
+  const wait=await f.service.next({binding:f.binding,requestId:"fixed-wait-original",leaseToken:clientSecret()});
+  assert.equal(wait.code,"VERIFICATION_BACKOFF");assert.equal(wait.retry_after_seconds,900);
+  assert.equal(wait.retry_at,f.source.nextRetryAt.toISOString());assert.deepEqual(f.rows[FIXED_MUSIC_RETEST_COLLECTION],before);
+  f.advance(900_000);f.hooks.idle=false;
+  assert.equal((await f.service.next({binding:f.binding,requestId:"fixed-gpu-busy",leaseToken:clientSecret()})).code,"VERIFICATION_NODE_BUSY");
+  f.hooks.idle=true;f.hooks.acquire=false;
+  assert.equal((await f.service.next({binding:f.binding,requestId:"fixed-physical-busy",leaseToken:clientSecret()})).code,"VERIFICATION_NODE_BUSY");
+  assert.deepEqual(f.rows[FIXED_MUSIC_RETEST_COLLECTION],before);
+});
+
+test("fixed one-shot CAS is atomic across instances; every other cap, group, artifact, model or uncontrolled lease is denied",async()=>{
+  const f=await fixedFixture();const native=f.rows[AUTO_VERIFICATION_COLLECTION].find(r=>r.capabilityId==="minimax_music_3.generate");
+  for(const patch of [{binding:{...f.binding,computeGroupId:"another"}},{binding:{...f.binding,nodeId:"another"}},
+    {candidate:{...native,artifactSha256:RELEASE_ARTIFACT}},{candidate:{...native,model:{id:"other",max_duration_seconds:300}}},{controlled:false}])
+    assert.equal(await f.controller.available({binding:f.binding,candidate:native,controlled:true,...patch}),false);
+  for(const row of f.rows[AUTO_VERIFICATION_COLLECTION].filter(r=>r!==native))assert.equal(await f.controller.available({binding:f.binding,candidate:row,controlled:true}),false);
+  const services=Array.from({length:3},()=>createFixedMusicRetestBudget({getCollection:f.getCollection,now:f.now}));
+  const results=await Promise.all(Array.from({length:30},(_,i)=>services[i%3].reserve({binding:f.binding,candidate:native,controlled:true,
+    requestId:`fixed-race-${i}`,requestRecordId:digest(`fixed-race-${i}`),challengeId:`gcv-fixed-race-${i}`})));
+  assert.equal(results.filter(Boolean).length,1);assert.equal(f.rows[FIXED_MUSIC_RETEST_COLLECTION][0].usedTotal,1);
+});
+
+test("fixed preparation failure stays consumed while repeated source requests cannot issue or run another model",async()=>{
+  const f=await fixedFixture();f.hooks.snapshotFails=true;const requestId="fixed-preparation-failure",leaseToken=clientSecret();
+  await assert.rejects(()=>f.service.next({binding:f.binding,requestId,leaseToken}));
+  assert.equal(f.rows[FIXED_MUSIC_RETEST_COLLECTION][0].usedTotal,1);
+  const recovered=await f.service.byRequest({binding:f.binding,requestId,leaseToken});assert.equal(recovered.state,"failed");assert.equal(recovered.lease_valid,false);
+  assert.equal(f.rows.capabilityVerificationBudgets[0].count,0);
+});
+
+test("fixed result keeps v1 whole-lyrics and audio checks, records only its regression and never grants general business admission",async()=>{
+  const f=await fixedFixture();const issued=await f.service.next({binding:f.binding,requestId:"fixed-success-memory",leaseToken:clientSecret()});
+  const params=issued.challenge.parameters,audioSha="a".repeat(64);
+  f.hooks.media=[{role:"primary_audio",contentType:"audio/flac",bytes:1000,sha256:audioSha,durationSeconds:11.993106575963719,sampleRate:44100}];
+  const result=await submit(f,issued.challenge,{outputs:[{output_id:"memory-fixed-output"}],inlineResult:{model:"MiniMax-Music3",
+    lyric_verification:{algorithm:"ordered-whole-lyrics-v1",full_audio:true,language:"en",audio_sha256:audioSha,
+      lyrics_sha256:digest(params.lyrics),transcript:params.lyrics}}});
+  assert.equal(result.verification.status,"active");assert.equal(result.verification.contract_tests.fixed_regression_case,true);
+  assert.equal(result.verification.fixed_case_only,true);assert.equal(result.verification.business_admission,false);
+  assert.equal(await f.service.findTrusted({bindingId:f.binding._id,report:releaseReports(FIXED_ARTIFACT).find(r=>r.capability_id==="minimax_music_3.generate")}),null);
+});
+
+test("fixed activated header is truthful and revoked/tampered grants never renew or consume",async()=>{
+  const f=await fixedFixture();assert.equal((await f.service.supplementStatus({binding:f.binding})).installation_guard.fixed_case_authorization_active,true);
+  const ledger=f.rows[FIXED_MUSIC_RETEST_COLLECTION][0];ledger.state="revoked";
+  assert.equal((await f.controller.status({binding:f.binding})).state,"unavailable");
+  await assert.rejects(()=>f.activation({expectedCommit:"d".repeat(40),installedCommit:"d".repeat(40)}));
+  assert.equal((await f.service.next({binding:f.binding,requestId:"revoked-fixed",leaseToken:clientSecret()})).challenge,null);
+  assert.equal(ledger.usedTotal,0);
+});
 
 test("installation quarantine blocks all new-artifact capabilities before any budget or physical reservation, including UTC rollover/group changes",async()=>{
   for(const groupId of [null,"changed-group"]){

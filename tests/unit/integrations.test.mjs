@@ -3,6 +3,15 @@ import { createHmac } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import app from "../../server/app.js";
+test("fixed-music deployment activation runs only after dual-target parity and contracts, never through an HTTP endpoint", async()=>{
+  const workflow=await readFile(new URL("../../.github/workflows/deploy-production.yml",import.meta.url),"utf8");
+  assert.ok(workflow.includes('cp scripts/activate-fixed-music-retest.mjs "$bundle/scripts/"'));
+  assert.ok(workflow.indexOf("Start the reviewed fixed-music window")>workflow.indexOf("Verify probe output recovery without issuing challenges"));
+  assert.match(workflow,/needs: \[vercel-production, tencent-production\]/);
+  assert.match(workflow,/activate-fixed-music-retest\.mjs --commit '\$GITHUB_SHA'/);
+  const apiSource=await readFile(new URL("../../server/capability-auto-verification.js",import.meta.url),"utf8");
+  assert.equal(apiSource.includes("activateFixedMusicRetestForDeployment"),false);
+});
 import platform from "../../api/platform.js";
 import {
   bindChandlerPhone,
@@ -1198,7 +1207,7 @@ test("English Coach desktop authentication and subscription are documented in Op
     "/api/v1/desktop/english-coach/account",
     "/api/v1/capability-orders/by-request/{key}",
   ]) assert.ok(document.paths[path], `${path} must be documented`);
-  assert.equal(document.info.version, "2.14.7");
+  assert.equal(document.info.version, "2.14.8");
   assert.ok(document.components.securitySchemes.englishCoachDesktopBearer);
 });
 
