@@ -11,6 +11,7 @@ import { createCapabilityReleaseVerificationBudget, RELEASE_VERIFICATION_COLLECT
 import { createCapabilityCaptionRetestBudget, CAPTION_RETEST_COLLECTION } from "../../server/capability-caption-retest-budget.js";
 import { createFixedMusicRetestBudget, activateFixedMusicRetestForDeployment, FIXED_MUSIC_RETEST_COLLECTION } from "../../server/capability-fixed-music-retest.js";
 import { buildFixedNativeMusicRegressionCase } from "../../server/capability-fixed-music-case.js";
+import { createConditionalSixBudget, CONDITIONAL_SIX_COLLECTION } from "../../server/capability-conditional-six-budget.js";
 
 // These test fixtures live only in memory. No installation, extraction, model
 // invocation, build output or on-disk fixture is created by this test file.
@@ -670,6 +671,58 @@ test("fixed activated header is truthful and revoked/tampered grants never renew
   await assert.rejects(()=>f.activation({expectedCommit:"d".repeat(40),installedCommit:"d".repeat(40)}));
   assert.equal((await f.service.next({binding:f.binding,requestId:"revoked-fixed",leaseToken:clientSecret()})).challenge,null);
   assert.equal(ledger.usedTotal,0);
+});
+
+async function completeFixedMemory(f){
+  const issued=await f.service.next({binding:f.binding,requestId:"condition-source-native",leaseToken:clientSecret()});
+  const audioSha="a".repeat(64);f.hooks.media=[{role:"primary_audio",contentType:"audio/flac",bytes:1000,sha256:audioSha,durationSeconds:11.993106575963719,sampleRate:44100}];
+  await submit(f,issued.challenge,{outputs:[{output_id:"memory-conditional-source"}],inlineResult:{model:"MiniMax-Music3",lyric_verification:{
+    algorithm:"ordered-whole-lyrics-v1",full_audio:true,language:"en",audio_sha256:audioSha,
+    lyrics_sha256:digest(issued.challenge.parameters.lyrics),transcript:issued.challenge.parameters.lyrics}}});
+  return f.rows[AUTO_VERIFICATION_COLLECTION].find(r=>r.capabilityId==="minimax_music_3.generate");
+}
+
+test("conditional six has zero effective allowance and no ledger before exact fixed native passes",async()=>{
+  const f=await fixedFixture(),service=createConditionalSixBudget({getCollection:f.getCollection,now:f.now});
+  const candidate=f.rows[AUTO_VERIFICATION_COLLECTION].find(r=>r.capabilityId==="gulong_engine.music");
+  const status=await service.status({binding:f.binding});assert.equal(status.prerequisite_met,false);assert.equal(status.total.limit,0);assert.equal(status.total.remaining,0);
+  assert.equal(await service.reserve({binding:f.binding,candidate,controlled:true,challengeId:"not-before-fixed",requestId:"not-before-fixed",requestRecordId:digest("not-before-fixed")}),null);
+  assert.deepEqual(f.rows[CONDITIONAL_SIX_COLLECTION]||[],[]);
+});
+
+test("conditional six requires database proof, source receipt, all v1 flags and matching pass audit, not reported happiness",async()=>{
+  for(const mutate of [(_f,p)=>{p.status="failed";},(_f,p)=>{p.contractTests.exact_lyrics=false;},(_f,p)=>{p.fixedCaseOnly=false;},
+    (_f,p)=>{p.artifactSha256=RELEASE_ARTIFACT;},(_f,p)=>{p.testEvidenceSha256="";},(_f,p)=>{p.parameters.seed=1;},
+    (f)=>{f.rows.capabilityVerificationAudits=[];},(f)=>{f.rows.capabilityVerificationChallenges.find(r=>r.requestId==="condition-source-native").budgetSource="ordinary";}]){
+    const f=await fixedFixture(),proof=await completeFixedMemory(f);mutate(f,proof);
+    const service=createConditionalSixBudget({getCollection:f.getCollection,now:f.now});
+    assert.equal((await service.status({binding:f.binding})).total.remaining,0);
+    assert.deepEqual(f.rows[CONDITIONAL_SIX_COLLECTION]||[],[]);
+  }
+});
+
+test("after a genuine fixed memory proof, conditional CAS is isolated one per six caps and never includes native or Qwen",async()=>{
+  const f=await fixedFixture();await completeFixedMemory(f);
+  const services=Array.from({length:3},()=>createConditionalSixBudget({getCollection:f.getCollection,now:f.now}));
+  const candidates=f.rows[AUTO_VERIFICATION_COLLECTION].filter(r=>r.capabilityId!=="minimax_music_3.generate");
+  const old=copy({fixed:f.rows[FIXED_MUSIC_RETEST_COLLECTION],release:f.rows[RELEASE_VERIFICATION_COLLECTION],daily:f.rows.capabilityVerificationBudgets});
+  assert.equal((await services[0].status({binding:f.binding})).total.remaining,6);
+  assert.equal(await services[0].available({binding:f.binding,candidate:f.rows[AUTO_VERIFICATION_COLLECTION].find(r=>r.capabilityId==="minimax_music_3.generate"),controlled:true}),false);
+  const results=await Promise.all(Array.from({length:60},(_,i)=>services[i%3].reserve({binding:f.binding,candidate:candidates[i%6],controlled:true,
+    requestId:`conditional-${i}`,requestRecordId:digest(`conditional-${i}`),challengeId:`gcv-conditional-${i}`})));
+  assert.equal(results.filter(Boolean).length,6);const ledger=f.rows[CONDITIONAL_SIX_COLLECTION][0];assert.equal(ledger.usedTotal,6);
+  assert.deepEqual(ledger.usedByCapability,{chat:1,embedding:1,music:1,sam:1,mediapipe:1,whisper:1});
+  assert.deepEqual({fixed:f.rows[FIXED_MUSIC_RETEST_COLLECTION],release:f.rows[RELEASE_VERIFICATION_COLLECTION],daily:f.rows.capabilityVerificationBudgets},old);
+  const window=f.rows[FIXED_MUSIC_RETEST_COLLECTION][0];assert.equal(+ledger.readyAt,+window.readyAt);assert.equal(+ledger.expiresAt,+window.expiresAt);
+});
+
+test("conditional six cannot escape scope or inherit a fresh window after fixed expiry",async()=>{
+  const f=await fixedFixture();await completeFixedMemory(f);const service=createConditionalSixBudget({getCollection:f.getCollection,now:f.now});
+  const candidate=f.rows[AUTO_VERIFICATION_COLLECTION].find(r=>r.capabilityId==="gulong_engine.embedding");
+  for(const patch of [{binding:{...f.binding,computeGroupId:"other"}},{binding:{...f.binding,nodeId:"other"}},
+    {candidate:{...candidate,model:{...candidate.model,dimension:3}}},{controlled:false}])assert.equal(await service.available({binding:f.binding,candidate,controlled:true,...patch}),false);
+  f.advance(7_200_000);const status=await service.status({binding:f.binding});assert.equal(status.state,"expired");assert.equal(status.total.remaining,0);
+  assert.deepEqual(f.rows[CONDITIONAL_SIX_COLLECTION]||[],[]);
 });
 
 test("installation quarantine blocks all new-artifact capabilities before any budget or physical reservation, including UTC rollover/group changes",async()=>{
