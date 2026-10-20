@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ObjectId } from "mongodb";
-import { isNodeArtifactQuarantined, nodeArtifactInstallationGuardStatus } from "../../server/capability-artifact-installation-guard.js";
+import { isNodeArtifactQuarantined, nodeArtifactInstallationGuardStatus, nodeReportArtifactSha256 } from "../../server/capability-artifact-installation-guard.js";
 import { capabilityNodeCanRunOrder } from "../../server/capability-orders.js";
 
 // In-memory policy tests; no inventory report, database write or model request.
@@ -26,4 +26,15 @@ test("same-account legacy and client-validated business flags cannot bypass unkn
   assert.equal(capabilityNodeCanRunOrder(node,order),false);
   assert.equal(capabilityNodeCanRunOrder({...node,capabilities:[{...item,artifactSha256:existing[0]}]},order),true);
   assert.equal(capabilityNodeCanRunOrder({...node,nodeId:"other",binding:{...binding,nodeId:"other"}},order),true);
+});
+
+test("business matching reads the real normalized artifact and rejects conflicting identities instead of treating it as absent",()=>{
+  const item={capabilityId:"codex.text",capabilityVersion:"1",installed:true,validated:true,enabled:true,
+    validation:{artifactSha256:existing[1].toUpperCase()}};
+  const node={availableSlots:1,nodeId:binding.nodeId,binding,capabilities:[item]},order={capabilityId:"codex.text",capabilityVersion:"1",requesterUserId:"same-user",computeGroupId:null,parameters:{}};
+  assert.equal(nodeReportArtifactSha256(item),existing[1]);assert.equal(capabilityNodeCanRunOrder(node,order),true);
+  for(const patch of [{artifactSha256:"a".repeat(64)},{validation:{artifactSha256:"wrong"}}]){
+    const bad={...item,...patch};assert.equal(nodeReportArtifactSha256(bad),null);
+    assert.equal(capabilityNodeCanRunOrder({...node,capabilities:[bad]},order),false);
+  }
 });

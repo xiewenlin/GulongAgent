@@ -2,6 +2,8 @@
 
 协议：`gulong-capability-orders-v1`。本文描述官网合同，不等同于真实消费者已在线或某模型已完成推理验收。生产合同以 `https://www.sologle.com/api/openapi.json` 和当前账户的鉴权目录为准。
 
+普通业务准入及仍未开放项见[WorkLucky业务审定](./worklucky-business-admission.md)。9/9合同记录不替代business-effective目录；原生Music3固定回归及其普通订单结果适配仍须独立收口。
+
 ## 账号、产品和计费边界
 
 WorkLucky 包含在现有 `gulong_engine_monthly` 权益中，不新增用户体系、订阅 SKU 或另一笔费用。使用与古龙绿色版相同的 GGE 会话族：`gge_at_` 访问令牌、`gge_rt_` 刷新令牌、相同会话库与撤销行为。路由别名不是权限隔离：在任一别名刷新或注销，会使另一别名中的同一旧会话失效。

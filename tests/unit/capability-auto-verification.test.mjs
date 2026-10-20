@@ -13,6 +13,7 @@ import { createFixedMusicRetestBudget, activateFixedMusicRetestForDeployment, FI
 import { buildFixedNativeMusicRegressionCase } from "../../server/capability-fixed-music-case.js";
 import { createConditionalSixBudget, CONDITIONAL_SIX_COLLECTION } from "../../server/capability-conditional-six-budget.js";
 import { createGenericMusicContinuationBudget, GENERIC_MUSIC_CONTINUATION_COLLECTION } from "../../server/capability-generic-music-continuation.js";
+import { isReviewedWorkLuckyBusinessAllowed } from "../../server/worklucky-reviewed-admission.js";
 
 // These test fixtures live only in memory. No installation, extraction, model
 // invocation, build output or on-disk fixture is created by this test file.
@@ -837,6 +838,21 @@ test("generic continuation preserves the exact >=11s gate and permanently stops 
   f.music.status="failed";f.music.nextRetryAt=f.now();
   assert.equal((await f.service.next({binding:f.binding,requestId:"generic-never-after-pass",leaseToken:clientSecret(3)})).challenge,null);
   assert.equal(ledger.usedTotal,2);
+});
+test("business proof review lifts only the exact nonfixed WorkLucky scope, not probe quarantine, native fixed, or copied flags",async()=>{
+  const f=await genericContinuationFixture();
+  const next=await f.service.next({binding:f.binding,requestId:"business-review-generic-pass",leaseToken:clientSecret()});
+  await completeGenericMemory(f,next.challenge);
+  const report=releaseReports(FIXED_ARTIFACT).find(r=>r.capability_id==="gulong_engine.music");
+  const accepted=await f.service.findTrusted({bindingId:f.binding._id,report});assert.ok(accepted?.reviewedBusinessAdmission);
+  const normalized={capabilityId:accepted.capabilityId,capabilityVersion:accepted.capabilityVersion,
+    validation:{artifactSha256:accepted.artifactSha256},reviewedBusinessAdmission:accepted.reviewedBusinessAdmission};
+  assert.equal(isReviewedWorkLuckyBusinessAllowed(f.binding,normalized,"worklucky",f.now()),true);
+  assert.equal(isReviewedWorkLuckyBusinessAllowed(f.binding,normalized,"digital_live",f.now()),false);
+  assert.equal(isReviewedWorkLuckyBusinessAllowed(f.binding,copy(normalized),"worklucky",f.now()),false);
+  assert.equal(await f.service.findTrusted({bindingId:f.binding._id,report:releaseReports(FIXED_ARTIFACT).find(r=>r.capability_id==="minimax_music_3.generate")}),null);
+  f.rows.capabilityVerificationAudits=[];
+  assert.equal(await f.service.findTrusted({bindingId:f.binding._id,report}),null);
 });
 test("generic continuation has one in-flight CAS across instances and cannot consume native, other groups, models or uncontrolled calls",async()=>{
   const f=await genericContinuationFixture(),args={binding:f.binding,candidate:f.music,controlled:true};

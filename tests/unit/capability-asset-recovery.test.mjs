@@ -43,9 +43,10 @@ function fixture() {
     createPresignedPutUrl: (key, options) => { signatures.push({ key, options }); return "https://cos.invalid/write-once"; },
     headObject: async (key) => {
       headReads++;
+      if (hooks.headError) throw hooks.headError;
       if (headMode === "null") return null;
       if (headMode === "unavailable") throw Object.assign(new Error("storage unavailable"), { statusCode: 403 });
-      if (!heads.has(key)) throw Object.assign(new Error("not found"), { statusCode: 404 });
+      if (!heads.has(key)) throw Object.assign(new Error("not found"), { statusCode: 404, code: "NoSuchKey" });
       return heads.get(key);
     }, deleteObject: async (key) => heads.delete(key),
   });
@@ -110,6 +111,19 @@ test("unknown, empty, mismatching or expired COS state fails closed without uplo
     assert.equal(result.body.can_upload, false); assert.equal(result.body.upload_url, undefined); assert.equal(f.signatures.length, 1);
     assert.equal(f.records[0].status, "uploading", "a GET never marks/deletes the user's asset");
   }
+});
+
+test("non-object 404, delete markers and inconsistent NoSuchKey cannot renew PUT or permit completion", async () => {
+  for (const error of [{statusCode:404}, {statusCode:404,code:"NoSuchBucket"}, {statusCode:403,code:"NoSuchKey"},
+    {statusCode:404,code:"NoSuchKey",headers:{"x-cos-delete-marker":"true"}}]) {
+    const f=fixture(),initial=await f.presign();f.hooks.headError=error;
+    const queried=await f.query();assert.equal(queried.status,503);assert.equal(queried.body.can_upload,false);
+    assert.equal(queried.body.upload_url,undefined);assert.equal(f.signatures.length,1);
+    const completed=await f.call(`/api/v1/capability-assets/${initial.body.asset_id}/complete?product=worklucky`,{});
+    assert.equal(completed.status,503);assert.equal(f.records[0].status,"uploading");
+  }
+  const f=fixture();await f.presign();f.hooks.headError={statusCode:404,code:"Error",headers:{"x-cos-request-id":"direct-private-cos-head"}};
+  const confirmed=await f.query();assert.equal(confirmed.status,200);assert.equal(confirmed.body.can_upload,true);
 });
 
 test("storage versioning or an unknown write-once policy never creates an unsafe PUT credential", async () => {

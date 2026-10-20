@@ -19,7 +19,9 @@ import { SHARED_NODE_SCHEDULING, NODE_REPORT_MAX_AGE_MS, normalizeGpuLoadReport,
 import { findTrustedConsumerAcceptance } from "./capability-consumer-acceptance.js";
 import { createCapabilityAutoVerificationService, registerCapabilityAutoVerificationRoutes } from "./capability-auto-verification.js";
 import { requiresAutomaticCapabilityVerification } from "./capability-verification-policy.js";
-import { isNodeArtifactQuarantined } from "./capability-artifact-installation-guard.js";
+import { isNodeArtifactQuarantined, nodeReportArtifactSha256 } from "./capability-artifact-installation-guard.js";
+import { isDefiniteMissingCosObject } from "./cos-object-presence.js";
+import { isReviewedWorkLuckyBusinessAllowed } from "./worklucky-reviewed-admission.js";
 import { createCapabilityVerificationMedia } from "./capability-verification-media.js";
 import { createCapabilityVerificationAdapters, automaticImageNodeMatchesOrder } from "./capability-verification-adapters.js";
 import { createNativeCapabilityVerificationAdapters, automaticNativeNodeMatchesOrder, nativeVerificationAvailability } from "./capability-native-verification.js";
@@ -518,7 +520,8 @@ export function capabilityNodeCanRunOrder(node, order) {
     && !(order.sharingScope === "gulong_shared" && (gulongEngineNodeSharesCapability(node, order.capabilityId) || nativeNodeSharesCapability(node, order.capabilityId)))) return false;
   if (order.sharingScope === "gulong_shared" && isNativeSharedCapability(order.capabilityId) && !nativeNodeSharesCapability(node, order.capabilityId)) return false;
   return Boolean(node.capabilities?.some((item) => item.capabilityId === order.capabilityId
-    && !isNodeArtifactQuarantined({ ...node.binding, nodeId: node.binding?.nodeId || node.nodeId }, item.artifactSha256)
+    && (isReviewedWorkLuckyBusinessAllowed({ ...node.binding, nodeId: node.binding?.nodeId || node.nodeId }, item, order.clientProduct)
+      || !item.reviewedBusinessAdmission && !isNodeArtifactQuarantined({ ...node.binding, nodeId: node.binding?.nodeId || node.nodeId }, nodeReportArtifactSha256(item)))
     && (!order.capabilityVersion || item.capabilityVersion === order.capabilityVersion)
     && item.installed && item.validated && item.enabled
     && automaticImageNodeMatchesOrder(item, order)
@@ -708,7 +711,8 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       const accepted = await lookup(binding._id, report, now);
       if (accepted?.source === "automatic") return { ...report, models: accepted.models, defaultModel: accepted.defaultModel,
         supportedModels: accepted.models.map((model) => model.id), supportedVoices: accepted.models.map((model) => model.voice_id).filter(Boolean),
-        contractTests: accepted.contractTests, asrLanguages: accepted.asrLanguages, trustedAcceptance: true, automaticVerification: true };
+        contractTests: accepted.contractTests, asrLanguages: accepted.asrLanguages, trustedAcceptance: true, automaticVerification: true,
+        reviewedBusinessAdmission: accepted.reviewedBusinessAdmission };
       if (requiresAutomaticCapabilityVerification(binding, report.capabilityId)) return { ...report, validated: false, trustedAcceptance: false };
       return isWorkLuckyCapability(report.capabilityId) ? { ...report, trustedAcceptance: Boolean(accepted) } : report;
     }));
@@ -729,7 +733,8 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
         supported_models: acceptance.models.map((model) => model.id), supported_voices: acceptance.models.map((model) => model.voice_id).filter(Boolean),
         validation: { ...(report.validation || {}), tested_at: acceptance.testedAt, artifact_sha256: acceptance.artifactSha256,
           contract_tests: acceptance.contractTests } }, now, { allowLegacyEnglishOrders: true });
-      ready.push({ ...normalized, models: acceptance.models, trustedAcceptance: true, automaticVerification: true, verificationInventory: report.verificationInventory || report });
+      ready.push({ ...normalized, models: acceptance.models, trustedAcceptance: true, automaticVerification: true,
+        reviewedBusinessAdmission: acceptance.reviewedBusinessAdmission, verificationInventory: report.verificationInventory || report });
     }
     return ready;
   }
@@ -778,6 +783,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
         if (!accepted || requiresAutomaticCapabilityVerification(binding, capabilityId) && accepted.source !== "automatic") continue;
         reportedCapability = { ...reportedCapability, trustedAcceptance: true, ...(accepted.source === "automatic" ? {
           models: accepted.models, defaultModel: accepted.defaultModel, contractTests: accepted.contractTests, asrLanguages: accepted.asrLanguages, automaticVerification: true,
+          reviewedBusinessAdmission: accepted.reviewedBusinessAdmission,
           supportedModels: accepted.models.map((model) => model.id), supportedVoices: accepted.models.map((model) => model.voice_id).filter(Boolean),
         } : {}) };
       }
@@ -950,7 +956,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
       let head, missing = false;
       try { head = await inspectCosObject(asset.objectKey); }
       catch (error) {
-        if (error?.statusCode !== 404 && error?.status !== 404 && error?.code !== "NoSuchKey") {
+        if (!isDefiniteMissingCosObject(error)) {
           return c.json({ ...common, stage: "unknown", code: "ASSET_RECOVERY_UNAVAILABLE", message: "暂时无法确认原素材状态，请只重试查询，不要重复上传" }, 503);
         }
         missing = true;
@@ -1093,7 +1099,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     let head;
     try { head = await inspectCosObject(asset.objectKey); }
     catch (error) {
-      if (asset.assetRequestKey && error?.statusCode !== 404 && error?.status !== 404 && error?.code !== "NoSuchKey") {
+      if (asset.assetRequestKey && !isDefiniteMissingCosObject(error)) {
         return c.json({ code: "ASSET_RECOVERY_UNAVAILABLE", message: "原素材状态暂时无法确认，请按原请求编号查询，勿重复上传" }, 503);
       }
       return c.json({ code: "ASSET_OBJECT_NOT_FOUND", message: "COS 中尚未找到素材" }, 409);

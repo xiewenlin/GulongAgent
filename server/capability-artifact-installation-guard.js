@@ -9,6 +9,14 @@ const EXISTING_ARTIFACTS = new Set([
   "f8bb182e7059eefe075567f37617324e4105dbfd81426c1cc82a44ef9355c27d",
 ]);
 const applies = binding => createHash("sha256").update(JSON.stringify([String(binding?._id), binding?.nodeId])).digest("hex") === SCOPE;
+export function nodeReportArtifactSha256(report) {
+  const values = [report?.artifactSha256, report?.artifact_sha256, report?.validation?.artifactSha256,
+    report?.validation?.artifact_sha256, report?.verificationInventory?.artifact_sha256,
+    report?.verificationInventory?.validation?.artifact_sha256].filter(value => value !== undefined && value !== null);
+  if (!values.length || values.some(value => typeof value !== "string" || !/^[a-f0-9]{64}$/i.test(value))) return null;
+  const normalized = [...new Set(values.map(value => value.toLowerCase()))];
+  return normalized.length === 1 ? normalized[0] : null;
+}
 export function isNodeArtifactQuarantined(binding, artifactSha256) {
   return applies(binding) && !EXISTING_ARTIFACTS.has(String(artifactSha256 || "").toLowerCase());
 }

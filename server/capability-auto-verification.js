@@ -13,6 +13,7 @@ import { isNodeArtifactQuarantined, nodeArtifactInstallationGuardStatus } from "
 import { createFixedMusicRetestBudget } from "./capability-fixed-music-retest.js";
 import { createConditionalSixBudget } from "./capability-conditional-six-budget.js";
 import { createGenericMusicContinuationBudget } from "./capability-generic-music-continuation.js";
+import { createWorkLuckyReviewedAdmission } from "./worklucky-reviewed-admission.js";
 
 export const AUTO_VERIFICATION_PROTOCOL = "gulong-auto-verification-v1";
 export const AUTO_VERIFICATION_COLLECTION = "capabilityAutoVerifications";
@@ -160,6 +161,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
   const fixedMusicBudget = createFixedMusicRetestBudget({ getCollection, now });
   const conditionalSixBudget = createConditionalSixBudget({ getCollection, now });
   const genericMusicContinuation = createGenericMusicContinuationBudget({ getCollection, now });
+  const workLuckyBusinessReview = createWorkLuckyReviewedAdmission({ getCollection });
   const rateLimit = dependencies.enforceRateLimit || (async () => ({ allowed: false }));
   const collection = () => getCollection(AUTO_VERIFICATION_COLLECTION);
   const requestRecordId = (bindingId, requestId) => sha(`verification-request:${bindingId}:${requestId}`);
@@ -695,16 +697,22 @@ export function createCapabilityAutoVerificationService(dependencies) {
     if (!inventory.enabled || !ObjectId.isValid(bindingId)) return null;
     const binding = await (await getCollection("nodeAccountBindings")).findOne({ _id: new ObjectId(bindingId), status: "active", revokedAt: null });
     if (!binding) return null;
-    if (isNodeArtifactQuarantined(binding, inventory.artifactSha256)) return null;
+    const quarantined = isNodeArtifactQuarantined(binding, inventory.artifactSha256);
     const instant = new Date(suppliedNow || now());
     const accepted = await (await collection()).find({ bindingId: String(bindingId), nodeId: binding.nodeId, userId: String(binding.userId),
       computeGroupId: group(binding.computeGroupId), matrixSha256: inventory.matrixSha256, status: "active", inventoryEnabled: true,
       automaticMigrationEnabled: { $ne: false },
       testedAt: { $lte: instant }, expiresAt: { $gt: instant } }).limit(64).toArray();
     if (!accepted.length) return null;
-    const records = accepted.filter((item) => item.verifiedModel && item.contractTests && HASH.test(item.testEvidenceSha256 || "")
+    let records = accepted.filter((item) => item.verifiedModel && item.contractTests && HASH.test(item.testEvidenceSha256 || "")
       && new Date(item.expiresAt) - new Date(item.testedAt) <= VALID_FOR && verifiedAdapterScope(item, inventory));
     if (!records.length) return null;
+    let reviewedBusinessAdmission;
+    if (quarantined) {
+      const decision = await workLuckyBusinessReview.review({ binding, inventory, records, now: instant });
+      if (!decision) return null;
+      records = decision.records; reviewedBusinessAdmission = decision.approval;
+    }
     const models = records.map((item) => item.verifiedModel);
     const keys = [...new Set(records.flatMap((item) => Object.keys(item.contractTests)))];
     const contractTests = Object.fromEntries(keys.map((key) => [key, records.every((item) => item.contractTests[key] === true)]));
@@ -713,7 +721,8 @@ export function createCapabilityAutoVerificationService(dependencies) {
       defaultModel: models.some((model) => model.id === inventory.defaultModel) ? inventory.defaultModel : models[0].id,
       contractTests, asrLanguages: [...new Set(records.flatMap((item) => item.asrLanguages || []))].sort(),
       testedAt: new Date(Math.min(...records.map((item) => +new Date(item.testedAt)))),
-      expiresAt: new Date(Math.min(...records.map((item) => +new Date(item.expiresAt)))), verificationIds: records.map((item) => item._id) };
+      expiresAt: new Date(Math.min(...records.map((item) => +new Date(item.expiresAt)))), verificationIds: records.map((item) => item._id),
+      ...(reviewedBusinessAdmission ? { reviewedBusinessAdmission } : {}) };
   }
   async function supplementStatus({ binding }) {
     const active = await currentBinding(binding);
