@@ -1,4 +1,4 @@
-# WorkLucky 普通业务准入（OpenAPI 2.14.13）
+# WorkLucky 普通业务准入（OpenAPI 2.14.14）
 
 本轮直接人类指令已通过read_thread核实：WorkLucky userMessage `01a15b8b-b0cb-7ce1-9094-49574b204e25`，“请检查九项共享开放，全部开放后，重新发版”。九项合同验收不自动等于九项普通业务全开；本次先修复已有真实证据对应的安全门禁，不改任何旧失败、额度、激活记录或模型。
 
@@ -32,3 +32,9 @@
 中文结果必须与原始完整歌词、完整FLAC及实际摘要绑定，实际ASR语言须为 `zh`，返回的 `asrLanguages` 来自已校验结果；不能从旧英文/fixed/generic证明推导。时长校验使用本次请求±0.05秒，准入上限取请求与真实音频时长的较小值，绝不向上取整。旧英文nonce参数不重写，新英文挑战同样尊重模型整数时长上限。
 
 此构造器**没有接入自动签发路径**，不接收公共请求选择、不增加quota、不解除新制品隔离、不改旧失败/关闭预算、不会创建模型订单。当前生产默认仍为英文挑战；拟定中文普通窗口必须等实际新安装制品、完整相关输入审查、精确artifact/绑定/分组/矩阵，以及独立一次窗口的持久化恢复与授权都明确后，才可由服务端选择。完成构造器CPU测试不等于第九项已开放。最终catalog/create/claim必须使用新制品自己的非fixed真实证明和当前有效范围，不能用这个文档或客户端flag放行。
+
+## 原生 Music3 显式 seed（2.14.14）
+
+`GET /api/v1/capability-orders/catalog` 中 `minimax_music_3.generate` 的 `parameters_schema` 要求 `seed` 必填，类型 integer，范围 0..2147483647；`default: 0` 仅供客户端初始化表单。创建 `POST /api/v1/capability-orders` 时必须显式提交，例如 `parameters: {prompt: "中文音乐描述", seed: 0}`。缺失、负数、字符串、小数或越界值返回 HTTP 400 / `INVALID_CAPABILITY_PARAMETERS`，服务端不会补 0、随机生成或改写历史任务。原编号 GET 查询与取消使用保存的原任务，不重新规范化旧 seed；旧非法参数不得更换为 0 后重试原幂等键。
+
+图片 seed=-1 的语义不变；`gulong_engine.music` 是独立合同，仍支持显式非负安全整数或完整 uint64 十进制字符串，不能借用原生 Music3 的证明或范围。这次仅修正参数合同，不签发挑战、不增加预算、不开放第九项派单。

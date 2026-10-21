@@ -118,8 +118,8 @@ const CAPABILITY_PARAMETER_SCHEMAS = Object.freeze({
     language: enumField(["auto", "zh", "en", "ja", "ko", "instrumental"], "auto"),
     sample_rate: integerField({ enum: [44100, 48000], default: 44100 }),
     output_format: enumField(["mp3", "wav", "flac"], "wav"),
-    seed: seedField(),
-  }, ["prompt"]),
+    seed: integerField({ minimum: 0, maximum: 2147483647, default: 0, description: "必须显式提交的非负整数；default=0 仅供界面初始化，服务端不补填或随机生成。" }),
+  }, ["prompt", "seed"]),
   "yue_2.generate": objectSchema({
     prompt: stringField({ minLength: 1, maxLength: 4000 }),
     lyrics: stringField({ minLength: 1, maxLength: 16000 }),
@@ -401,7 +401,13 @@ export function normalizeCapabilityParameters(value, capability) {
   const serialized = JSON.stringify(value);
   if (Buffer.byteLength(serialized) > (capability.maxParameterBytes || 64_000)) throw Object.assign(new Error("能力参数超过该能力允许的大小"), { code: "VALIDATION_ERROR", status: 400 });
   if (/"(?:__proto__|prototype|constructor)"\s*:/u.test(serialized)) throw Object.assign(new Error("能力参数包含不安全字段"), { code: "VALIDATION_ERROR", status: 400 });
-  const normalized = applySchemaDefaults(capability.parametersSchema, JSON.parse(serialized));
+  const supplied = JSON.parse(serialized);
+  // Music3's default is an authoring hint, not permission to change the request.
+  // Keep other capabilities' defaults (including image seed=-1) independent.
+  if (capability.capabilityId === "minimax_music_3.generate" && supplied.seed === undefined) {
+    throw validationError("为必填字段，请显式填写 0–2147483647 的整数", "parameters.seed");
+  }
+  const normalized = applySchemaDefaults(capability.parametersSchema, supplied);
   validateJsonValue(capability.parametersSchema, normalized);
   validateSpecialParameters(capability.capabilityId, normalized);
   return normalized;
@@ -1833,7 +1839,7 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
     summary: "按账号、产品和原素材编号只读恢复上传阶段", description: "不创建新素材、不变更阶段、不自动complete。ready只返原receipt；uploaded表示COS HEAD清单全匹配，只能POST原id/complete；awaiting_upload仅在COS明确404、防覆盖策略与CORS核对通过时签同对象PUT（不延长原1小时）；未知503、错清单409、过期410都不发PUT。恢复接口本身不上传或触发推理。账号及product必须精确匹配，不向其他账户泄露记录。", request: { params: z.object({ key: z.string().regex(assetRequestPattern) }), query: z.object({ product: z.enum(["gulong_engine", "worklucky", "digital_live"]) }) },
     responses: { 200: { description: "原素材及精确阶段，private/no-store", content: { "application/json": { schema: recoverableAssetSchema } } }, 401: { description: "未登录" }, 404: { description: "本账户尚无该素材请求" }, 409: { description: "产品/清单/存储策略冲突，无PUT" }, 410: { description: "原上传期限已过，不重发PUT" }, 503: { description: "状态未知，只查询，不上传" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-assets/{id}/complete", tags: ["Unified Capability Orders"], summary: "幂等校验原素材大小、摘要与归属", description: "新产品标记素材必须?product=worklucky或gulong_engine；同账号同产品重复完成返回同asset receipt和idempotent=true，ready状态不重签PUT。HEAD未知时新素材返回503，先GET原request_key查询，不能重复上传。旧未标记素材无需product，保持兼容。", responses: { 200: { description: "原asset receipt，无新上传/订单/记账" }, 409: { description: "产品/清单或状态CAS冲突" }, 503: { description: "存储状态暂不可确认" } } });
-  app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders", tags: ["Unified Capability Orders"], summary: "幂等创建同账户本地能力订单", description: "english_coach.* 新任务已改为本地处理，返回 409 CAPABILITY_LOCAL_ONLY；旧订单仍可读取或取消。BIN、模型配件和 runtime 不是独立能力。收费 minimax_h3.video_generation 继续使用 /api/h3/tasks；零价 gulong_engine.video 在消费者完成真实验收前返回 409 CAPABILITY_ADAPTER_REQUIRED。gulong_engine.text/image/image_2k/tts 若无实时兼容节点返回 409 CAPABILITY_NO_COMPATIBLE_NODE，不创建订单；已创建的旧订单不受此创建门禁影响。tts 需要有效古龙引擎包月和 capability_version=1.0.0；parameters 提交 text(1–12000 字符)、voice_id(目录 availability.voice_ids 中的 ID)、language、speed、output_format=mp3|wav；不上传输入素材，primary_audio 直传 COS，完成回调验证对象内容 SHA-256。image_2k 需要有效古龙引擎包月、capability_version=1.0.0；parameters 提交 model=qwen_image_2_1、task=text_to_image|multi_image_edit、prompt、width/height(官方七种 2K 尺寸)、generation_mode=standard|fast_lora_6、steps(快速模式必须6)、prompt_enhancement=none|official|local；assets 按输入数组顺序传 0 或 1–10 张 reference_image。v1 本地能力订单价格为 0 分，不扣钱包且无分佣。", responses: { 201: { description: "订单已入队，含 queue_position、auto_cancel_at、queue_reason_code、queue_message" }, 403: { description: "古龙引擎包月权益未生效" }, 409: { description: "本地处理、无兼容节点、版本不符、幂等冲突、适配未验收或旧 H3 接口" } } });
+  app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders", tags: ["Unified Capability Orders"], summary: "幂等创建同账户本地能力订单", description: "minimax_music_3.generate 必须显式提交 parameters.seed：integer，minimum=0，maximum=2147483647；目录 default=0 仅供界面初始化，服务端不补填、不随机生成、不改写历史任务；缺失、负数或类型错误返回 400 INVALID_CAPABILITY_PARAMETERS。图片 seed=-1 与 gulong_engine.music uint64 合同独立，不能借用验收证明。english_coach.* 新任务已改为本地处理，返回 409 CAPABILITY_LOCAL_ONLY；旧订单仍可读取或取消。BIN、模型配件和 runtime 不是独立能力。收费 minimax_h3.video_generation 继续使用 /api/h3/tasks；零价 gulong_engine.video 在消费者完成真实验收前返回 409 CAPABILITY_ADAPTER_REQUIRED。gulong_engine.text/image/image_2k/tts 若无实时兼容节点返回 409 CAPABILITY_NO_COMPATIBLE_NODE，不创建订单；已创建的旧订单不受此创建门禁影响。tts 需要有效古龙引擎包月和 capability_version=1.0.0；parameters 提交 text(1–12000 字符)、voice_id(目录 availability.voice_ids 中的 ID)、language、speed、output_format=mp3|wav；不上传输入素材，primary_audio 直传 COS，完成回调验证对象内容 SHA-256。image_2k 需要有效古龙引擎包月、capability_version=1.0.0；parameters 提交 model=qwen_image_2_1、task=text_to_image|multi_image_edit、prompt、width/height(官方七种 2K 尺寸)、generation_mode=standard|fast_lora_6、steps(快速模式必须6)、prompt_enhancement=none|official|local；assets 按输入数组顺序传 0 或 1–10 张 reference_image。v1 本地能力订单价格为 0 分，不扣钱包且无分佣。", responses: { 201: { description: "订单已入队，含 queue_position、auto_cancel_at、queue_reason_code、queue_message" }, 400: { description: "INVALID_CAPABILITY_PARAMETERS：包含原生 Music3 seed 缺失、类型或范围错误" }, 403: { description: "古龙引擎包月权益未生效" }, 409: { description: "本地处理、无兼容节点、版本不符、幂等冲突、适配未验收或旧 H3 接口" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/{id}", tags: ["Unified Capability Orders"], summary: "查询订单进度、排队位置、ETA 与短时结果下载票据", responses: { 200: { description: "仅返回本人订单；排队含 queue_position、estimated_wait_seconds、queue_reason_code、queue_message、auto_cancel_at；排队超时返回 cancelled、CAPABILITY_QUEUE_TIMEOUT；执行含 progress、eta_seconds" } } });
   app.openAPIRegistry.registerPath({ method: "post", path: "/api/v1/capability-orders/{id}/cancel", tags: ["Unified Capability Orders"], summary: "幂等取消能力订单", responses: { 200: { description: "取消状态与零费用退款边界" } } });
   app.openAPIRegistry.registerPath({ method: "get", path: "/api/v1/capability-orders/{id}/worker-state", tags: ["Unified Capability Orders"], summary: "执行节点轮询取消与租约状态", description: "执行节点每 15 秒轮询；claim_id 必须匹配且只能由 assigned_node 自己的绑定令牌读取。started/progress 回调会把 5 分钟租约重新续满。", security: [{ accountBinding: [] }], request: { query: z.object({ claim_id: z.string().min(8) }) }, responses: { 200: { description: "cancellation_requested、should_stop 与 lease_expires_at" }, 409: { description: "订单未分配或 claim 不匹配" } } });
