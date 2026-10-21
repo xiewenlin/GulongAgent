@@ -6,6 +6,7 @@ import { OpenAPIHono } from "@hono/zod-openapi";
 import { createCapabilityMemoryCollection } from "../helpers/capability-memory.mjs";
 import { registerCapabilityOrderRoutes } from "../../server/capability-orders.js";
 import { singleWriteBucketReady } from "../../server/cos.js";
+import { isDefiniteMissingCosObject } from "../../server/cos-object-presence.js";
 
 // All storage, signatures and bodies stay in memory. No actual COS upload,
 // credentials, model, service or file fixture is created by these tests.
@@ -124,6 +125,55 @@ test("non-object 404, delete markers and inconsistent NoSuchKey cannot renew PUT
   }
   const f=fixture();await f.presign();f.hooks.headError={statusCode:404,code:"Error",headers:{"x-cos-request-id":"direct-private-cos-head"}};
   const confirmed=await f.query();assert.equal(confirmed.status,200);assert.equal(confirmed.body.can_upload,true);
+});
+
+const numericCosHeadMissing = () => ({ statusCode: 404, code: "404", name: "404", headers: {
+  "server": "tencent-cos", "content-length": "0", "content-type": "application/xml", "x-cos-request-id": "synthetic-direct-cos-head",
+} });
+
+test("the SDK numeric empty COS HEAD shape is definite missing with case-insensitive direct headers", () => {
+  assert.equal(isDefiniteMissingCosObject(numericCosHeadMissing()), true);
+  assert.equal(isDefiniteMissingCosObject({ statusCode: 404, code: "404", headers: {
+    "Server": "tencent-cos", "Content-Length": "0", "X-Cos-Request-Id": "synthetic-direct-cos-head",
+  } }), true);
+});
+
+test("numeric status codes cannot widen missing detection to proxy, nonempty, denied or deleted objects", () => {
+  for (const patch of [
+    { statusCode: 403 }, { statusCode: 500 }, { code: "403" }, { code: "NoSuchBucket" }, { code: "AccessDenied" },
+    { code: 404 }, { headers: {} }, { headers: { "server": "tencent-cos", "content-length": "0" } },
+    { headers: { "x-cos-request-id": "synthetic-id", "content-length": "0", "server": "proxy" } },
+    { headers: { "x-cos-request-id": "synthetic-id", "server": "tencent-cos" } },
+    { headers: { "x-cos-request-id": "synthetic-id", "server": "tencent-cos", "content-length": "100" } },
+    { headers: { ...numericCosHeadMissing().headers, "x-cos-delete-marker": "true" } },
+  ]) assert.equal(isDefiniteMissingCosObject({ ...numericCosHeadMissing(), ...patch }), false, JSON.stringify(patch));
+});
+
+test("numeric missing recovery keeps the original asset and expiry without any upload or database mutation", async () => {
+  const f = fixture(), first = await f.presign(), before = JSON.stringify(f.records);
+  f.hooks.headError = numericCosHeadMissing();
+  const recovered = await f.query();
+  assert.equal(recovered.status, 200); assert.equal(recovered.body.stage, "awaiting_upload");
+  assert.equal(recovered.body.can_upload, true); assert.equal(recovered.body.can_complete, false);
+  assert.equal(recovered.body.asset_id, first.body.asset_id); assert.equal(recovered.body.object_key, first.body.object_key);
+  assert.equal(recovered.body.expires_at, first.body.expires_at); assert.deepEqual(recovered.body.headers, first.body.headers);
+  assert.equal(JSON.stringify(f.records), before); assert.equal(f.heads.size, 0); assert.equal(f.records.length, 1);
+  f.records[0].expiresAt = new Date(0);
+  const expired = await f.query();
+  assert.equal(expired.status, 410); assert.equal(expired.body.can_upload, false); assert.equal(expired.body.upload_url, undefined);
+});
+
+test("numeric missing cannot complete or delete an object and unknown HEADs still return safe 503", async () => {
+  const f = fixture(), first = await f.presign(), before = JSON.stringify(f.records);
+  f.hooks.headError = numericCosHeadMissing();
+  const complete = await f.call(`/api/v1/capability-assets/${first.body.asset_id}/complete?product=worklucky`, {});
+  assert.equal(complete.status, 409); assert.equal(complete.body.code, "ASSET_OBJECT_NOT_FOUND");
+  f.hooks.headError = { ...numericCosHeadMissing(), headers: { ...numericCosHeadMissing().headers, server: "proxy" } };
+  const unknown = await f.query();
+  assert.equal(unknown.status, 503); assert.equal(unknown.body.code, "ASSET_RECOVERY_UNAVAILABLE");
+  assert.equal(unknown.body.stage, "unknown"); assert.equal(unknown.body.can_upload, false); assert.equal(unknown.body.can_complete, false);
+  assert.equal(unknown.body.upload_url, undefined); assert.equal(f.signatures.length, 1);
+  assert.equal(JSON.stringify(f.records), before); assert.equal(f.heads.size, 0);
 });
 
 test("storage versioning or an unknown write-once policy never creates an unsafe PUT credential", async () => {

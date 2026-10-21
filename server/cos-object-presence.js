@@ -4,7 +4,12 @@ export function isDefiniteMissingCosObject(error) {
   const headers = error?.headers || error?.error?.headers || {};
   const header = name => String(Object.entries(headers).find(([key]) => key.toLowerCase() === name)?.[1] || "");
   const code = error?.error?.Code || error?.code;
-  const directEmptyCosHead = (!code || code === "Error") && Boolean(header("x-cos-request-id"));
+  // cos-nodejs-sdk-v5 uses the HTTP status string as Code when a HEAD has no
+  // XML body. Accept that observed shape only with direct COS and empty-body
+  // evidence; a numeric-looking proxy error must remain unknown.
+  const numericEmptyCosHead = code === "404" && header("content-length") === "0"
+    && header("server").toLowerCase() === "tencent-cos";
+  const directEmptyCosHead = (!code || code === "Error" || numericEmptyCosHead) && Boolean(header("x-cos-request-id"));
   return Number(error?.statusCode ?? error?.status) === 404 && (code === "NoSuchKey" || directEmptyCosHead)
     && header("x-cos-delete-marker").toLowerCase() !== "true";
 }

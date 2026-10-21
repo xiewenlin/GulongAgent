@@ -1,4 +1,4 @@
-# WorkLucky 普通业务准入（OpenAPI 2.14.11）
+# WorkLucky 普通业务准入（OpenAPI 2.14.12）
 
 本轮直接人类指令已通过read_thread核实：WorkLucky userMessage `01a15b8b-b0cb-7ce1-9094-49574b204e25`，“请检查九项共享开放，全部开放后，重新发版”。九项合同验收不自动等于九项普通业务全开；本次先修复已有真实证据对应的安全门禁，不改任何旧失败、额度、激活记录或模型。
 
@@ -20,5 +20,7 @@
 规范化节点报告的制品SHA位于 `validation.artifactSha256`，不是顶层artifactSha256；旧读取造成已验证Qwen也被误判未知。现在统一读取并拒绝多个来源冲突或格式无效的摘要。
 
 可恢复素材只在真实COS对象404+NoSuchKey，或带COS request-id的直接空HEAD 404且无delete-marker时，才判断缺失并允许原票据剩余期内的防覆盖PUT。403、NoSuchBucket、任意代理404、未知状态都只返回unknown/503，不续签PUT、不误删除对象。原1小时绝对期限、原request_key/asset_id/object_key/六个签名headers、产品与角色隔离保持。
+
+2.14.12 补齐真实 SDK 空 HEAD 形态：`statusCode=404, code="404"` 还必须同时具有 `x-cos-request-id`、`server=tencent-cos`、`content-length=0`，并且没有 `x-cos-delete-marker=true`，才认定原对象不存在。仅数字错误码、代理404、非空响应、403、桶不存在或删除标记仍不授权上传。此兼容修复不创建或修改素材、对象、原票据期限或验收预算；原请求到期仍返回410，不能自动换编号重试。原编号查询返回可上传状态也不等于客户端有权越过其已关闭的验收窗口恢复PUT。
 
 单元/内存HTTP测试不代表真实COS传输或模型E2E通过。WorkLucky生产素材开关仍由其归属在真实有界素材恢复验证后启用；官网不代它修改flag。真实素材验证不得顺带创建模型订单、claim或重跑九项，也不得占用DigitalLive语音/口型调试槽。
