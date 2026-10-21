@@ -17,6 +17,27 @@ function demand(value, message) { if (!value) throw Object.assign(new Error(mess
 const rule = (role, type, max) => ({ role, content_types: [type], max_bytes: max, min_count: 1, max_count: 1 });
 const MiB = 1024 * 1024;
 const seed = (nonce) => createHash("sha256").update(nonce).digest().readUInt32BE(0) & 0x7fffffff;
+
+// A server-only case constructor, NOT an issuance route or admission grant.
+// The final installed artifact, scope and independent one-shot budget must be
+// reviewed before a caller may select this instead of the legacy English case.
+export function createNativeMusicBusinessProbe({ inventory, model, lyrics, durationSeconds, seed: explicitSeed } = {}) {
+  demand(inventory?.capabilityId === "minimax_music_3.generate" && inventory.capabilityVersion === "3"
+    && model?.id === "MiniMax-Music3" && inventory.asrLanguages?.includes("zh"), "中文原生音乐验收须匹配真实模型、版本和整段中文ASR能力");
+  demand(Number.isSafeInteger(durationSeconds) && durationSeconds >= 10 && durationSeconds <= 12
+    && Number.isFinite(model.max_duration_seconds) && model.max_duration_seconds <= 300 && durationSeconds <= model.max_duration_seconds,
+  "中文原生音乐验收时长必须为10–12秒整数，且不能超过最终模型的实际时长上限");
+  demand(Number.isSafeInteger(explicitSeed) && explicitSeed >= 0 && explicitSeed <= 0x7fffffff, "中文原生音乐验收必须提供明确且有效的随机种子");
+  const lines = typeof lyrics === "string" ? lyrics.split("\n") : [];
+  demand(lines.length === 2 && lines.every(line => line === line.trim() && [...line].length >= 1 && [...line].length <= 40
+    && /\p{Script=Han}/u.test(line) && /^[\p{Script=Han}，。！？、；：…·“”‘’（）《》 ]+$/u.test(line)),
+  "中文原生音乐验收必须使用两行完整的新中文短歌词，不能截断、混入英文或控制字符");
+  return { outputUploadRequired: true, probeKind: "native-music", language: "zh",
+    budget: { max_inferences: 1, max_output_tokens: 0, max_audio_seconds: durationSeconds, max_asr_passes: 1 },
+    parameters: { prompt: "清晰的中文独唱，简单柔和的伴奏，按顺序完整唱出两行歌词，不省略末尾，不增加其他歌词。",
+      lyrics, duration_seconds: durationSeconds, sample_rate: 44100, output_format: "flac", language: "auto", seed: explicitSeed },
+    outputRules: [rule("primary_audio", "audio/flac", 64 * MiB)] };
+}
 const SCOPES = {
   "qwen_image_2_1.multi_image_edit": { task: "multi_image_edit", input_asset_count: 1, width: 512, height: 512, steps: 4, guidance_scale: 4, batch_size: 1, edit_strength: 1 },
   "sam.video_track": { output_format: "native_layers", prompt_mode: "text", max_text_prompts: 1, full_source_frames: true, probe_input_frames: 16, probe_input_seconds: 2 },
@@ -87,23 +108,26 @@ export function nativeVerificationAvailability(capabilityId, reports = []) {
  * in addition to the original native payload; no client `validated` is evidence. */
 export function createNativeCapabilityVerificationAdapters({ verifyMediaOutputs } = {}) {
   if (typeof verifyMediaOutputs !== "function") return {};
-  function supports(inventory, model) {
+  function supports(inventory, model, asrLanguage = "en") {
     return NATIVE_PROBE_VERSIONS[inventory.capabilityId]?.includes(inventory.capabilityVersion) === true
       && plain(model) && model.id === MODEL_IDS[inventory.capabilityId]
       && (inventory.capabilityId !== "minimax_music_3.generate" || Number.isFinite(model.max_duration_seconds)
-        && model.max_duration_seconds >= 10 && model.max_duration_seconds <= 300 && inventory.asrLanguages?.includes("en"));
+        && model.max_duration_seconds >= 10 && model.max_duration_seconds <= 300 && inventory.asrLanguages?.includes(asrLanguage));
   }
   function createProbe({ inventory, model, nonce }) {
     demand(supports(inventory, model), "原生模型、版本或完整音频识别能力不匹配");
     const id = inventory.capabilityId;
     const common = { outputUploadRequired: true, budget: { max_inferences: 1, max_output_tokens: 0 } };
-    if (id === "minimax_music_3.generate") return { ...common, probeKind: "native-music", budget: { ...common.budget, max_audio_seconds: 12, max_asr_passes: 1 },
+    if (id === "minimax_music_3.generate") {
+      const durationSeconds = Math.min(12, Math.floor(model.max_duration_seconds));
+      return { ...common, probeKind: "native-music", budget: { ...common.budget, max_audio_seconds: durationSeconds, max_asr_passes: 1 },
       // Only future challenges use this authoring hint. The full audit nonce is
       // still persisted by the service; lyrics/seed retain the original derivation.
       parameters: { prompt: "A clear solo singing voice, simple gentle accompaniment, sing the complete lyrics exactly once.",
-        lyrics: `Blue sky, silver river.\n${[...createHash("sha256").update(nonce).digest().subarray(0, 4)].map((x) => ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"][x % 10]).join(", ")}.`, duration_seconds: 12,
+        lyrics: `Blue sky, silver river.\n${[...createHash("sha256").update(nonce).digest().subarray(0, 4)].map((x) => ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"][x % 10]).join(", ")}.`, duration_seconds: durationSeconds,
         sample_rate: 44100, output_format: "flac", language: "auto", seed: seed(nonce) },
       outputRules: [rule("primary_audio", "audio/flac", 64 * MiB)] };
+    }
     const image = id === "qwen_image_2_1.multi_image_edit", whisper = id === "whisper.transcribe";
     const input = image ? POSE_IMAGE_FIXTURE : whisper ? WHISPER_AUDIO_FIXTURE : POSE_VIDEO_FIXTURE;
     const budget = { ...common.budget, max_input_assets: 1, max_input_bytes: input.bytes,
@@ -125,7 +149,9 @@ export function createNativeCapabilityVerificationAdapters({ verifyMediaOutputs 
   }
   async function validateResult({ challenge, inlineResult, outputs, binding }) {
     const id = challenge.capabilityId;
-    demand(supports({ capabilityId: id, capabilityVersion: challenge.capabilityVersion, asrLanguages: challenge.inventory?.asrLanguages || [] }, challenge.model), "原生验收结果不能替换模型或版本");
+    const expectedAsrLanguage = id === "minimax_music_3.generate" ? (challenge.language ?? "en") : "en";
+    demand(["zh", "en"].includes(expectedAsrLanguage)
+      && supports({ capabilityId: id, capabilityVersion: challenge.capabilityVersion, asrLanguages: challenge.inventory?.asrLanguages || [] }, challenge.model, expectedAsrLanguage), "原生验收结果不能替换模型、版本或整段ASR语言");
     demand(plain(inlineResult) && inlineResult.model === challenge.model.id && !Object.hasOwn(inlineResult, "url"), "须返回真实原生模型编号，不接受客户端输出URL");
     if (challenge.probeInputs?.length) demand(inlineResult.input_sha256 === challenge.probeInputs[0].sha256, "原生结果与本次固定输入摘要不一致");
     demand(Array.isArray(outputs) && outputs.length === challenge.probeOutputRules.length
@@ -139,9 +165,15 @@ export function createNativeCapabilityVerificationAdapters({ verifyMediaOutputs 
       const audio = one("primary_audio");
       validateSpecialInlineResult({ capabilityId: "gulong_engine.music", parameters: { model: challenge.model.id, caption: challenge.parameters.prompt,
         lyrics: challenge.parameters.lyrics, seconds: challenge.parameters.duration_seconds, seed: challenge.parameters.seed } }, inlineResult, { outputs: verified });
-      demand(audio.durationSeconds >= 11 && audio.durationSeconds <= 12.05 && audio.sampleRate === 44100 && inlineResult.lyric_verification.language === "en", "完整音乐时长、采样率或整段ASR语言不匹配");
-      return { verifiedModel: { id: challenge.model.id, max_duration_seconds: Math.min(12, audio.durationSeconds), sample_rate: 44100, output_format: "flac", reference_audio_count: 0 },
-        contractTests: { exact_native_scope: true, music_generation: true, whole_audio_asr: true, exact_lyrics: true, exact_duration: true }, asrLanguages: ["en"] };
+      const requestedSeconds = challenge.parameters.duration_seconds;
+      const actualAsrLanguage = inlineResult.lyric_verification.language;
+      demand(Number.isSafeInteger(requestedSeconds) && requestedSeconds >= 10 && requestedSeconds <= 12
+        && requestedSeconds <= challenge.model.max_duration_seconds
+        && audio.durationSeconds >= requestedSeconds - 0.05
+        && audio.durationSeconds <= requestedSeconds + 0.05 && audio.sampleRate === 44100 && actualAsrLanguage === expectedAsrLanguage,
+      "完整音乐时长、采样率或整段ASR语言不匹配");
+      return { verifiedModel: { id: challenge.model.id, max_duration_seconds: Math.min(requestedSeconds, audio.durationSeconds), sample_rate: 44100, output_format: "flac", reference_audio_count: 0 },
+        contractTests: { exact_native_scope: true, music_generation: true, whole_audio_asr: true, exact_lyrics: true, exact_duration: true }, asrLanguages: [actualAsrLanguage] };
     } else if (id === "whisper.transcribe") {
       const json = one("transcript_json").json, rows = json?.transcription;
       demand(Array.isArray(rows) && rows.length > 0 && rows.length <= 128 && [json.result?.language, json.language].includes("en"), "须保留Whisper完整原生英文转录JSON");
