@@ -289,6 +289,9 @@ jobs:
       - name: Verify birthday wall routing, authentication and workflow entry
         run: node scripts/verify-birthday-wall-deployment.mjs https://sologle.com https://111.229.70.235
 
+      - name: Verify private-by-link letters without creating content
+        run: node scripts/verify-love-letter-deployment.mjs https://sologle.com https://111.229.70.235
+
       - name: Start the reviewed fixed-music window after both targets are ready
         shell: bash
         run: |

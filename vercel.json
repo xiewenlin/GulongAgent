@@ -10,6 +10,14 @@
   },
   "headers": [
     {
+      "source": "/love-letter/:path*",
+      "headers": [
+        { "key": "Cache-Control", "value": "private, no-store" },
+        { "key": "Referrer-Policy", "value": "no-referrer" },
+        { "key": "X-Robots-Tag", "value": "noindex, nofollow, noarchive" }
+      ]
+    },
+    {
       "source": "/deployment-manifest.json",
       "headers": [
         {
@@ -29,6 +37,14 @@
     }
   ],
   "rewrites": [
+    {
+      "source": "/api/love-letters",
+      "destination": "/api/platform?_platform_path=love-letters"
+    },
+    {
+      "source": "/api/love-letters/:path*",
+      "destination": "/api/platform?_platform_path=love-letters/:path*"
+    },
     {
       "source": "/api/birthday-walls",
       "destination": "/api/platform?_platform_path=birthday-walls"

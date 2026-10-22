@@ -1,4 +1,5 @@
 import { localizeErrorMessage } from "../shared/error-messages.js";
+import { isPrivateLetterPath } from "../shared/private-page.js";
 
 export class ApiError extends Error {
   constructor(message, code = "API_ERROR", status = 500) {
@@ -117,6 +118,8 @@ function analyticsDevice() {
 export function trackAnalyticsEvent(eventType, { path } = {}) {
   if (typeof window === "undefined") return;
   const url = new URL(window.location.href);
+  // A private-by-link letter URL is a read capability, never analytics metadata.
+  if (isPrivateLetterPath(url.pathname) || isPrivateLetterPath(path || "")) return;
   const payload = {
     eventType,
     visitorId: analyticsId(window.localStorage, "gulong-analytics-visitor"),

@@ -1,4 +1,5 @@
 import { getCollection } from "./db.js";
+import { isPrivateLetterPath } from "../shared/private-page.js";
 
 const DAY_MS = 86_400_000;
 const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000;
@@ -44,6 +45,7 @@ function uniqueIds(values) {
 }
 
 export async function recordAnalyticsEvent(input) {
+  if (isPrivateLetterPath(input?.path)) return;
   const analytics = await getCollection("analyticsEvents");
   await analytics.insertOne({
     ...input,

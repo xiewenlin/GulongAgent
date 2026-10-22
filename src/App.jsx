@@ -38,6 +38,7 @@ import { themes } from "./data/site.js";
 
 const WebAgentPage = lazy(() => import("./components/WebAgentPage.jsx").then((module) => ({ default: module.WebAgentPage })));
 const BirthdayWallPage = lazy(() => import("./components/BirthdayWallPage.jsx").then((module) => ({ default: module.BirthdayWallPage })));
+const LoveLetterPage = lazy(() => import("./components/LoveLetterPage.jsx").then((module) => ({ default: module.LoveLetterPage })));
 
 const SHORT_DRAMA_ROUTE = "/short-drama";
 
@@ -272,6 +273,9 @@ export function App() {
   }
 
   const pathname = window.location.pathname;
+  if (pathname === "/love-letter" || pathname.startsWith("/love-letter/")) return <Suspense fallback={<main id="main-content" style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "#fff7f3" }}>正在打开这封信…</main>}>
+    <LoveLetterPage key={pathname} letterId={pathname.split("/")[2] || ""} />
+  </Suspense>;
   // The shared birthday link is a standalone experience, including after SPA navigation.
   if (pathname === "/birthday-wall" || pathname.startsWith("/birthday-wall/")) return <>
     <Suspense fallback={<main id="main-content" style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "#fffaf4" }}>正在打开生日墙…</main>}>
