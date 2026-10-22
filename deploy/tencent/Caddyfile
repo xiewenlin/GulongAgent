@@ -61,11 +61,17 @@ https://111.229.70.235 {
 		file_server
 	}
 
+	# Keep this out of the deferred -Server block, which otherwise overwrites
+	# the stricter private-letter policy when the response is committed.
+	@standardReferrer {
+		not path /love-letter /love-letter/* /api/love-letters /api/love-letters/*
+	}
+	header @standardReferrer Referrer-Policy "strict-origin-when-cross-origin"
+
 	header {
 		-Server
 		Strict-Transport-Security "max-age=31536000"
 		X-Content-Type-Options "nosniff"
-		Referrer-Policy "strict-origin-when-cross-origin"
 		X-Frame-Options "DENY"
 	}
 }

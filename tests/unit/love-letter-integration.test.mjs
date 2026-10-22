@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
 import { isPrivateLetterPath } from "../../shared/private-page.js";
 import { recordAnalyticsEvent } from "../../server/analytics.js";
 import platform from "../../api/platform.js";
@@ -29,4 +30,14 @@ test("Vercel platform entry preserves anonymous letter routing and privacy heade
     method: "POST", headers: { "content-type": "application/json", origin: "https://untrusted.invalid", "sec-fetch-site": "cross-site" }, body: "{}",
   }));
   assert.equal(rejected.status, 403);
+});
+
+test("Tencent deferred security headers cannot overwrite the private letter referrer policy", async () => {
+  const config = await readFile(new URL("../../deploy/tencent/Caddyfile", import.meta.url), "utf8");
+  assert.match(config, /@standardReferrer\s*\{\s*not path \/love-letter \/love-letter\/\* \/api\/love-letters \/api\/love-letters\/\*/);
+  assert.match(config, /header @standardReferrer Referrer-Policy "strict-origin-when-cross-origin"/);
+  const deferredSecurity = config.match(/header\s*\{\s*-Server[\s\S]*?\}/)?.[0];
+  assert.ok(deferredSecurity);
+  assert.doesNotMatch(deferredSecurity, /Referrer-Policy/);
+  assert.equal((config.match(/header >Referrer-Policy "no-referrer"/g) || []).length, 2);
 });
