@@ -38,6 +38,14 @@
   ],
   "rewrites": [
     {
+      "source": "/api/admin/birthday-records",
+      "destination": "/api/platform?_platform_path=admin/birthday-records"
+    },
+    {
+      "source": "/api/admin/birthday-records/:path*",
+      "destination": "/api/platform?_platform_path=admin/birthday-records/:path*"
+    },
+    {
       "source": "/api/love-letters",
       "destination": "/api/platform?_platform_path=love-letters"
     },

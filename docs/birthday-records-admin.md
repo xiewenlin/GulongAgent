@@ -1,0 +1,22 @@
+# 生日墙与情书历史记录管理
+
+入口：`/admin?section=birthday`。仅管理员可访问；前台分享链接不会获得管理权限。
+
+两个标签页分别管理生日墙和情书，按创建时间倒序分页。生日墙支持按姓名、用户 ID、墙编号搜索；情书支持按写信人、收件人、正文、信件编号搜索。搜索是字面关键词匹配，不执行用户输入的正则表达式。
+
+## 接口
+
+- `GET /api/admin/birthday-records?type=walls|letters&q=&page=1&pageSize=20`：返回 `type/items/total/page/pageSize`。每页最多 50 条，列表不返回情书正文、密码哈希或访客身份。
+- `GET /api/admin/birthday-records/:type/:id`：返回 `{type,record}`。生日墙详情含全部祝福；情书详情含完整正文与信纸颜色。管理员的详情查看有审计记录。
+- `PATCH /api/admin/birthday-records/letters/:id`：提交 `{revision,senderName,recipientName,body,backgroundColor}`。只允许修改这四个内容字段；保留原始日期、分享链接和查看密码。版本冲突返回 `409 RECORD_CHANGED`，不能静默覆盖。
+- `DELETE /api/admin/birthday-records/:type/:id`：返回 `{ok:true,removed:boolean}`。幂等执行，删除前前端使用统一确认弹窗。
+
+所有接口复用官网管理员鉴权，修改和删除同时校验可信来源。响应禁止缓存。管理权限与情书收信人的密码解锁权限相互独立；管理员不能读取或修改原查看密码。
+
+## 删除与隐私
+
+删除清除用户内容及密码摘要，并使原分享链接失效。生日墙下的祝福同步删除。不影响其他墙、其他情书、钱包、付款订单或绘图订单。数据库仅保留用于幂等防复活的最小墓碑及管理审计；审计不记录信件内容或密码。编辑、删除和审计在同一事务内落库；审计失败时回滚修改。
+
+公开情书页面必须先输入查看密码。历史无密码情书锁定，只有持有原创建访客 Cookie 的写信人可以一次性补设密码。分享链接和二维码永远不含密码，详见 `love-letter.md`。
+
+生产验收使用 `scripts/verify-love-letter-deployment.mjs`，仅校验路由、合同、缓存/隐私头和匿名管理请求拒绝，不创建或删除真实用户记录。

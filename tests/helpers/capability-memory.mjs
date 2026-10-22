@@ -29,6 +29,8 @@ function matches(row, filter = {}) {
       if (op === "$in") return candidates.some((item) => expected.some((entry) => equal(item, entry)));
       if (op === "$nin") return !candidates.some((item) => expected.some((entry) => equal(item, entry)));
       if (op === "$exists") return (actual !== undefined) === expected;
+      if (op === "$options") return true;
+      if (op === "$regex") return candidates.some((item) => typeof item === "string" && new RegExp(expected, value.$options || "").test(item));
       if (op === "$gte") return candidates.some((item) => scalar(item) >= scalar(expected));
       if (op === "$gt") return candidates.some((item) => scalar(item) > scalar(expected));
       if (op === "$lte") return candidates.some((item) => scalar(item) <= scalar(expected));
@@ -89,6 +91,7 @@ export function createCapabilityMemoryCollection(initialRows = []) {
       return {
         sort(order) { values.sort((left, right) => { for (const [key, direction] of Object.entries(order)) { if (scalar(nested(left, key)) < scalar(nested(right, key))) return -direction; if (scalar(nested(left, key)) > scalar(nested(right, key))) return direction; } return 0; }); return this; },
         limit(count) { values = values.slice(0, count); return this; },
+        skip(count) { values = values.slice(count); return this; },
         async toArray() { return values.map(clone); },
       };
     },

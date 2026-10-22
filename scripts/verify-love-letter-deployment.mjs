@@ -14,7 +14,7 @@ for (const base of bases) {
   assert.equal(page.headers.get("referrer-policy"), "no-referrer");
   assert.match(page.headers.get("x-robots-tag") || "", /noindex/);
   const docs = await (await request("/api/openapi.json")).json();
-  for (const path of ["/api/love-letters/session", "/api/love-letters", "/api/love-letters/{id}"]) {
+  for (const path of ["/api/love-letters/session", "/api/love-letters", "/api/love-letters/{id}", "/api/love-letters/{id}/unlock", "/api/love-letters/{id}/password", "/api/admin/birthday-records", "/api/admin/birthday-records/{type}/{id}"]) {
     assert.ok(docs.paths[path], `${base} 缺少接口合同 ${path}`);
   }
   const invalid = await request("/api/love-letters/deployment-check");
@@ -25,5 +25,11 @@ for (const base of bases) {
     method: "POST", headers: { "content-type": "application/json", origin: "https://untrusted.invalid", "sec-fetch-site": "cross-site" }, body: "{}",
   });
   assert.equal(crossOrigin.status, 403, "跨站创建情书必须被拒绝");
-  console.log(JSON.stringify({ origin: base, page: page.status, invalidLetter: invalid.status, crossOrigin: crossOrigin.status, openapi: docs.info.version, productionLettersCreated: 0 }));
+  const adminStatuses = {};
+  for (const method of ["GET", "PATCH", "DELETE"]) {
+    const response = await request(method === "GET" ? "/api/admin/birthday-records?type=letters" : "/api/admin/birthday-records/letters/deployment-check", { method, ...(method === "PATCH" ? { headers: { "content-type": "application/json" }, body: "{}" } : {}) });
+    assert.ok([401, 403].includes(response.status), `${base} ${method} 管理接口必须拒绝匿名访问`);
+    adminStatuses[method] = response.status;
+  }
+  console.log(JSON.stringify({ origin: base, page: page.status, invalidLetter: invalid.status, crossOrigin: crossOrigin.status, adminStatuses, openapi: docs.info.version, productionLettersCreated: 0, productionRecordsChanged: 0 }));
 }

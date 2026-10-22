@@ -5,13 +5,24 @@ import { OpenAPIHono } from "@hono/zod-openapi";
 import { realpath, lstat } from "node:fs/promises";
 import path from "node:path";
 import { registerLoveLetterRoutes } from "../server/love-letter.js";
+import { registerBirthdayRecordAdminRoutes } from "../server/birthday-records-admin.js";
 import { createCapabilityMemoryCollection } from "../tests/helpers/capability-memory.mjs";
 
 const expectedCache = "D:/ProgramFiles/program/gulong-agent-build/current/cache/birthday-preview";
 const cache = process.argv[2];
 if (!cache || !path.isAbsolute(cache) || path.resolve(cache).toLowerCase() !== path.resolve(expectedCache).toLowerCase()) throw new Error("必须使用已经核验的项目固定预览缓存目录");
 if ((await lstat(cache)).isSymbolicLink() || (await realpath(cache)).toLowerCase() !== path.resolve(cache).toLowerCase()) throw new Error("预览目录不能经过重解析目标");
-const collection = createCapabilityMemoryCollection();
+const wallId = "11111111-1111-4111-8111-111111111111";
+const collections = new Map();
+function memory(name) {
+  if (!collections.has(name)) {
+    const value = createCapabilityMemoryCollection(); value.createIndex = async () => "preview-memory-index"; collections.set(name, value);
+  }
+  return collections.get(name);
+}
+memory("birthdayWalls").rows.push({ _id: wallId, name: "小满", ownerId: "preview-owner", count: 1, status: "active", createdAt: new Date() });
+memory("birthdayWallNotes").rows.push({ _id: "preview-note", noteId: "preview-note", wallId, name: "测试朋友", message: "生日快乐，愿你的每一天都有惊喜！", emojis: ["🎂", "✨"], status: "active", createdAt: new Date() });
+const collection = memory("loveLetters");
 collection.createIndex = async () => "preview-memory-index";
 const insert = collection.insertOne.bind(collection);
 collection.insertOne = async (document) => {
@@ -25,8 +36,20 @@ registerLoveLetterRoutes(app, {
   fingerprintIp: () => "local-preview",
   isTrustedBrowserRequest: (c) => !c.req.header("origin") || c.req.header("origin") === "http://127.0.0.1:5173",
 });
-const wallId = "11111111-1111-4111-8111-111111111111";
-const entry = `import React from "react";import {createRoot} from "react-dom/client";import "/src/styles.css";import {ConfirmDialogProvider} from "/src/components/ConfirmDialog.jsx";import {BirthdayWallPage} from "/src/components/BirthdayWallPage.jsx";import {LoveLetterPage} from "/src/components/LoveLetterPage.jsx";const letter=location.pathname.startsWith("/love-letter/");createRoot(document.getElementById("root")).render(React.createElement(ConfirmDialogProvider,null,letter?React.createElement(LoveLetterPage,{letterId:location.pathname.split("/")[2]}):React.createElement(BirthdayWallPage,{wallId:"${wallId}",user:null})));`;
+let tail = Promise.resolve();
+registerBirthdayRecordAdminRoutes(app, {
+  getCollection: async (name) => memory(name),
+  requireAdmin: async () => ({ user: { id: "preview-admin", role: "admin" } }),
+  requireTrustedMutation: (c) => c.req.header("origin") && c.req.header("origin") !== "http://127.0.0.1:5173" ? c.json({ message: "仅供本地预览" }, 403) : null,
+  transaction: (callback) => {
+    const result = tail.then(async () => {
+      const snapshots = new Map([...collections].map(([name, value]) => [name, structuredClone(value.rows)]));
+      try { return await callback({}); } catch (error) { for (const [name, rows] of snapshots) memory(name).rows.splice(0, memory(name).rows.length, ...rows); throw error; }
+    });
+    tail = result.catch(() => {}); return result;
+  },
+});
+const entry = `import React from "react";import {createRoot} from "react-dom/client";import "/src/styles.css";import {ConfirmDialogProvider} from "/src/components/ConfirmDialog.jsx";import {BirthdayWallPage} from "/src/components/BirthdayWallPage.jsx";import {LoveLetterPage} from "/src/components/LoveLetterPage.jsx";import {AdminBirthdayRecords} from "/src/components/AdminBirthdayRecords.jsx";const letter=location.pathname.startsWith("/love-letter/");const admin=location.pathname==="/admin/birthday-preview";createRoot(document.getElementById("root")).render(React.createElement(ConfirmDialogProvider,null,admin?React.createElement(AdminBirthdayRecords):letter?React.createElement(LoveLetterPage,{letterId:location.pathname.split("/")[2]}):React.createElement(BirthdayWallPage,{wallId:"${wallId}",user:null})));`;
 const server = await createServer({
   configFile: false, root: process.cwd(), cacheDir: cache, envDir: cache,
   server: { host: "127.0.0.1", port: 5173, strictPort: true },
@@ -37,7 +60,7 @@ const server = await createServer({
     configureServer(s) {
       s.middlewares.use(async (req, res, next) => {
         try {
-          if (req.url?.startsWith("/api/love-letters")) {
+          if (req.url?.startsWith("/api/love-letters") || req.url?.startsWith("/api/admin/birthday-records")) {
             const chunks = []; let bytes = 0;
             for await (const chunk of req) { bytes += chunk.length; if (bytes > 131072) throw new Error("preview body limit"); chunks.push(chunk); }
             const response = await app.fetch(new Request(`http://127.0.0.1:5173${req.url}`, {
@@ -52,7 +75,7 @@ const server = await createServer({
             if (req.method !== "GET") { res.statusCode = 405; res.end(JSON.stringify({ message: "此预览只允许在内存中保存测试情书" })); return; }
             res.end(JSON.stringify(req.url.startsWith("/api/birthday-walls/") ? { wall: { id: wallId, name: "小满", createdAt: new Date().toISOString() }, notes: [], stats: { total: 0 } } : { models: [] })); return;
           }
-          if (req.url?.startsWith("/birthday-wall") || req.url?.startsWith("/love-letter/")) {
+          if (req.url?.startsWith("/birthday-wall") || req.url?.startsWith("/love-letter/") || req.url === "/admin/birthday-preview") {
             res.setHeader("Content-Type", "text/html; charset=utf-8");
             res.setHeader("Referrer-Policy", "no-referrer");
             res.end(await s.transformIndexHtml(req.url, '<!doctype html><html lang="zh-CN"><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>电子情书本地验收</title></head><body><div id="root"></div><script type="module" src="/__letter-preview.jsx"></script></body></html>')); return;

@@ -41,3 +41,14 @@ test("Tencent deferred security headers cannot overwrite the private letter refe
   assert.doesNotMatch(deferredSecurity, /Referrer-Policy/);
   assert.equal((config.match(/header\s*\{\s*Referrer-Policy "no-referrer"[\s\S]*?\bdefer\s*\}/g) || []).length, 2);
 });
+
+test("platform preserves administrator record routes and rejects anonymous mutations", async () => {
+  for (const method of ["GET", "PATCH", "DELETE"]) {
+    const path = method === "GET" ? "admin/birthday-records" : "admin/birthday-records/letters/deployment-check";
+    const response = await platform.fetch(new Request(`https://example.test/api/platform?_platform_path=${path}`, { method, ...(method === "PATCH" ? { headers: { "content-type": "application/json" }, body: "{}" } : {}) }));
+    assert.ok([401, 403].includes(response.status));
+    assert.match(response.headers.get("cache-control"), /no-store/);
+  }
+  const config = JSON.parse(await readFile(new URL("../../vercel.json", import.meta.url), "utf8"));
+  for (const source of ["/api/admin/birthday-records", "/api/admin/birthday-records/:path*"]) assert.ok(config.rewrites.some((rule) => rule.source === source));
+});

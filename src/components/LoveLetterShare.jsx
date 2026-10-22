@@ -26,7 +26,7 @@ export function LetterOrnaments() {
 }
 
 export function LoveLetterShare({ letter }) {
-  const validId = /^[A-Za-z0-9_-]{43}$/.test(letter?.id || "");
+  const validId = letter?.passwordProtected === true && /^[A-Za-z0-9_-]{43}$/.test(letter?.id || "");
   const url = validId ? new URL(`/love-letter/${encodeURIComponent(letter.id)}`, window.location.origin).href : "";
   const [qrImage, setQrImage] = useState("");
   const [error, setError] = useState("");
@@ -55,13 +55,13 @@ export function LoveLetterShare({ letter }) {
     try {
       if (!navigator.clipboard?.writeText) throw new Error("manual-copy");
       await navigator.clipboard.writeText(url);
-      if (alive.current) setNotice("链接已复制，发送给收信人即可阅读完整情书。");
+      if (alive.current) setNotice("链接已复制，请将查看密码单独告诉收信人。");
     } catch {
       if (!alive.current) return;
       inputRef.current?.focus(); inputRef.current?.select();
       let copied = false;
       try { copied = Boolean(document.execCommand?.("copy")); } catch { /* Keep the selected link available. */ }
-      setNotice(copied ? "链接已复制，发送给收信人即可阅读完整情书。" : "已选中链接，请长按或按 Ctrl+C 复制。");
+      setNotice(copied ? "链接已复制，请将查看密码单独告诉收信人。" : "已选中链接，请长按或按 Ctrl+C 复制。");
     } finally { copyLock.current = false; if (alive.current) setCopying(false); }
   }
 
@@ -70,12 +70,12 @@ export function LoveLetterShare({ letter }) {
     <h3>把这份心意，送到 TA 身边</h3>
     <p className="love-letter-share-to">写给 <strong>{letter.recipientName}</strong> · 来自 {letter.senderName}</p>
     <div className="love-letter-qr" aria-busy={!qrImage && !error}>
-      {qrImage ? <img src={qrImage} width="1024" height="1024" alt={`写给${letter.recipientName}的情书二维码，扫码可阅读完整内容`} /> : error ? <div role="alert"><QrCode size={34} /><p>{error}</p>{url && <button type="button" onClick={() => setAttempt((value) => value + 1)}>重新生成二维码</button>}</div> : <div role="status"><SpinnerGap size={30} className="love-letter-spin" /><p>正在生成专属二维码…</p></div>}
+      {qrImage ? <img src={qrImage} width="1024" height="1024" alt={`写给${letter.recipientName}的情书二维码，扫码并输入密码可阅读完整内容`} /> : error ? <div role="alert"><QrCode size={34} /><p>{error}</p>{url && <button type="button" onClick={() => setAttempt((value) => value + 1)}>重新生成二维码</button>}</div> : <div role="status"><SpinnerGap size={30} className="love-letter-spin" /><p>正在生成专属二维码…</p></div>}
     </div>
-    <p className="love-letter-share-caption">扫一扫，打开只想对你说的话</p>
+    <p className="love-letter-share-caption">扫一扫，输入密码，打开专属心意</p>
     <label className="love-letter-link-label">情书专属链接<input ref={inputRef} value={url} readOnly aria-label="情书专属分享链接" onFocus={(event) => event.target.select()} /></label>
     <div className="love-letter-share-actions"><button type="button" onClick={copyLink} disabled={copying || !url}>{copying ? <SpinnerGap size={18} className="love-letter-spin" /> : <Copy size={18} />}复制链接</button>{qrImage ? <a href={qrImage} download={filename}><DownloadSimple size={18} />保存二维码图片</a> : <button type="button" disabled><DownloadSimple size={18} />保存二维码图片</button>}</div>
-    <p className="love-letter-share-help">手机可长按二维码保存图片。持有链接的人可阅读，请只分享给收信人。</p>
+    <p className="love-letter-share-help">手机可长按二维码保存图片。请记住查看密码，并单独告知收信人；二维码和链接不包含密码。</p>
     {url && <a className="love-letter-read-link" href={url} target="_blank" rel="noopener noreferrer">打开情书，看看收信人的阅读效果 <EnvelopeOpen size={17} /></a>}
     {notice && <p className="love-letter-share-notice" role="status"><CheckCircle size={18} />{notice}</p>}
   </section>;
