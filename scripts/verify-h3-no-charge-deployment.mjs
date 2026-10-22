@@ -43,6 +43,11 @@ try {
   for (const [index, origin] of origins.entries()) {
     const document = await get(origin, "/api/openapi.json"); requireValue(document.status === 200, `${origin}: OpenAPI status ${document.status}`);
     const api = document.data, post = api.paths?.["/api/h3/tasks"]?.post;
+    const bindingSchema = resolve(api, api.paths?.["/api/desktop/account-bindings/verify"]?.post?.responses?.[200]?.content?.["application/json"]?.schema);
+    requireValue(bindingSchema?.required?.includes("account") && bindingSchema.required.includes("binding_id")
+      && property(api, property(api, bindingSchema, "account"), "id")?.type === "string"
+      && property(api, property(api, bindingSchema, "binding"), "user_id")?.type === "string",
+    `${origin}: canonical account and distinct binding identity contract missing`);
     const request = resolve(api, post?.requestBody?.content?.["application/json"]?.schema);
     requireValue(property(api, request, "require_no_charge")?.type === "boolean" && !request.required?.includes("require_no_charge"), `${origin}: optional boolean missing`);
     requireValue(post.responses?.[403] && api.paths?.["/api/admin/h3/tasks/{id}/retry"]?.post?.responses?.[403], `${origin}: no-charge rejection missing`);

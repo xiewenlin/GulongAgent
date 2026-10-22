@@ -166,6 +166,12 @@ X-Gulong-Account-Binding: gab_...
 {
   "ok": true,
   "binding_token": "gab_仅显示一次的高熵令牌",
+  "binding_id": "绑定记录ID",
+  "account": {
+    "id": "用户ID",
+    "email": "user@example.com",
+    "display_name": "用户昵称"
+  },
   "binding": {
     "id": "绑定记录ID",
     "email": "user@example.com",
@@ -178,6 +184,8 @@ X-Gulong-Account-Binding: gab_...
   }
 }
 ```
+
+`account.id` 始终是真实用户 ID，与 `binding.user_id` 相同；顶层 `binding_id` 与原有 `binding.id` 始终是绑定记录 ID。两个 ID 不可混用。此兼容响应支持现行旧客户端优先解析 `payload.account`，无需修改其已冻结制品。已保存错误用户 ID 的客户端须在原设备同账户重新绑定一次，再按真实用户 ID 重算账号范围；服务端仍以绑定令牌解析身份。不得记录或回传明文 `binding_token`，也不能沿用错误账号范围激活验收窗口。
 
 激活有效但用户不存在：
 

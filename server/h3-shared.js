@@ -1337,7 +1337,13 @@ export function registerH3SharedRoutes(app, dependencies) {
       { upsert: true, returnDocument: "after" },
     );
     await audit(await getCollection("nodeAccountBindingAudits"), previous && previous.userId?.toString() !== user._id.toString() ? "rebound" : "bound", { bindingId: binding._id, userId: user._id, previousUserId: previous?.userId || null, activationLicenseId: activation.record._id, nodeId, nodeName, appVersion, ipFingerprint: ip });
-    return c.json({ ok: true, binding_token: rawToken, binding: { id: binding._id.toString(), email, user_id: user._id.toString(), display_name: user.displayName || user.username || email.split("@")[0], node_id: nodeId, node_name: nodeName, compute_group_id: normalizeComputeGroupId(binding.computeGroupId), app_version: appVersion, verified_at: now.toISOString() } });
+    const bindingId = binding._id.toString(), userId = user._id.toString();
+    const displayName = user.displayName || user.username || email.split("@")[0];
+    // Older clients prefer account.id to binding.user_id. Keep the binding ID
+    // distinct so their persisted account scope is derived from the real user.
+    return c.json({ ok: true, binding_token: rawToken, binding_id: bindingId,
+      account: { id: userId, email, display_name: displayName },
+      binding: { id: bindingId, email, user_id: userId, display_name: displayName, node_id: nodeId, node_name: nodeName, compute_group_id: normalizeComputeGroupId(binding.computeGroupId), app_version: appVersion, verified_at: now.toISOString() } });
   });
 
   app.post("/api/desktop/account-bindings/unbind", async (c) => {
@@ -2278,7 +2284,10 @@ export function registerH3SharedRoutes(app, dependencies) {
   app.openAPIRegistry.registerComponent("securitySchemes", "accountBinding", { type: "apiKey", in: "header", name: H3_ACCOUNT_BINDING_HEADER, description: "桌面端账号绑定时签发的可撤销高熵令牌；服务端仅保存哈希。" });
   const noChargeContractSchema = z.object({ version: z.literal(1), requestField: z.literal("require_no_charge"), enforced: z.literal(H3_NO_CHARGE_CREATION.enforced), onUnavailable: z.literal("reject_without_order_or_charge") });
   const errorSchema = z.object({ code: z.string(), message: z.string() });
-  const bindingSuccessSchema = z.object({ ok: z.literal(true), binding_token: z.string(), binding: z.object({ id: z.string(), email: z.email(), user_id: z.string(), display_name: z.string(), node_id: z.string(), node_name: z.string(), app_version: z.string(), verified_at: z.string() }) });
+  const bindingSuccessSchema = z.object({ ok: z.literal(true), binding_token: z.string(),
+    binding_id: z.string().describe("绑定记录ID，与binding.id相同；不能当成用户ID"),
+    account: z.object({ id: z.string().describe("真实用户ID，与binding.user_id相同，用于客户端账号范围"), email: z.email(), display_name: z.string() }),
+    binding: z.object({ id: z.string(), email: z.email(), user_id: z.string(), display_name: z.string(), node_id: z.string(), node_name: z.string(), compute_group_id: z.string().nullable(), app_version: z.string(), verified_at: z.string() }) });
   const unknownUserSchema = errorSchema.extend({ register_url: z.url() });
   const earningsDeviceSchema = z.object({ node_id: z.string(), node_name: z.string(), gpu_name: z.string().nullable(), vram_mb: z.number().int(), online: z.boolean(), status: z.enum(["online", "offline"]), queue_status: z.string(), total_earnings_fen: z.number().int(), settled_earnings_fen: z.number().int(), pending_earnings_fen: z.number().int(), average_daily_earnings_fen: z.number().int(), active_days: z.number().int(), completed_task_count: z.number().int(), last_claimed_at: z.string().nullable(), last_callback_at: z.string().nullable(), last_completed_at: z.string().nullable(), app_version: z.string().nullable() });
   const earningsSummarySchema = z.object({ ok: z.literal(true), currency: z.literal("CNY"), account: z.object({ total_earnings_fen: z.number().int(), settled_earnings_fen: z.number().int(), pending_earnings_fen: z.number().int(), average_daily_earnings_fen: z.number().int(), active_days: z.number().int(), device_count: z.number().int() }), current_device: z.object({ node_id: z.string(), node_name: z.string(), total_earnings_fen: z.number().int(), average_daily_earnings_fen: z.number().int(), completed_task_count: z.number().int(), last_completed_at: z.string().nullable() }).nullable(), devices: z.array(earningsDeviceSchema) });

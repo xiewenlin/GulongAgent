@@ -565,7 +565,19 @@ test("H3 desktop account binding returns a high-entropy token but only persists 
   assert.equal(response.status, 200);
   const payload = await response.json();
   assert.match(payload.binding_token, /^gab_[A-Za-z0-9_-]{40,}$/);
+  assert.equal(payload.binding_id, bindingId.toString());
+  assert.equal(payload.binding.id, bindingId.toString());
   assert.equal(payload.binding.user_id, userId.toString());
+  assert.deepEqual(payload.account, { id: userId.toString(), email: "member@example.com", display_name: "Member" });
+  // Frozen field precedence from the deployed 2.1.335 account-binding client.
+  const account = payload.account || payload.user || payload.binding || payload;
+  const legacyUserId = account.id || account.user_id || payload.user_id || null;
+  const legacyBindingId = payload.binding_id || payload.bindingId || account.id || null;
+  assert.equal(legacyUserId, userId.toString());
+  assert.equal(legacyBindingId, bindingId.toString());
+  assert.notEqual(legacyUserId, legacyBindingId);
+  assert.equal(persistedSet.userId.toString(), legacyUserId);
+  assert.equal(Object.hasOwn(payload.account, "binding_token"), false);
   assert.match(persistedSet.tokenHash, /^[a-f0-9]{64}$/);
   assert.notEqual(persistedSet.tokenHash, payload.binding_token);
   assert.equal(Object.values(persistedSet).includes(payload.binding_token), false);
@@ -1092,6 +1104,12 @@ test("H3 OpenAPI publishes binding, assets, desktop tool, claim and callback con
     "/api/cron/h3-output-cleanup",
   ]) assert.ok(document.paths[path], `${path} should be documented`);
   assert.equal(document.components.securitySchemes.accountBinding.name, H3_ACCOUNT_BINDING_HEADER);
+  const bindingSchema = document.paths["/api/desktop/account-bindings/verify"].post.responses[200].content["application/json"].schema;
+  assert.ok(bindingSchema.required.includes("account"));
+  assert.ok(bindingSchema.required.includes("binding_id"));
+  assert.equal(bindingSchema.properties.account.properties.id.type, "string");
+  assert.ok(bindingSchema.properties.account.required.includes("id"));
+  assert.equal(bindingSchema.properties.binding.properties.user_id.type, "string");
   assert.deepEqual(document.paths["/api/desktop/earnings/summary"].get.security, [{ accountBinding: [] }]);
   assert.match(document.paths["/api/h3/tasks/claim"].post.description, /max_duration_seconds/);
   assert.match(document.paths["/api/h3/tasks/claim"].post.description, /最早|从旧到新/);
