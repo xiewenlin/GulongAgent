@@ -1,9 +1,10 @@
-import { ArrowClockwise, ArrowDown, ArrowRight, CheckCircle, Confetti, Copy, DownloadSimple, Heart, PencilSimple, Plus, Sparkle, SpinnerGap } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowDown, ArrowRight, CheckCircle, Confetti, DownloadSimple, Heart, PencilSimple, Plus, QrCode, Sparkle, SpinnerGap } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { apiFetch, createClientRequestId } from "../api.js";
 import { birthdayNoteColor, exportBirthdayWall } from "../birthday-wall-export.js";
 import { ApplicationDialog } from "./ConfirmDialog.jsx";
 import { BirthdayArtwork } from "./BirthdayArtwork.jsx";
+import { BirthdayShareDialog } from "./BirthdayShareDialog.jsx";
 import "./birthday-wall.css";
 
 const DRAFT_KEY = "gulong-birthday-wall-draft-v2";
@@ -34,7 +35,7 @@ export function BirthdayWallPage({ user, openAuth, wallId = "", onOpenWall }) {
   const [submitError, setSubmitError] = useState("");
   const [createError, setCreateError] = useState("");
   const [notice, setNotice] = useState("");
-  const [shareFallback, setShareFallback] = useState("");
+  const [shareOpen, setShareOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [artwork, setArtwork] = useState(null);
   const session = useRef(null);
@@ -87,7 +88,7 @@ export function BirthdayWallPage({ user, openAuth, wallId = "", onOpenWall }) {
     session.current = context;
     setWall(null); setWalls([]); setNotes([]); setStats(ZERO_STATS); setArtwork(null);
     setComposerOpen(false); setDraft(readDraft(context.draftKey)); setCreateDraft(readDraft(context.createKey));
-    setLoading(true); setLoadError(""); setSubmitError(""); setCreateError(""); setNotice(""); setShareFallback("");
+    setLoading(true); setLoadError(""); setSubmitError(""); setCreateError(""); setNotice(""); setShareOpen(false);
     setSubmitting(false); setCreating(false); setExporting(false);
     refresh(context);
     const timer = wallId ? window.setInterval(() => { if (!document.hidden) refresh(context, { quiet: true }); }, 30_000) : null;
@@ -116,7 +117,7 @@ export function BirthdayWallPage({ user, openAuth, wallId = "", onOpenWall }) {
       else { createRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }); createRef.current?.focus(); }
       return;
     }
-    if (readyWall && !loading && !loadError) { setComposerOpen(true); setSubmitError(""); }
+    if (readyWall && !loading && !loadError) { setShareOpen(false); setComposerOpen(true); setSubmitError(""); }
   }
   function changeDraft(patch) {
     const next = { ...draft, ...patch, clientRequestId: null };
@@ -165,15 +166,9 @@ export function BirthdayWallPage({ user, openAuth, wallId = "", onOpenWall }) {
     finally { context.noteLocked = false; if (active(context)) setSubmitting(false); }
   }
 
-  async function shareWall() {
+  function shareWall() {
     if (!readyWall) return;
-    const context = session.current;
-    const url = new URL(`/birthday-wall/${encodeURIComponent(readyWall.id)}`, window.location.origin).href;
-    try {
-      if (!navigator.clipboard?.writeText) throw new Error("manual-copy");
-      await navigator.clipboard.writeText(url);
-      if (active(context)) { setNotice("专属链接已复制，发给朋友就能收集祝福啦！"); setShareFallback(""); }
-    } catch { if (active(context)) { setShareFallback(url); setNotice("请长按或选中下面的专属链接复制，分享给朋友。好友无需登录即可送祝福。"); } }
+    setComposerOpen(false); setShareOpen(true);
   }
 
   async function exportWall() {
@@ -199,12 +194,11 @@ export function BirthdayWallPage({ user, openAuth, wallId = "", onOpenWall }) {
       <div className="birthday-hero-kicker"><span /><Heart size={15} weight="fill" /> 每一个你，都值得被祝福 <span /></div>
       <h1>{readyWall ? <><span className="birthday-honoree">{readyWall.name}</span><span className="birthday-personal-title">的生日墙</span></> : <>生日<span>墙</span></>}<Sparkle size={34} weight="duotone" aria-hidden="true" /></h1>
       <p>{wallId ? <>把想说的话，变成一张小小的便签。<br />愿这一墙的温柔，陪你走进新的一岁。</> : <>输入寿星的名字，开启一面专属生日墙。<br />把链接发给朋友，让祝福从四面八方而来。</>}</p>
-      {wallId && <div className="birthday-hero-actions"><button className="birthday-write-button" type="button" onClick={openComposer} disabled={!readyWall || loading || Boolean(loadError)}><PencilSimple size={18} /> 写下我的祝福 <Heart size={17} weight="fill" /></button><button className="birthday-share-button" type="button" onClick={shareWall} disabled={!readyWall}><Copy size={18} /> 复制分享链接</button></div>}
+      {wallId && <div className="birthday-hero-actions"><button className="birthday-write-button" type="button" onClick={openComposer} disabled={!readyWall || loading || Boolean(loadError)}><PencilSimple size={18} /> 写下我的祝福 <Heart size={17} weight="fill" /></button><button className="birthday-share-button" type="button" onClick={shareWall} disabled={!readyWall} aria-haspopup="dialog"><QrCode size={18} /> 分享生日墙</button></div>}
       <div className="birthday-hero-doodle left" aria-hidden="true">✧<span>🎈</span>✦</div><div className="birthday-hero-doodle right" aria-hidden="true">✦<span>🎂</span>✧</div>
     </header>
     <div className="birthday-content">
       {notice && <div className="birthday-notice" role="status"><CheckCircle size={19} /><span>{notice}</span><button type="button" aria-label="关闭提示" onClick={() => setNotice("")}>×</button></div>}
-      {shareFallback && <label className="birthday-share-fallback">生日墙专属链接<input readOnly value={shareFallback} onFocus={(event) => event.target.select()} /></label>}
       {!wallId ? <>
         <section className="birthday-create-card" aria-labelledby="birthday-create-heading">
           <div className="birthday-create-icon" aria-hidden="true">🎂</div><h2 id="birthday-create-heading">为 TA 留一面生日墙</h2><p>每一面新墙都是空白的，等待专属于寿星的祝福。</p>
@@ -225,6 +219,7 @@ export function BirthdayWallPage({ user, openAuth, wallId = "", onOpenWall }) {
       </>}
       <footer className="birthday-page-footer"><span>✧</span> 岁岁常欢愉，年年皆胜意 <span>✧</span></footer>
     </div>
+    {shareOpen && readyWall && <BirthdayShareDialog key={`${wallId}:${ownerId}`} wall={readyWall} onClose={() => setShareOpen(false)} />}
     <button className="birthday-magic-orb" type="button" aria-label={wallId ? "打开七彩魔法球，写下生日祝福" : "创建专属生日墙"} aria-haspopup={wallId ? "dialog" : undefined} aria-expanded={wallId ? composerOpen : undefined} onClick={openComposer}><span className="birthday-orb-sphere"><Sparkle size={34} weight="fill" /><i /><i /><i /></span><span className="birthday-orb-label">{wallId ? "写祝福" : "创建生日墙"}</span></button>
     {composerOpen && readyWall && <ApplicationDialog title="送出你的生日祝福" eyebrow="一份心意，一张便签" description={`为 ${readyWall.name} 写下真心话，魔法球会为你配上表情和专属颜色。`} onClose={() => setComposerOpen(false)} busy={submitting} className="birthday-composer"><form className="birthday-wish-form" onSubmit={submit}><label htmlFor="birthday-name">你的名字 <small>（可不填）</small><input id="birthday-name" name="name" maxLength={40} value={name} onChange={(event) => changeDraft({ name: event.target.value })} placeholder="留个名字，让祝福更亲切" autoComplete="nickname" disabled={submitting} /></label><label htmlFor="birthday-message">想对 TA 说的话 <textarea id="birthday-message" ref={promptRef} name="message" value={message} onChange={(event) => changeDraft({ message: event.target.value })} placeholder="生日快乐！愿你新的一岁，心里有光，眼里有笑……" maxLength={500} rows={7} required disabled={submitting} /></label><div className="birthday-composer-hint"><span>🎂 ✨ 🎉 💛 自动装点你的心意</span><span>{message.length} / 500</span></div><p className="birthday-public-note">提交后，祝福和昵称会公开显示在这面墙上。</p>{submitError && <p className="birthday-submit-error" role="alert">{submitError}</p>}<button className="birthday-submit" type="submit" disabled={submitting || !message.trim()}>{submitting ? <SpinnerGap className="birthday-spin" size={20} /> : <Sparkle size={20} weight="fill" />}{submitting ? "正在贴上祝福…" : "把祝福贴上墙"}</button></form></ApplicationDialog>}
   </main>;
