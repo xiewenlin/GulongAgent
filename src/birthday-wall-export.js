@@ -73,7 +73,7 @@ export function birthdayWallSvg(layout, stats, artwork) {
 ${art ? `<image x="3100" y="112" width="760" height="480" preserveAspectRatio="xMidYMid slice" href="${art}"/>` : '<circle cx="3610" cy="300" r="176" fill="#fce0e6"/><circle cx="3750" cy="422" r="92" fill="#e5e3fa"/>'}
 ${layout.titleLines.map((line, index) => text(line, 152, 278 + index * 168, 138, 'font-weight="700"')).join("")}
 ${text("愿每一份心意，都被好好珍藏。", 158, layout.descriptionY, 50, 'fill="#75697e"')}
-${text(`${stats.total ?? layout.cards.length} 份祝福   ·   ${stats.participants ?? 0} 位朋友   ·   今日新增 ${stats.today ?? 0} 份`, 158, layout.statsY, 38, 'fill="#807389"')}
+${text(`${stats.total ?? layout.cards.length} 份暖心祝福`, 158, layout.statsY, 38, 'fill="#807389"')}
 ${layout.cards.map(({ note, index, x, y, width, height, lines, names }) => `<g>
 <rect x="${x + 5}" y="${y + 15}" width="${width}" height="${height}" rx="26" fill="#45334b" opacity=".05"/>
 <rect x="${x}" y="${y}" width="${width}" height="${height}" rx="26" fill="${birthdayNoteColor(note.color, index)}"/>
@@ -148,7 +148,7 @@ export async function exportBirthdayWall({ notes = [], stats = {}, artwork = nul
     layout.titleLines.forEach((line, index) => ctx.fillText(line, 152, 278 + index * 168));
     ctx.fillStyle = "#75697e"; ctx.font = `50px ${FONT}`; ctx.fillText("愿每一份心意，都被好好珍藏。", 158, layout.descriptionY);
     ctx.fillStyle = "#807389"; ctx.font = `38px ${FONT}`;
-    ctx.fillText(`${stats.total ?? notes.length} 份祝福   ·   ${stats.participants ?? 0} 位朋友   ·   今日新增 ${stats.today ?? 0} 份`, 158, layout.statsY);
+    ctx.fillText(`${stats.total ?? notes.length} 份暖心祝福`, 158, layout.statsY);
     for (const { note, index, x, y, width, height, lines, names } of layout.cards) {
       roundedRect(ctx, x + 5, y + 15, width, height, 26, "#45334b0d");
       roundedRect(ctx, x, y, width, height, 26, birthdayNoteColor(note.color, index));

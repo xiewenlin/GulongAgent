@@ -193,9 +193,7 @@ export function BirthdayWallPage({ user, openAuth, wallId = "", onOpenWall }) {
   return <main className="birthday-wall" id="main-content">
     <div className="birthday-ambient" aria-hidden="true"><i /><i /><i /><i /><i /><i /></div>
     <section className="birthday-statistics" aria-label="生日墙数据统计">
-      <div><strong>{wallId && (loading || !readyWall) ? "—" : (wallId ? stats.total : 0).toLocaleString("zh-CN")}</strong><span>份暖心祝福</span></div><span className="birthday-stat-divider" aria-hidden="true" />
-      <div><strong>{wallId && (loading || !readyWall) ? "—" : (wallId ? stats.participants : 0).toLocaleString("zh-CN")}</strong><span>位朋友相聚</span></div><span className="birthday-stat-divider" aria-hidden="true" />
-      <div><strong>{wallId && (loading || !readyWall) ? "—" : `+${(wallId ? stats.today : 0).toLocaleString("zh-CN")}`}</strong><span>今日新增祝福</span></div>
+      <div><strong>{wallId && (loading || !readyWall) ? "—" : (wallId ? stats.total : 0).toLocaleString("zh-CN")}</strong><span>份暖心祝福</span></div>
     </section>
     <header className={`birthday-hero ${readyWall ? "birthday-hero-personal" : ""}`}>
       <div className="birthday-hero-kicker"><span /><Heart size={15} weight="fill" /> 每一个你，都值得被祝福 <span /></div>

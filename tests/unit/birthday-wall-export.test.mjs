@@ -33,6 +33,8 @@ test("birthday export retains all 1000 long blessings at 4K width", () => {
   const svg = birthdayWallSvg(layout, { total: 1000, participants: 1000, today: 1000 }, null);
   assert.equal((svg.match(/rx="26" fill="#FFE5E8"/g) || []).length, 1000);
   assert(svg.includes("朋友999")); assert(svg.includes("小满的生日墙"));
+  assert(svg.includes("1000 份暖心祝福"));
+  assert(!svg.includes("位朋友")); assert(!svg.includes("今日新增"));
 });
 
 test("birthday long honoree name wraps without overlapping artwork or notes", () => {
