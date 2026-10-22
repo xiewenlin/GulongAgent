@@ -30,6 +30,18 @@
   ],
   "rewrites": [
     {
+      "source": "/api/birthday-walls",
+      "destination": "/api/platform?_platform_path=birthday-walls"
+    },
+    {
+      "source": "/api/birthday-walls/:path*",
+      "destination": "/api/platform?_platform_path=birthday-walls/:path*"
+    },
+    {
+      "source": "/api/admin/birthday-walls/:path*",
+      "destination": "/api/platform?_platform_path=admin/birthday-walls/:path*"
+    },
+    {
       "source": "/api/auth/:path*",
       "destination": "/api/platform?_platform_path=auth/:path*"
     },

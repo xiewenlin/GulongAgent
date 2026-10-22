@@ -47,7 +47,7 @@ export function WorkflowPage({ navigate }) {
       <section className="workflow-catalog section-shell">
         <form className="workflow-search" onSubmit={load} role="search">
           <MagnifyingGlass size={23} />
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索工作流名称或功能，例如：威客、任务、交付" aria-label="搜索工作流" />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索工作流名称或功能，例如：生日墙、威客、任务" aria-label="搜索工作流" />
           <button className="button primary" disabled={loading}>搜索工作流</button>
         </form>
         <header><div><span>WORKFLOW CATALOG</span><h2>{query ? `“${query}”的搜索结果` : "全部工作流"}</h2></div><strong>{workflows.length} 个可用能力</strong></header>

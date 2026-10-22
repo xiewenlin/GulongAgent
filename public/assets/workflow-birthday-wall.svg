@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500">
+  <rect width="800" height="500" rx="32" fill="#fff8ed"/>
+  <circle cx="690" cy="90" r="110" fill="#fce1ec"/><circle cx="100" cy="440" r="140" fill="#e3f1e5"/>
+  <g stroke="#514342" stroke-opacity=".12" stroke-width="2">
+    <rect x="95" y="90" width="185" height="205" rx="10" fill="#ffe3a0" transform="rotate(-9 187 192)"/>
+    <rect x="308" y="130" width="185" height="205" rx="10" fill="#e5dcff" transform="rotate(5 400 232)"/>
+    <rect x="525" y="90" width="185" height="205" rx="10" fill="#ffd9de" transform="rotate(-5 617 192)"/>
+  </g>
+  <g fill="none" stroke="#967d72" stroke-width="5" stroke-linecap="round" opacity=".45"><path d="M138 210h90m-90 24h63M345 257h98m-98 24h72M562 214h98m-98 24h70"/></g>
+  <path d="M183 165c-40-29-45 20 0 42 45-22 40-71 0-42" fill="#ec7e90"/>
+  <path d="m401 170 12 24 27 4-20 20 5 27-24-13-24 13 5-27-20-20 27-4z" fill="#b3a1ec"/>
+  <g fill="#e7a64c"><rect x="585" y="164" width="64" height="40" rx="7"/><rect x="580" y="153" width="74" height="14" rx="4"/></g><path d="M617 153v51m0-51c-25 0-24-25-11-20 8 3 11 20 11 20s3-17 11-20c13-5 14 20-11 20" stroke="#fff8ed" stroke-width="5" fill="none"/>
+  <text x="400" y="414" text-anchor="middle" fill="#41675d" font-family="sans-serif" font-size="42" font-weight="700">生日墙</text>
+  <g fill="#e9b452"><circle cx="327" cy="68" r="5"/><circle cx="478" cy="370" r="5"/><path d="m76 330 5 13 13 5-13 5-5 13-5-13-13-5 13-5zm670-11 5 13 13 5-13 5-5 13-5-13-13-5 13-5z"/></g>
+</svg>

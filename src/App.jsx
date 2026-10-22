@@ -37,6 +37,7 @@ import {
 import { themes } from "./data/site.js";
 
 const WebAgentPage = lazy(() => import("./components/WebAgentPage.jsx").then((module) => ({ default: module.WebAgentPage })));
+const BirthdayWallPage = lazy(() => import("./components/BirthdayWallPage.jsx").then((module) => ({ default: module.BirthdayWallPage })));
 
 const SHORT_DRAMA_ROUTE = "/short-drama";
 
@@ -271,6 +272,13 @@ export function App() {
   }
 
   const pathname = window.location.pathname;
+  // The shared birthday link is a standalone experience, including after SPA navigation.
+  if (pathname === "/birthday-wall" || pathname.startsWith("/birthday-wall/")) return <>
+    <Suspense fallback={<main id="main-content" style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "#fffaf4" }}>正在打开生日墙…</main>}>
+      <BirthdayWallPage key={pathname} user={user} openAuth={openAuth} wallId={pathname.split("/")[2] || null} onOpenWall={navigate} />
+    </Suspense>
+    <AccountModal open={authOpen} initialMode={authMode} onClose={() => setAuthOpen(false)} onUser={(nextUser) => { setUser(nextUser); setAuthResolved(true); }} themeIcon={themeIcon} />
+  </>;
   let page;
   if (pathname === "/admin") page = <AdminPage user={user} openAuth={openAuth} />;
   else if (pathname === "/agent") page = <Suspense fallback={<main id="main-content" className="web-agent-page web-agent-gate section-shell"><span>GULONG WEB AGENT</span><h1>正在打开古龙网页版</h1><p>正在加载对话排版与实时流程组件…</p></main>}><WebAgentPage user={user} openAuth={openAuth} navigate={navigate} themeIcon={themeIcon} /></Suspense>;

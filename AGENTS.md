@@ -10,6 +10,9 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 
 ## Locked product direction
 
+- The `/birthday-wall` workflow is a standalone public birthday page with no Gulong navigation, footer, menus or feedback orb. Keep live statistics centered at the top, a right-edge rainbow bubble composer, readable randomly colored notes and emoji enrichment. Birthday-only rainbow accents are an explicit user exception to the general restrained palette. Use the authenticated Codex Market 龙图 order contract for optional generated decoration, preserving quote confirmation, billing and request-id recovery. Render blessing text deterministically at 4K export width; never replace, truncate or shrink blessings to make an AI picture appear complete. Large walls use a complete scalable SVG export instead of exceeding canvas limits.
+- Birthday walls are personal: only authenticated users create a named, initially empty wall; `/birthday-wall/<wallId>` is its public collection link. Visitors may submit wishes without logging in. Scope notes, counters, drafts and artwork recovery to that wall; never mix separate owners' walls or expose account identities in public responses.
+
 - Visual target: `docs/design/selected-homepage-option-1.png` (玉瓷·东方算力).
 - Preserve the ivory porcelain base, jade-green actions, pale-gold accents, restrained borders and shadows, and code-native light product UI.
 - The first 1536 × 1024 viewport must contain the hero, 理解/组装/执行/进化 flow, and four-capability strip.

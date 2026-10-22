@@ -5,6 +5,7 @@ import { OpenAPIHono } from "@hono/zod-openapi";
 import { ObjectId } from "mongodb";
 import { registerCodexMarketRoutes, CODEX_CAPACITY_SCOPE, CODEX_CAPACITY_TOTAL, CODEX_NODE_HEADER } from "../../server/codex-market.js";
 import { calculateLongyanAmount, marketQuotePrice, normalizeMarketRequest, readMarketPricing, readMarketWalletAmount } from "../../server/codex-market-pricing.js";
+import { BIRTHDAY_ARTWORK_REQUEST } from "../../shared/birthday-artwork.js";
 
 test("precise wallet balance keeps the milli-yuan remainder for desktop status", () => {
   assert.deepEqual(readMarketWalletAmount({ balanceFen: 81, codexMarketRemainderMilliYuan: 8 }), {
@@ -569,6 +570,92 @@ test("Gulong Engine free quote expires with membership and cannot be spent after
   assert.equal(order.status, 409);
   assert.equal(order.body.code, "QUOTE_AUTHORIZATION_CHANGED");
   assert.equal(f.rows.wallets[0].balanceFen, 0);
+});
+
+test("birthday Longtu generation enforces the server membership time window at zero balance", async (t) => {
+  const cases = [
+    { name: "active", start: "2026-09-01T00:00:00Z", end: "2026-10-01T00:00:00Z", free: true },
+    { name: "exact-start", start: "2026-09-10T00:00:00Z", end: "2026-10-01T00:00:00Z", free: true },
+    { name: "future-start", start: "2026-09-10T00:00:01Z", end: "2026-10-01T00:00:00Z", free: false },
+    { name: "expired", start: "2026-08-01T00:00:00Z", end: "2026-09-01T00:00:00Z", free: false },
+    { name: "exact-end", start: "2026-09-01T00:00:00Z", end: "2026-09-10T00:00:00Z", free: false },
+    { name: "disabled", start: "2026-09-01T00:00:00Z", end: "2026-10-01T00:00:00Z", enabled: false, free: false },
+    { name: "ordinary", free: false },
+  ];
+  for (const scenario of cases) await t.test(scenario.name, async () => {
+    const f = fixture({ balance: 0 });
+    if (scenario.start) f.rows.subscriptions = [{ ownerId: f.accounts.requester, products: { gulong_engine_monthly: {
+      enabled: scenario.enabled !== false, status: "active", currentPeriodStart: new Date(scenario.start), currentPeriodEnd: new Date(scenario.end),
+    } } }];
+    const requestId = `birthday-window-${scenario.name}`;
+    const quote = await f.call("/quotes", { model: "longtu", requestId, request: BIRTHDAY_ARTWORK_REQUEST });
+    assert.equal(quote.status, 201);
+    assert.equal(quote.body.executionModel, "gpt-image-2");
+    assert.equal(quote.body.requiredMilliYuan, scenario.free ? 0 : 182);
+    assert.equal(quote.body.affordable, scenario.free);
+    assert.equal(quote.body.billingMode, scenario.free ? "gulong_engine_membership" : "wallet");
+    const created = await f.call("/tasks", { quoteId: quote.body.quoteId, requestId });
+    assert.equal(created.status, scenario.free ? 201 : 402);
+    assert.equal(created.body.billing.chargedMilliYuan, 0);
+    assert.equal(created.body.task.nodeShareMilliYuan, 0);
+    assert.equal(created.body.task.platformShareMilliYuan, 0);
+    if (scenario.free) {
+      const node = await f.register();
+      const task = (await f.claim(node)).body.task;
+      assert.ok(task, "an eligible zero-balance birthday order is executable");
+      assert.equal((await f.callback(node, task)).status, 200);
+      assert.equal((await f.callback(node, task)).body.idempotent, true);
+      assert.equal(f.rows.codexMarketTasks[0].status, "completed");
+      assert.equal(f.rows.codexMarketTasks[0].chargedMilliYuan, 0);
+      assert.equal(f.rows.codexMarketTasks[0].nodeShareMilliYuan, 0);
+      assert.equal(f.rows.codexMarketTasks[0].platformShareMilliYuan, 0);
+    } else {
+      assert.equal(created.body.code, "INSUFFICIENT_BALANCE");
+      assert.equal(created.body.task.status, "rejected");
+    }
+    assert.equal(f.rows.wallets[0].balanceFen, 0);
+    assert.equal(f.rows.wallets.length, 1);
+    assert.equal(f.rows.codexMarketLedger?.length || 0, 0);
+  });
+});
+
+test("birthday Longtu membership exemption does not require a wallet or commission recipient", async () => {
+  const f = fixture({ member: true });
+  f.rows.wallets = [];
+  f.rows.users = f.rows.users.filter((user) => user.role !== "admin");
+  const quote = await f.call("/quotes", { model: "longtu", requestId: "birthday-without-wallet", request: BIRTHDAY_ARTWORK_REQUEST });
+  assert.equal(quote.status, 201);
+  assert.equal(quote.body.availableBalanceMilliYuan, 0);
+  assert.equal(quote.body.affordable, true);
+  const order = await f.call("/tasks", { quoteId: quote.body.quoteId, requestId: "birthday-without-wallet" });
+  assert.equal(order.status, 201);
+  const node = await f.register();
+  const task = (await f.claim(node)).body.task;
+  assert.equal((await f.callback(node, task)).status, 200);
+  assert.equal(f.rows.wallets.length, 0);
+  assert.equal(f.rows.codexMarketLedger?.length || 0, 0);
+});
+
+test("birthday Longtu paid quote cannot charge after membership becomes active; fresh quote is free", async () => {
+  const f = fixture({ balance: 100 });
+  const input = { model: "longtu", requestId: "birthday-before-membership", request: BIRTHDAY_ARTWORK_REQUEST };
+  const paidQuote = await f.call("/quotes", input);
+  assert.equal(paidQuote.body.requiredMilliYuan, 182);
+  f.rows.subscriptions = [{ ownerId: f.accounts.requester, products: { gulong_engine_monthly: {
+    enabled: true, status: "active", currentPeriodStart: new Date("2026-09-01T00:00:00Z"), currentPeriodEnd: new Date("2026-10-01T00:00:00Z"),
+  } } }];
+  const refused = await f.call("/tasks", { quoteId: paidQuote.body.quoteId, requestId: input.requestId });
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.code, "QUOTE_AUTHORIZATION_CHANGED");
+  assert.equal(f.rows.codexMarketTasks?.length || 0, 0);
+  assert.equal(f.rows.codexMarketLedger?.length || 0, 0);
+  assert.equal(f.rows.wallets[0].balanceFen, 100);
+  const fresh = await f.call("/quotes", { ...input, requestId: "birthday-after-membership" });
+  assert.equal(fresh.body.requiredMilliYuan, 0);
+  const order = await f.call("/tasks", { quoteId: fresh.body.quoteId, requestId: "birthday-after-membership" });
+  assert.equal(order.status, 201);
+  assert.equal(order.body.billing.chargedMilliYuan, 0);
+  assert.equal(f.rows.wallets[0].balanceFen, 100);
 });
 
 test("Longyan reserves a billing ceiling and settles authenticated actual usage with one refund and a 50/50 split", async () => {
