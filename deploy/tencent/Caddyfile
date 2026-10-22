@@ -26,9 +26,12 @@ https://111.229.70.235 {
 
 	@loveLetterApi path /api/love-letters /api/love-letters/*
 	handle @loveLetterApi {
-		header >Referrer-Policy "no-referrer"
-		header >Cache-Control "private, no-store"
-		header >X-Robots-Tag "noindex, nofollow, noarchive"
+		header {
+			Referrer-Policy "no-referrer"
+			Cache-Control "private, no-store"
+			X-Robots-Tag "noindex, nofollow, noarchive"
+			defer
+		}
 		reverse_proxy 127.0.0.1:8787
 	}
 
@@ -45,9 +48,12 @@ https://111.229.70.235 {
 	@loveLetter path /love-letter /love-letter/*
 	handle @loveLetter {
 		root * /opt/gulong/current/dist/client
-		header Cache-Control "private, no-store"
-		header >Referrer-Policy "no-referrer"
-		header X-Robots-Tag "noindex, nofollow, noarchive"
+		header {
+			Referrer-Policy "no-referrer"
+			Cache-Control "private, no-store"
+			X-Robots-Tag "noindex, nofollow, noarchive"
+			defer
+		}
 		try_files {path} /index.html
 		file_server
 	}

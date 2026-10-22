@@ -39,5 +39,5 @@ test("Tencent deferred security headers cannot overwrite the private letter refe
   const deferredSecurity = config.match(/header\s*\{\s*-Server[\s\S]*?\}/)?.[0];
   assert.ok(deferredSecurity);
   assert.doesNotMatch(deferredSecurity, /Referrer-Policy/);
-  assert.equal((config.match(/header >Referrer-Policy "no-referrer"/g) || []).length, 2);
+  assert.equal((config.match(/header\s*\{\s*Referrer-Policy "no-referrer"[\s\S]*?\bdefer\s*\}/g) || []).length, 2);
 });
