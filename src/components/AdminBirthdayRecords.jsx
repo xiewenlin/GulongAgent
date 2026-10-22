@@ -12,6 +12,13 @@ const displayDate = (value) => {
 };
 const recordName = (type, item) => type === "walls" ? `${item.name || "未命名"}的生日墙` : `${item.senderName || "未署名"} → ${item.recipientName || "未填写收件人"}`;
 const recordPath = (type, id) => `/api/admin/birthday-records/${type}/${encodeURIComponent(id)}`;
+const letterDraft = (record) => ({
+  revision: Number.isInteger(record.revision) ? record.revision : 0,
+  senderName: record.senderName || "",
+  recipientName: record.recipientName || "",
+  body: record.body || "",
+  backgroundColor: /^#[0-9a-f]{6}$/i.test(record.backgroundColor || "") ? record.backgroundColor : "#FFF8F2",
+});
 
 function RecordDetail({ selected, onClose, onUpdated }) {
   const [record, setRecord] = useState(null);
@@ -28,19 +35,20 @@ function RecordDetail({ selected, onClose, onUpdated }) {
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; saveRequest.current?.abort(); }; }, []);
   useEffect(() => {
     const controller = new AbortController();
-    setRecord(null); setError("");
+    setRecord(null); setDraft(null); setError("");
     apiFetch(recordPath(selected.type, selected.item.id), { signal: controller.signal, cache: "no-store" })
       .then((result) => {
         if (controller.signal.aborted) return;
         if (result.type !== selected.type || result.record?.id !== selected.item.id) throw new Error("记录详情与所选内容不一致，请重试。");
         setRecord(result.record);
+        if (selected.type === "letters" && selected.action === "edit") setDraft(letterDraft(result.record));
       })
       .catch((reason) => { if (!controller.signal.aborted) setError(reason.message || "暂时无法读取详情，请稍后重试。"); });
     return () => controller.abort();
-  }, [selected.type, selected.item.id, attempt]);
+  }, [selected.type, selected.item.id, selected.action, attempt]);
   const isWall = selected.type === "walls";
   function edit() {
-    setDraft({ revision: Number.isInteger(record.revision) ? record.revision : 0, senderName: record.senderName || "", recipientName: record.recipientName || "", body: record.body || "", backgroundColor: /^#[0-9a-f]{6}$/i.test(record.backgroundColor || "") ? record.backgroundColor : "#FFF8F2" });
+    setDraft(letterDraft(record));
     setSaveError(""); setConflict(false); setNotice("");
   }
   async function save(event) {
@@ -148,9 +156,21 @@ export function AdminBirthdayRecords() {
       {notice && <div className="admin-birthday-notice success" role="status"><CheckCircle size={19} /><span>{notice}</span></div>}
       {error && <div className="admin-birthday-notice error" role="alert"><WarningCircle size={19} /><span>{error}</span><button type="button" disabled={locked || loading} onClick={() => setRevision((value) => value + 1)}>重新读取</button></div>}
       <div className="admin-birthday-summary"><span>{loading ? "正在读取记录…" : <>共 <strong>{total.toLocaleString("zh-CN")}</strong> 条记录</>}</span><span>按创建时间倒序 · 每页 {PAGE_SIZE} 条</span></div>
-      {loading ? <div className="admin-birthday-state" role="status"><SpinnerGap size={30} className="admin-birthday-spin" /><p>正在读取{isWall ? "生日墙" : "情书"}记录…</p></div> : items.length ? <div className={`admin-birthday-list ${filters.type}`}><div className="admin-birthday-list-head"><span>{isWall ? "生日墙 / 记录编号" : "写信人 / 收件人"}</span><span>{isWall ? "祝福数量" : "正文 / 分享保护"}</span><span>创建时间</span><span>操作</span></div>{items.map((item) => <article key={item.id} className="admin-birthday-row"><div className="admin-birthday-record-title"><strong>{recordName(filters.type, item)}</strong><small>{item.id}</small></div><div className="admin-birthday-record-count"><span className="admin-birthday-cell-label">{isWall ? "祝福数量" : "正文 / 分享保护"}</span><strong>{isWall ? `${item.noteCount || 0} 份祝福` : `${Number(item.characterCount || 0).toLocaleString("zh-CN")} 字`}</strong>{!isWall && <small><LockKey size={13} />{item.passwordSet ? "已设阅读密码" : "待写信人补设密码（已锁定）"}</small>}</div><div className="admin-birthday-record-time"><span className="admin-birthday-cell-label">创建时间</span><time dateTime={item.createdAt}>{displayDate(item.createdAt)}</time>{!isWall && item.date && <small>信件日期 {item.date}</small>}</div><div className="admin-birthday-row-actions"><button className="button small secondary" type="button" disabled={locked} onClick={() => setSelected({ type: filters.type, item })}><Eye size={16} />查看</button><button className="button small danger" type="button" disabled={locked} onClick={() => remove(item)}>{removing === item.id ? <SpinnerGap size={16} className="admin-birthday-spin" /> : <Trash size={16} />}删除</button></div></article>)}</div> : !error && <div className="admin-birthday-state"><EnvelopeSimple size={33} weight="duotone" /><h3>{filters.q ? "没有匹配的记录" : `暂无${isWall ? "生日墙" : "情书"}记录`}</h3><p>{filters.q ? "请调整关键词后重新搜索。" : "用户创建的内容会显示在这里。"}</p></div>}
+      {loading ? <div className="admin-birthday-state" role="status"><SpinnerGap size={30} className="admin-birthday-spin" /><p>正在读取{isWall ? "生日墙" : "情书"}记录…</p></div> : items.length ? <div className={`admin-birthday-list ${filters.type}`}>
+        <div className="admin-birthday-list-head"><span>{isWall ? "生日墙 / 记录编号" : "写信人 / 收件人"}</span><span>{isWall ? "祝福数量" : "正文 / 分享保护"}</span><span>创建时间</span><span>操作</span></div>
+        {items.map((item) => <article key={item.id} className="admin-birthday-row">
+          <div className="admin-birthday-record-title"><strong>{recordName(filters.type, item)}</strong><small>{item.id}</small></div>
+          <div className="admin-birthday-record-count"><span className="admin-birthday-cell-label">{isWall ? "祝福数量" : "正文 / 分享保护"}</span><strong>{isWall ? `${item.noteCount || 0} 份祝福` : `${Number(item.characterCount || 0).toLocaleString("zh-CN")} 字`}</strong>{!isWall && <small><LockKey size={13} />{item.passwordSet ? "已设阅读密码" : "待写信人补设密码（已锁定）"}</small>}</div>
+          <div className="admin-birthday-record-time"><span className="admin-birthday-cell-label">创建时间</span><time dateTime={item.createdAt}>{displayDate(item.createdAt)}</time>{!isWall && item.date && <small>信件日期 {item.date}</small>}{!isWall && item.updatedAt && <small>最近修改 <time dateTime={item.updatedAt}>{displayDate(item.updatedAt)}</time></small>}</div>
+          <div className="admin-birthday-row-actions">
+            <button className="button small secondary" type="button" disabled={locked} aria-label={`查看详情：${recordName(filters.type, item)}`} onClick={() => setSelected({ type: filters.type, item, action: "view" })}><Eye size={16} />查看详情</button>
+            {!isWall && <button className="button small secondary" type="button" disabled={locked} aria-label={`修改情书：${recordName("letters", item)}`} onClick={() => setSelected({ type: "letters", item, action: "edit" })}><PencilSimple size={16} />修改</button>}
+            <button className="button small danger" type="button" disabled={locked} aria-label={`删除：${recordName(filters.type, item)}`} onClick={() => remove(item)}>{removing === item.id ? <SpinnerGap size={16} className="admin-birthday-spin" /> : <Trash size={16} />}删除</button>
+          </div>
+        </article>)}
+      </div> : !error && <div className="admin-birthday-state"><EnvelopeSimple size={33} weight="duotone" /><h3>{filters.q ? "没有匹配的记录" : `暂无${isWall ? "生日墙" : "情书"}记录`}</h3><p>{filters.q ? "请调整关键词后重新搜索。" : "用户创建的内容会显示在这里。"}</p></div>}
       <nav className="admin-birthday-pagination" aria-label="历史记录分页"><span>第 {filters.page} / {totalPages} 页</span><div><button className="button secondary" type="button" disabled={loading || locked || filters.page <= 1} onClick={() => setFilters((current) => ({ ...current, page: current.page - 1 }))}><ArrowLeft size={17} />上一页</button><button className="button secondary" type="button" disabled={loading || locked || filters.page >= totalPages} onClick={() => setFilters((current) => ({ ...current, page: current.page + 1 }))}>下一页<ArrowRight size={17} /></button></div></nav>
     </div>
-    {selected && <RecordDetail key={`${selected.type}:${selected.item.id}`} selected={selected} onClose={() => setSelected(null)} onUpdated={() => setRevision((value) => value + 1)} />}
+    {selected && <RecordDetail key={`${selected.type}:${selected.item.id}:${selected.action}`} selected={selected} onClose={() => setSelected(null)} onUpdated={() => setRevision((value) => value + 1)} />}
   </section>;
 }

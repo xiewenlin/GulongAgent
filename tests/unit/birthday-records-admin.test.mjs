@@ -101,6 +101,33 @@ test("letter editing validates content and cannot inject password, dates or arbi
   assert.equal(normalizeAdminLetterEdit({ ...edit(), body: "<script>内容</script>" }).body, "<script>内容</script>");
 });
 
+test("letter history supports name/body/ID searches, latest detail, edits and confirmed deletion lifecycle", async () => {
+  const f = fixture();
+  for (const keyword of ["星河", "小满", "完整保留", LETTER.slice(0, 12)]) {
+    const result = await f.call(`?type=letters&q=${encodeURIComponent(keyword)}`);
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.body.items.map((item) => item.id), [LETTER]);
+  }
+  f.now = new Date(+START + 60_000);
+  const before = await f.call(`/letters/${LETTER}`);
+  const saved = await f.call(`/letters/${LETTER}`, "PATCH", { ...edit(before.body.record.revision), body: "新的独特关键词 💓\n第二段完整保留" });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.record.updatedAt, f.now.toISOString());
+  assert.equal(saved.body.record.passwordSet, true);
+  assert.equal((await f.call(`?type=letters&q=${encodeURIComponent("私密")}`)).body.total, 0);
+  const found = await f.call(`?type=letters&q=${encodeURIComponent("独特关键词")}&page=1&pageSize=20`);
+  assert.equal(found.body.items[0].id, LETTER);
+  assert.equal(found.body.items[0].revision, 1);
+  assert.equal(found.body.items[0].updatedAt, f.now.toISOString());
+  assert.equal(found.body.items[0].body, undefined);
+  assert.equal((await f.call(`/letters/${LETTER}`)).body.record.body, saved.body.record.body);
+  assert.equal((await f.call(`/letters/${LETTER}`, "DELETE")).body.removed, true);
+  assert.equal((await f.call(`?type=letters&q=${encodeURIComponent("独特关键词")}`)).body.total, 0);
+  assert.equal((await f.call(`/letters/${LETTER}`)).status, 404);
+  assert.equal(f.collection("loveLetters").rows[1].body, "未设密的旧信");
+  assert.doesNotMatch(JSON.stringify(f.collection("contentManagementAudit").rows), /独特关键词|scrypt-secret/);
+});
+
 test("wall deletion atomically removes all content, invalidates public link and leaves unrelated data intact", async () => {
   const f = fixture();
   assert.deepEqual((await f.call(`/walls/${WALL}`, "DELETE")).body, { ok: true, removed: true });
