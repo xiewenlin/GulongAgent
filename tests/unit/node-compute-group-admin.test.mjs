@@ -124,3 +124,11 @@ test("node group editor requires fresh state, confirmation, pagination and saves
   assert.match(source, /加载更多分组/); assert.match(source, /显示全部/); assert.match(source, /controller.signal.aborted/);
   assert.doesNotMatch(source, /\/api\/desktop|window.confirm|Authorization:|localStorage|method: "POST"/);
 });
+
+test("Vercel forwards deep admin node group routes to the platform instead of returning hosting 404", async () => {
+  const configuration = JSON.parse(await readFile(new URL("../../vercel.json", import.meta.url), "utf8"));
+  const rule = configuration.rewrites.find((entry) => entry.source === "/api/admin/nodes/:id/compute-group");
+  assert.equal(rule?.destination, "/api/platform?_platform_path=admin/nodes/:id/compute-group");
+  const fixturePath = rule.destination.replace(":id", "1".repeat(24));
+  assert.equal(new URL(fixturePath, "https://example.test").searchParams.get("_platform_path"), `admin/nodes/${"1".repeat(24)}/compute-group`);
+});

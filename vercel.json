@@ -106,6 +106,10 @@
       "destination": "/api/platform?_platform_path=admin/compute-groups"
     },
     {
+      "source": "/api/admin/nodes/:id/compute-group",
+      "destination": "/api/platform?_platform_path=admin/nodes/:id/compute-group"
+    },
+    {
       "source": "/api/desktop/compute-groups",
       "destination": "/api/platform?_platform_path=desktop/compute-groups"
     },
