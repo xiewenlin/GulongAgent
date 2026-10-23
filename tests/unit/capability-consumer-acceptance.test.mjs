@@ -46,7 +46,7 @@ function report(input, acceptanceId) {
 
 function fixture({ auditFails = false, activationFails = false } = {}) {
   const rows = { nodeAccountBindings: [{ _id: BINDING, userId: USER, nodeId: "node-one", status: "active", revokedAt: null }] };
-  const hooks = { admin: true, authenticated: true, trusted: true };
+  const hooks = { admin: true, authenticated: true, trusted: true, heartbeats: [], presenceFails: false };
   const getCollection = async (name) => {
     rows[name] ||= [];
     return {
@@ -75,6 +75,7 @@ function fixture({ auditFails = false, activationFails = false } = {}) {
   };
   const app = new OpenAPIHono();
   registerCapabilityConsumerAcceptanceRoutes(app, { getCollection, now: () => NOW,
+    readNodeHeartbeats: async () => { if (hooks.presenceFails) throw new Error("heartbeat unavailable"); return hooks.heartbeats; },
     requireAdmin: async (c) => !hooks.authenticated ? { error: c.json({ code: "UNAUTHORIZED", message: "请登录" }, 401) }
       : !hooks.admin ? { error: c.json({ code: "FORBIDDEN", message: "仅管理员可操作" }, 403) } : { user: { id: String(USER), role: "admin" } },
     requireTrustedMutation: (c) => hooks.trusted ? null : c.json({ code: "ORIGIN_REJECTED", message: "来源不受信任" }, 403),
@@ -145,7 +146,7 @@ test("binding search is exact for node IDs and literal fuzzy for names", async (
   f.rows.nodeAccountBindings[0].nodeName = "节点[测试]";
   let result = await readBindings(f, "?node_id=node-one");
   assert.equal(result.body.bindings.length, 1);
-  assert.deepEqual(Object.keys(result.body.bindings[0]).sort(), ["binding_id", "compute_group_id", "node_id", "node_name", "user_id"]);
+  assert.deepEqual(Object.keys(result.body.bindings[0]).sort(), ["binding_id", "compute_group_id", "last_seen_at", "node_id", "node_name", "online", "online_expires_at", "online_status", "user_id"]);
   assert.equal((await readBindings(f, "?q=" + encodeURIComponent("[测试]"))).body.bindings.length, 1);
   assert.equal((await readBindings(f, "?q=not-present")).body.bindings.length, 0);
 });
@@ -158,6 +159,54 @@ test("unknown, duplicate and oversized filters are rejected but exact platform r
 test("inactive and revoked bindings are not selectable", async () => {
   const f = fixture(); f.rows.nodeAccountBindings[0].status = "revoked";
   assert.deepEqual((await readBindings(f)).body.bindings, []);
+});
+
+test("binding presence uses recent server heartbeat, never binding edits or acceptance", async () => {
+  const f = fixture();
+  f.rows.nodeAccountBindings[0].updatedAt = NOW;
+  seed(f);
+  let result = await readBindings(f);
+  assert.equal(result.headers.get("cache-control"), "private, no-store");
+  assert.equal(result.body.checked_at, NOW.toISOString());
+  assert.equal(result.body.heartbeat_window_seconds, 180);
+  assert.equal(result.body.bindings[0].online_status, "offline");
+  f.rows.nodeAccountBindings[0].lastSeenAt = new Date(+NOW - 1000);
+  result = await readBindings(f);
+  assert.equal(result.body.bindings[0].online_status, "online");
+  assert.equal(result.body.bindings[0].online, true);
+  assert.equal(result.body.bindings[0].online_expires_at, new Date(+NOW + 179000).toISOString());
+  f.rows.nodeAccountBindings[0].lastSeenAt = new Date(+NOW - 180000);
+  assert.equal((await readBindings(f)).body.bindings[0].online_status, "offline");
+});
+
+test("consumer heartbeat is binding/node scoped, independent of model admission and read only", async () => {
+  const f = fixture();
+  f.rows.nodeAccountBindings[0].computeGroupId = "group-preserved";
+  f.hooks.heartbeats = [
+    { bindingId: String(new ObjectId()), nodeId: "node-one", lastSeenAt: NOW },
+    { bindingId: String(BINDING), nodeId: "other-node", lastSeenAt: NOW },
+  ];
+  assert.equal((await readBindings(f)).body.bindings[0].online, false);
+  f.hooks.heartbeats.push({ bindingId: String(BINDING), nodeId: "node-one", lastSeenAt: NOW });
+  const before = clone(f.rows);
+  const result = await readBindings(f);
+  assert.equal(result.body.bindings[0].online_status, "online");
+  assert.equal(result.body.bindings[0].compute_group_id, "group-preserved");
+  assert.deepEqual(f.rows, before);
+});
+
+test("heartbeat read failure returns unknown without hiding safe binding and group fields", async () => {
+  const f = fixture(); f.hooks.presenceFails = true;
+  f.rows.nodeAccountBindings[0].lastSeenAt = NOW;
+  f.rows.nodeAccountBindings[0].email = "must-not-return@example.com";
+  f.rows.nodeAccountBindings[0].tokenHash = "must-not-return";
+  const result = await readBindings(f);
+  assert.equal(result.status, 200);
+  assert.equal(result.body.presence_unavailable, true);
+  assert.equal(result.body.bindings[0].online_status, "unknown");
+  assert.equal(result.body.bindings[0].online, false);
+  assert.equal(result.body.bindings[0].binding_id, String(BINDING));
+  assert.equal(JSON.stringify(result.body).includes("must-not-return"), false);
 });
 test("legacy list effective expiry is derived without mutating the stored history", async () => {
   const f = fixture(), saved = seed(f); saved.expiresAt = new Date(+NOW - 1);

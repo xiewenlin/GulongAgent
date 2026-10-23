@@ -292,23 +292,5 @@ jobs:
       - name: Verify private-by-link letters without creating content
         run: node scripts/verify-love-letter-deployment.mjs https://sologle.com https://111.229.70.235
 
-      - name: Start the reviewed fixed-music window after both targets are ready
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          test -n "$TENCENT_SSH_HOST"
-          test -n "$TENCENT_SSH_USER"
-          test -n "$TENCENT_SSH_PRIVATE_KEY"
-          test -n "$TENCENT_SSH_KNOWN_HOSTS"
-          key="$RUNNER_TEMP/gulong-fixed-retest-key"
-          known_hosts="$RUNNER_TEMP/gulong-fixed-retest-known-hosts"
-          trap 'rm -f -- "$key" "$known_hosts"' EXIT
-          install -m 600 /dev/null "$key"
-          install -m 600 /dev/null "$known_hosts"
-          printf '%s\n' "$TENCENT_SSH_PRIVATE_KEY" > "$key"
-          printf '%s\n' "$TENCENT_SSH_KNOWN_HOSTS" > "$known_hosts"
-          ssh -p "${TENCENT_SSH_PORT:-22}" -i "$key" \
-            -o UserKnownHostsFile="$known_hosts" -o StrictHostKeyChecking=yes \
-            -o IdentitiesOnly=yes -o ForwardAgent=no -o BatchMode=yes \
-            "$TENCENT_SSH_USER@$TENCENT_SSH_HOST" \
-            "cd /opt/gulong/current && node --env-file=/etc/gulong/gulong.env scripts/activate-fixed-music-retest.mjs --commit '$GITHUB_SHA'"
+      # Software deployment never activates inference windows or model budgets.
+      # Explicit model verification remains a separately authorized operation.

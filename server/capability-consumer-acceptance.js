@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import { z } from "@hono/zod-openapi";
 import { normalizeSpecialNodeModels } from "./worklucky-capabilities.js";
+import { NODE_PRESENCE_WINDOW_MS, projectSharedNodePresence, readSharedNodeHeartbeats } from "./shared-node-presence.js";
 
 const COLLECTION = "capabilityConsumerAcceptances";
 const MAX_AGE_MS = 30 * 86400_000;
@@ -110,11 +111,16 @@ export function registerCapabilityConsumerAcceptanceRoutes(app, dependencies) {
       ...(keyword ? { $or: ["nodeName", "deviceName", "nodeId"].map((field) => ({ [field]: { $regex: keyword, $options: "i" } })) } : {}),
     };
     const bindings = await (await getCollection("nodeAccountBindings")).find(filter, {
-      projection: { _id: 1, nodeId: 1, nodeName: 1, deviceName: 1, userId: 1, computeGroupId: 1, updatedAt: 1 },
+      projection: { _id: 1, nodeId: 1, nodeName: 1, deviceName: 1, userId: 1, computeGroupId: 1, updatedAt: 1, status: 1, revokedAt: 1, lastSeenAt: 1 },
     }).sort({ updatedAt: -1, _id: -1 }).limit(input.limit).toArray();
-    return c.json({ bindings: bindings.map((binding) => ({
+    const instant = new Date(now()); let heartbeats = [], presenceUnavailable = false;
+    try { heartbeats = await (dependencies.readNodeHeartbeats || readSharedNodeHeartbeats)(getCollection, bindings, instant); }
+    catch { presenceUnavailable = true; }
+    return c.json({ checked_at: instant.toISOString(), heartbeat_window_seconds: NODE_PRESENCE_WINDOW_MS / 1000, presence_unavailable: presenceUnavailable,
+      bindings: bindings.map((binding) => ({
       binding_id: String(binding._id), node_id: binding.nodeId, node_name: binding.nodeName || binding.deviceName || null,
       user_id: binding.userId == null ? null : String(binding.userId), compute_group_id: binding.computeGroupId == null ? null : String(binding.computeGroupId),
+      ...projectSharedNodePresence(binding, heartbeats, instant, presenceUnavailable),
     })) });
   });
 
@@ -143,10 +149,11 @@ export function registerCapabilityConsumerAcceptanceRoutes(app, dependencies) {
 
   if (openapi !== false && app.openAPIRegistry) {
     app.openAPIRegistry.registerPath({ method: "get", path: bindingsPath, tags: ["Consumer Acceptance"], summary: "管理员搜索可登记验收的有效节点绑定", security: [{ sessionCookie: [] }],
-      description: "仅管理员可查询 active 且未撤销的绑定。node_id 精确匹配，q 按节点名、设备名或节点 ID 进行字面量模糊搜索；最多 50 条，按 updatedAt 倒序。仅返回绑定 ID、节点 ID/名称、用户 ID 和分组 ID，绝不返回邮箱、令牌摘要或凭据。不缓存。",
+      description: "仅管理员可查询 active 且未撤销的绑定。node_id 精确匹配，q 按节点名、设备名或节点 ID 进行字面量模糊搜索；最多50条。online/online_status取绑定最后心跳、统一消费者上报与自动库存上报中的服务端时间，最近3分钟为在线；缺心跳/超时离线，读取异常或异常时间未知。checked_at为服务器快照时间，online_expires_at用于页面自动过期；不取updatedAt/激活/验收通过当在线。仅管理员显示，不代表GPU空闲/模型准入/派单资格，不触发任务。绝不返回邮箱、令牌摘要或凭据，不缓存。",
       request: { query: bindingQuerySchema },
-      responses: { 200: { description: "可用于验收登记的有效绑定列表", content: { "application/json": { schema: z.object({ bindings: z.array(z.object({
+      responses: { 200: { description: "绑定与只读心跳状态列表", content: { "application/json": { schema: z.object({ checked_at: z.iso.datetime(), heartbeat_window_seconds: z.number().int(), presence_unavailable: z.boolean(), bindings: z.array(z.object({
         binding_id: z.string(), node_id: z.string(), node_name: z.string().nullable(), user_id: z.string().nullable(), compute_group_id: z.string().nullable(),
+        online: z.boolean(), online_status: z.enum(["online", "offline", "unknown"]), last_seen_at: z.iso.datetime().nullable(), online_expires_at: z.iso.datetime().nullable(),
       })) }) } } }, 400: { description: "筛选条件、长度、数量或重复参数不正确" }, 401: { description: "未登录" }, 403: { description: "不是管理员" } } });
     app.openAPIRegistry.registerPath({ method: "get", path, tags: ["Consumer Acceptance"], summary: "管理员查询可信消费者验收记录", security: [{ sessionCookie: [] }],
       responses: { 200: { description: "仅管理员可见；不缓存；最多返回 100 条验收记录。保留原始 status，额外返回按当前有效期推导的 effective_status；原 active 到期或有效期无效时显示 expired。该字段不代表节点在线。" }, 401: { description: "未登录" }, 403: { description: "不是管理员" } } });

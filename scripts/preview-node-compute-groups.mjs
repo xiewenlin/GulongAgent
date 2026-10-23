@@ -15,10 +15,12 @@ if ((await lstat(cache)).isSymbolicLink() || (await realpath(cache)).toLowerCase
 const tables = new Map();
 const table = (name) => { if (!tables.has(name)) tables.set(name, createCapabilityMemoryCollection()); return tables.get(name); };
 for (let n = 1; n <= 120; n++) table("computeGroups").rows.push({ id: `gug_${n.toString(16).padStart(32, "0")}`, name: n === 120 ? "影视团队 · 搜索测试" : `创作团队 ${n}`, createdAt: new Date() });
-for (const digit of ["1", "2"]) table("nodeAccountBindings").rows.push({ _id: new ObjectId(digit.repeat(24)), userId: new ObjectId("a".repeat(24)), nodeId: digit.repeat(64), nodeName: `本地预览节点${digit}`, status: "active", revokedAt: null, computeGroupId: table("computeGroups").rows[0].id, updatedAt: new Date() });
+for (const digit of ["1", "2"]) table("nodeAccountBindings").rows.push({ _id: new ObjectId(digit.repeat(24)), userId: new ObjectId("a".repeat(24)), nodeId: digit.repeat(64), nodeName: digit === "1" ? "培训 1 号机（本地验收样例）" : "离线节点（本地验收样例）", status: "active", revokedAt: null, computeGroupId: table("computeGroups").rows[0].id, updatedAt: new Date(), lastSeenAt: new Date(Date.now() - (digit === "1" ? 1000 : 600000)) });
 const app = new OpenAPIHono();
 const guards = {
   getCollection: async (name) => table(name),
+  // Synthetic heartbeat for the explicitly labelled loopback sample only.
+  readNodeHeartbeats: async () => [{ bindingId: "1".repeat(24), nodeId: "1".repeat(64), lastSeenAt: new Date(Date.now() - 1000) }],
   requireAdmin: async () => ({ user: { id: "a".repeat(24), role: "admin" } }),
   requireTrustedMutation: (c) => c.req.header("origin") === "http://127.0.0.1:5173" ? null : c.json({ message: "仅限本地预览" }, 403),
 };

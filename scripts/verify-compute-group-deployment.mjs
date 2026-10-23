@@ -5,6 +5,14 @@ for (const target of targets) {
   const documentResponse = await fetch(`${origin}/api/openapi.json`, { cache: "no-store", signal: AbortSignal.timeout(30_000) });
   if (!documentResponse.ok) throw new Error(`${origin}: OpenAPI HTTP ${documentResponse.status}`);
   const document = await documentResponse.json();
+  const bindingsPath = "/api/admin/capability-consumers/bindings";
+  const presenceSchema = document.paths[bindingsPath]?.get?.responses?.["200"]?.content?.["application/json"]?.schema;
+  const nodeProperties = presenceSchema?.properties?.bindings?.items?.properties;
+  if (nodeProperties?.online?.type !== "boolean" || JSON.stringify(nodeProperties?.online_status?.enum) !== JSON.stringify(["online", "offline", "unknown"])
+    || !presenceSchema?.properties?.checked_at || !nodeProperties?.online_expires_at) throw new Error(`${origin}: missing read-only node presence contract`);
+  const bindingsResponse = await fetch(`${origin}${bindingsPath}`, { cache: "no-store", signal: AbortSignal.timeout(30_000) });
+  if (bindingsResponse.status !== 401 || !bindingsResponse.headers.get("cache-control")?.includes("no-store")) throw new Error(`${origin}: node presence must be administrator-only and uncached`);
+  console.log(`${origin}${bindingsPath}: presence contract and administrator gate verified (401); model calls: 0`);
   const adminPath = "/api/admin/nodes/000000000000000000000000/compute-group";
   for (const method of ["GET", "PUT"]) {
     if (!document.paths["/api/admin/nodes/{id}/compute-group"]?.[method.toLowerCase()]) throw new Error(`${origin}: missing admin node group contract`);

@@ -18,6 +18,14 @@
 .capability-consumers-panel .cc-binding { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; min-width: 0; padding: 14px; text-align: left; border: 1px solid var(--line); border-radius: 12px; color: var(--ink); background: var(--surface-strong); cursor: pointer; }
 .capability-consumers-panel .cc-binding > span { display: grid; gap: 5px; min-width: 0; }
 .capability-consumers-panel .cc-binding strong { font-size: 15px; overflow-wrap: anywhere; }
+.capability-consumers-panel .cc-node-title { display: flex; align-items: center; flex-wrap: wrap; gap: 9px 13px; min-width: 0; }
+.capability-consumers-panel .cc-node-presence { display: inline-flex; align-items: center; gap: 8px; flex: 0 0 auto; white-space: nowrap; font-size: 12px; font-weight: 700; line-height: 24px; color: #667671; }
+.capability-consumers-panel .cc-node-dot { display: block; width: 18px; height: 18px; flex: 0 0 18px; border-radius: 50%; background: #929e9a; box-shadow: 0 0 0 3px #929e9a20; }
+.capability-consumers-panel .cc-node-presence.is-online { color: #087c52; }
+.capability-consumers-panel .cc-node-presence.is-online .cc-node-dot { background: #15a36e; box-shadow: 0 0 0 3px #15a36e20; }
+.capability-consumers-panel .cc-node-presence.is-offline { color: #b13b3b; }
+.capability-consumers-panel .cc-node-presence.is-offline .cc-node-dot { background: #dc4c4c; box-shadow: 0 0 0 3px #dc4c4c20; }
+.capability-consumers-panel .cc-presence-hint { margin: 13px 0 0; color: var(--muted); font-size: 12px; }
 .capability-consumers-panel .cc-binding small { color: var(--muted); font-size: 11px; }
 .capability-consumers-panel .cc-binding > svg { flex-shrink: 0; color: var(--muted); }
 .capability-consumers-panel .cc-binding.selected { border-color: var(--jade); background: var(--jade-soft); }
