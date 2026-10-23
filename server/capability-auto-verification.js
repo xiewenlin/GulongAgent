@@ -14,6 +14,7 @@ import { createFixedMusicRetestBudget } from "./capability-fixed-music-retest.js
 import { createConditionalSixBudget } from "./capability-conditional-six-budget.js";
 import { createGenericMusicContinuationBudget } from "./capability-generic-music-continuation.js";
 import { createWorkLuckyReviewedAdmission } from "./worklucky-reviewed-admission.js";
+import { createInstalledNineWindow, installedNineRound } from "./capability-installed-nine-window.js";
 
 export const AUTO_VERIFICATION_PROTOCOL = "gulong-auto-verification-v1";
 export const AUTO_VERIFICATION_COLLECTION = "capabilityAutoVerifications";
@@ -157,6 +158,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
   const now = dependencies.now || (() => new Date());
   const supplementalBudget = createCapabilityVerificationSupplement({ getCollection, now });
   const releaseBudget = createCapabilityReleaseVerificationBudget({ getCollection, now });
+  const installedNineWindow = createInstalledNineWindow({ getCollection, now });
   const captionBudget = createCapabilityCaptionRetestBudget({ getCollection, now });
   const fixedMusicBudget = createFixedMusicRetestBudget({ getCollection, now });
   const conditionalSixBudget = createConditionalSixBudget({ getCollection, now });
@@ -321,11 +323,14 @@ export function createCapabilityAutoVerificationService(dependencies) {
         $or: [{ matrixSha256: { $ne: inventory.matrixSha256 } }, { computeGroupId: { $ne: group(active.computeGroupId) } }] },
       { $set: { status: "invalidated", updatedAt: instant, error: { code: "VERIFICATION_MATRIX_CHANGED", message: "模型、制品或分组已变化，等待重新自动验收" } } });
       for (const model of inventory.models) {
-        const _id = sha({ bindingId: String(active._id), group: group(active.computeGroupId), matrix: inventory.matrixSha256, model });
+        const verificationWindowId = installedNineRound(enrolledBinding, inventory);
+        const _id = sha({ bindingId: String(active._id), group: group(active.computeGroupId), matrix: inventory.matrixSha256, model,
+          ...(verificationWindowId ? { verificationWindowId } : {}) });
         const adapter = adapterFor(inventory, model);
         await records.updateOne({ _id }, { $setOnInsert: { bindingId: String(active._id), nodeId: active.nodeId, userId: String(active.userId),
           computeGroupId: group(active.computeGroupId), capabilityId: inventory.capabilityId, capabilityVersion: inventory.capabilityVersion,
           artifactSha256: inventory.artifactSha256, matrixSha256: inventory.matrixSha256, model, inventory,
+          ...(verificationWindowId ? { verificationWindowId } : {}),
           status: !inventory.enabled ? "disabled" : !automatic ? "migration_deferred" : adapter ? "pending" : "adapter_required", attempts: 0, createdAt: instant,
           ...(!automatic ? { automaticMigrationEnabled: false } : {}) },
         $set: { reportedAt: instant, updatedAt: instant, inventoryEnabled: inventory.enabled,
@@ -411,11 +416,17 @@ export function createCapabilityAutoVerificationService(dependencies) {
       $or: [{ status: "pending" }, { status: "failed", nextRetryAt: { $lte: instant } }, { status: "active", expiresAt: { $lte: instant } }] }).sort({ createdAt: 1, _id: 1 }).limit(32).toArray();
     const budgetId = `${active._id}:${instant.toISOString().slice(0, 10)}`;
     const priorBudget = await (await getCollection(BUDGETS)).findOne({ _id: budgetId });
-    let selected = null, useSupplement = false, useReleaseBudget = false, useCaptionBudget = false, useFixedMusicBudget = false, useConditionalSixBudget = false, useGenericMusicContinuation = false,
+    let selected = null, useSupplement = false, useReleaseBudget = false, useCaptionBudget = false, useFixedMusicBudget = false, useConditionalSixBudget = false, useGenericMusicContinuation = false, useInstalledNineWindow = false,
       releaseBlocked = false, artifactBlocked = false, fixedRetryAt = null;
     for (const item of candidates) {
       if (item.automaticMigrationEnabled === false || !requiresAutomaticCapabilityVerification(active, item.capabilityId)
         || !adapterFor(item.inventory, item.model)) continue;
+      if (installedNineWindow.applies(active, item)) {
+        if (await installedNineWindow.available({ binding: active, candidate: item, controlled })) {
+          selected = item; useInstalledNineWindow = true; break;
+        }
+        releaseBlocked = true; continue;
+      }
       if (isNodeArtifactQuarantined(active, item.artifactSha256)) {
         const permission = await fixedMusicBudget.inspect({ binding: active, candidate: item, controlled });
         if (permission.available) { selected = item; useFixedMusicBudget = true; break; }
@@ -450,20 +461,21 @@ export function createCapabilityAutoVerificationService(dependencies) {
       // capabilities; never shorten the stored model backoff or reserve a lease.
       const scopes = controlled ? [await supplementalBudget.status({ binding: active }), await releaseBudget.status({ binding: active }),
         await captionBudget.status({ binding: active }), await conditionalSixBudget.status({ binding: active }),
-        await genericMusicContinuation.status({ binding: active })] : [];
-      for (const scope of scopes) if (scope?.state === "available" && scope.total.remaining > 0) {
-        const scopedBudget = scope.policy === "generic-music-three-at-a-time-until-pass-v1" ? genericMusicContinuation
+        await genericMusicContinuation.status({ binding: active }), await installedNineWindow.status({ binding: active })] : [];
+      for (const scope of scopes) if ((scope?.state === "available" || scope?.policy === "installed-nine-verification-only-v1" && scope.state === "awaiting_inventory") && scope.total.remaining > 0) {
+        const scopedBudget = scope.policy === "installed-nine-verification-only-v1" ? installedNineWindow
+          : scope.policy === "generic-music-three-at-a-time-until-pass-v1" ? genericMusicContinuation
           : scope.policy === "six-after-verified-fixed-native-v1" ? conditionalSixBudget
           : scope.policy === "native-caption-single-retest-v1" ? captionBudget
           : scope.policy === "release-scoped-seven-capability-reverification-v1" ? releaseBudget : supplementalBudget;
         const waiting = await records.find({ bindingId: String(active._id), computeGroupId: group(active.computeGroupId),
-          inventoryEnabled: true, artifactSha256: scope.artifact_sha256,
+          inventoryEnabled: true, ...(scope.policy === "installed-nine-verification-only-v1" ? { verificationWindowId: scope.authorization_id } : { artifactSha256: scope.artifact_sha256 }),
           capabilityId: { $in: scope.capabilities.filter((item) => item.remaining > 0).map((item) => item.capability_id) },
           status: "failed", nextRetryAt: { $gt: instant } }).sort({ nextRetryAt: 1, _id: 1 }).limit(32).toArray();
         for (const item of waiting) {
           if (item.automaticMigrationEnabled === false || !requiresAutomaticCapabilityVerification(active, item.capabilityId)
             || !adapterFor(item.inventory, item.model)
-            || !await scopedBudget.available({ binding: active, candidate: item, controlled })) continue;
+            || !await scopedBudget.available({ binding: active, candidate: item, controlled, allowBackoff: scope.policy === "installed-nine-verification-only-v1" })) continue;
           return noChallenge({ ok: true, challenge: null, code: "VERIFICATION_BACKOFF",
             retry_at: new Date(item.nextRetryAt).toISOString(),
             retry_after_seconds: Math.max(1, Math.ceil((+new Date(item.nextRetryAt) - +new Date(now())) / 1000)) });
@@ -486,9 +498,9 @@ export function createCapabilityAutoVerificationService(dependencies) {
         return noChallenge({ ok: true, challenge: null, code: "VERIFICATION_NODE_BUSY", retry_after_seconds: 30 });
       }
       let reserved, supplementReceipt = null;
-      if (useSupplement || useReleaseBudget || useCaptionBudget || useFixedMusicBudget || useConditionalSixBudget || useGenericMusicContinuation) {
+      if (useSupplement || useReleaseBudget || useCaptionBudget || useFixedMusicBudget || useConditionalSixBudget || useGenericMusicContinuation || useInstalledNineWindow) {
         const liveBinding = await currentBinding(active);
-        supplementReceipt = await (useFixedMusicBudget ? fixedMusicBudget : useGenericMusicContinuation ? genericMusicContinuation : useConditionalSixBudget ? conditionalSixBudget : useCaptionBudget ? captionBudget : useReleaseBudget ? releaseBudget : supplementalBudget).reserve({ binding: liveBinding, candidate: selected, controlled,
+        supplementReceipt = await (useInstalledNineWindow ? installedNineWindow : useFixedMusicBudget ? fixedMusicBudget : useGenericMusicContinuation ? genericMusicContinuation : useConditionalSixBudget ? conditionalSixBudget : useCaptionBudget ? captionBudget : useReleaseBudget ? releaseBudget : supplementalBudget).reserve({ binding: liveBinding, candidate: selected, controlled,
           challengeId, requestId, requestRecordId: associationId });
         reserved = supplementReceipt;
       } else {
@@ -499,12 +511,12 @@ export function createCapabilityAutoVerificationService(dependencies) {
           { $inc: { count: 1, [`models.${selected._id}`]: 1 } }, { returnDocument: "after" }));
       }
       if (!reserved) { await releaseLocks({ _id: challengeId }); return noChallenge({ ok: true, challenge: null,
-        code: useReleaseBudget || useCaptionBudget || useFixedMusicBudget || useConditionalSixBudget || useGenericMusicContinuation ? "VERIFICATION_RELEASE_BUDGET_UNAVAILABLE" : "VERIFICATION_DAILY_BUDGET_EXHAUSTED", retry_after_seconds: 3600 }); }
+        code: useInstalledNineWindow || useReleaseBudget || useCaptionBudget || useFixedMusicBudget || useConditionalSixBudget || useGenericMusicContinuation ? "VERIFICATION_RELEASE_BUDGET_UNAVAILABLE" : "VERIFICATION_DAILY_BUDGET_EXHAUSTED", retry_after_seconds: 3600 }); }
       const nonce = `gcv-${randomBytes(5).toString("hex")}`;
       const adapter = adapterFor(selected.inventory, selected.model);
       const probe = useFixedMusicBudget ? fixedMusicBudget.buildProbe()
         : await adapter.createProbe({ inventory: selected.inventory, model: selected.model, nonce, binding: active });
-      if ((useGenericMusicContinuation || useConditionalSixBudget) && selected.capabilityId === "gulong_engine.music" && probe?.budget) probe.budget.max_asr_passes = 1;
+      if ((useInstalledNineWindow || useGenericMusicContinuation || useConditionalSixBudget) && selected.capabilityId === "gulong_engine.music" && probe?.budget) probe.budget.max_asr_passes = 1;
       assert(!useGenericMusicContinuation || probe?.probeKind === "music" && probe.parameters?.seconds === 12
         && probe.parameters?.model === "MiniMax-Music3" && probe.budget.max_asr_passes === 1,
       "VERIFICATION_CONTINUATION_PROBE_INVALID", "追加音乐验收必须沿用原模型、12秒和一次完整ASR", 503);
@@ -544,7 +556,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
       // Keep createdAt insert-only: MongoDB rejects it in both $set and $setOnInsert.
       const { _id: featureId, requestId: snapshotRequestId, createdAt: _inventoryCreatedAt, ...snapshot } = updated;
       await requestRecords.updateOne({ _id: associationId }, { $set: { ...snapshot, ...(controlled ? { requestId: snapshotRequestId } : {}),
-        budgetSource: useFixedMusicBudget ? "fixed_music_regression" : useGenericMusicContinuation ? "generic_music_continuation" : useConditionalSixBudget ? "conditional_six_after_fixed" : useCaptionBudget ? "caption_retest" : useReleaseBudget ? "release_reverification" : supplementReceipt ? "supplement" : "ordinary", supplementalBudget: supplementReceipt, featureId, updatedAt: instant },
+        budgetSource: useInstalledNineWindow ? "installed_nine_window" : useFixedMusicBudget ? "fixed_music_regression" : useGenericMusicContinuation ? "generic_music_continuation" : useConditionalSixBudget ? "conditional_six_after_fixed" : useCaptionBudget ? "caption_retest" : useReleaseBudget ? "release_reverification" : supplementReceipt ? "supplement" : "ordinary", supplementalBudget: supplementReceipt, featureId, updatedAt: instant },
         $setOnInsert: { createdAt: instant } }, { upsert: true });
       return { ok: true, protocol: AUTO_VERIFICATION_PROTOCOL, ...(controlled ? { request_id: requestId } : {}), state: "leased", lease_valid: true,
         execute_once: true, challenge: { id: challengeId, lease_token: leaseToken,
@@ -732,7 +744,7 @@ export function createCapabilityAutoVerificationService(dependencies) {
       native_caption_retest: await captionBudget.status({ binding: active }), installation_guard: { ...nodeArtifactInstallationGuardStatus(active),
         fixed_case_authorization_active: ["available", "backoff", "awaiting_inventory"].includes(fixed.state) && fixed.total?.remaining === 1 },
       fixed_native_music_retest: fixed, conditional_six_after_fixed: await conditionalSixBudget.status({ binding: active }),
-      generic_music_continuation: await genericMusicContinuation.status({ binding: active }) };
+      generic_music_continuation: await genericMusicContinuation.status({ binding: active }), installed_nine_window: await installedNineWindow.status({ binding: active }) };
   }
   return { report, next, submit, outputUpload, outputStatus, findTrusted, list, byRequest, getChallenge, supplementStatus };
 }
@@ -813,7 +825,7 @@ export function registerCapabilityAutoVerificationRoutes(app, dependencies) {
       tags: ["Automatic Capability Verification"], summary: "查询当前绑定的发布审定一次性补测额度，不创建挑战、不授予模型准入",
       security: [{ accountBinding: [] }],
       request: { headers: z.object({ "X-Gulong-Account-Binding": z.string().min(1) }) },
-      responses: { 200: { description: "仅本绑定补测；generic_music_continuation是直接人类授权的独立通用音乐累计账本，每批3次、通过即关闭，固定绝对截止；不复活旧六项/固定native窗口、不授普通业务准入", content: { "application/json": { schema: z.object({ release_reverification: objectSchema, native_caption_retest: objectSchema, installation_guard: objectSchema, fixed_native_music_retest: objectSchema, conditional_six_after_fixed: objectSchema, generic_music_continuation: objectSchema }).catchall(z.unknown()) } } },
+      responses: { 200: { description: "仅本绑定补测；installed_nine_window为已核对安装程序的独立九项窗口，固定截止，音乐按真实授权保留失败与退避继续；不复活旧预算、不授普通业务准入。generic_music_continuation保留原固定截止", content: { "application/json": { schema: z.object({ release_reverification: objectSchema, native_caption_retest: objectSchema, installation_guard: objectSchema, fixed_native_music_retest: objectSchema, conditional_six_after_fixed: objectSchema, generic_music_continuation: objectSchema, installed_nine_window: objectSchema }).catchall(z.unknown()) } } },
         401: { description: "节点绑定无效" }, 429: { description: "查询频率受限" } } });
     const modelSchema = z.object({ id: z.string().min(1).max(240) }).catchall(z.union([z.string(), z.number(), z.boolean()]));
     const artifactSchema = z.string().regex(/^[a-f0-9]{64}$/i);

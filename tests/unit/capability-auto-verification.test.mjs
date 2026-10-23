@@ -14,6 +14,8 @@ import { buildFixedNativeMusicRegressionCase } from "../../server/capability-fix
 import { createConditionalSixBudget, CONDITIONAL_SIX_COLLECTION } from "../../server/capability-conditional-six-budget.js";
 import { createGenericMusicContinuationBudget, GENERIC_MUSIC_CONTINUATION_COLLECTION } from "../../server/capability-generic-music-continuation.js";
 import { isReviewedWorkLuckyBusinessAllowed } from "../../server/worklucky-reviewed-admission.js";
+import { createInstalledNineWindow, INSTALLED_NINE_COLLECTION } from "../../server/capability-installed-nine-window.js";
+import { createCapabilityVerificationAdapters } from "../../server/capability-verification-adapters.js";
 
 // These test fixtures live only in memory. No installation, extraction, model
 // invocation, build output or on-disk fixture is created by this test file.
@@ -414,6 +416,150 @@ async function releaseFixture({ bindingPatch = {}, reports = releaseReports(), r
   f.rows.capabilityVerificationBudgets = [{ _id: `${f.binding._id}:${f.now().toISOString().slice(0,10)}`, count: 0, models: {} }];
   return f;
 }
+
+const NINE_ARTIFACT = "f41db323b1c6ac3879d5b59a05c21b71866c8b8dfb6470446c2f427e37424418";
+const NINE_QWEN = "983ea1b00180824ef7cf310594efa2a1e755b0293a853225ea286055149c9aa7";
+const nineReports = () => [...releaseReports(NINE_ARTIFACT), ...["qwen_image_2_1.text_to_image", "qwen_image_2_1.multi_image_edit"].map(capability_id => ({
+  capability_id, capability_version: "2.1", installed: true, enabled: true, sharing_opt_in: true,
+  artifact_sha256: NINE_QWEN, models: [{ id: "qwen-image21-uc" }], default_model: "qwen-image21-uc", asr_languages: [],
+}))];
+async function nineFixture({ reports = nineReports(), bindingPatch = {}, report = true } = {}) {
+  const f = fixture({ adapters: { ...createCapabilityVerificationAdapters({ verifyMediaOutputs: async () => [] }),
+    ...createNativeCapabilityVerificationAdapters({ verifyMediaOutputs: async () => [] }) },
+    issueProbeInputDownloads: async ({ challenge }) => challenge.probeInputs.map(input => ({ ...input,
+      download_url: "https://fixture.example.invalid/nine-input", expires_at: new Date(+f.now() + 300_000) })) });
+  Object.assign(f.binding, { nodeId: "85254b9d69e4e3307049020c58bab89f2edae70a50817c37ca561194105512d1",
+    userId: new ObjectId("6a6970f546cf0274fc9bf740"), computeGroupId: null, autoVerificationPolicy: "capability-v2",
+    autoVerificationEnrolledAt: new Date(NOW), autoVerificationCapabilityIds: reports.map(r => r.capability_id) }, bindingPatch);
+  f.rows.nodeAccountBindings[0] = copy(f.binding);
+  f.advance(+new Date("2026-10-23T00:30:00Z") - +f.now());
+  if (report) await f.service.report({ binding: f.binding, reports, migrationPolicy: "capability-v2", automaticCapabilityIds: reports.map(r => r.capability_id) });
+  f.rows.capabilityVerificationBudgets = [{ _id: `${f.binding._id}:2026-10-23`, count: 16, models: {} }];
+  f.window = createInstalledNineWindow({ getCollection: f.getCollection, now: f.now });
+  return f;
+}
+
+test("installed nine has nine exact independent inventory rows and a read-only scoped status", async () => {
+  const f = await nineFixture();
+  assert.equal(f.rows[AUTO_VERIFICATION_COLLECTION].length, 9);
+  assert.ok(f.rows[AUTO_VERIFICATION_COLLECTION].every(row => row.verificationWindowId === "gvn_20261023_f41_nine" && row.status === "pending"));
+  const s = (await f.service.supplementStatus({ binding: f.binding })).installed_nine_window;
+  assert.equal(s.inventory_ready, true); assert.equal(s.passed_count, 0); assert.equal(s.capabilities.length, 9);
+  assert.equal(s.capabilities.filter(c => c.artifact_sha256 === NINE_QWEN).length, 2);
+  assert.equal(s.grants_admission, false); assert.equal(s.ordinary_fallback, false);
+  assert.equal((f.rows[INSTALLED_NINE_COLLECTION] || []).length, 0);
+});
+
+test("installed nine never inherits an existing Qwen proof or mutates its row", async () => {
+  const f = await nineFixture();
+  const row = f.rows[AUTO_VERIFICATION_COLLECTION].find(r => r.capabilityId === "qwen_image_2_1.text_to_image");
+  const old = { ...copy(row), _id: "historical-qwen-proof", verificationWindowId: undefined, status: "active",
+    expiresAt: new Date(+f.now() + 86400_000), testedAt: new Date(+f.now() - 1000) };
+  f.rows[AUTO_VERIFICATION_COLLECTION].push(old);
+  const before = copy(old);
+  await f.service.report({ binding: f.binding, reports: nineReports(), migrationPolicy: "capability-v2", automaticCapabilityIds: f.binding.autoVerificationCapabilityIds });
+  assert.deepEqual(old, before);
+  assert.equal((await f.window.status({ binding: f.binding })).passed_count, 0);
+});
+
+test("installed nine exact one-shot nonmusic reservation survives recovery without spending ordinary or old budgets", async () => {
+  const f = await nineFixture();
+  f.rows[AUTO_VERIFICATION_COLLECTION] = f.rows[AUTO_VERIFICATION_COLLECTION].filter(r => r.capabilityId === "gulong_engine.agent_chat");
+  const before = copy(f.rows.capabilityVerificationBudgets), token = clientSecret();
+  const first = await f.service.next({ binding: f.binding, requestId: "nine-chat", leaseToken: token });
+  assert.ok(first.challenge);
+  assert.equal(f.rows.capabilityVerificationChallenges[0].budgetSource, "installed_nine_window");
+  const ledger = copy(f.rows[INSTALLED_NINE_COLLECTION]);
+  assert.equal((await f.service.next({ binding: f.binding, requestId: "nine-chat", leaseToken: token })).challenge.id, first.challenge.id);
+  assert.deepEqual(f.rows[INSTALLED_NINE_COLLECTION], ledger);
+  await submit(f, first.challenge, { status: "failed", inlineResult: undefined }); f.advance(60_000);
+  assert.equal((await f.service.next({ binding: f.binding, requestId: "nine-chat-again", leaseToken: clientSecret(2) })).code, "VERIFICATION_RELEASE_BUDGET_UNAVAILABLE");
+  assert.deepEqual(f.rows.capabilityVerificationBudgets, before);
+  assert.equal((f.rows[RELEASE_VERIFICATION_COLLECTION] || []).length, 0);
+  f.advance(86400_000);
+  assert.equal((await f.service.next({ binding: f.binding, requestId: "nine-next-day", leaseToken: clientSecret(3) })).challenge, null);
+});
+
+test("installed nine music continues in separate audited batches with original backoff and exactly one whole ASR", async () => {
+  const f = await nineFixture();
+  f.rows[AUTO_VERIFICATION_COLLECTION] = f.rows[AUTO_VERIFICATION_COLLECTION].filter(r => r.capabilityId === "gulong_engine.music");
+  for (let i = 0; i < 4; i++) {
+    const response = await f.service.next({ binding: f.binding, requestId: `nine-music-${i}`, leaseToken: clientSecret(i + 1) });
+    assert.ok(response.challenge);
+    assert.equal(response.challenge.budget.max_inferences, 1); assert.equal(response.challenge.budget.max_asr_passes, 1);
+    assert.equal(response.challenge.parameters.seconds, 12); assert.ok(response.challenge.parameters.lyrics.includes("Blue sky"));
+    await submit(f, response.challenge, { status: "failed", inlineResult: undefined });
+    const blocked = await f.service.next({ binding: f.binding, requestId: `nine-backoff-${i}`, leaseToken: clientSecret(i + 10) });
+    assert.equal(blocked.code, "VERIFICATION_BACKOFF");
+    const row = f.rows[AUTO_VERIFICATION_COLLECTION][0]; f.advance(+row.nextRetryAt - +f.now());
+  }
+  const doc = f.rows[INSTALLED_NINE_COLLECTION][0];
+  assert.equal(doc.usedTotal, 4);
+  assert.deepEqual(Object.values(doc.consumptions).map(c => c.batch), [1, 1, 1, 2]);
+  assert.equal(f.rows.capabilityVerificationChallenges.filter(c => c.status === "failed").length, 4);
+  assert.equal(f.rows.capabilityVerificationBudgets[0].count, 16);
+});
+
+test("installed nine rejects changed account/group/model, legacy requests and corrupt scoped ledgers without fallback", async () => {
+  for (const bindingPatch of [{ userId: new ObjectId("6ab71678e4859d7255789e09") }, { computeGroupId: "other" }]) {
+    const f = await nineFixture({ bindingPatch });
+    assert.equal((await f.service.next({ binding: f.binding, requestId: "wrong-scope", leaseToken: clientSecret() })).challenge, null);
+    assert.equal((f.rows[INSTALLED_NINE_COLLECTION] || []).length, 0);
+  }
+  const f = await nineFixture();
+  assert.equal((await f.service.next({ binding: f.binding })).challenge, null);
+  const row = f.rows[AUTO_VERIFICATION_COLLECTION].find(r => r.capabilityId === "gulong_engine.embedding");
+  assert.equal(await f.window.available({ binding: f.binding, candidate: { ...row, model: { ...row.model, dimension: 3 } }, controlled: true }), false);
+  assert.ok(await f.window.reserve({ binding: f.binding, candidate: row, controlled: true, challengeId: "one", requestId: "one", requestRecordId: "one" }));
+  f.rows[INSTALLED_NINE_COLLECTION][0].scope.userId = "forged";
+  assert.equal(await f.window.available({ binding: f.binding, candidate: row, controlled: true }), false);
+});
+
+test("installed nine new real-route chat proof remains quarantined from ordinary business admission", async () => {
+  const f = await nineFixture();
+  f.rows[AUTO_VERIFICATION_COLLECTION] = f.rows[AUTO_VERIFICATION_COLLECTION].filter(r => r.capabilityId === "gulong_engine.agent_chat");
+  const response = await f.service.next({ binding: f.binding, requestId: "nine-success", leaseToken: clientSecret() });
+  assert.equal((await submit(f, response.challenge)).verification.status, "active");
+  assert.equal((await f.window.status({ binding: f.binding })).passed_count, 1);
+  assert.equal(await f.service.findTrusted({ bindingId: f.binding._id, report: nineReports()[0] }), null);
+});
+
+test("installed nine reservation CAS cannot double-spend a single-shot capability under concurrent callers", async () => {
+  const f = await nineFixture(); const row = f.rows[AUTO_VERIFICATION_COLLECTION].find(r => r.capabilityId === "sam.video_track");
+  const result = await Promise.all(Array.from({ length: 20 }, (_, i) => f.window.reserve({ binding: f.binding, candidate: row, controlled: true,
+    challengeId: `concurrent-${i}`, requestId: `request-${i}`, requestRecordId: `journal-${i}` })));
+  assert.equal(result.filter(Boolean).length, 1);
+  assert.equal(f.rows[INSTALLED_NINE_COLLECTION][0].usedTotal, 1);
+});
+
+test("installed nine dry run and physical busy gates issue no allowance; preparation failure stays spent", async () => {
+  const f = await nineFixture();
+  f.rows[AUTO_VERIFICATION_COLLECTION] = f.rows[AUTO_VERIFICATION_COLLECTION].filter(r => r.capabilityId === "gulong_engine.embedding");
+  assert.equal((await f.service.next({ binding: f.binding, dryRun: true })).challenge, null);
+  f.hooks.idle = false;
+  assert.equal((await f.service.next({ binding: f.binding, requestId: "nine-busy", leaseToken: clientSecret() })).code, "VERIFICATION_NODE_BUSY");
+  assert.equal((f.rows[INSTALLED_NINE_COLLECTION] || []).length, 0);
+  f.hooks.idle = true; f.hooks.snapshotFails = true;
+  await assert.rejects(f.service.next({ binding: f.binding, requestId: "nine-prepare-failed", leaseToken: clientSecret(2) }));
+  assert.equal(f.rows[INSTALLED_NINE_COLLECTION][0].usedTotal, 1);
+  assert.equal(f.rows.capabilityVerificationChallenges.find(r => r.requestId === "nine-prepare-failed").status, "failed");
+  f.hooks.snapshotFails = false;
+  assert.equal((await f.service.next({ binding: f.binding, requestId: "nine-after-prepare", leaseToken: clientSecret(3) })).challenge, null);
+});
+
+test("installed nine absolute expiry and tampered totals cannot renew through status, report or date rollover", async () => {
+  const f = await nineFixture(); const row = f.rows[AUTO_VERIFICATION_COLLECTION].find(r => r.capabilityId === "sam.video_track");
+  assert.ok(await f.window.reserve({ binding: f.binding, candidate: row, controlled: true, challengeId: "expiry", requestId: "expiry", requestRecordId: "expiry" }));
+  const doc = f.rows[INSTALLED_NINE_COLLECTION][0], original = copy(doc);
+  doc.usedTotal = 0;
+  assert.equal((await f.window.status({ binding: f.binding })).state, "unavailable");
+  Object.assign(doc, original);
+  f.advance(+new Date("2026-10-23T02:00:00Z") - +f.now());
+  assert.equal((await f.window.status({ binding: f.binding })).state, "expired");
+  assert.equal(await f.window.available({ binding: f.binding, candidate: row, controlled: true }), false);
+  await f.service.report({ binding: f.binding, reports: nineReports(), migrationPolicy: "capability-v2", automaticCapabilityIds: f.binding.autoVerificationCapabilityIds });
+  assert.deepEqual(doc, original);
+});
 
 test("new release has exactly eleven independent attempts, no ordinary fallback even across UTC day, and no old ledger mutation", async () => {
   const f = await releaseFixture(); const ordinary = copy(f.rows.capabilityVerificationBudgets);
