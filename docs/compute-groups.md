@@ -21,6 +21,13 @@
 
 管理员认证沿用官网会话或已有管理员 Bearer。所有写操作验证可信来源并记审计。
 
+“共享模型状态 → 查看共享节点”选择节点后可设置算力分组。列表显示名称及唯一 ID，按名称关键词搜索，超过 100 条可继续加载，不截断剩余分组；也可选择未分组。保存前使用统一确认弹窗。
+
+- `GET /api/admin/nodes/:id/compute-group`：`:id` 为所选节点的绑定编号（24 位 ObjectId），返回下述节点分组响应，另有 `binding_id`。
+- `PUT /api/admin/nodes/:id/compute-group`：`{"group_id":"gug_...或null","expected_group_id":"读取时的原组ID或null"}`。只允许管理员、可信来源；旧组不匹配返回 `409 NODE_GROUP_CHANGED`，已撤销绑定返回 404。运行中 H3/统一订单或物理租约（含自动验收）拒绝修改，返回 `409 NODE_GROUP_BUSY`。分组、物理槽位版本隔离及审计同一事务提交，审计失败回滚，不接受客户端自报角色/节点身份。
+
+修改仅更新选中绑定，不改变用户所属组、会员、余额和现有验收结论。新组仍须满足原有同组派单及精确自动验收要求；不会因管理员保存分组而把未通过模型开放。线上验收不得修改真实节点分组来测试此功能。
+
 `GET /api/admin/compute-groups?q=<名称关键词>&limit=100&cursor=<上页nextCursor>`
 
 `POST /api/admin/compute-groups`：`{"name":"品牌短视频团队"}`。成功 `201`：

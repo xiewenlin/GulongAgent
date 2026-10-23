@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { ObjectId } from "mongodb";
 import { z } from "@hono/zod-openapi";
-import { getCollection as databaseCollection } from "./db.js";
+import { getCollection as databaseCollection, withDatabaseTransaction } from "./db.js";
 import { hashOpaqueToken } from "./security.js";
 import { enforceRateLimit as databaseRateLimit } from "./rate-limit.js";
 import { GULONG_ENGINE_PLAN_ID, productSubscription, readGulongEngineEntitlement } from "./english-coach-products.js";
@@ -30,6 +30,7 @@ export function registerComputeGroupRoutes(app, dependencies) {
   const entitlement = dependencies.readGulongEngineEntitlement || ((ownerId) => readGulongEngineEntitlement(ownerId, new Date(), getCollection));
   const hash = dependencies.hashOpaqueToken || hashOpaqueToken;
   const now = dependencies.now || (() => new Date());
+  const transaction = dependencies.transaction || withDatabaseTransaction;
   app.openAPIRegistry.registerComponent("securitySchemes", "sessionCookie", { type: "apiKey", in: "cookie", name: "gulong_session", description: "官网登录会话；修改操作同时校验可信来源。" });
 
   app.use("/api/admin/compute-groups*", async (c, next) => { c.header("Cache-Control", "private, no-store"); await next(); });
@@ -131,6 +132,59 @@ export function registerComputeGroupRoutes(app, dependencies) {
     const group = groupId ? await (await getCollection("computeGroups")).findOne({ id: groupId }) : null;
     return { ok: true, node_id: binding.nodeId, group_id: groupId, group: publicGroup(group), policy: "same_group_only", ungrouped_policy: "ungrouped_nodes_only" };
   }
+  // Administrator edits target the authoritative binding, never a client node DTO.
+  for (const method of ["get", "put"]) app[method]("/api/admin/nodes/:id/compute-group", async (c) => {
+    c.header("Cache-Control", "private, no-store");
+    try {
+      const auth = await dependencies.requireAdmin(c); if (auth.error) return auth.error;
+      if (auth.user?.role !== "admin") return c.json({ code: "ADMIN_REQUIRED", message: "只有管理员可以设置节点算力分组" }, 403);
+      if (!/^[a-f0-9]{24}$/i.test(c.req.param("id"))) return c.json({ code: "NODE_NOT_FOUND", message: "节点绑定不存在或已失效" }, 404);
+      const id = new ObjectId(c.req.param("id"));
+      const bindings = await getCollection("nodeAccountBindings");
+      const filter = { _id: id, status: "active", revokedAt: null };
+      if (method === "get") {
+        const binding = await bindings.findOne(filter);
+        if (!binding) return c.json({ code: "NODE_NOT_FOUND", message: "节点绑定不存在或已失效" }, 404);
+        return c.json({ ...await nodeGroupView(binding), binding_id: String(id) });
+      }
+      const rejected = await dependencies.requireTrustedMutation(c); if (rejected) return rejected;
+      const blocked = await limited(c, `admin-node-group:${auth.user.id}`, 30); if (blocked) return blocked;
+      const parsed = z.object({ group_id: groupIdSchema, expected_group_id: groupIdSchema }).strict().safeParse(await c.req.json().catch(() => null));
+      if (!parsed.success) return c.json({ code: "VALIDATION_ERROR", message: "请选择有效分组，并重新读取节点当前分组后保存" }, 400);
+      const { group_id: groupId, expected_group_id: expectedGroupId } = parsed.data;
+      const saved = await transaction(async (session) => {
+        const binding = await bindings.findOne(filter, { session });
+        if (!binding) throw groupError("NODE_NOT_FOUND", "节点绑定不存在或已失效", 404);
+        if (!computeGroupsMatch(binding.computeGroupId, expectedGroupId)) throw groupError("NODE_GROUP_CHANGED", "节点分组已被其他人修改，请重新读取后再保存", 409);
+        if (groupId && !await (await getCollection("computeGroups")).findOne({ id: groupId }, { session })) throw groupError("COMPUTE_GROUP_NOT_FOUND", "分组不存在，请刷新分组列表", 404);
+        if (computeGroupsMatch(groupId, binding.computeGroupId)) return binding;
+        const [h3, capability, slots] = await Promise.all([
+          (await getCollection("h3SharedTasks")).findOne({ "claimedByNode.bindingId": id, status: { $in: ["claimed", "processing"] } }, { session }),
+          (await getCollection("capabilityOrders")).findOne({ "assignedNode.bindingId": id, status: { $in: ["claimed", "processing"] } }, { session }),
+          (await getCollection("capabilityNodeSlots")).findOne({ _id: String(id) }, { session }),
+        ]);
+        if (h3 || capability || slots && (!Number.isSafeInteger(slots.version) || slots.version < 0 || !Array.isArray(slots.leases) || slots.leases.some((lease) => !Number.isFinite(+new Date(lease.expiresAt)) || new Date(lease.expiresAt) > now()))) {
+          throw groupError("NODE_GROUP_BUSY", "节点仍有运行中任务或自动验收，请等待结束后再修改分组", 409);
+        }
+        // Fence simultaneous capability-slot reservations; any conflicting
+        // transaction retries and observes the newly reserved physical lease.
+        const fenced = await (await getCollection("capabilityNodeSlots")).updateOne({ _id: String(id), ...(slots ? { version: slots.version } : {}) }, {
+          $inc: { version: 1 }, $set: { updatedAt: now() }, $setOnInsert: { leases: [], createdAt: now() },
+        }, { session, upsert: !slots });
+        if (!fenced.matchedCount && !fenced.upsertedCount) throw groupError("NODE_GROUP_BUSY", "节点任务状态已变化，请重新读取后再修改分组", 409);
+        const changed = await bindings.updateOne({ ...filter, userId: binding.userId, computeGroupId: expectedGroupId }, {
+          $set: { computeGroupId: groupId, computeGroupUpdatedAt: now() },
+        }, { session });
+        if (!changed.matchedCount) throw groupError("NODE_GROUP_CHANGED", "节点绑定或分组已变化，请重新读取后再保存", 409);
+        await (await getCollection("computeGroupAudits")).insertOne({ action: "admin_node_assigned", bindingId: id, nodeId: binding.nodeId,
+          groupId, previousGroupId: expectedGroupId, actorUserId: new ObjectId(auth.user.id), createdAt: now() }, { session });
+        return { ...binding, computeGroupId: groupId };
+      });
+      return c.json({ ...await nodeGroupView(saved), binding_id: String(id) });
+    } catch (error) {
+      return c.json({ code: error.status ? error.code : "NODE_GROUP_UNAVAILABLE", message: error.status ? error.message : "节点分组暂时无法保存，请稍后重新读取并重试" }, error.status || 503);
+    }
+  });
   app.get("/api/desktop/nodes/compute-group", async (c) => {
     const auth = await bindingAuth(c, c.req.query("node_id")); if (auth.error) return auth.error;
     c.header("Cache-Control", "private, no-store"); return c.json(await nodeGroupView(auth.binding));
@@ -191,19 +245,20 @@ export function registerComputeGroupRoutes(app, dependencies) {
   });
   const groupListSchema = z.object({ groups: z.array(groupSchema), nextCursor: groupIdSchema });
   const userGroupSchema = z.object({ ok: z.boolean().optional(), computeGroupId: groupIdSchema, computeGroup: groupSchema.nullable(), eligible: z.boolean() });
-  const nodeGroupSchema = z.object({ ok: z.literal(true), node_id: z.string(), group_id: groupIdSchema, group: groupSchema.nullable(), policy: z.literal("same_group_only"), ungrouped_policy: z.literal("ungrouped_nodes_only") });
+  const nodeGroupSchema = z.object({ ok: z.literal(true), binding_id: z.string().optional(), node_id: z.string(), group_id: groupIdSchema, group: groupSchema.nullable(), policy: z.literal("same_group_only"), ungrouped_policy: z.literal("ungrouped_nodes_only") });
   const permitSchema = z.object({ ok: z.literal(true), permit: z.string(), node_id: z.string(), group_id: groupIdSchema, expires_at: z.iso.datetime(), one_time: z.literal(true) });
   const verificationSchema = z.object({ ok: z.literal(true), allowed: z.literal(true), node_id: z.string(), group_id: groupIdSchema, requester_user_id: z.string(), authorization_id: z.string() });
   for (const [method, path, summary, binding] of [
     ["get", "/api/admin/compute-groups", "管理员搜索会员算力分组", false], ["post", "/api/admin/compute-groups", "新建唯一 ID 的会员算力分组", false],
     ["get", "/api/admin/users/{id}/compute-group", "查看用户算力分组", false], ["put", "/api/admin/users/{id}/compute-group", "分配古龙引擎包月用户算力分组", false],
+    ["get", "/api/admin/nodes/{id}/compute-group", "管理员读取共享节点的权威算力分组", false], ["put", "/api/admin/nodes/{id}/compute-group", "管理员设置共享节点算力分组；运行或验收中禁止修改", false],
     ["get", "/api/desktop/compute-groups", "已绑定节点搜索全部用户分组名称和 ID", true],
     ["get", "/api/desktop/nodes/compute-group", "读取当前绑定节点的算力分组", true], ["put", "/api/desktop/nodes/compute-group", "设置当前绑定节点算力分组", true],
     ["post", "/api/v1/compute-access/authorize", "会员获取本地或局域网节点一次性调用许可", false],
     ["post", "/api/desktop/compute-access/verify", "目标绑定节点原子验证并消耗同组调用许可", true],
   ]) {
     const responseSchema = path.endsWith("/authorize") ? permitSchema : path.endsWith("/verify") ? verificationSchema : path.includes("/nodes/") ? nodeGroupSchema : path.includes("/users/") ? userGroupSchema : method === "post" ? z.object({ group: groupSchema }) : groupListSchema;
-    const bodySchema = path.endsWith("/authorize") ? z.object({ node_id: z.string() }) : path.endsWith("/verify") ? z.object({ node_id: z.string(), permit: z.string() }) : path.includes("/nodes/") ? z.object({ node_id: z.string(), group_id: groupIdSchema }) : path.includes("/users/") ? z.object({ groupId: groupIdSchema }) : z.object({ name: z.string().min(1).max(80) });
+    const bodySchema = path.endsWith("/authorize") ? z.object({ node_id: z.string() }) : path.endsWith("/verify") ? z.object({ node_id: z.string(), permit: z.string() }) : path.startsWith("/api/admin/nodes/") ? z.object({ group_id: groupIdSchema, expected_group_id: groupIdSchema }).strict() : path.includes("/nodes/") ? z.object({ node_id: z.string(), group_id: groupIdSchema }) : path.includes("/users/") ? z.object({ groupId: groupIdSchema }) : z.object({ name: z.string().min(1).max(80) });
     app.openAPIRegistry.registerPath({ method, path, tags: ["Compute Groups"], summary,
     security: binding ? [{ accountBinding: [] }] : [{ sessionCookie: [] }, { bearerAuth: [] }],
     description: "算力分组独立于发行渠道。仅相同分组 ID 可调用；未分组只匹配未分组。管理员新建/分配、绑定节点配置均审计。名称 q 模糊搜索，limit 最大200，nextCursor 翻页。直连许可90秒有效且仅可消耗一次，验证时重新检查会员和用户/节点权威分组。完整 JSON 合同见 docs/compute-groups.md。",
