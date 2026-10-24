@@ -18,6 +18,7 @@ import { createCapabilitySlotCoordinator, normalizeCapabilityResources } from ".
 import { SHARED_NODE_SCHEDULING, NODE_REPORT_MAX_AGE_MS, normalizeGpuLoadReport, projectSharedNodeLoad, compareSharedNodeLoad, boundedGlobalDispatchWait } from "./shared-node-scheduler.js";
 import { findTrustedConsumerAcceptance } from "./capability-consumer-acceptance.js";
 import { createCapabilityAutoVerificationService, registerCapabilityAutoVerificationRoutes } from "./capability-auto-verification.js";
+import { registerLocalCapabilityResultRoutes } from "./capability-local-results.js";
 import { requiresAutomaticCapabilityVerification } from "./capability-verification-policy.js";
 import { isNodeArtifactQuarantined, nodeReportArtifactSha256 } from "./capability-artifact-installation-guard.js";
 import { isDefiniteMissingCosObject } from "./cos-object-presence.js";
@@ -877,6 +878,8 @@ export function registerCapabilityOrderRoutes(app, dependencies) {
 
   registerCapabilityAutoVerificationRoutes(app, { service: automaticVerification, requireBinding: authenticateBinding,
     requireAdmin: dependencies.requireAdmin || (async (c) => ({ error: c.json({ code: "FORBIDDEN", message: "仅管理员可查询共享模型状态" }, 403) })) });
+  registerLocalCapabilityResultRoutes(app, { getCollection, requireBinding: authenticateBinding,
+    transaction: dependencies.transaction, enforceRateLimit });
 
   async function recoverExpired(now = new Date()) {
     const orders = await getCollection("capabilityOrders");

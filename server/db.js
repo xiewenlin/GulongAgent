@@ -126,6 +126,10 @@ export async function ensureIndexes() {
         db.collection("computeAccessPermits").createIndex({ tokenHash: 1 }, { unique: true, name: "uniq_compute_access_permit" }),
         db.collection("computeAccessPermits").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0, name: "ttl_compute_access_permit" }),
         db.collection("computeGroupAudits").createIndex({ createdAt: -1, userId: 1, bindingId: 1 }, { name: "compute_group_audits" }),
+        db.collection("capabilityLocalResultReports").createIndex({ bindingId: 1, reportId: 1 }, { unique: true, name: "uniq_local_result_report" }),
+        db.collection("capabilityLocalResultReports").createIndex({ bindingId: 1, localRequestId: 1 }, { unique: true, name: "uniq_local_result_execution" }),
+        db.collection("capabilityLocalResultFiles").createIndex({ bindingId: 1, "descriptor.upload_id": 1 }, { unique: true, name: "uniq_local_result_file" }),
+        db.collection("capabilityLocalResultChunks").createIndex({ fileId: 1, index: 1 }, { unique: true, name: "uniq_local_result_chunk" }),
         db.collection("users").createIndex(
           { usernameNormalized: 1 },
           { unique: true, sparse: true, name: "uniq_username" },

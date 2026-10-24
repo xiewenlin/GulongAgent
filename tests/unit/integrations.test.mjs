@@ -1207,8 +1207,25 @@ test("English Coach desktop authentication and subscription are documented in Op
     "/api/v1/desktop/english-coach/account",
     "/api/v1/capability-orders/by-request/{key}",
   ]) assert.ok(document.paths[path], `${path} must be documented`);
-  assert.equal(document.info.version, "2.17.5");
+  assert.equal(document.info.version, "2.17.6");
   assert.ok(document.components.securitySchemes.englishCoachDesktopBearer);
+});
+
+test("local direct result collector is documented separately and requires binding before body intake", async () => {
+  const document = await (await app.request("https://example.test/api/openapi.json")).json();
+  const path = "/api/v1/capability-verifications/local-results";
+  const route = document.paths[path].post;
+  assert.deepEqual(document.paths[`${path}/chunks`].post.security, [{ accountBinding: [] }]);
+  assert.equal(document.paths[`${path}/chunks`].get, undefined);
+  assert.deepEqual(route.security, [{ accountBinding: [] }]);
+  assert.equal(document.paths[path].get, undefined);
+  const schema = route.requestBody.content["application/json"].schema;
+  for (const field of ["local_direct_source", "request_body_base64", "response_body_base64", "outputs"]) assert.ok(schema.required.includes(field));
+  assert.match(route.description, /pending-native-review/);
+  const response = await platform.fetch(new Request(`https://example.test/api/platform?_platform_path=v1/capability-verifications/local-results`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+  }));
+  assert.equal(response.status, 401);
 });
 
 test("Gulong Engine desktop account and free text recovery routes are documented in OpenAPI", async () => {
