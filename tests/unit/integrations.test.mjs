@@ -1207,7 +1207,7 @@ test("English Coach desktop authentication and subscription are documented in Op
     "/api/v1/desktop/english-coach/account",
     "/api/v1/capability-orders/by-request/{key}",
   ]) assert.ok(document.paths[path], `${path} must be documented`);
-  assert.equal(document.info.version, "2.17.6");
+  assert.equal(document.info.version, "2.17.7");
   assert.ok(document.components.securitySchemes.englishCoachDesktopBearer);
 });
 
@@ -1299,10 +1299,11 @@ test("admin subscriptions use a full-screen multi-product editor", async () => {
 });
 
 test("admin subscription directory uses Chandler application scope and explicit capabilities", async () => {
-  const [serverSource, adminSource, chandlerSource] = await Promise.all([
+  const [serverSource, adminSource, chandlerSource, syncSource] = await Promise.all([
     readFile(new URL("../../server/app.js", import.meta.url), "utf8"),
     readFile(new URL("../../src/components/AdminPage.jsx", import.meta.url), "utf8"),
     readFile(new URL("../../server/chandler.js", import.meta.url), "utf8"),
+    readFile(new URL("../../server/subscription-period-sync.js", import.meta.url), "utf8"),
   ]);
   const listStart = serverSource.indexOf("app.openapi(adminListChandlerUsersRoute");
   const listEnd = serverSource.indexOf("app.openapi(adminSetWebsiteRoleRoute", listStart);
@@ -1315,7 +1316,9 @@ test("admin subscription directory uses Chandler application scope and explicit 
   assert.doesNotMatch(listHandler, /\/v1\/admin\/users\?/);
   assert.match(subscriptionsHandler, /getPartnerClientUserAttributes/);
   assert.doesNotMatch(subscriptionsHandler, /\/v1\/admin\/users\/.*\/subscriptions/);
-  assert.match(serverSource, /existing\?\.manualPeriodOverride/);
+  assert.match(serverSource, /synchronizeChandlerSubscriptionPeriod\(\{ ownerId, period, attributes, applicationId, getCollection \}\)/);
+  assert.match(syncSource, /existing\?\.manualPeriodOverride/);
+  assert.match(syncSource, /productSubscription\(existing, period\.plan\)\?\.manualPeriodOverride/);
   assert.match(serverSource, /globalUserStatus:\s*false/);
   assert.match(serverSource, /globalEntitlementApproval:\s*false/);
   assert.match(adminSource, /官网 \+ Chandler 应用/);
