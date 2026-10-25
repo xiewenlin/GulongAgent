@@ -16,6 +16,9 @@ WorkLucky 包含在现有 `gulong_engine_monthly` 权益中，不新增用户体
 | POST | `/api/v1/desktop/worklucky/auth/logout` | Bearer 加 JSON `{refresh_token}`；撤销当前会话 |
 | GET | `/api/v1/desktop/worklucky/account` | Bearer；当前用户、权威权益和 `checked_at` |
 | GET | `/api/v1/desktop/worklucky/updates` | 未发布已验证安装包时明确返回 `no_update`，不能拿源码标签当安装包 |
+| GET | `/api/v1/desktop/worklucky/releases/{version}/{filename}` | 仅已审定且验签的固定版本可下载；未发布的候选返回404，不回退latest |
+
+维护版发布位置与最终签名/包/Data升级门禁见[维护发布合同](./worklucky-maintenance-release.md)。当前发布目录保持空，新增下载路由不会自动公开0.1.19或解除模型准入。
 
 上述别名若带可选 `product` 查询参数，只接受单个 `worklucky`；其他值、空值或重复参数返回 `400 WORKLUCKY_PRODUCT_INVALID`。所有响应均不可缓存。登录成功不代表会员生效，`active=false` 不授权创建共享订单。
 

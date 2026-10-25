@@ -55,7 +55,7 @@
           "WorkLucky desktop"
         ],
         "summary": "Read the current signed desktop release status",
-        "description": "This patch intentionally returns no_update/release_not_published until an actual verified WorkLucky release manifest is published. Query values are accepted as client metadata and do not turn upstream source tags into executable updates. A 404, network failure or invalid JSON is not a no_update response.",
+        "description": "The reviewed release catalog is empty until final package, signature and Data upgrade acceptance. Empty catalog returns no_update; published records must pass the client-pinned Ed25519 digest signature and fixed-version URL checks. Query metadata cannot publish a release. A 404, network failure or invalid JSON is not a no_update response. See worklucky-maintenance-release.md.",
         "security": [],
         "responses": {
           "200": {
@@ -77,7 +77,10 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/NoUpdate"
+                  "oneOf": [
+                    { "$ref": "#/components/schemas/NoUpdate" },
+                    { "$ref": "#/components/schemas/PublishedUpdate" }
+                  ]
                 }
               }
             }
@@ -131,6 +134,23 @@
             }
           }
         ]
+      }
+    },
+    "/api/v1/desktop/worklucky/releases/{version}/{filename}": {
+      "get": {
+        "operationId": "downloadPublishedWorkLuckyVersion",
+        "tags": ["WorkLucky desktop"],
+        "summary": "Download an exact reviewed portable version; unpublished candidates remain 404",
+        "security": [],
+        "parameters": [
+          { "name": "version", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "filename", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "302": { "description": "No-store redirect to a 15-minute HTTPS COS URL for this exact approved version" },
+          "404": { "description": "No approved release; never falls back to latest" },
+          "503": { "description": "Invalid configured release metadata" }
+        }
       }
     },
     "/api/v1/desktop/worklucky/auth/login": {
@@ -494,6 +514,40 @@
       }
     },
     "schemas": {
+      "PublishedUpdate": {
+        "type": "object",
+        "required": ["product_id", "status", "release"],
+        "properties": {
+          "product_id": { "type": "string", "enum": ["worklucky"] },
+          "product": { "type": "string", "enum": ["worklucky"] },
+          "status": { "type": "string", "enum": ["update_available"] },
+          "release": {
+            "type": "object",
+            "required": ["release_id", "version", "release_notes", "publishedAt", "min_compatible_knowledge_version", "knowledge_version_range", "assets"],
+            "properties": {
+              "release_id": { "type": "string" }, "version": { "type": "string" },
+              "release_notes": { "type": "string" }, "publishedAt": { "type": "string", "format": "date-time" },
+              "min_compatible_knowledge_version": { "type": "string" }, "knowledge_version_range": { "type": "string" },
+              "assets": {
+                "type": "object", "required": ["windows-x64"],
+                "properties": { "windows-x64": {
+                  "type": "object", "required": ["portable_zip"],
+                  "properties": { "portable_zip": {
+                    "type": "object", "required": ["filename", "bytes", "url", "sha256", "signature", "signature_algorithm", "signature_key_id"],
+                    "properties": {
+                      "filename": { "type": "string" }, "bytes": { "type": "integer", "minimum": 1, "maximum": 2147483648 },
+                      "url": { "type": "string", "format": "uri" }, "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                      "signature": { "type": "string" },
+                      "signature_algorithm": { "type": "string", "enum": ["worklucky-ed25519-sha256-v1"] },
+                      "signature_key_id": { "type": "string", "enum": ["worklucky-desktop-2026-01"] }
+                    }
+                  } }
+                } }
+              }
+            }
+          }
+        }
+      },
       "ApiError": {
         "type": "object",
         "properties": {

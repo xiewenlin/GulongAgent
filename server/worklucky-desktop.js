@@ -1,5 +1,7 @@
 import { z } from "@hono/zod-openapi";
-import { WORKLUCKY_ROOT, WORKLUCKY_CAPABILITY_IDS, workLuckyConfig, workLuckyEntitlement, workLuckyUpdates } from "./worklucky-product.js";
+import { WORKLUCKY_ROOT, WORKLUCKY_CAPABILITY_IDS, workLuckyConfig, workLuckyEntitlement } from "./worklucky-product.js";
+import { createWorkLuckyReleaseService, workLuckyPublishedManifestSchema } from "./worklucky-releases.js";
+import { createPresignedDownloadUrl } from "./cos.js";
 
 // These declarations are part of the live /api/openapi.json registry, not just
 // an offline companion document. They describe the existing shared session;
@@ -37,7 +39,15 @@ function registerOpenAPI(app) {
   });
   register("get", "updates", "读取 WorkLucky 已核验桌面版本状态", {
     security: [], request: { query: productQuery },
-    responses: { 200: response("没有经过验证的可执行文件发布时明确返回 no_update", z.object({ product_id: z.literal("worklucky"), product: z.literal("worklucky"), status: z.literal("no_update"), release: z.null(), reason: z.literal("release_not_published") })) },
+    responses: { 200: response("仅返回已审定且通过固定公钥验签的最终清单；未发布时为 no_update", z.union([
+      z.object({ product_id: z.literal("worklucky"), product: z.literal("worklucky"), status: z.literal("no_update"), release: z.null(), reason: z.literal("release_not_published") }),
+      workLuckyPublishedManifestSchema,
+    ])) },
+  });
+  register("get", "releases/{version}/{filename}", "下载固定版本的已审定 WorkLucky 绿色包", {
+    security: [], request: { params: z.object({ version: z.string(), filename: z.string() }) },
+    responses: { 302: { description: "短时 HTTPS COS 下载重定向；版本地址不指向 latest" },
+      404: response("未审定/未发布的候选不可下载", error), 503: response("发布清单配置校验失败", error) },
   });
   register("post", "auth/login", "使用官网账号登录 WorkLucky", {
     security: [], request: body(z.object({ identifier: z.string().min(1).max(320), password: z.string().min(1).max(1024) })),
@@ -63,7 +73,8 @@ function registerOpenAPI(app) {
 
 // Dependency injection preserves the existing password verification, rate
 // limits, refresh rotation, session revocation and authoritative entitlement.
-export function registerWorkLuckyDesktopRoutes(app, { createAuth, readEntitlement, monthlyPriceFen }) {
+export function registerWorkLuckyDesktopRoutes(app, { createAuth, readEntitlement, monthlyPriceFen,
+  releaseService = createWorkLuckyReleaseService({ downloadUrl: createPresignedDownloadUrl }) }) {
   // A fixed product alias must not silently accept another product selector.
   app.use(`${WORKLUCKY_ROOT}/*`, async (c, next) => {
     c.header("Cache-Control", "no-store, max-age=0");
@@ -81,6 +92,10 @@ export function registerWorkLuckyDesktopRoutes(app, { createAuth, readEntitlemen
     return c.json(value);
   };
   app.get(`${WORKLUCKY_ROOT}/config`, (c) => publicReply(c, workLuckyConfig(monthlyPriceFen)));
-  app.get(`${WORKLUCKY_ROOT}/updates`, (c) => publicReply(c, workLuckyUpdates()));
+  app.get(`${WORKLUCKY_ROOT}/updates`, (c) => publicReply(c, releaseService.updates()));
+  app.get(`${WORKLUCKY_ROOT}/releases/:version/:filename`, (c) => {
+    const url = releaseService.download(c.req.param("version"), c.req.param("filename"));
+    return url ? c.redirect(url, 302) : c.json({ code: "RELEASE_NOT_FOUND", message: "该 WorkLucky 版本尚未发布" }, 404);
+  });
   registerOpenAPI(app);
 }

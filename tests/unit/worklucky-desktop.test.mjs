@@ -167,10 +167,12 @@ test("client product is part of idempotency and cannot reuse a legacy or tombsto
   assert.equal(clientProductConflicts({ cancellationTombstone: true, clientProduct: "worklucky" }, undefined), true);
 });
 
-test("standalone OpenAPI describes all six routes and the shared-session boundary", () => {
+test("standalone OpenAPI describes auth and gated release routes with the shared-session boundary", () => {
   // JSON is a strict subset of YAML 1.2, so this spec needs no test dependency.
   const spec = JSON.parse(readFileSync(new URL("../../docs/openapi-worklucky.yaml", import.meta.url), "utf8"));
-  assert.equal(spec.openapi, "3.0.3"); assert.equal(Object.keys(spec.paths).length, 6);
+  assert.equal(spec.openapi, "3.0.3"); assert.equal(Object.keys(spec.paths).length, 7);
+  assert.ok(spec.paths[`${root}/releases/{version}/{filename}`].get.responses["404"]);
+  assert.equal(spec.components.schemas.PublishedUpdate.properties.status.enum[0], "update_available");
   for (const [suffix, method] of [["config", "get"], ["updates", "get"], ["account", "get"], ["auth/login", "post"], ["auth/refresh", "post"], ["auth/logout", "post"]]) {
     const operation = spec.paths[`/api/v1/desktop/worklucky/${suffix}`]?.[method];
     assert.ok(operation?.operationId); assert.ok(operation?.responses?.["200"]);
