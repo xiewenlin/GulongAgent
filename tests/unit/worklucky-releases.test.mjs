@@ -52,6 +52,12 @@ test("production catalog pins the qualified 0.1.19 archive and original client s
   const feed = await f.app.request("/api/v1/desktop/worklucky/updates");
   assert.equal(feed.status, 200);
   assert.deepEqual(await feed.json(), approved);
+  // Feed is signed latest-release metadata. The shipped client compares its
+  // own version and returns None for an equal/newer installed version.
+  for (const current of ["0.1.18", "0.1.19", "0.1.20"]) {
+    const query = `?platform=windows&arch=x64&package_type=portable_zip&knowledge_version=0.8.3&current_version=${current}`;
+    assert.deepEqual(await (await f.app.request(`/api/v1/desktop/worklucky/updates${query}`)).json(), approved);
+  }
   assert.equal((await f.app.request(asset.url)).status, 302);
   assert.deepEqual(f.calls, [{ key: workLuckyReleaseObjectKey("0.1.19"), options: { filename: asset.filename, expires: 900 } }]);
   // Publishing a program must not publish other versions or model admissions.

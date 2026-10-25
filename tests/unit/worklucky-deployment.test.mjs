@@ -67,6 +67,9 @@ test("production verification script performs only default GET and never sends c
   assert.equal((source.match(/\bfetch\s*\(/g) || []).length, 1);
   assert.doesNotMatch(source, /\bmethod\s*:/); assert.doesNotMatch(source, /\bbody\s*:/);
   assert.doesNotMatch(source, /\bauthorization\s*:/i); assert.doesNotMatch(source, /exec(?:File|Sync)?\s*\(/);
+  // The clean parity job has no node_modules; every verifier import must be builtin.
+  for (const [, dependency] of source.matchAll(/\bfrom\s+["']([^"']+)["']/g)) assert.ok(dependency.startsWith("node:"), dependency);
+  assert.match(source, /createPublicKey/); assert.match(source, /verify\(null,/);
   for (const path of ["/api/v1/desktop/worklucky/config", "/api/admin/capability-consumers/acceptances", "/api/cron/capability-output-cleanup"]) assert.ok(source.includes(path));
   assert.match(source, /real_inference_tested:\s*false/);
 });

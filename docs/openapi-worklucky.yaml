@@ -55,7 +55,7 @@
           "WorkLucky desktop"
         ],
         "summary": "Read the current signed desktop release status",
-        "description": "The reviewed catalog contains the qualified 0.1.19 maintenance release. Published records must pass the client-pinned Ed25519 digest signature and fixed-version URL checks; program publication grants no model admission. Empty catalog returns no_update. Query metadata cannot publish a release. A 404, network failure or invalid JSON is not a no_update response. See worklucky-maintenance-release.md.",
+        "description": "The reviewed catalog contains the qualified 0.1.19 maintenance release. This is latest-release metadata: the shipped client compares semantic versions and suppresses equal/older releases; current_version does not filter the feed. Published records must pass the client-pinned Ed25519 digest signature and fixed-version URL checks; program publication grants no model admission. Empty catalog returns no_update. Query metadata cannot publish a release. A 404, network failure or invalid JSON is not a no_update response. See worklucky-maintenance-release.md.",
         "security": [],
         "responses": {
           "200": {

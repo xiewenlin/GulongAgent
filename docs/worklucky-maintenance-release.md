@@ -8,6 +8,8 @@
 `update_available`，固定下载返回 302 到同一 ZIP 的 15 分钟 HTTPS COS 地址。
 未审定版本仍为 404，空目录仍返回 `no_update/release_not_published`。
 没有环境开关、上传完成回调或 HTTP 请求可以把其他候选自动发布。
+Feed 提供最新审定清单，不按 `current_version` 过滤；既有客户端校验清单后比较语义版本，
+`latest <= CARGO_PKG_VERSION` 返回无更新，因此同版本不会重复提醒或安装。
 
 ## 0.1.19 发布依据（2026-10-25）
 
