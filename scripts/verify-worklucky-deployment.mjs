@@ -1,5 +1,6 @@
 // GET-only production contract check. Never creates a session, order or inference.
 import assert from "node:assert/strict";
+import { createWorkLuckyReleaseService, validateWorkLuckyPublishedRelease } from "../server/worklucky-releases.js";
 
 const origins = process.argv.slice(2);
 if (!origins.length) throw new Error("请显式提供待核验的官网 HTTPS 地址");
@@ -21,6 +22,8 @@ for (const raw of origins) {
   for (const id of ["agent_chat", "embedding", "music"]) assert.ok(config.capability_orders.capability_ids.includes(`gulong_engine.${id}`));
   const updates = await read("/api/v1/desktop/worklucky/updates", 200);
   assert.equal(updates.product_id, "worklucky");
+  assert.deepEqual(updates, createWorkLuckyReleaseService().updates());
+  if (updates.status === "update_available") validateWorkLuckyPublishedRelease(updates);
   const document = await read("/api/openapi.json", 200);
   for (const [path, method] of [
     ["/api/v1/desktop/worklucky/config", "get"], ["/api/v1/desktop/worklucky/account", "get"],

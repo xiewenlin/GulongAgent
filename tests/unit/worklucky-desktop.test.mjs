@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { OpenAPIHono } from "@hono/zod-openapi";
 import { workLuckyEntitlement, workLuckyConfig, workLuckyUpdates, capabilityProducts, withClientProductFingerprint, clientProductConflicts } from "../../server/worklucky-product.js";
 import { registerWorkLuckyDesktopRoutes } from "../../server/worklucky-desktop.js";
+import { createWorkLuckyReleaseService } from "../../server/worklucky-releases.js";
 import { createGulongEngineDesktopAuth, GULONG_ENGINE_DESKTOP_ROOT } from "../../server/desktop-gulong-auth.js";
 import { createGulongEngineSessionStore } from "../../server/desktop-english-sessions.js";
 const entitlement = { product: "gulong_engine", plan_id: "gulong_engine_monthly", active: true, status: "active", starts_at: "2026-10-01", expires_at: "2026-11-01", monthly_price_fen: 99900 };
@@ -81,7 +82,7 @@ test("public config and updates routes are uncached and cannot advertise fake co
   assert.equal("verified_node_count" in config.capability_orders, false);
   const updates = await app.request(`${root}/updates?platform=windows&arch=x64`);
   assert.equal(updates.status, 200); assert.match(updates.headers.get("Cache-Control"), /no-store/);
-  assert.deepEqual(await updates.json(), workLuckyUpdates());
+  assert.deepEqual(await updates.json(), createWorkLuckyReleaseService().updates());
 });
 
 test("fixed WorkLucky routes reject invalid or duplicate product selectors", async () => {

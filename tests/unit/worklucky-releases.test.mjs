@@ -17,7 +17,7 @@ const signed = (version = "0.1.12") => ({ product_id: "worklucky", status: "upda
     signature_algorithm: "worklucky-ed25519-sha256-v1", signature_key_id: "worklucky-desktop-2026-01",
   } } },
 } });
-const now = () => new Date("2026-10-25T00:00:00.000Z");
+const now = () => new Date("2026-10-25T12:00:00.000Z");
 function fixture(releases = []) {
   const calls = [];
   const releaseService = createWorkLuckyReleaseService({ releases, now,
@@ -29,15 +29,34 @@ function fixture(releases = []) {
   return { app, calls, releaseService };
 }
 
-test("production catalog is empty and a reserved 0.1.19 URL cannot publish a candidate", async () => {
-  assert.deepEqual(WORKLUCKY_PUBLISHED_RELEASES, []);
-  assert.ok(Object.isFrozen(WORKLUCKY_PUBLISHED_RELEASES));
+test("empty reviewed catalog cannot publish a candidate through request metadata", async () => {
   const f = fixture();
   const response = await f.app.request("/api/v1/desktop/worklucky/updates?platform=windows&arch=x64&package_type=portable_zip");
   assert.equal(response.status, 200); assert.equal((await response.json()).status, "no_update");
   const download = await f.app.request(workLuckyReleaseUrl("0.1.19"));
   assert.equal(download.status, 404); assert.equal((await download.json()).code, "RELEASE_NOT_FOUND");
   assert.match(download.headers.get("Cache-Control"), /no-store/); assert.deepEqual(f.calls, []);
+});
+
+test("production catalog pins the qualified 0.1.19 archive and original client signature", async () => {
+  assert.ok(Object.isFrozen(WORKLUCKY_PUBLISHED_RELEASES));
+  assert.equal(WORKLUCKY_PUBLISHED_RELEASES.length, 1);
+  const approved = validateWorkLuckyPublishedRelease(WORKLUCKY_PUBLISHED_RELEASES[0], now());
+  assert.equal(approved.release.version, "0.1.19");
+  const asset = approved.release.assets["windows-x64"].portable_zip;
+  assert.equal(asset.bytes, 124997007);
+  assert.equal(asset.sha256, "dc1140c755f871c601bc14415a9bd1c46da3571bb89a6a7708db8eb26fd2fafd");
+  assert.equal(asset.url, workLuckyReleaseUrl("0.1.19"));
+  assert.equal(asset.signature_key_id, "worklucky-desktop-2026-01");
+  const f = fixture(WORKLUCKY_PUBLISHED_RELEASES);
+  const feed = await f.app.request("/api/v1/desktop/worklucky/updates");
+  assert.equal(feed.status, 200);
+  assert.deepEqual(await feed.json(), approved);
+  assert.equal((await f.app.request(asset.url)).status, 302);
+  assert.deepEqual(f.calls, [{ key: workLuckyReleaseObjectKey("0.1.19"), options: { filename: asset.filename, expires: 900 } }]);
+  // Publishing a program must not publish other versions or model admissions.
+  assert.equal((await f.app.request(workLuckyReleaseUrl("0.1.18"))).status, 404);
+  assert.equal(approved.grants_admission, undefined);
 });
 
 test("existing client key verifies the signature over the raw ZIP digest", () => {

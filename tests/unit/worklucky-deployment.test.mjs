@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import app from "../../server/app.js";
+import { validateWorkLuckyPublishedRelease } from "../../server/worklucky-releases.js";
 
 test("Vercel dispatches desktop, consumer-administration and protected cleanup paths to the API", () => {
   const config = JSON.parse(readFileSync(new URL("../../vercel.json", import.meta.url), "utf8"));
@@ -52,7 +53,11 @@ test("production app public config and updates use only safe GETs and never prom
       assert.equal(body.capability_orders.paid_fallback, false); assert.equal(body.capability_orders.video, "adapter_required");
       for (const id of ["agent_chat", "embedding", "music"]) assert.ok(body.capability_orders.capability_ids.includes(`gulong_engine.${id}`));
       assert.equal("verified_node_count" in body.capability_orders, false);
-    } else { assert.equal(body.status, "no_update"); assert.equal(body.release, null); }
+    } else {
+      const manifest = validateWorkLuckyPublishedRelease(body);
+      assert.equal(manifest.status, "update_available"); assert.equal(manifest.release.version, "0.1.19");
+      assert.equal(manifest.release.assets["windows-x64"].portable_zip.bytes, 124997007);
+    }
   }
 });
 

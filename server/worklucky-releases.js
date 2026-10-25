@@ -33,10 +33,25 @@ export const workLuckyPublishedManifestSchema = z.object({
   }).strict(),
 }).strict();
 
-// Deliberately empty. Add a final signed manifest through reviewed source only,
-// after the unchanged COS object, package acceptance and Data upgrade are
-// verified. No HTTP/admin/env toggle can publish an unverified candidate.
-export const WORKLUCKY_PUBLISHED_RELEASES = Object.freeze([]);
+// Reviewed maintenance release only. Qualification receipt SHA256:
+// 48845a78a0245de5a65aa27453e1d2c5b100c6e3bf581a1741b14fab23054f71.
+// The immutable COS object was independently streamed and fully SHA256-checked
+// before enabling this entry. This does not grant model/shared admission.
+// No HTTP/admin/env toggle can publish another candidate.
+export const WORKLUCKY_PUBLISHED_RELEASES = Object.freeze([{
+  product_id: "worklucky", status: "update_available", release: {
+    release_id: "worklucky-0.1.19", version: "0.1.19",
+    release_notes: "新增文档树与原文定位检索，修复默认模型失联错误；保留账号、聊天与知识库数据。",
+    publishedAt: "2026-10-25T09:39:33.713Z", min_compatible_knowledge_version: "0.8.3",
+    knowledge_version_range: ">=0.8.3, <0.9.0", assets: { "windows-x64": { portable_zip: {
+      filename: "WorkLucky-0.1.19-windows-x64-portable.zip", bytes: 124997007,
+      url: "https://www.sologle.com/api/v1/desktop/worklucky/releases/0.1.19/WorkLucky-0.1.19-windows-x64-portable.zip",
+      sha256: "dc1140c755f871c601bc14415a9bd1c46da3571bb89a6a7708db8eb26fd2fafd",
+      signature: "pvb8EoOzl1zGcdqjVnmzpG2YcpluzMZOziVQ6kGe7ij8Afb2Wng7/nlWrhOUcYuEFBhgzz7Sd3zKw7i+nUlxBw==",
+      signature_algorithm: WORKLUCKY_UPDATE_ALGORITHM, signature_key_id: KEY_ID,
+    } } },
+  },
+}]);
 
 const invalid = () => Object.assign(new Error("WorkLucky 发布清单尚未通过完整校验"), {
   code: "WORKLUCKY_RELEASE_INVALID", status: 503,

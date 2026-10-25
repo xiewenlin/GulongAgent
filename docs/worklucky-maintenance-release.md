@@ -4,9 +4,26 @@
 
 `https://www.sologle.com/api/v1/desktop/worklucky/releases/0.1.19/WorkLucky-0.1.19-windows-x64-portable.zip`
 
-这是预留位置，不代表已经发布。`WORKLUCKY_PUBLISHED_RELEASES` 默认空：下载 404、
-`GET /api/v1/desktop/worklucky/updates` 继续 `no_update/release_not_published`。
-没有环境开关、上传完成回调或 HTTP 请求可以把候选自动发布。
+本次审定目录仅启用 0.1.19：`GET /api/v1/desktop/worklucky/updates` 返回
+`update_available`，固定下载返回 302 到同一 ZIP 的 15 分钟 HTTPS COS 地址。
+未审定版本仍为 404，空目录仍返回 `no_update/release_not_published`。
+没有环境开关、上传完成回调或 HTTP 请求可以把其他候选自动发布。
+
+## 0.1.19 发布依据（2026-10-25）
+
+- ZIP：124,997,007 字节；SHA256
+  `dc1140c755f871c601bc14415a9bd1c46da3571bb89a6a7708db8eb26fd2fafd`。
+- 原签名清单：1,070 字节；SHA256
+  `3de0ef3ca49ac454ba07c213777c56c61e6f9607a9a8d015816c8fa46b150a2b`。
+- 最终资格回执 SHA256
+  `48845a78a0245de5a65aa27453e1d2c5b100c6e3bf581a1741b14fab23054f71`；
+  `qualified=true`、`publication.activationAuthorized=true`。官网逐一核对6个制品与7个证明摘要。
+- 18→19 全程序字节及模拟 Data 的内容/身份、独立备份、回滚、重试、固定槽回收验证通过。
+  WinPS5.1 隔离启动器验收覆盖1,640真实资源、升级/复用/拒绝与无可见控制台；主程序由无窗口夹具替代。
+  未访问实际安装或用户 Data，未运行真实产品；不将这些夹具结论冒称为生产用户运行实证。
+- 官网对实际 ZIP 完整流式摘要验签；通过防覆盖 PUT 上传固定私有 COS key，再完整 GET
+  124,997,007 字节，云端摘要与冻结 ZIP 完全一致。没有只凭 HEAD/metadata 宣称验收。
+- 本次仅含默认模型失联修复和文档树/原文定位检索；音乐、资产两道共享开关及九项开放声明仍关闭。
 
 ## 最终发布门禁
 
@@ -20,7 +37,7 @@
    不覆盖旧发布对象、不删除唯一回退、不复用其他产品的渠道。
 4. 只在上述完成后通过源代码审查把最终 manifest 加到 `server/worklucky-releases.js` 的
    `WORKLUCKY_PUBLISHED_RELEASES`；走同一 commit 的 Vercel+腾讯云测试/构建/部署/字节核对。
-   本准备提交不包含任何候选清单或包，不改变当前公开版本。
+   不允许靠候选目录、环境变量或仅上传完成自动改变公开版本。
 5. 公网核对 feed、固定版本下载、签名/大小/实际 SHA。下载路由仅为已审定的同一版本签发
    15分钟 HTTPS COS 重定向，绝不把未知版本回退到 latest，签名清单不保存过期 COS URL。
 

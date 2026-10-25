@@ -1207,7 +1207,7 @@ test("English Coach desktop authentication and subscription are documented in Op
     "/api/v1/desktop/english-coach/account",
     "/api/v1/capability-orders/by-request/{key}",
   ]) assert.ok(document.paths[path], `${path} must be documented`);
-  assert.equal(document.info.version, "2.17.8");
+  assert.equal(document.info.version, "2.17.9");
   assert.ok(document.components.securitySchemes.englishCoachDesktopBearer);
 });
 
