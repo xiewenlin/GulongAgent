@@ -34,7 +34,7 @@ function registerOpenAPI(app) {
       subscription: z.object({ plan_id: z.literal("gulong_engine_monthly"), monthly_price_fen: z.number().int().positive(), included_in_plan: z.literal(true), separate_purchase: z.literal(false) }),
       auth: z.object({ login: z.string(), refresh: z.string(), logout: z.string(), account: z.string() }),
       capability_orders: z.object({ catalog: z.string(), create: z.string(), product: z.literal("worklucky"), capability_ids: z.array(z.enum(WORKLUCKY_CAPABILITY_IDS)), pricing: z.literal("zero_price_shared_only"), video: z.literal("adapter_required"), availability_source: z.literal("authenticated_catalog"), execution_requires: z.literal("verified_consumer_contract"), paid_fallback: z.literal(false) }),
-      updates: z.object({ endpoint: z.string(), signature_algorithm: z.literal("worklucky-ed25519-sha256-v1") }), updates_url: z.string(),
+      updates: z.object({ endpoint: z.string(), signature_algorithm: z.literal("worklucky-ed25519-sha256-v1"), latest_version: z.string().nullable() }), updates_url: z.string(),
     })) },
   });
   register("get", "updates", "读取 WorkLucky 已核验桌面版本状态", {
@@ -44,9 +44,9 @@ function registerOpenAPI(app) {
       workLuckyPublishedManifestSchema,
     ])) },
   });
-  register("get", "releases/{version}/{filename}", "下载固定版本的已审定 WorkLucky 绿色包", {
+  register("get", "releases/{version}/{filename}", "下载固定版本的已审定 WorkLucky 制品", {
     security: [], request: { params: z.object({ version: z.string(), filename: z.string() }) },
-    responses: { 302: { description: "短时 HTTPS COS 下载重定向；版本地址不指向 latest" },
+    responses: { 302: { description: "精确白名单 ZIP、EXE、源码 ZIP 或签名清单的短时 HTTPS COS 重定向；仅公开已审定文件，版本地址不指向 latest" },
       404: response("未审定/未发布的候选不可下载", error), 503: response("发布清单配置校验失败", error) },
   });
   register("post", "auth/login", "使用官网账号登录 WorkLucky", {
@@ -91,7 +91,10 @@ export function registerWorkLuckyDesktopRoutes(app, { createAuth, readEntitlemen
     c.header("Pragma", "no-cache");
     return c.json(value);
   };
-  app.get(`${WORKLUCKY_ROOT}/config`, (c) => publicReply(c, workLuckyConfig(monthlyPriceFen)));
+  app.get(`${WORKLUCKY_ROOT}/config`, (c) => {
+    const config = workLuckyConfig(monthlyPriceFen);
+    return publicReply(c, { ...config, updates: { ...config.updates, latest_version: releaseService.updates().release?.version ?? null } });
+  });
   app.get(`${WORKLUCKY_ROOT}/updates`, (c) => publicReply(c, releaseService.updates()));
   app.get(`${WORKLUCKY_ROOT}/releases/:version/:filename`, (c) => {
     const url = releaseService.download(c.req.param("version"), c.req.param("filename"));

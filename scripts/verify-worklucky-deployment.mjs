@@ -17,30 +17,42 @@ for (const raw of origins) {
   assert.equal(base.username + base.password + base.search + base.hash, "");
   const checks = [];
   const read = async (path, expected) => {
-    const response = await fetch(new URL(path, base.origin), { redirect: "error", signal: AbortSignal.timeout(30_000) });
+    const response = await fetch(new URL(path, base.origin), { redirect: expected === 302 ? "manual" : "error", signal: AbortSignal.timeout(30_000) });
     assert.equal(response.status, expected, `${base.origin}${path}`);
     checks.push({ path, status: response.status });
+    if (expected === 302) {
+      const target = new URL(response.headers.get("location"));
+      assert.equal(target.protocol, "https:"); assert.ok(target.hostname.endsWith(".myqcloud.com"));
+      assert.equal(target.username + target.password + target.port + target.hash, "");
+      assert.match(response.headers.get("cache-control"), /no-store/);
+      await response.body?.cancel(); return;
+    }
     return response.json();
   };
   const config = await read("/api/v1/desktop/worklucky/config", 200);
   assert.equal(config.product_id, "worklucky");
+  assert.equal(config.updates.latest_version, "0.1.20");
   assert.equal(config.capability_orders.paid_fallback, false);
   assert.equal(config.capability_orders.execution_requires, "verified_consumer_contract");
   for (const id of ["agent_chat", "embedding", "music"]) assert.ok(config.capability_orders.capability_ids.includes(`gulong_engine.${id}`));
   const updates = await read("/api/v1/desktop/worklucky/updates", 200);
   assert.equal(updates.product_id, "worklucky");
   assert.equal(updates.status, "update_available");
-  assert.equal(updates.release.version, "0.1.19");
+  assert.equal(updates.release.version, "0.1.20");
   const asset = updates.release.assets["windows-x64"].portable_zip;
-  assert.equal(asset.filename, "WorkLucky-0.1.19-windows-x64-portable.zip");
-  assert.equal(asset.url, "https://www.sologle.com/api/v1/desktop/worklucky/releases/0.1.19/WorkLucky-0.1.19-windows-x64-portable.zip");
-  assert.equal(asset.bytes, 124997007);
-  assert.equal(asset.sha256, "dc1140c755f871c601bc14415a9bd1c46da3571bb89a6a7708db8eb26fd2fafd");
+  assert.equal(asset.filename, "WorkLucky-0.1.20-windows-x64-portable.zip");
+  assert.equal(asset.url, "https://www.sologle.com/api/v1/desktop/worklucky/releases/0.1.20/WorkLucky-0.1.20-windows-x64-portable.zip");
+  assert.equal(asset.bytes, 775539289);
+  assert.equal(asset.sha256, "88e5584092f65a93dd40723754acb9a93f1f290503514f300ae78035deaaba50");
   assert.equal(asset.signature_algorithm, "worklucky-ed25519-sha256-v1");
   assert.equal(asset.signature_key_id, "worklucky-desktop-2026-01");
   const signature = Buffer.from(asset.signature, "base64");
   assert.equal(signature.length, 64); assert.equal(signature.toString("base64"), asset.signature);
   assert.ok(verify(null, Buffer.from(asset.sha256, "hex"), updateKey, signature));
+  for (const suffix of ["windows-x64-portable.zip", "windows-x64-portable.exe", "source.zip", "update-manifest.json"]) {
+    await read(`/api/v1/desktop/worklucky/releases/0.1.20/WorkLucky-0.1.20-${suffix}`, 302);
+  }
+  await read("/api/v1/desktop/worklucky/releases/0.1.19/WorkLucky-0.1.19-windows-x64-portable.zip", 302);
   const document = await read("/api/openapi.json", 200);
   for (const [path, method] of [
     ["/api/v1/desktop/worklucky/config", "get"], ["/api/v1/desktop/worklucky/account", "get"],

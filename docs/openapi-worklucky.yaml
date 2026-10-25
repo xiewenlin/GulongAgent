@@ -55,7 +55,7 @@
           "WorkLucky desktop"
         ],
         "summary": "Read the current signed desktop release status",
-        "description": "The reviewed catalog contains the qualified 0.1.19 maintenance release. This is latest-release metadata: the shipped client compares semantic versions and suppresses equal/older releases; current_version does not filter the feed. Published records must pass the client-pinned Ed25519 digest signature and fixed-version URL checks; program publication grants no model admission. Empty catalog returns no_update. Query metadata cannot publish a release. A 404, network failure or invalid JSON is not a no_update response. See worklucky-maintenance-release.md.",
+        "description": "The latest reviewed release is qualified 0.1.20; the fixed 0.1.19 ZIP remains available. This is latest-release metadata: the shipped client compares semantic versions and suppresses equal/older releases; current_version does not filter the feed. Published records must pass the client-pinned Ed25519 digest signature and fixed-version URL checks; program publication grants no model admission. Empty catalog returns no_update. Query metadata cannot publish a release. A 404, network failure or invalid JSON is not a no_update response. See worklucky-maintenance-release.md.",
         "security": [],
         "responses": {
           "200": {
@@ -140,7 +140,7 @@
       "get": {
         "operationId": "downloadPublishedWorkLuckyVersion",
         "tags": ["WorkLucky desktop"],
-        "summary": "Download an exact reviewed portable version; unpublished candidates remain 404",
+        "summary": "Download an exact reviewed ZIP, EXE, corresponding source ZIP or signed manifest; unpublished files remain 404",
         "security": [],
         "parameters": [
           { "name": "version", "in": "path", "required": true, "schema": { "type": "string" } },
@@ -943,11 +943,16 @@
                 "enum": [
                   "worklucky-ed25519-sha256-v1"
                 ]
+              },
+              "latest_version": {
+                "type": ["string", "null"],
+                "description": "Latest version from the same reviewed catalog as the update feed; null if none is published."
               }
             },
             "required": [
               "endpoint",
-              "signature_algorithm"
+              "signature_algorithm",
+              "latest_version"
             ]
           },
           "updates_url": {
