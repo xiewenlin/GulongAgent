@@ -40,6 +40,19 @@ export const workLuckyPublishedManifestSchema = z.object({
 // No HTTP/admin/env toggle can publish another candidate.
 export const WORKLUCKY_PUBLISHED_RELEASES = Object.freeze([{
   product_id: "worklucky", status: "update_available", release: {
+    release_id: "worklucky-0.1.21", version: "0.1.21",
+    release_notes: "修复绿色启动完整性误报，优化完整校验、解包和故障恢复速度，保留升级前完整数据备份。",
+    publishedAt: "2026-10-26T11:30:54.448Z", min_compatible_knowledge_version: "0.8.3",
+    knowledge_version_range: ">=0.8.3, <0.9.0", assets: { "windows-x64": { portable_zip: {
+      filename: "WorkLucky-0.1.21-windows-x64-portable.zip", bytes: 775542204,
+      url: "https://www.sologle.com/api/v1/desktop/worklucky/releases/0.1.21/WorkLucky-0.1.21-windows-x64-portable.zip",
+      sha256: "87964ab8c4d56eefb8b3ceaa5ee0ad391d832b08a0cb128ad7c1f73ffbe92f7f",
+      signature: "WgCVoODdphiBocOqsaTZNYjj/+uvhls3CzhsfaFxmjvfwu9nEQHUto4cbhDBZWSZ1+LrwX2GRYIlA820FnkkDg==",
+      signature_algorithm: WORKLUCKY_UPDATE_ALGORITHM, signature_key_id: KEY_ID,
+    } } },
+  },
+}, {
+  product_id: "worklucky", status: "update_available", release: {
     release_id: "worklucky-0.1.20", version: "0.1.20",
     release_notes: "新增数字人团队协作、成员交接、任务看板与技能工具；支持中英文，升级保留账号、聊天和团队数据。",
     publishedAt: "2026-10-25T18:15:08.424Z", min_compatible_knowledge_version: "0.8.3",
@@ -70,6 +83,13 @@ export const WORKLUCKY_PUBLISHED_RELEASES = Object.freeze([{
 // manifest. Never add arbitrary filenames/objects to the updater's signed shape.
 // 0.1.20 qualification: fac55ed3a311abf8511b85160c330143532857edd246cdcd6dd52fa352eb6140.
 export const WORKLUCKY_PUBLISHED_ARTIFACTS = Object.freeze([
+  // 0.1.21 startup qualification: e318132199c4a9b9c0fa53ee29dbf06941adcfbbca2cb3cda2ad09788a49215c.
+  { version: "0.1.21", filename: "WorkLucky-0.1.21-windows-x64-portable.exe", bytes: 714988544,
+    sha256: "880eb4737da448edb82ba62b519256ce165bca48f1accccdff4e233b416862b8" },
+  { version: "0.1.21", filename: "WorkLucky-0.1.21-source.zip", bytes: 129307344,
+    sha256: "12c21f0cf5b6d41b25d5f50c04885709df646a86703f2532add85dcde5c81bfb" },
+  { version: "0.1.21", filename: "WorkLucky-0.1.21-update-manifest.json", bytes: 1079,
+    sha256: "44e830e8766bc14c7d25fedac4b68b6fadb6e92d385ed943dea0aef86ece6eba" },
   { version: "0.1.20", filename: "WorkLucky-0.1.20-windows-x64-portable.exe", bytes: 495075328,
     sha256: "fa63688c0bd4c1d430f0191076e75ef07f75980cae7463439eb5d7e79a52d2a6" },
   { version: "0.1.20", filename: "WorkLucky-0.1.20-source.zip", bytes: 129277274,

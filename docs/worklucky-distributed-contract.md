@@ -18,7 +18,7 @@ WorkLucky 包含在现有 `gulong_engine_monthly` 权益中，不新增用户体
 | GET | `/api/v1/desktop/worklucky/updates` | 未发布已验证安装包时明确返回 `no_update`，不能拿源码标签当安装包 |
 | GET | `/api/v1/desktop/worklucky/releases/{version}/{filename}` | 仅已审定且验签的固定版本可下载；未发布的候选返回404，不回退latest |
 
-发布位置与最终签名/包/Data升级门禁见[发布合同](./worklucky-maintenance-release.md)。当前最新审定版本为0.1.20，保留0.1.19固定ZIP；0.1.20另有精确白名单EXE、源码ZIP与原签名清单。config的`updates.latest_version`和updates均来自同一受审目录，不解除模型准入。其他文件/未审定版本仍返回404。
+发布位置与最终签名/包/Data升级门禁见[发布合同](./worklucky-maintenance-release.md)。当前最新审定版本为0.1.21，提供精确白名单ZIP、EXE、源码ZIP与原签名清单；保留0.1.20全部已发布制品及0.1.19固定ZIP。config的`updates.latest_version`和updates均来自同一受审目录，不解除模型准入。其他文件/未审定版本仍返回404。
 
 上述别名若带可选 `product` 查询参数，只接受单个 `worklucky`；其他值、空值或重复参数返回 `400 WORKLUCKY_PRODUCT_INVALID`。所有响应均不可缓存。登录成功不代表会员生效，`active=false` 不授权创建共享订单。
 

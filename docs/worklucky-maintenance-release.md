@@ -1,16 +1,37 @@
 # WorkLucky 受审版本发布
 
-0.1.20 的固定签名/下载地址：
+0.1.21 的固定签名/下载地址：
 
-`https://www.sologle.com/api/v1/desktop/worklucky/releases/0.1.20/WorkLucky-0.1.20-windows-x64-portable.zip`
+`https://www.sologle.com/api/v1/desktop/worklucky/releases/0.1.21/WorkLucky-0.1.21-windows-x64-portable.zip`
 
-本次审定最新目录为 0.1.20，保留 0.1.19 的原固定 ZIP。`GET /api/v1/desktop/worklucky/updates`
+本次审定最新目录为 0.1.21，保留 0.1.20 全部原制品及 0.1.19 的原固定 ZIP。`GET /api/v1/desktop/worklucky/updates`
 返回 `update_available`；config 的 `updates.latest_version` 来自相同目录。固定下载返回 302
 到同一制品的 15 分钟 HTTPS COS 地址，实际大包直接在 COS 传输，不经过 API body。
 未审定版本仍为 404，空目录仍返回 `no_update/release_not_published`。
 没有环境开关、上传完成回调或 HTTP 请求可以把其他候选自动发布。
 Feed 提供最新审定清单，不按 `current_version` 过滤；既有客户端校验清单后比较语义版本，
 `latest <= CARGO_PKG_VERSION` 返回无更新，因此同版本不会重复提醒或安装。
+
+## 0.1.21 启动维护发布依据（2026-10-26）
+
+资格回执为 `worklucky-startup-release-qualification-v1`，8,610字节，SHA256
+`e318132199c4a9b9c0fa53ee29dbf06941adcfbbca2cb3cda2ad09788a49215c`；
+`qualified=true`，本轮收到明确发布授权。官网逐一复核7个制品与9个证明摘要，未读取实际账号凭据。
+固定 `/releases/0.1.21/` 路径下的文件均以前缀 `WorkLucky-0.1.21-` 命名：
+
+| 文件后缀 | 字节 | SHA256 |
+| --- | ---: | --- |
+| windows-x64-portable.zip | 775542204 | `87964ab8c4d56eefb8b3ceaa5ee0ad391d832b08a0cb128ad7c1f73ffbe92f7f` |
+| windows-x64-portable.exe | 714988544 | `880eb4737da448edb82ba62b519256ce165bca48f1accccdff4e233b416862b8` |
+| source.zip | 129307344 | `12c21f0cf5b6d41b25d5f50c04885709df646a86703f2532add85dcde5c81bfb` |
+| update-manifest.json | 1079 | `44e830e8766bc14c7d25fedac4b68b6fadb6e92d385ed943dea0aef86ece6eba` |
+
+- 修复六个固定空库目录误判、完整校验/恢复索引、Deflate解包及NSIS与应用TEMP分离；不重新签名或构建冻结介质。
+- 归属证明绑定实际EXE三次启动退出0、窗口响应及546文件完整旧Data检查点；隔离启动器、升级恢复、生命周期、
+  0.1.19→0.1.21中断恢复及UI等证明均纳入资格。旧GP大夹具失败证据保留，不冒充通过。
+  官网只复核证明和制品，未运行真实软件、读取Data或发起真实模型任务。
+- 四项主制品防覆盖上传后完整云端GET核SHA，公开后再从官网/腾讯入口完整回读；不以HEAD或构建成功替代下载验收。
+- 原信任根、账号权益和未验收共享/素材/音乐/RTC门禁保持不变；0.1.20原对象不覆盖、不重签、不重建，旧固定路由不回退latest。
 
 ## 0.1.20 发布依据（2026-10-26）
 

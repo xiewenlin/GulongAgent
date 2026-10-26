@@ -53,11 +53,11 @@ test("production app public config and updates use only safe GETs and never prom
       assert.equal(body.capability_orders.paid_fallback, false); assert.equal(body.capability_orders.video, "adapter_required");
       for (const id of ["agent_chat", "embedding", "music"]) assert.ok(body.capability_orders.capability_ids.includes(`gulong_engine.${id}`));
       assert.equal("verified_node_count" in body.capability_orders, false);
-      assert.equal(body.updates.latest_version, "0.1.20");
+      assert.equal(body.updates.latest_version, "0.1.21");
     } else {
       const manifest = validateWorkLuckyPublishedRelease(body);
-      assert.equal(manifest.status, "update_available"); assert.equal(manifest.release.version, "0.1.20");
-      assert.equal(manifest.release.assets["windows-x64"].portable_zip.bytes, 775539289);
+      assert.equal(manifest.status, "update_available"); assert.equal(manifest.release.version, "0.1.21");
+      assert.equal(manifest.release.assets["windows-x64"].portable_zip.bytes, 775542204);
     }
   }
 });
